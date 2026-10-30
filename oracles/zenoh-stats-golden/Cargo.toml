@@ -29,7 +29,7 @@ publish = false
 # PINNED BY TAG, the pin every other oracle here and the citation gates use.
 # `zenoh-stats` is the registry itself; the other three type the events fed to
 # it (a network message, its payload buffer, a configured key expression).
-zenoh-stats = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh-protocol = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh-keyexpr = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh-buffers = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+zenoh-stats = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh-protocol = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh-keyexpr = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh-buffers = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }

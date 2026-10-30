@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/scouting.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A scout is run by the
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/scouting.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). A scout is run by the
 // engine (`start_scout` of the session module), which scouts on its own thread until what it
 // returns is dropped, where upstream spawns a task on its runtime and terminates it; the types and
 // the function are upstream's.

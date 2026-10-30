@@ -331,14 +331,14 @@ name = "wz-family-patch-control"
 version = "0.1.0"
 dependencies = [
  "zenoh-keyexpr",
- "zenoh-result 1.10.1",
+ "zenoh-result 1.10.2",
 ]
 
 [[package]]
 name = "zenoh-keyexpr"
-version = "1.10.1"
+version = "1.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02c6fcb7f18846b4e9b097c61ed7c656ec8d7858ab54a12d5f5025fe1514caae"
+checksum = "471cc8d38cd7ba4d75e6ce96d076048d31d9ffe319cae0f522e692e705fc453f"
 dependencies = [
  "getrandom",
  "hashbrown 0.16.1",
@@ -347,21 +347,21 @@ dependencies = [
  "schemars",
  "serde",
  "token-cell",
- "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-result 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "zenoh-result"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "zenoh-result"
-version = "1.10.1"
+version = "1.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d6d0ca24186d9cfbf14f2d08b8b0a09afac690fe5cd68899d8f896f9247a3dd"
+checksum = "9daafe6c84485576783d1fd7c213fc31c534e591d0359a26fc0b9004798785d9"
 dependencies = [
  "anyhow",
 ]

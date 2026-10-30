@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/selector.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/selector.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! [Selector](https://github.com/eclipse-zenoh/roadmap/tree/main/rfcs/ALL/Selectors) to issue queries
 use std::{borrow::Cow, convert::TryFrom, str::FromStr};

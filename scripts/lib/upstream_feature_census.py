@@ -150,7 +150,7 @@ UPSTREAM_PACKAGE = "zenoh"
 # disagrees. That is the shape R2535 paid a hosted red for. `pin_arm` below now
 # makes the binding in code, in the DEFAULT mode, so it is readable offline and
 # without a provisioned tree.
-UPSTREAM_VERSION = "1.10.1"
+UPSTREAM_VERSION = "1.10.2"
 
 # Features that are upstream capability toggles by shape but not by meaning.
 # `default` and the implicit optional-dep feature are DERIVED (see the module

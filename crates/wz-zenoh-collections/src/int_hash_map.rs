@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.1, file
-// src/int_hash_map.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.2, file
+// src/int_hash_map.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! A map keyed by small integers that is a vector while its keys are dense.
 

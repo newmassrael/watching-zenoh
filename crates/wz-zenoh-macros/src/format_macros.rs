@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-macros 1.10.1, file
-// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-macros 1.10.2, file
+// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! The key expression macros: the literals checked at compile time (`ke!`, `nonwild_ke!`) and the
 //! format macros (`kedefine!`, `kewrite!`, `keformat!`).

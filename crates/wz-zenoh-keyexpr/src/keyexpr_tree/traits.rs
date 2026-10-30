@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.1, file
-// src/keyexpr_tree/traits/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.2, file
+// src/keyexpr_tree/traits/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! The traits of KeTrees: what a tree is, what a node is, and what stores a node's children.
 

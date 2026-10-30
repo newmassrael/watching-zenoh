@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/net/runtime/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The provider of the
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/net/runtime/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The provider of the
 // session is made here, from the `transport/shared_memory` section, where upstream asks the
 // transport manager for it through the runtime's `get_shm_provider`
 // (docs/zenoh-api-on-the-engine.md, slice Z7a).

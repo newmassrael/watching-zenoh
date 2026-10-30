@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/info.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The builders hold
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/info.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The builders hold
 // the session they ask and not a runtime, because a session here is a handle over an engine
 // (docs/zenoh-api-on-the-engine.md, decision D3), and they read the peers of the engine's registry
 // where upstream reads the transports of its manager (slice Z1c).

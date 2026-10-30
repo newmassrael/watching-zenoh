@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/query.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial derivative:
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/query.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). A partial derivative:
 // `QueryState` and `LivelinessQueryState`, the entries of the tables a session keeps of its pending
 // queries, are not here, since the engine keeps the queries (docs/zenoh-api-on-the-engine.md,
 // decision D3). The documentation names the querier in code spans until slice Z3c.

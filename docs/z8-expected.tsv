@@ -17,6 +17,7 @@ events	pass	1	yes	all of it
 formatters	pass	1	yes	all of it
 handler	pass	2	yes	all of it
 interceptors	pass	7	yes	all of it
+interest_undeclare	pass	1	yes	all of it; the file arrived with 1.10.2 (measured on the tree of round 3976)
 keyexpr	pass	15	yes	all of it
 liveliness	pass	46	yes	all of it; 4 tests are ignored upstream
 low_pass	pass	4	yes	all of it

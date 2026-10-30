@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Only the parts of that file
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). Only the parts of that file
 // that the landed slices need are here: the crate documentation, the modules and the re-exports
 // arrive with the slices that give them something to describe.
 #![cfg_attr(docsrs, feature(doc_cfg))]

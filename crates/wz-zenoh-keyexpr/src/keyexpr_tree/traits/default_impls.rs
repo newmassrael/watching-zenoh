@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.1, file
-// src/keyexpr_tree/traits/default_impls.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.2, file
+// src/keyexpr_tree/traits/default_impls.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! The trait implementations that let a reference, a box or an `Arc` of a node be used where a node
 //! is asked for: each forwards to the node it holds.

@@ -44,7 +44,7 @@ publish = false
 # `zenoh::internal::traits`, which is what `zenoh-ext` itself imports it from
 # (`zenoh-ext/src/advanced_publisher.rs` @ `        traits::{`). Without the
 # feature the method is not in scope and this oracle cannot express its subject.
-zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1", features = [
+zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2", features = [
     "internal",
     "unstable",
 ] }

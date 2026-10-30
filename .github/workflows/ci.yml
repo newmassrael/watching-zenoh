@@ -2753,15 +2753,19 @@ jobs:
       - name: Install Rust toolchain (pinned by rust-toolchain.toml, for wz)
         # See the `ci` job's step of the same name — the pin is the SSOT for
         # channel + components + targets. zenohd's own channel (1.97.1 at the
-        # pinned 1.10.1) is installed separately below and selected explicitly
+        # pinned 1.10.2) is installed separately below and selected explicitly
         # with `cargo +<that channel>`, which overrides the toolchain file and
         # is unaffected by it.
         run: bash scripts/lib/rust-toolchain-pinned.sh
 
-      - name: Install Rust toolchain 1.97.1 (zenoh 1.10.1's pinned channel)
+      - name: Install Rust toolchain 1.97.1 (zenoh 1.10.2's pinned channel)
         # scripts/build-zenohd.sh REQUIRES this exact channel and hard-errors
-        # without it — zenoh 1.10.1 pins it, and building zenohd on a different
+        # without it — zenoh 1.10.2 pins it, and building zenohd on a different
         # channel is not a reproducibility trade this project makes.
+        #
+        # R3976 — the 1.10.1 -> 1.10.2 bump did not move it either: `diff` of
+        # the two releases' trees names no `rust-toolchain.toml`, and the 1.10.2
+        # one declares `channel = "1.97.1"`.
         #
         # R2527 — the 1.10.0 -> 1.10.1 bump did NOT move this channel, and that
         # is measured rather than assumed: both releases' own
@@ -2807,7 +2811,7 @@ jobs:
         uses: ./.github/actions/rocksdb-engine
 
       - name: Cache the zenohd binary (pinned version)
-        # zenohd 1.10.1 is a FIXED external release, so the built binary is a pure
+        # zenohd 1.10.2 is a FIXED external release, so the built binary is a pure
         # function of the version — cache the artifact itself rather than paying
         # a from-source build every run. Only a cold cache builds.
         id: zenohd-cache
@@ -2858,9 +2862,9 @@ jobs:
           # naming 1.10.1), and it keeps the key moving with the logic that
           # decides whether a restore is acceptable, so a future change to that
           # decision cannot be masked by a cache written under the old one.
-          key: zenohd-1.10.1-src-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+          key: zenohd-1.10.2-src-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
 
-      - name: Build zenohd 1.10.1 + the storage-manager plugin (cache miss only)
+      - name: Build zenohd 1.10.2 + the storage-manager plugin (cache miss only)
         if: steps.zenohd-cache.outputs.cache-hit != 'true'
         # ZENOHD_ALLOW_CLONE=1 makes build-zenohd.sh take the SOURCE path (a shallow
         # clone of the pinned tag) instead of falling to crates.io. That matters:
@@ -3007,7 +3011,7 @@ jobs:
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh
 
-      - name: Cache the zenoh-c oracle (pinned 1.10.1)
+      - name: Cache the zenoh-c oracle (pinned 1.10.2)
         # A SECOND copy of the `ci` job's cache step, on purpose: this job is where
         # zenohd lives, and Layer C1cd needs the zenoh-c headers + examples AND
         # zenohd AND the pico CLIs at once. The key is identical to the other
@@ -3020,7 +3024,7 @@ jobs:
             ~/.local/include
             ~/.local/lib/libzenohc.so
             ~/zenoh-c-ref
-          key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh', 'scripts/zenoh-c-oracle.pin') }}
+          key: zenoh-c-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh', 'scripts/zenoh-c-oracle.pin') }}
 
       - name: Provision the zenoh-c oracle (cache miss only)
         id: zenoh-c-provision
@@ -3358,7 +3362,7 @@ jobs:
 
       - name: Layer E16 — the filesystem backend against upstream's, one directory
         # R2804 — `storage-backend-filesystem`'s cross-implementation witness.
-        # `oracles/fs-backend` links zenoh-backend-filesystem 1.10.1 and drives
+        # `oracles/fs-backend` links zenoh-backend-filesystem 1.10.2 and drives
         # upstream's own Storage impl over the directory wz's backend reads and
         # writes: each side must serve what the other wrote, payload, encoding
         # and timestamp. HERE rather than beside C1bg in `feature-gates` because
@@ -3408,7 +3412,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target/zenohd-unixpipe
-          key: zenohd-unixpipe-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+          key: zenohd-unixpipe-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
 
       - name: Build the unixpipe-enabled zenohd (cache miss only)
         if: steps.zenohd-unixpipe-cache.outputs.cache-hit != 'true'
@@ -3483,7 +3487,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target/zenohd-vsock
-          key: zenohd-vsock-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+          key: zenohd-vsock-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
 
       - name: Build the vsock-enabled zenohd (cache miss only)
         if: steps.zenohd-vsock-cache.outputs.cache-hit != 'true'
@@ -5979,7 +5983,7 @@ jobs:
         # absent CLI is a red rather than a skip.
         run: bash scripts/build-zenoh-pico-cli.sh
 
-      - name: Cache the zenoh-c oracle (pinned 1.10.1)
+      - name: Cache the zenoh-c oracle (pinned 1.10.2)
         # SAME key as the `ci` job's, deliberately: `install-zenoh-c.sh` clones
         # the whole zenoh-c REPOSITORY into ~/zenoh-c-ref (not just its
         # examples), which is exactly the source checkout both checks below
@@ -5993,7 +5997,7 @@ jobs:
             ~/.local/include
             ~/.local/lib/libzenohc.so
             ~/zenoh-c-ref
-          key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh', 'scripts/zenoh-c-oracle.pin') }}
+          key: zenoh-c-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh', 'scripts/zenoh-c-oracle.pin') }}
 
       - name: Provision the zenoh-c oracle (cache miss only)
         id: zenoh-c-provision
@@ -6037,7 +6041,7 @@ jobs:
           # second oracle was minutes of build for a second copy of the first.
           # `scripts/lib/zenoh_c_oracle_arms.py` REDs on that arrangement now.
           path: target/zenoh-c-unstable
-          key: zenoh-c-unstable-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c-arm.sh') }}
+          key: zenoh-c-unstable-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c-arm.sh') }}
 
       - name: Provision the unstable-arm zenoh-c oracle (cache miss only)
         id: zenoh-c-unstable-provision
@@ -6056,7 +6060,7 @@ jobs:
           path: target/zenoh-c-unstable
           key: ${{ steps.zenoh-c-unstable-cache.outputs.cache-primary-key }}
 
-      - name: Install Rust toolchain 1.97.1 (zenoh 1.10.1's pinned channel, for the SHM oracle)
+      - name: Install Rust toolchain 1.97.1 (zenoh 1.10.2's pinned channel, for the SHM oracle)
         # Open-debt item 901. `scripts/build-zenohd.sh` builds zenoh with ITS
         # release's channel and hard-errors without it; the steps above install
         # zenoh-c's own channel, which is a different one. The literal is the
@@ -6064,7 +6068,7 @@ jobs:
         # `toolchain install` line in this file against the pinned release.
         run: rustup toolchain install 1.97.1 --profile minimal
 
-      - name: Cache the shared-memory zenohd oracle (pinned 1.10.1)
+      - name: Cache the shared-memory zenohd oracle (pinned 1.10.2)
         # Open-debt item 901. Ten legs of Layer C1cc
         # (zenoh_c_shm_and_advanced_on_wz_capi_c) drive upstream's own `z_pub_shm`,
         # `z_sub_shm`, `z_queryable_shm` and `z_get_shm`, which only
@@ -6078,7 +6082,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target/zenohd-shm
-          key: zenohd-shm-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+          key: zenohd-shm-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
 
       - name: Build the shared-memory zenohd and its four examples (cache miss only)
         if: steps.zenohd-shm-cache.outputs.cache-hit != 'true'
@@ -6126,7 +6130,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target/zenoh-c-opaque/*.stderr
-          key: capi-c-opaque-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/check-capi-c-opaque-arms.sh') }}
+          key: capi-c-opaque-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/check-capi-c-opaque-arms.sh') }}
 
       - name: Cache Cargo registry + build artifacts
         # Class `rust-capi-c-arms`: a private SAVER (about 8 of 32 minutes cold

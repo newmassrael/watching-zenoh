@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/publisher.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/publisher.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). A partial
 // derivative: the matching listener of a publisher and the state it keeps arrive with slice Z4.
 
 use std::future::{IntoFuture, Ready};

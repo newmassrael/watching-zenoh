@@ -196,10 +196,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # move to what the gate measures, the grade it prints is `patch`, and `BUMP_GRADE` opens at
 # `minor`, so no bump round is owed by this observation. The pins are unchanged, and the
 # bump to 1.10.2 stays with item 711.
+#
+# R3976 (open-debt item 711) — zenoh 1 -> 0 and zenoh-c 1 -> 0, the bump the clause
+# above left owing, made though a patch does not require it (the owner's
+# track-every-release policy). `UPSTREAM_VERSION`, `ZENOHD_VERSION` and
+# `ZENOH_C_VERSION` are 1.10.2. zenoh-pico stays at 1: it is a vendored C
+# submodule, so its move is its own round, as R2527 and R2528 separated them.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh": ("MEASURED", 1),
-    "eclipse-zenoh/zenoh-c": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh": ("MEASURED", 0),
+    "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-pico": ("MEASURED", 1),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),

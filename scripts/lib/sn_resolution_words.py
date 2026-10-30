@@ -106,7 +106,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # the derived population is exactly one more live constant — every other
 # `1.10.0` under `scripts/lib/` is prose or a selftest fixture, and
 # `oracle_pin_gate.py` DERIVES its pin from `build-zenohd.sh` so it self-updates.
-PIN = "1.10.1"
+#
+# R3976 — 1.10.1 -> 1.10.2, RE-DERIVED: `--derive --require` against the 1.10.2
+# checkout reports "4 (code, word) pair(s), all matching", and the file it
+# reads (`commons/zenoh-protocol/src/core/resolution.rs` @ `pub enum Bits {`) is byte-identical
+# across the two releases, so the mapping is unchanged and only the pin moves.
+PIN = "1.10.2"
 BUILD_ZENOHD = "scripts/build-zenohd.sh"
 
 # code -> word, from `Bits`'s discriminants and `Bits::to_str`.

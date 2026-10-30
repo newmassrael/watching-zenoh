@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.1, file
-// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.2, file
+// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! ⚠️ WARNING ⚠️
 //!
@@ -21,7 +21,7 @@
 //!
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
 //!
-//! The messages of the zenoh protocol (`zenoh-protocol` 1.10.1), over watching-zenoh. The crate is
+//! The messages of the zenoh protocol (`zenoh-protocol` 1.10.2), over watching-zenoh. The crate is
 //! upstream's by name, version, library name and public surface (inventory atom `api-compat-rust`).
 // A test build links `std` whatever the features say: the unit tests are written against the std
 // prelude (`vec!`, `format!`, `ToString`), and the combination without `std` is still held to

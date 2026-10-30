@@ -25,6 +25,6 @@
 # The environment variable ZENOH_C_VERSION overrides the version for one run of
 # the installer; the installer then asserts the version it installed, so an
 # override that does not match what the archive carries fails there.
-ZENOH_C_VERSION=1.10.1
+ZENOH_C_VERSION=1.10.2
 ZENOH_C_ARCHIVE=zenoh-c-@VERSION@-@TARGET@-standalone.zip
 ZENOH_C_RELEASE_URL=https://github.com/eclipse-zenoh/zenoh-c/releases/download/@VERSION@/@ARCHIVE@

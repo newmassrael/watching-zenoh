@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.1, file
-// src/keyexpr_tree/support.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1), which carries
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.2, file
+// src/keyexpr_tree/support.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2), which carries
 // no notice of its own; the declared license of that crate, EPL-2.0 OR Apache-2.0, applies.
 
 //! Small pieces the trees share: the wildness a tree records, and an iterator that is either an

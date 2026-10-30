@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/timestamp_stack.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The function
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/timestamp_stack.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The function
 // that pushes an interception record onto the stack of a frame (`push_ts_interception`) asks a
 // runtime for the node's identity and clock; here the session holds them, as `TimestampSource`,
 // and the stack is the engine's bytes (`wz_session_core::ts_stack`), so the record is made by the

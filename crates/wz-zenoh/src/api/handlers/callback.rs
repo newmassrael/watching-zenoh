@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/handlers/callback.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). It adds
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/handlers/callback.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). It adds
 // `Ordered`, the queue a callback is called from when the item comes from the thread of a face.
 
 //! Callback handler trait.

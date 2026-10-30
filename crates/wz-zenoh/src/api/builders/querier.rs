@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/querier.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The querier is
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/querier.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The querier is
 // declared and asked through the session over its engine (`Session::declare_querier_inner`,
 // `Session::query`), so the builders are upstream's.
 

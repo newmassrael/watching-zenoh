@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.1, file
-// src/core/parameters.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.2, file
+// src/core/parameters.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! Module provides a set of utility functions which allows to manipulate  &str` which follows the format `a=b;c=d|e;f=g`.
 //! and structure `Parameters` which provides `HashMap<&str, &str>`-like view over a string of such format.

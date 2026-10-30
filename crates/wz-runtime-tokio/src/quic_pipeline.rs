@@ -406,7 +406,7 @@ pub(crate) async fn quic_server_endpoint(
     transport.max_concurrent_bidi_streams(max_bidi.into());
     // R2598 — the listen half of the locator's quinn transport keys. Upstream
     // configures the MTU on BOTH builders
-    // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.configure_mtu(&QuicMtuConfig::try_from(&epconf)?);`,
+    // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.configure_mtu(&QuicMtuConfig::try_from(&epconf)?)`,
     // once in the server path and once in the client path), and each side's
     // value governs what THAT side may send, so neither is redundant.
     link_socket.apply_quic_transport(&mut transport);

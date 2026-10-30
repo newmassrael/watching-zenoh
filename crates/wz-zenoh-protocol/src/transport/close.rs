@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.1, file
-// src/transport/close.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.2, file
+// src/transport/close.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 pub mod flag {
     pub const S: u8 = 1 << 5; // 0x20 Session close if S==1 close the whole session, close only the link otherwise

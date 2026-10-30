@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/liveliness.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). That
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/liveliness.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). That
 // upstream file carries no notice of its own, so it is Copyright (c) the contributors of Eclipse
 // zenoh, under the licenses the project states. The subscriber of liveliness is declared through
 // the session, which answers with the id of the engine's subscriber and not with the entry of a

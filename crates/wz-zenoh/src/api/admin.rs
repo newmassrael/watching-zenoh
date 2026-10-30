@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/admin.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The session's own part of
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/admin.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The session's own part of
 // the admin space: the transports and the links it holds, published as they come and go and
 // answered to a query. They are read from the session (`WeakSession::transports` and `links`),
 // which lists the faces of its engine, where upstream reads its runtime, so the module is

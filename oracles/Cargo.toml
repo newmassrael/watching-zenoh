@@ -37,7 +37,7 @@ members = ["future-stamp", "fs-backend", "zenoh-stats-golden"]
 # R2804 — ONE zenoh in this workspace, and it is the pinned tag.
 #
 # `fs-backend` links `zenoh-backend-filesystem`, a separate repository whose
-# manifest asks for zenoh's crates by crates.io VERSION (`1.10.1`), while every
+# manifest asks for zenoh's crates by crates.io VERSION (`1.10.2`), while every
 # oracle here takes zenoh by git TAG. Left alone that is two copies of zenoh in
 # one lock: twice the build, and a backend running against a zenoh source other
 # than the one the citation gates grade. The patch redirects the crates.io
@@ -46,8 +46,8 @@ members = ["future-stamp", "fs-backend", "zenoh-stats-golden"]
 # manifest; their transitive zenoh crates are path dependencies inside the git
 # workspace and follow on their own.
 [patch.crates-io]
-zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh_backend_traits = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh-plugin-trait = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh-ext = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh-util = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh_backend_traits = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh-plugin-trait = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh-ext = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh-util = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }

@@ -19,4 +19,4 @@ publish = false
 # wz's crate under another LOCAL name, because two packages of one name cannot both be named in a
 # manifest; the package is the same one the scenario patches in.
 wz_result = { package = "zenoh-result", path = "../../crates/wz-zenoh-result" }
-zenoh-keyexpr = "1.10.1"
+zenoh-keyexpr = "1.10.2"

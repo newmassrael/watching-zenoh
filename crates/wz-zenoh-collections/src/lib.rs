@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.1, file
-// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.2, file
+// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! ⚠️ WARNING ⚠️
 //!
@@ -21,7 +21,7 @@
 //!
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
 //!
-//! The small containers of the zenoh family (`zenoh-collections` 1.10.1), over watching-zenoh. The
+//! The small containers of the zenoh family (`zenoh-collections` 1.10.2), over watching-zenoh. The
 //! crate is upstream's by name, version, library name and public surface (inventory atom
 //! `api-compat-rust`); the containers are written here from what each is for, with no `unsafe`, and
 //! `conformance/differential` holds each to upstream's over generated sequences of operations.

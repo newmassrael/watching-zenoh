@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.1, file
-// src/keyexpr_tree/arc_tree.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.2, file
+// src/keyexpr_tree/arc_tree.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! A KeTree whose nodes are shared: the tree and each node are held by `Arc`, and what the tree
 //! contains is read and written only through a token.

@@ -148,7 +148,13 @@ import tempfile
 # move. That is a MEASUREMENT, not an assumption that a patch changes nothing:
 # which build upstream publishes is a per-release fact and this file exists
 # because the 1.5.0 -> 1.10.0 move retyped three sites without re-deriving any.
-PIN = "1.10.1"
+#
+# R3976 — PIN 1.10.1 -> 1.10.2, RE-DERIVED the same way: `--derive --require`
+# against the zenoh-c 1.10.2 source answered `unstable-shm` ("upstream's release
+# workflow builds the package `unstable-shm`") before the pin moved, and the
+# gate refused the run only because PIN still read 1.10.1. ARCHIVE_ARM does not
+# move.
+PIN = "1.10.2"
 ARCHIVE_ARM = "unstable-shm"
 
 # The four ids are `install-zenoh-c-arm.sh`'s argument vocabulary and

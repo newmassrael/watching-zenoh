@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/session.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). This is a partial
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/session.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). This is a partial
 // derivative and a modified one. What is here is the handle (`Session`, its clone, equality and
 // drop), its opening from a configuration, `close`, `is_closed`, `zid`, `id` and `info`, the error
 // of a closed session, the declaration of a key expression and `undeclare` with the traits that

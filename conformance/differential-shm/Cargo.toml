@@ -26,21 +26,21 @@ edition = "2021"
 publish = false
 
 [dependencies]
-up_buffers = { package = "zenoh-buffers", version = "=1.10.1", features = ["shared-memory"] }
+up_buffers = { package = "zenoh-buffers", version = "=1.10.2", features = ["shared-memory"] }
 wz_buffers = { package = "zenoh-buffers", path = "../../crates/wz-zenoh-buffers", features = ["shared-memory"] }
-up_protocol = { package = "zenoh-protocol", version = "=1.10.1", features = ["unstable", "internal", "test", "shared-memory"] }
+up_protocol = { package = "zenoh-protocol", version = "=1.10.2", features = ["unstable", "internal", "test", "shared-memory"] }
 wz_protocol = { package = "zenoh-protocol", path = "../../crates/wz-zenoh-protocol", features = ["unstable", "internal", "test", "shared-memory"] }
-up_codec = { package = "zenoh-codec", version = "=1.10.1", features = ["shared-memory"] }
+up_codec = { package = "zenoh-codec", version = "=1.10.2", features = ["shared-memory"] }
 wz_codec = { package = "zenoh-codec", path = "../../crates/wz-zenoh-codec", features = ["shared-memory"] }
 # `test` makes the metadata and watchdog modules public, which is how a test plays the provider.
-up_shm = { package = "zenoh-shm", version = "=1.10.1", features = ["test"] }
+up_shm = { package = "zenoh-shm", version = "=1.10.2", features = ["test"] }
 wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm", features = ["test"] }
 # `zenoh`'s `bytes` module in the shared-memory arm (a payload and its buffer in shared memory), each
 # built over its own family crates; `zenoh-core` is what the blocking resolution of a builder comes
 # from.
-up_zenoh = { package = "zenoh", version = "=1.10.1", default-features = false, features = ["unstable", "shared-memory", "internal"] }
+up_zenoh = { package = "zenoh", version = "=1.10.2", default-features = false, features = ["unstable", "shared-memory", "internal"] }
 wz_zenoh = { package = "zenoh", path = "../../crates/wz-zenoh", features = ["unstable", "shared-memory", "internal"] }
-up_core = { package = "zenoh-core", version = "=1.10.1" }
+up_core = { package = "zenoh-core", version = "=1.10.2" }
 wz_core = { package = "zenoh-core", path = "../../crates/wz-zenoh-core" }
 # The timestamp of a put is `uhlc`'s, one package for both crates.
 uhlc = { version = "0.8.0", default-features = false, features = ["std"] }

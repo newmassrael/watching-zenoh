@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/info_transport.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/info_transport.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The
 // builders hold the session they ask and not a runtime, because a session here is a handle over an
 // engine (docs/zenoh-api-on-the-engine.md, decision D3), and a listener is declared through the
 // session (`WeakSession::declare_transport_events_listener_inner`), which answers with the id of

@@ -25,8 +25,8 @@ edition = "2021"
 publish = false
 
 [dependencies]
-zenoh-result = "1.10.1"
-zenoh-keyexpr = "1.10.1"
+zenoh-result = "1.10.2"
+zenoh-keyexpr = "1.10.2"
 
 [patch.crates-io]
 zenoh-result = { path = "../../crates/wz-zenoh-result" }

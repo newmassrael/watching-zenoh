@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.1, file
-// src/ring_buffer.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.2, file
+// src/ring_buffer.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! A bounded queue that can overwrite its oldest element.
 

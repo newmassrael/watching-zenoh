@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.1, file
-// src/transport/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.2, file
+// src/transport/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! The messages of the transport layer: the opening, keeping and closing of a session between two
 //! nodes, and the frames the network messages travel in.

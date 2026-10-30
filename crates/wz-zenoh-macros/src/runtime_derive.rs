@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-macros 1.10.1, file
-// src/zenoh_runtime_derive.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-macros 1.10.2, file
+// src/zenoh_runtime_derive.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! The two derives that configure the pool of runtimes of `zenoh-runtime`.
 //!

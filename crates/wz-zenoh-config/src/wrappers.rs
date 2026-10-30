@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-config 1.10.1, file
-// src/wrappers.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-config 1.10.2, file
+// src/wrappers.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! Wrappers around types reexported by `zenoh` from subcrates.
 //! These wrappers are used to avoid exposing the the API necessary only for zenoh internals into the public API.
@@ -113,6 +113,14 @@ impl Hello {
         &self.0.locators
     }
 
+    /// Iterate over the locators of this Hello message without allocating.
+    ///
+    /// The iterator borrows the locators from this message, in the same order as
+    /// [`Self::locators`].
+    pub fn locators_iter(&self) -> std::slice::Iter<'_, Locator> {
+        self.0.locators.iter()
+    }
+
     /// Get the zenoh id of this Hello message.
     pub fn zid(&self) -> ZenohId {
         self.0.zid.into()
@@ -205,5 +213,38 @@ impl From<EntityGlobalIdProto> for EntityGlobalId {
 impl From<EntityGlobalId> for EntityGlobalIdProto {
     fn from(value: EntityGlobalId) -> Self {
         value.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_locators_iter() {
+        let mut hello = Hello(HelloProto {
+            version: zenoh_protocol::VERSION,
+            whatami: WhatAmI::default(),
+            zid: ZenohIdProto::default(),
+            locators: vec![],
+        });
+        assert_eq!(hello.locators_iter().next(), None);
+
+        hello.0.locators = vec![
+            "tcp/127.0.0.1:7447".parse().unwrap(),
+            "udp/127.0.0.1:7448".parse().unwrap(),
+        ];
+        let mut iter = hello.locators_iter();
+        let mut independent = iter.clone();
+        assert_eq!(iter.len(), hello.locators().len());
+        for locator in hello.locators() {
+            assert!(std::ptr::eq(iter.next().unwrap(), locator));
+        }
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        assert!(std::ptr::eq(
+            independent.next_back().unwrap(),
+            &hello.locators()[1]
+        ));
     }
 }

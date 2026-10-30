@@ -133,7 +133,7 @@ resolve per machine, keep in agent memory).
 - **Zenoh (Rust), at the PINNED version** — core crates (`zenoh`,
   `zenoh-protocol`, `zenoh-codec`, `zenoh-buffers`, `zenoh-keyexpr`,
   `zenoh-config`, `zenoh-link-*`). The version compared against and enforced is
-  `UPSTREAM_VERSION` in `scripts/lib/upstream_feature_census.py` (1.10.1). The
+  `UPSTREAM_VERSION` in `scripts/lib/upstream_feature_census.py` (1.10.2). The
   number written here is HELD by `scripts/lib/claude_md_upstream_pin_gate.py`,
   which fails on any version token in this bullet that differs from the
   constant, and on a bullet that no longer names the constant or states a

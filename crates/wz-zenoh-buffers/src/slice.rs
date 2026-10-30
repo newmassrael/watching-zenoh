@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-buffers 1.10.1, file
-// src/slice.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-buffers 1.10.2, file
+// src/slice.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! A slice of bytes as a buffer, a writer and a reader: what is read is the front of the slice,
 //! and what is written the front of the slice that is left, which is how the slice is consumed.

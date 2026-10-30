@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/queryable.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/queryable.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). A partial
 // derivative. Where upstream's `Query` holds the primitives it answers on and sends the response
 // final when it is dropped, this one holds a `Replier`, a closure over the engine's hold on the
 // query that answers with the reply as this crate's types say it (`Answer`) and lets go of the hold

@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-codec 1.10.1, file
-// src/network/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-codec 1.10.2, file
+// src/network/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 // An extension a message knows may appear once: the reader of a message marks each it takes in a
 // bit set and refuses the second (upstream keeps the last and drops the first without a word). The

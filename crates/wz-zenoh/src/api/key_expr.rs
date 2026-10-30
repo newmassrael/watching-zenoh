@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/key_expr.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The session a key
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/key_expr.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The session a key
 // expression was declared on is erased (docs/zenoh-api-on-the-engine.md, D2): where upstream's
 // declaration holds a `WeakSession` and calls its methods, this one holds a `Weak` of the trait
 // `WireAnchor`, which the session of slice Z1 implements, so that the module names no session. The

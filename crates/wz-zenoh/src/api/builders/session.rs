@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/session.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Without the
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/session.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). Without the
 // option that belongs to a later slice (`with_shm_clients`, slice Z7) and without `init`, the
 // plugins' door to a runtime that another session already holds, which is `internal` and names a
 // runtime this crate does not have (docs/zenoh-api-on-the-engine.md, slice Z1).

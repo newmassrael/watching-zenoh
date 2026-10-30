@@ -43,7 +43,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="$ROOT/target/zenohd"
 BUILD_DIR="$ROOT/target/zenohd-build"
-ZENOHD_VERSION="${ZENOHD_VERSION:-1.10.1}"
+ZENOHD_VERSION="${ZENOHD_VERSION:-1.10.2}"
 
 # R2229 (open-debt item 579) — the toolchain that release pins, DERIVED.
 #

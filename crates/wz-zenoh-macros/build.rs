@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-macros 1.10.1, file
-// build.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-macros 1.10.2, file
+// build.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! Records the compiler's verbose version, which `rustc_version_release!` reads back: the release
 //! and commit of the rustc that built the crate that uses the macro's host, which is this one.

@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/info.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The transports and the links
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/info.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The transports and the links
 // are read off the faces of the engine (`Face`), where upstream reads the transports of its manager,
 // and the events of the two listeners are told by the engine when a face comes up or goes down
 // (docs/zenoh-api-on-the-engine.md, slice Z6a).
@@ -389,6 +389,15 @@ impl Link {
         &self.interfaces
     }
 
+    /// Iterate over the network interfaces associated with the link without allocating.
+    ///
+    /// The iterator borrows the interface names from this link, in the same order as
+    /// [`Self::interfaces`].
+    #[inline]
+    pub fn interfaces_iter(&self) -> std::slice::Iter<'_, String> {
+        self.interfaces.iter()
+    }
+
     /// Gets the authentication identifier used for the link (if any).
     #[inline]
     pub fn auth_identifier(&self) -> Option<&str> {
@@ -522,3 +531,29 @@ impl Face {
 /// What the engine tells of a face: that it came up (Put) or went down (Delete).
 #[cfg(feature = "unstable")]
 pub(crate) type FaceSink = std::sync::Arc<dyn Fn(SampleKind, &Face) + Send + Sync>;
+
+// `Link::empty` is an `internal` door, so the test is held to the build that has it.
+#[cfg(all(test, feature = "unstable", feature = "internal"))]
+mod interfaces_iter_tests {
+    use super::*;
+
+    #[test]
+    fn link_interfaces_iter() {
+        let mut link = Link::empty();
+        assert_eq!(link.interfaces_iter().next(), None);
+
+        link.interfaces = vec!["eth0".into(), "lo".into()];
+        let mut iter = link.interfaces_iter();
+        let mut independent = iter.clone();
+        assert_eq!(iter.len(), link.interfaces().len());
+        for interface in link.interfaces() {
+            assert!(std::ptr::eq(iter.next().unwrap(), interface));
+        }
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        assert!(std::ptr::eq(
+            independent.next_back().unwrap(),
+            &link.interfaces()[1]
+        ));
+    }
+}

@@ -4583,7 +4583,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4617,7 +4617,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-buffers"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "rand 0.8.6",
  "zenoh-collections",
@@ -4625,7 +4625,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-codec"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "rand 0.8.6",
  "tracing",
@@ -4637,14 +4637,14 @@ dependencies = [
 
 [[package]]
 name = "zenoh-collections"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "ahash",
 ]
 
 [[package]]
 name = "zenoh-config"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "json5",
  "nonempty-collections",
@@ -4668,7 +4668,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-core"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "lazy_static",
  "tokio",
@@ -4678,7 +4678,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-keyexpr"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "hashbrown 0.16.1",
  "keyed-set",
@@ -4691,7 +4691,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-macros"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4711,7 +4711,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-protocol"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "const_format",
  "lazy_static",
@@ -4727,14 +4727,14 @@ dependencies = [
 
 [[package]]
 name = "zenoh-result"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "zenoh-runtime"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "lazy_static",
  "ron",
@@ -4746,7 +4746,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-shm"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "advisory-lock",
  "async-trait",
@@ -4774,7 +4774,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-util"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "async-trait",
  "const_format",

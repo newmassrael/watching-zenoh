@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.1, file
-// src/key_expr/format/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.2, file
+// src/key_expr/format/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! The format language's own rules, one assertion each. The comparison with upstream's crate is
 //! `conformance/differential`; these hold the crate to the documented behaviour where none is linked.

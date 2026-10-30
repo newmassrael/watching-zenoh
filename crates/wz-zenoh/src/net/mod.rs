@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/net/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Only the module that a
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/net/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). Only the module that a
 // public item of the crate is re-exported from is kept; the routing, the primitives and the
 // protocol of upstream's `net` are the engine's (docs/zenoh-api-on-the-engine.md, slice Z7a).
 

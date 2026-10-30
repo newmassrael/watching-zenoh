@@ -22,14 +22,14 @@
 
 [package]
 name = "zenoh-result"
-version = "1.10.1"
+version = "1.10.2"
 edition.workspace = true
 rust-version.workspace = true
 license = "EPL-2.0 OR Apache-2.0"
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "The result and error types of the zenoh family (1.10.1), as a drop-in over watching-zenoh."
+description = "The result and error types of the zenoh family (1.10.2), as a drop-in over watching-zenoh."
 
 [lib]
 name = "zenoh_result"

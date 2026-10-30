@@ -2052,7 +2052,7 @@ impl LinkstateNetwork {
                     node.links = ls.links;
                     // R2878 — a newer link-state restates the gateway bit, and
                     // a cleared bit clears it
-                    // (`zenoh/src/net/protocol/network.rs` @ `node.is_gateway = ls.is_gateway;`).
+                    // (`zenoh/src/net/protocol/network.rs` @ `*is_gateway = ls.is_gateway;`).
                     node.is_gateway = ls.is_gateway;
                     // Backfill the role of a node first seen as a link TARGET (a
                     // whatami-less `ensure_node` placeholder) when its own
@@ -2062,10 +2062,15 @@ impl LinkstateNetwork {
                     // (which `convert_to_local_link_states` defaults to Router)
                     // cannot flip an established Peer to Router.
                     //
-                    // A wz-LOCAL divergence, NOT zenoh parity: zenoh's update path
-                    // never touches `whatami` (`network.rs:711-722` updates
-                    // sn/links/locators only) because its gossip reads the role
-                    // off the incoming ENTRY (`ls.whatami`), not the graph node.
+                    // A wz-LOCAL divergence, NOT zenoh parity: zenoh 1.10.2 restates
+                    // the role on every newer link-state
+                    // (`zenoh/src/net/protocol/network.rs` @ `*whatami = Some(ls.whatami);`),
+                    // where 1.10.1's update path never touched `whatami`; wz fills
+                    // it only while it is unknown, and adopting 1.10.2's unconditional
+                    // write is open (it would let a re-advertisement that omits the
+                    // W field flip an established Peer to Router, which 1.10.2
+                    // accepts). Upstream's gossip reads the role off the incoming
+                    // ENTRY (`ls.whatami`), not the graph node.
                     // wz's autoconnect emit reads `node.whatami` back from the
                     // graph (the `Changes` it gets carry only zids), so wz must
                     // keep a placeholder's stored role correct here. The textbook

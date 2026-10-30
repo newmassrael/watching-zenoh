@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-core 1.10.1, file
-// src/macros.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-core 1.10.2, file
+// src/macros.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! The helper macros of the family. Each is `#[macro_export]`, so it is at the crate root, and the
 //! expansions are upstream's: they are the contract, since a crate that uses one expands this text.

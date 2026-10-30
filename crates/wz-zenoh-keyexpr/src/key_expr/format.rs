@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.1, file
-// src/key_expr/format/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.2, file
+// src/key_expr/format/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! # Building and parsing Key Expressions
 //! A common issue in REST API is the association of meaning to sections of the URL, and respecting that API in a convenient manner.

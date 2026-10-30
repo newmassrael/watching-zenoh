@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.1, file
-// build.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.2, file
+// build.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 fn main() {
     // `shm_external_lockfile` is the only cfg alias this crate actually

@@ -32,16 +32,16 @@ publish = false
 # PINNED BY TAG, the same pin the reference clone the atom is graded against
 # sits on. `default-features = false` drops `dynamic_plugin`, the feature that
 # exports the plugin entry points -- a library caller has no use for them.
-zenoh-backend-filesystem = { git = "https://github.com/eclipse-zenoh/zenoh-backend-filesystem", tag = "1.10.1", default-features = false }
+zenoh-backend-filesystem = { git = "https://github.com/eclipse-zenoh/zenoh-backend-filesystem", tag = "1.10.2", default-features = false }
 # The backend's own public surface is its `Plugin` impl; everything it takes and
 # returns is typed by these. `internal` is for `Encoding::new`, the constructor
 # the backend itself rebuilds an encoding with from a row.
-zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1", features = [
+zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2", features = [
     "internal",
     "unstable",
     "plugins",
 ] }
-zenoh_backend_traits = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
-zenoh-plugin-trait = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+zenoh_backend_traits = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
+zenoh-plugin-trait = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.2" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

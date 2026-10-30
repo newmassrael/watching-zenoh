@@ -12,10 +12,10 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-runtime 1.10.1, file
-// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-runtime 1.10.2, file
+// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
-//! The process-wide tokio runtimes of the zenoh family (`zenoh-runtime` 1.10.1), over watching-zenoh.
+//! The process-wide tokio runtimes of the zenoh family (`zenoh-runtime` 1.10.2), over watching-zenoh.
 //!
 //! This crate is upstream's by name, version, library name and public surface (inventory atom
 //! `api-compat-rust`), and it is the one crate of the family that owns PROCESS-GLOBAL state: one pool

@@ -286,7 +286,7 @@ pinned revision for the generation-time policy.
 
 ## crates/wz-zenoh-* — the zenoh family's public API, reproduced
 
-- **Origin**: https://github.com/eclipse-zenoh/zenoh, tag `1.10.1` (the crates `zenoh-result`,
+- **Origin**: https://github.com/eclipse-zenoh/zenoh, tag `1.10.2` (the crates `zenoh-result`,
   `zenoh-runtime`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-macros`, `zenoh-collections`, `zenoh-buffers`, `zenoh-protocol`, `zenoh-codec`, `zenoh-shm`, `zenoh-util`, `zenoh-config`, `zenoh` and those that follow them).
 - **License of the origin**: EPL-2.0 OR Apache-2.0.
 - **License of these crates**: the same, `EPL-2.0 OR Apache-2.0`, and not this repository's
@@ -296,7 +296,7 @@ pinned revision for the generation-time policy.
   changed, and to ship the license text (Apache-2.0 section 4, EPL-2.0 section 3). So every
   source file of a family crate keeps upstream's notice block verbatim, adds
   `SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael` and a `Modified by newmassrael ...
-  Derived from <crate> 1.10.1, file <path>` statement, and names `EPL-2.0 OR Apache-2.0`; a file
+  Derived from <crate> 1.10.2, file <path>` statement, and names `EPL-2.0 OR Apache-2.0`; a file
   whose upstream original carries no notice says so and takes the crate's declared license. The
   manifests declare `license = "EPL-2.0 OR Apache-2.0"`. The modifications are offered under the
   same expression: the crates exist to be patched into other people's graphs, which a

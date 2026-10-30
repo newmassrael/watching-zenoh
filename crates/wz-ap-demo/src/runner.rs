@@ -1216,7 +1216,7 @@ pub(crate) async fn spawn_scouting_responder(
         log::info!("wz-ap-demo: SCOUT REPLY SOCKETS {elected_from:?}");
     }
     // NET — scouting is network-tier upkeep, the subsystem zenoh puts its own
-    // gossip on (`zenoh/src/net/protocol/gossip.rs` @ `ZRuntime::Net.block_in_place(`).
+    // gossip on (`zenoh/src/net/runtime/mod.rs` @ `.spawn_with_rt(zenoh_runtime::ZRuntime::Net, future)`).
     PartitionedRuntime::NET.spawn(serve(responder, |step| {
         match step {
             ResponderStep::Answered { to, from, bytes } => {

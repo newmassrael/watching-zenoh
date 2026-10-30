@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-config 1.10.1, file
-// src/qos.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The notice block comes first
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-config 1.10.2, file
+// src/qos.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The notice block comes first
 // here; upstream's file has a `use` line above it.
 use std::fmt;
 

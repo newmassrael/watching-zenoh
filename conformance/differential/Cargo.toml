@@ -20,24 +20,24 @@ edition = "2021"
 publish = false
 
 [dependencies]
-up = { package = "zenoh-result", version = "=1.10.1" }
+up = { package = "zenoh-result", version = "=1.10.2" }
 wz = { package = "zenoh-result", path = "../../crates/wz-zenoh-result" }
 anyhow = { version = "1", default-features = false, features = ["std"] }
 # `zenoh-runtime`: the same pair, and a tokio of the 1.x line both are built against, whose
 # multi-threaded scheduler the tests run on (`ZRuntime::block_in_place` refuses a current-thread one).
-up_runtime = { package = "zenoh-runtime", version = "=1.10.1" }
+up_runtime = { package = "zenoh-runtime", version = "=1.10.2" }
 wz_runtime = { package = "zenoh-runtime", path = "../../crates/wz-zenoh-runtime" }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 # `zenoh-core`: the pair again. Each crate's own `zenoh-runtime` is the same pair's (upstream's from
 # the registry, wz's by path), so the two pools stay apart and neither crate is measured on the
 # other's. `tracing` is what `zparse!` expands to in the caller.
-up_core = { package = "zenoh-core", version = "=1.10.1" }
+up_core = { package = "zenoh-core", version = "=1.10.2" }
 wz_core = { package = "zenoh-core", path = "../../crates/wz-zenoh-core" }
 tracing = "0.1"
 # `zenoh-keyexpr`: the pair, each built with its `unstable` feature so `relation_to` is in both. Each
 # crate's `zenoh-result` is the one named `up` / `wz` above, which is what its errors are made of.
 # `rand` seeds the generators.
-up_keyexpr = { package = "zenoh-keyexpr", version = "=1.10.1", features = ["unstable", "internal"] }
+up_keyexpr = { package = "zenoh-keyexpr", version = "=1.10.2", features = ["unstable", "internal"] }
 wz_keyexpr = { package = "zenoh-keyexpr", path = "../../crates/wz-zenoh-keyexpr", features = ["unstable", "internal"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 serde_json = "1"
@@ -45,28 +45,28 @@ serde_json = "1"
 # wz's by path) and each built with `unstable` and `internal`, which carry `CongestionControl::BlockFirst`
 # and the empty `Locator` and `EndPoint`, and with `test`, whose `rand()` constructors the shape test
 # runs on both.
-up_protocol = { package = "zenoh-protocol", version = "=1.10.1", features = ["unstable", "internal", "test"] }
+up_protocol = { package = "zenoh-protocol", version = "=1.10.2", features = ["unstable", "internal", "test"] }
 wz_protocol = { package = "zenoh-protocol", path = "../../crates/wz-zenoh-protocol", features = ["unstable", "internal", "test"] }
 # The timestamp of a put or a delete is `uhlc`'s, one package for both crates, so the tests name it.
 uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
 # `zenoh-buffers`: the pair again, each over its own `zenoh-collections` (upstream's from the registry,
 # wz's by path, as for every family crate), built with `std`.
-up_buffers = { package = "zenoh-buffers", version = "=1.10.1" }
+up_buffers = { package = "zenoh-buffers", version = "=1.10.2" }
 wz_buffers = { package = "zenoh-buffers", path = "../../crates/wz-zenoh-buffers" }
 # `zenoh-codec`: the pair again, each over its own `zenoh-buffers` and `zenoh-protocol` (the ones named
 # above), built with `std`.
-up_codec = { package = "zenoh-codec", version = "=1.10.1" }
+up_codec = { package = "zenoh-codec", version = "=1.10.2" }
 wz_codec = { package = "zenoh-codec", path = "../../crates/wz-zenoh-codec" }
 # `zenoh-shm`: the pair again, each over its own `zenoh-core`, `zenoh-macros` and `zenoh-result`, each
 # built with `test`, which makes the metadata and watchdog modules public. They share the machine's
 # segments, so the tests also open the one crate's segments with the other.
-up_shm = { package = "zenoh-shm", version = "=1.10.1", features = ["test"] }
+up_shm = { package = "zenoh-shm", version = "=1.10.2", features = ["test"] }
 wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm", features = ["test"] }
 num-traits = { version = "0.2", default-features = false }
 # `zenoh-util`: the pair again, each over its own `zenoh-result` and `zenoh-core`, each built with
 # `test`, which adds the logging setup the valgrind lane uses. `humantime` is what the time
 # language formats and parses instants with, one package for both crates, so the tests name it.
-up_util = { package = "zenoh-util", version = "=1.10.1", features = ["test"] }
+up_util = { package = "zenoh-util", version = "=1.10.2", features = ["test"] }
 wz_util = { package = "zenoh-util", path = "../../crates/wz-zenoh-util", features = ["test"] }
 humantime = "2"
 # `zenoh`: the pair again, each over its own family crates, each built with `unstable` and
@@ -76,7 +76,7 @@ humantime = "2"
 # the two transports (`transport_tcp` and `transport_udp`, for the multicast group of a refused
 # configuration) that the `session` module's tests open sessions over. The
 # `shared-memory` arm is in `../differential-shm`, because it changes the types of the protocol.
-up_zenoh = { package = "zenoh", version = "=1.10.1", default-features = false, features = ["unstable", "internal", "plugins", "transport_tcp", "transport_udp"] }
+up_zenoh = { package = "zenoh", version = "=1.10.2", default-features = false, features = ["unstable", "internal", "plugins", "transport_tcp", "transport_udp"] }
 wz_zenoh = { package = "zenoh", path = "../../crates/wz-zenoh", features = ["unstable", "internal", "plugins"] }
 bytes = "1.11.0"
 # The channels of the `handlers` module are `flume`'s, whose pair one of the handlers takes as it is,
@@ -86,7 +86,7 @@ futures = "0.3.31"
 # `zenoh-config`: the pair again, each over its own family crates, each built with `unstable` (the
 # TOML reader and the unstable keys) and `internal`. `serde_yaml` and `json5` are what its files are
 # read with, one package for both crates, so the tests name them.
-up_config = { package = "zenoh-config", version = "=1.10.1", features = ["unstable", "internal"] }
+up_config = { package = "zenoh-config", version = "=1.10.2", features = ["unstable", "internal"] }
 wz_config = { package = "zenoh-config", path = "../../crates/wz-zenoh-config", features = ["unstable", "internal"] }
 json5 = "0.4.1"
 serde_yaml = "0.9.34"
@@ -99,7 +99,7 @@ async-trait = "0.1"
 schemars = { version = "1", features = ["either1"] }
 # `zenoh-collections`: the pair again. Both are built with the default `std`, which carries every
 # container but `SingleOrVec`.
-up_collections = { package = "zenoh-collections", version = "=1.10.1" }
+up_collections = { package = "zenoh-collections", version = "=1.10.2" }
 wz_collections = { package = "zenoh-collections", path = "../../crates/wz-zenoh-collections" }
 # `zenoh-macros`: a macro cannot be called with the same input to two crates, so each crate's macros
 # are compiled into a probe program (`probes/`) and the programs' transcripts are compared. Each probe
@@ -128,5 +128,5 @@ opt-level = 3
 # Interest. The assertion is about upstream's routing, not about anything compared here, so upstream's
 # crate is built without it; the crate of this family keeps its own. The name is the registry's
 # because both crates are the package `zenoh` of this version.
-[profile.test.package."https://github.com/rust-lang/crates.io-index#zenoh@1.10.1"]
+[profile.test.package."https://github.com/rust-lang/crates.io-index#zenoh@1.10.2"]
 debug-assertions = false

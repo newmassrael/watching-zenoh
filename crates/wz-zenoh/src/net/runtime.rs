@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/net/runtime/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Only
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/net/runtime/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). Only
 // `ShmProviderState` is kept, over the receiver the provider is made behind in `api::shm`; the
 // runtime of upstream is the engine's (docs/zenoh-api-on-the-engine.md, slice Z7a).
 

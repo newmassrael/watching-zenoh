@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-util 1.10.1, file
-// src/net/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-util 1.10.2, file
+// src/net/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 use std::net::{IpAddr, Ipv6Addr};
 
 #[cfg(unix)]
@@ -486,14 +486,24 @@ pub fn set_bind_to_device_udp_socket(socket: &UdpSocket, iface: &str) -> ZResult
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
 pub fn set_bind_to_device_tcp_socket(socket: &TcpSocket, iface: &str) -> ZResult<()> {
-    tracing::warn!("Binding the socket {socket:?} to the interface {iface} is not supported on macOS, iOS, and Windows");
+    tracing::warn!("Binding the socket {socket:?} to the interface {iface} is not supported on macOS, iOS, FreeBSD and Windows");
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
 pub fn set_bind_to_device_udp_socket(socket: &UdpSocket, iface: &str) -> ZResult<()> {
-    tracing::warn!("Binding the socket {socket:?} to the interface {iface} is not supported on macOS, iOS, and Windows");
+    tracing::warn!("Binding the socket {socket:?} to the interface {iface} is not supported on macOS, iOS, FreeBSD and Windows");
     Ok(())
 }

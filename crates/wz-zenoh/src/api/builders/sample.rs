@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/sample.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The two
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/sample.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The two
 // `internal` conversions of a publication builder into a `Sample` are not here: they name the
 // publisher, and join it in slice Z2 of docs/zenoh-api-on-the-engine.md.
 use std::marker::PhantomData;

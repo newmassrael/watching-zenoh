@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/matching_listener.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/matching_listener.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The
 // listener is declared on the engine through the session (`WeakSession::declare_matches_listener_inner`),
 // which answers with the id of the listener and not with the entry of a table, so the builder is
 // upstream's but for the id it reads from that answer.

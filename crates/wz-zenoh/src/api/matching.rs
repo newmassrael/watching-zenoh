@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/matching.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial derivative:
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/matching.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). A partial derivative:
 // `MatchingListenerState`, the entry of the table a session keeps of its matching listeners, is not
 // here, since the engine keeps the listeners and says when their status changes
 // (docs/zenoh-api-on-the-engine.md, decision D3).

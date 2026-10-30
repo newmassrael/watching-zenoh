@@ -12,10 +12,10 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-result 1.10.1, file
-// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-result 1.10.2, file
+// src/lib.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
-//! The result and error types of the zenoh family (`zenoh-result` 1.10.1), over watching-zenoh.
+//! The result and error types of the zenoh family (`zenoh-result` 1.10.2), over watching-zenoh.
 //!
 //! This crate is upstream's by name, version, library name and public surface (inventory atom
 //! `api-compat-rust`): a Rust user replaces it with a `[patch.crates-io]` entry, and every crate of

@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/liveliness.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The tokens, the
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/liveliness.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The tokens, the
 // subscribers and the queries of liveliness are kept by the engine and reached through the session
 // (docs/zenoh-api-on-the-engine.md, decision D3), so this file is upstream's.
 

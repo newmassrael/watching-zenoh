@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/close.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Without the
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/close.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). Without the
 // builder that runs a close in the background and its join handle, which upstream declares for the
 // `internal` feature together with `unstable` and no arm of the surface gate reaches, and without
 // the branch that panics on the two releases of the compiler (1.85.0 and 1.85.1) whose

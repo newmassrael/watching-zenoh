@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.1, file
-// src/shm/unix.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.2, file
+// src/shm/unix.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 #[cfg(shm_external_lockfile)]
 use std::os::fd::FromRawFd;
@@ -303,8 +303,10 @@ impl<ID: SegmentID> SegmentImpl<ID> {
 
     fn map(len: NonZeroUsize, fd: &OwnedFd) -> nix::Result<NonNull<c_void>> {
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
+        #[cfg(target_os = "linux")]
         let flags = MapFlags::MAP_SHARED | MapFlags::MAP_NORESERVE;
-
+        #[cfg(not(target_os = "linux"))]
+        let flags = MapFlags::MAP_SHARED;
         tracing::trace!(
             "mmap(addr=NULL, length={}, prot={:X}, flags={:X}, f={}, offset=0)",
             len,

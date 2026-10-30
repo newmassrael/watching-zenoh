@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.1, file
-// src/single_or_box_hashset.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-collections 1.10.2, file
+// src/single_or_box_hashset.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! A set that holds nothing, one element in place, or a boxed hash set from the second element.
 

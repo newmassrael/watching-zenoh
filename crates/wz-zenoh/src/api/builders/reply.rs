@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/reply.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The response an
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/reply.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The response an
 // error reply is made of is the engine's to write, so `ReplyErrBuilder` hands its payload and
 // encoding to the query (`Query::reply_err_with`) where upstream's builds the response itself.
 

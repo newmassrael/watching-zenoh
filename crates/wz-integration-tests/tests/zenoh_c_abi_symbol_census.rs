@@ -357,7 +357,13 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     // on the 'unstable-shm' arm is now 0"), and witnessed against libzenohc by
     // `zenoh_c_shm_custom_protocol_twice_and_diff`, whose receiver is the program that did not
     // link before: five storages, three payload kinds, the real library's rows.
-    ("unstable-shm", 0, "1.10.1", "C1cc"),
+    // R3976 — the VERSION moves 1.10.1 -> 1.10.2 and the COUNT does NOT, re-measured against
+    // the 1.10.2 archive installed into a prefix of its own (the three legs of this file each ran
+    // one test and passed). The release's whole C-visible change is one declaration, `z_open`'s
+    // `_options` losing its `const` (in the generated header and in the Rust definition behind
+    // it); the name is the same, so the symbol set the census counts did not move, and wz's own
+    // `z_open` takes the pointer as `*const c_void`, which accepts both.
+    ("unstable-shm", 0, "1.10.2", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
@@ -468,7 +474,13 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     // compared two stale numbers and passed. What made the local oracle stale is
     // named at `install-zenoh-c.sh`'s examples branch — the source checkout the
     // arm build copies from was never re-cloned when the pin moved.
-    ("unstable", 0, "1.10.1", "C1ce"),
+    //
+    // R3976 — the VERSION moves 1.10.1 -> 1.10.2 and the COUNT does NOT, re-measured the way
+    // R2535 did: the `unstable` oracle was built from the 1.10.2 source
+    // (`install-zenoh-c-arm.sh unstable`, verified `unstable, 1.10.2`) and the three legs of this
+    // file each ran one test and passed. The diff of the two releases' Rust sources is the one
+    // `z_open` parameter that lost its `const`, so there was no new C entry point to define.
+    ("unstable", 0, "1.10.2", "C1ce"),
     (
         "nounstable-shm",
         1,

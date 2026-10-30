@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/builders/query.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The query is
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
+// src/api/builders/query.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The query is
 // made by the session over its engine (`Session::query`), so the builder is upstream's.
 
 use std::{

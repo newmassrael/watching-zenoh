@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-util 1.10.1, file
-// src/lib_loader.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-util 1.10.2, file
+// src/lib_loader.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 use std::{
     env::consts::{DLL_PREFIX, DLL_SUFFIX},
     ffi::OsString,

@@ -12,8 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.1, file
-// src/core/endpoint.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.2, file
+// src/core/endpoint.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! Endpoints: where a link is opened to or listens at, with the metadata and the configuration of
 //! the link, in the canon string form `<proto>/<address>[?<metadata>][#<config>]`.
@@ -37,6 +37,9 @@ pub(super) fn protocol(s: &str) -> &str {
 }
 
 pub(super) fn address(s: &str) -> &str {
+    if s.is_empty() {
+        return "";
+    }
     let pdix = s.find(PROTO_SEPARATOR).unwrap_or(s.len());
     let midx = s.find(METADATA_SEPARATOR).unwrap_or(s.len());
     let cidx = s.find(CONFIG_SEPARATOR).unwrap_or(s.len());
@@ -860,6 +863,23 @@ fn endpoints() {
             ]
         })
     );
+}
+
+#[cfg(feature = "internal")]
+#[test]
+fn empty_endpoint_address() {
+    let mut endpoint = EndPoint::empty();
+    assert_eq!(endpoint.address().as_str(), "");
+    assert_eq!(endpoint.split().1.as_str(), "");
+    assert_eq!(endpoint.address_mut().as_str(), "");
+}
+
+#[cfg(feature = "internal")]
+#[test]
+fn empty_locator_address() {
+    let mut locator = Locator::empty();
+    assert_eq!(locator.address().as_str(), "");
+    assert_eq!(locator.address_mut().as_str(), "");
 }
 
 #[test]

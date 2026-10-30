@@ -17,5 +17,5 @@ name = "zenoh"
 path = "src/lib.rs"
 
 [dependencies]
-zenoh-keyexpr = { version = "=1.10.1", features = ["unstable", "internal"] }
-zenoh-result = { version = "=1.10.1" }
+zenoh-keyexpr = { version = "=1.10.2", features = ["unstable", "internal"] }
+zenoh-result = { version = "=1.10.2" }
