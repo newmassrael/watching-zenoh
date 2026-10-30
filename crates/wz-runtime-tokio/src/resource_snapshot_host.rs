@@ -242,12 +242,26 @@ impl SnapshotService {
     /// Poll on the build's period from a task of its own, with the hosted platform's source: the
     /// task a hosted node has and the sampler does not. The first snapshot is taken at once.
     /// Dropping or aborting the handle stops it.
+    ///
+    /// The task runs on the `net` subsystem, beside the node's other periodic upkeep
+    /// (`crate::periodic`): nothing the application calls waits on it, and the thread that starts
+    /// it need not be inside a tokio runtime.
     pub fn spawn(
         self: &Arc<Self>,
         messages: impl Fn() -> NodeMessageReading + Send + 'static,
     ) -> tokio::task::JoinHandle<()> {
+        self.spawn_on(crate::runtime_pool::WzRuntime::Net.handle(), messages)
+    }
+
+    /// [`Self::spawn`] on `runtime`: the task sleeps on that runtime's clock, so a test whose clock
+    /// is paused hands its own runtime here, as tokio's paused clock is one runtime's.
+    pub fn spawn_on(
+        self: &Arc<Self>,
+        runtime: &tokio::runtime::Handle,
+        messages: impl Fn() -> NodeMessageReading + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
         let service = Arc::clone(self);
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             let mut source = HostResourceSource::new();
             loop {
                 service.poll(&mut source, &messages);
@@ -420,7 +434,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_task_takes_a_snapshot_at_once_and_serves_what_the_node_counted() {
         let service = SnapshotService::new();
-        let handle = service.spawn(|| {
+        // On this test's runtime, whose clock is the paused one the test advances.
+        let handle = service.spawn_on(&tokio::runtime::Handle::current(), || {
             let mut reading = NodeMessageReading::empty();
             reading.messages = 42;
             reading

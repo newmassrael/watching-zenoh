@@ -52,10 +52,11 @@ SUBSYSTEM SET is asserted rather than a count, because a count cannot tell four
 
 ## What is production, and what is the substrate
 
-Production is `crates/*/src/**.rs` minus `#[cfg(test)]` blocks: `tests/` targets
-are free to reach for the ambient runtime, and several must (tokio's paused
-clock is per-runtime, so a test that advances time has to share a runtime with
-what it observes).
+Production is `crates/*/src/**.rs` minus the items whose `cfg` requires a test
+build (`#[cfg(test)]`, and `#[cfg(all(test, feature = ..))]` as much: see
+`cfg_requires_test`): `tests/` targets are free to reach for the ambient runtime,
+and several must (tokio's paused clock is per-runtime, so a test that advances
+time has to share a runtime with what it observes).
 
 The substrate is `wz-runtime-tokio/src/runtime_impl.rs` and `runtime_pool.rs` —
 the two modules that DEFINE ambient spawning and partitioned spawning. A gate
@@ -151,12 +152,66 @@ CONST_RE = re.compile(
 )
 
 
+def _split_top(args: str) -> list[str]:
+    """The comma-separated arguments of a cfg combinator, at depth zero only."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(args):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(args[start:i])
+            start = i + 1
+    parts.append(args[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def cfg_requires_test(predicate: str) -> bool:
+    """Whether a `cfg(...)` predicate holds ONLY in a test build: `test` itself, an `all(..)` with
+    one argument that requires it, or an `any(..)` every argument of which does. `not(..)` and a
+    feature never do. Read by the predicate's structure and not its spelling, because a test module
+    gated on a feature as well (`cfg(all(test, feature = "engine-tokio"))`) is as test-only as a
+    `cfg(test)` one, and was read as production when only the bare spelling was matched.
+    """
+    p = predicate.strip()
+    if p == "test":
+        return True
+    m = re.fullmatch(r"(all|any)\s*\((.*)\)", p, re.S)
+    if m is None:
+        return False
+    args = _split_top(m.group(2))
+    if m.group(1) == "all":
+        return any(cfg_requires_test(a) for a in args)
+    return bool(args) and all(cfg_requires_test(a) for a in args)
+
+
+def _test_cfg_attrs(text: str):
+    """Every `#[cfg(<predicate>)]` attribute in `text` whose predicate requires a test build."""
+    for m in re.finditer(r"#\[cfg\(", text):
+        depth, j = 1, m.end()
+        while j < len(text) and depth:
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+            j += 1
+        if depth == 0 and text.startswith("]", j) and cfg_requires_test(text[m.end() : j - 1]):
+            yield m.start(), j + 1
+
+
 def cfg_test_spans(text: str) -> list[tuple[int, int]]:
-    """Character spans of every `#[cfg(test)]` item, by brace matching."""
+    """Character spans of every item under a `cfg` that requires a test build
+    ([`cfg_requires_test`]), by brace matching."""
     spans: list[tuple[int, int]] = []
-    for m in re.finditer(r"#\[cfg\(test\)\]", text):
-        i = text.find("{", m.end())
+    for start, end in _test_cfg_attrs(text):
+        i = text.find("{", end)
         if i < 0:
+            continue
+        # An item with no body (`mod tests;`, `use ..;`) ends at its `;`: the next block is not
+        # its own. The out-of-line module is `cfg_test_files`'s.
+        semi = text.find(";", end)
+        if 0 <= semi < i:
             continue
         depth = 0
         j = i
@@ -168,13 +223,24 @@ def cfg_test_spans(text: str) -> list[tuple[int, int]]:
                 if depth == 0:
                     break
             j += 1
-        spans.append((m.start(), j))
+        spans.append((start, j))
     return spans
 
 
-CFG_TEST_MOD_RE = re.compile(
-    r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+TEST_MOD_DECL_RE = re.compile(
+    r"\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
 )
+
+
+def cfg_test_mod_decls(text: str) -> list[str]:
+    """The names of the out-of-line modules (`mod <name>;`) declared under a `cfg` that requires a
+    test build ([`cfg_requires_test`]), other attributes between the two allowed."""
+    names = []
+    for _, end in _test_cfg_attrs(text):
+        m = TEST_MOD_DECL_RE.match(text, end)
+        if m is not None:
+            names.append(m.group(1))
+    return names
 PLAIN_MOD_RE = re.compile(
     r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", re.M
 )
@@ -216,8 +282,8 @@ def cfg_test_files(roots: list[Path]) -> set[Path]:
     frontier: list[Path] = []
     for path in roots:
         text = path.read_text(encoding="utf-8", errors="replace")
-        for m in CFG_TEST_MOD_RE.finditer(text):
-            child = module_file(path, m.group(1))
+        for name in cfg_test_mod_decls(text):
+            child = module_file(path, name)
             if child is not None:
                 frontier.append(child)
     seen: set[Path] = set()
@@ -389,6 +455,30 @@ def selftest() -> int:
             0,
             0,
         ),
+        (
+            "under cfg(all(test, feature)), which is test-only as well",
+            '#[cfg(all(test, feature = "engine-tokio"))]\nmod t {\n    fn f() { tokio::spawn(g()); }\n}',
+            0,
+            0,
+        ),
+        (
+            "under cfg(any(test, feature)), which a production build can hold",
+            '#[cfg(any(test, feature = "x"))]\nfn f() { tokio::spawn(g()); }',
+            1,
+            0,
+        ),
+        (
+            "under cfg(not(test)), which is production",
+            "#[cfg(not(test))]\nfn f() { tokio::spawn(g()); }",
+            1,
+            0,
+        ),
+        (
+            "a bodiless test item does not take the next block with it",
+            "#[cfg(test)]\nmod tests;\nfn f() { tokio::spawn(g()); }",
+            1,
+            0,
+        ),
         ("named by enum", "fn f() { WzRuntime::Rx.spawn(g()); }", 0, 1),
         (
             "named by constant",
@@ -473,7 +563,12 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "sub" / "inner" / "leaf").mkdir(parents=True)
-        (root / "mod.rs").write_text("#[cfg(test)]\nmod tests;\nmod other;\n")
+        (root / "mod.rs").write_text(
+            "#[cfg(test)]\nmod tests;\n"
+            '#[cfg(all(test, feature = "x"))]\n#[path = "featured.rs"]\nmod featured;\n'
+            "mod other;\n"
+        )
+        (root / "featured.rs").write_text("fn f() { tokio::spawn(g()); }\n")
         (root / "tests.rs").write_text("fn f() { tokio::spawn(g()); }\n")
         (root / "other.rs").write_text("fn f() { WzRuntime::Rx.spawn(g()); }\n")
         # A declaration inside `sub.rs` resolves under `sub/`, not beside it.
@@ -485,6 +580,7 @@ def selftest() -> int:
         found = cfg_test_files([root / "mod.rs", root / "sub.rs"])
         for want, label in (
             (root / "tests.rs", "a whole-file cfg(test) module is excluded"),
+            (root / "featured.rs", "a whole-file cfg(all(test, ..)) module is excluded too"),
             (root / "sub" / "inner.rs", "the foo.rs/foo/ spelling resolves too"),
             (root / "sub" / "inner" / "leaf" / "mod.rs", "exclusion is transitive"),
         ):
@@ -511,7 +607,7 @@ def selftest() -> int:
             print(f"  - {line}", file=sys.stderr)
         return 1
     print(
-        f"  subsystem-spawn selftest: {len(cases)} text case(s) + 4 file-level "
+        f"  subsystem-spawn selftest: {len(cases)} text case(s) + 5 file-level "
         "case(s) OK"
     )
     return 0
