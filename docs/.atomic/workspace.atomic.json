@@ -300608,6 +300608,34 @@
         "Owed: a peer of the regions tests needs more than 1024 open files for twelve nodes in one process; the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 3974": {
+      "decision_summary": "The nine cooperative text budgets moved in round 3958 named the observation plane and other work of the window as the likely source of the growth. Measured on pc2 instead: pico-client-coop text 937,467 at 04d21adb3 and 940,971 at the head (+3,504), against +13,316 on the hosted reading; the head's nm listing holds none of the observation doors. The note in capability_cost_gate.py now says that; the budgets are unchanged because the hosted lane grades them.",
+      "changes_bullets": [
+        "capability_cost_gate.py: the comment above the coop cases."
+      ],
+      "verification_bullets": [
+        "Two pc2 builds and sizes of one case at two commits, and an nm listing; the gate selftest passes. The cause of the machine gap was not found."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Which change widened the gap between pc2 and the hosted text reading from 232 to about 10,000 bytes is open; the hosted artifact of a coop build would settle it."
+      ],
+      "publishable_decision_summary": "The nine cooperative text budgets moved in round 3958 named the observation plane and other work of the window as the likely source of the growth. Measured on pc2 instead: pico-client-coop text 937,467 at 04d21adb3 and 940,971 at the head (+3,504), against +13,316 on the hosted reading; the head's nm listing holds none of the observation doors. The note in capability_cost_gate.py now says that; the budgets are unchanged because the hosted lane grades them.",
+      "publishable_changes_bullets": [
+        "capability_cost_gate.py: the comment above the coop cases."
+      ],
+      "publishable_verification_bullets": [
+        "Two pc2 builds and sizes of one case at two commits, and an nm listing; the gate selftest passes. The cause of the machine gap was not found."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Which change widened the gap between pc2 and the hosted text reading from 232 to about 10,000 bytes is open; the hosted artifact of a coop build would settle it."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
