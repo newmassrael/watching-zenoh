@@ -621,6 +621,21 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "transport/link/tls/root_ca_certificate",
         "transport/link/tls/listen_certificate",
         "transport/link/tls/listen_private_key",
+        // The connecting side of the same three, classed on the same sentence: DEFAULT_CONFIG
+        // carries `connect_private_key: null` and `connect_certificate: null` beside the
+        // listening pair. `protocols` is an optional whitelist whose silence means every
+        // protocol the build supports, so the tree has no list to compare.
+        // (`commons/zenoh-config/src/lib.rs` @ `pub protocols: Option<Vec<String>>,`)
+        "transport/link/tls/connect_certificate",
+        "transport/link/tls/connect_private_key",
+        "transport/link/protocols",
+        // MEASURED on a running zenohd with a silent file: the two TLS booleans of the
+        // connecting side resolve to `null` although DEFAULT_CONFIG states `enable_mtls: false`
+        // and `verify_name_on_connect: true`, because they are `Option` fields whose defaults
+        // are applied where they are read. wz's reader leaves each unset for silence and the
+        // open applies the same two (`unwrap_or(false)` and `unwrap_or(true)`).
+        "transport/link/tls/enable_mtls",
+        "transport/link/tls/verify_name_on_connect",
         // R2593 — MEASURED on a running zenohd with no file key: its resolved
         // tree prints `"tcp":{"so_rcvbuf":null,"so_sndbuf":null}` and the same
         // two nulls inside `tls`. No buffer size is a kernel default, which the
@@ -788,6 +803,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // mentions `downsampling` renders it `[]`, not `null`, so the tree
         // answers and the key is comparable.
         ("downsampling", String::from("[]")),
+        // `qos/network` -- the same class as the two rows above: upstream types it as a
+        // list with a default (`commons/zenoh-config/src/lib.rs` @ `network: Vec<QosOverwriteItemConf>,`),
+        // so a silent file resolves it to `[]`, and wz's struct answers with the same empty
+        // list, which is asserted below rather than rendered here.
+        ("qos/network", String::from("[]")),
         // R2652 — the two `access_control` leaves the tree ANSWERS for a silent
         // file, measured against this binary: `"enabled":false` and
         // `"default_permission":"deny"`. Their three siblings resolve to `null`
@@ -905,6 +925,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     assert!(
         wz.router_transport_weights.is_empty(),
         "the fixture states no transport weights"
+    );
+    assert!(
+        wz.qos_network.is_empty(),
+        "the fixture states no QoS overwrite rule"
     );
     // The key the tree cannot answer (`THE_TREE_ANSWERS_NULL`): a silent file leaves wz on the
     // `auto` preset, the one the pinned `DEFAULT_CONFIG.json5` documents.
@@ -3605,10 +3629,17 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         root_ca_certificate: "/etc/wz/ca.pem",
         listen_certificate: "/etc/wz/server.pem",
         listen_private_key: "/etc/wz/server.key",
+        // The connecting side of the mutual-authentication pair, each off its default so
+        // the demo has something to apply. Nothing here dials tls, so none of it is used.
+        enable_mtls: true,
+        connect_certificate: "/etc/wz/client.pem",
+        connect_private_key: "/etc/wz/client.key",
+        verify_name_on_connect: false,
         so_rcvbuf: 12288,
         so_sndbuf: 24576,
       }},
       tcp: {{ so_rcvbuf: 65536, so_sndbuf: 65536 }},
+      protocols: ["tcp", "tls"],
       // R2925 — the queue sizes and the two congestion waits, each off its
       // default so the demo has something to apply.
       tx: {{
@@ -3688,6 +3719,18 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
        messages: ["put", "delete", "query", "reply"],
        rules: [ {{ key_expr: "demo/slow", freq: 0.5 }} ] }},
   ],
+  // `qos/network`, named here for the reason `low_pass_filter` is: a client's file can
+  // carry it and this fixture asserts the reader names every honoured key. The rule is
+  // INERT for this leg: it names a key expression nothing here publishes on, so turning
+  // the interceptor on cannot change what the leg observes.
+  qos: {{
+    network: [
+      {{ id: "q1",
+         messages: ["put"],
+         key_exprs: ["inert/qos/**"],
+         overwrite: {{ priority: "real_time", congestion_control: "block", express: true }} }},
+    ],
+  }},
   // R2652 — the five `access_control/*` keys, the last of the seven interceptor
   // keys to get a reader. Named together because they ARE one subtree: upstream
   // compiles `rules` x `subjects` x `policies` into its enforcer in one step and
