@@ -260,6 +260,10 @@ CAPABILITY_FEATURES = frozenset({
     "e2e-sender", "transport_compression", "auth_usrpwd", "interceptors",
     # Open-debt item 913: a multicast listen endpoint joins a group, a door and not a footprint.
     "multicast-transport",
+    # The four instruments of the observation plane: wz's own doors, which zenoh-c has not and
+    # which are off in a build made as the reference is. They add doors and no type, so none of
+    # them moves an axis, and they are off in the default and in every arm.
+    "clock-source", "event-ring", "supervision", "resource-snapshot",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

@@ -401,12 +401,33 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "loopback sockets",
         frozenset({"scout", "listen"}),
     ),
+    "wz-capi-port": (
+        "the port between a wz C ABI and its engine: a workspace-internal rlib with no path a C "
+        "program names. Its four features gate `observation`, the one behaviour of the node's "
+        "clock registry, event log, supervisor and resource sampler that the doors of both C ABIs "
+        "call; each function in it is run by this crate's own tests and again through each ABI's "
+        "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests)",
+        frozenset({"clock-source", "event-ring", "supervision", "resource-snapshot"}),
+    ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
         "links against, not a Rust path a consumer names, and that contract "
         "is already measured against upstream's own library on all four ABI "
         "arms. Held to `ABI_CONTRACT` below rather than to this sentence",
-        frozenset({"zenoh-c-no-unstable-api", "zenoh-c-shared-memory"}),
+        # The four instruments of the observation plane gate `pub mod clock_source`, `event_log`,
+        # `supervision` and `snapshot`, whose public items are wz's own `wz_capi_c_*` doors, each
+        # `#[no_mangle] extern "C"`, and the types and constants they take, all declared in
+        # `wz_capi_c.h`. Off by default as the reference build is; upstream has no name for them.
+        frozenset(
+            {
+                "clock-source",
+                "event-ring",
+                "resource-snapshot",
+                "supervision",
+                "zenoh-c-no-unstable-api",
+                "zenoh-c-shared-memory",
+            }
+        ),
     ),
     # R3416 -- `admin-space` (pico's `Z_FEATURE_ADMIN_SPACE`, off by default as upstream's is)
     # gates `pub mod admin_space`, whose two public items are pico's `zp_start_admin_space` and
@@ -1334,7 +1355,14 @@ FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.to
 # `wz-node-time` too, for the same reason: who consumes the crate (the tokio runtime's re-exports,
 # the cooperative engine) is a claim no predicate above holds a row to.
 PROSE_ONLY: frozenset[str] = frozenset(
-    {"wz-capi-core", "wz-capi-coop", "wz-host-net", "wz-ext-pubsub", "wz-node-time"}
+    {
+        "wz-capi-core",
+        "wz-capi-coop",
+        "wz-capi-port",
+        "wz-host-net",
+        "wz-ext-pubsub",
+        "wz-node-time",
+    }
 )
 
 
