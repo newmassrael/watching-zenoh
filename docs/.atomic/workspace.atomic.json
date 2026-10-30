@@ -300072,6 +300072,34 @@
         "Layer Z8 reds are not paid: session expected pass measured fail (Elapsed), shm timed out, routing three_node_combination ignored; they are the api-compat session's rows. The nine coop text budgets follow the reading, attribution to a commit is open. C1cn shard 0 and validate+verify+test logs were gone."
       ]
     },
+    "Round 3959": {
+      "decision_summary": "The first hosted run of Layer C1bzr (six shards, 533 to 891 s each, inside the 30 minute budget) failed every shard and the settle job, and each failure was the ledger doing its job: main had moved after the ledger was measured. Two doc links in wz-capi-core named items that exist only with router-node (the private router_node module, OpenArguments::run_node) from fields every build has. Another session landed the router_node one as code while this round was measured; this round writes the run_node one the same way, as code, the shape already paid in wz-workload. The wz-session-core lifecycle_contract and lifecycle_node redundant-target lines now measure 0 and are dropped from the ledger.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: the gateway_south field doc names OpenArguments::run_node as code. scripts/lib/reduced_docs_ledger.txt: two wz-session-core finding lines removed (3 places each, now 0)."
+      ],
+      "verification_bullets": [
+        "Layer C1bzr narrowed to wz-capi-core and to wz-session-core, run on the build machine against this tree: both pass, so the ledger and the measurement agree for those two crates. The other crates were green in the same hosted run (their shards failed only on the wz-capi-core lines and the settle only on those plus the two stale lines)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "That hosted run measured main at round 3951; rounds after it are unmeasured, so another ledger drift is possible. Most hosted runs on main are cancelled by the next push, so the first complete run after this round is what settles it. A drift is paid as its own round, by dropping fixed lines or fixing the new link, and ledger --write regenerates the file from the shard artifacts."
+      ],
+      "publishable_decision_summary": "The first hosted run of Layer C1bzr (six shards, 533 to 891 s each, inside the 30 minute budget) failed every shard and the settle job, and each failure was the ledger doing its job: main had moved after the ledger was measured. Two doc links in wz-capi-core named items that exist only with router-node (the private router_node module, OpenArguments::run_node) from fields every build has. Another session landed the router_node one as code while this round was measured; this round writes the run_node one the same way, as code, the shape already paid in wz-workload. The wz-session-core lifecycle_contract and lifecycle_node redundant-target lines now measure 0 and are dropped from the ledger.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: the gateway_south field doc names OpenArguments::run_node as code. scripts/lib/reduced_docs_ledger.txt: two wz-session-core finding lines removed (3 places each, now 0)."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1bzr narrowed to wz-capi-core and to wz-session-core, run on the build machine against this tree: both pass, so the ledger and the measurement agree for those two crates. The other crates were green in the same hosted run (their shards failed only on the wz-capi-core lines and the settle only on those plus the two stale lines)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "That hosted run measured main at round 3951; rounds after it are unmeasured, so another ledger drift is possible. Most hosted runs on main are cancelled by the next push, so the first complete run after this round is what settles it. A drift is paid as its own round, by dropping fixed lines or fixing the new link, and ledger --write regenerates the file from the shard artifacts."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
