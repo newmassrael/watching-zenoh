@@ -140,7 +140,7 @@ CASES: tuple[Case, ...] = (
     # standing) -> 9,204,244 with `d8995bc4f1` (the gateway/south reader) -> 9,204,316 at the head.
     # The timestamp stack of the session API is in none of these images: no C ABI crate enables
     # `pubsub-ts-stack`.
-    Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_861_400,
+    Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_871_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
          require=(SINGLE_THREADED, TOKIO_ENGINE),
@@ -155,7 +155,10 @@ CASES: tuple[Case, ...] = (
               "reply key gate (`169bd005b`) and the engine port's advanced plane. The budget "
               "moves to that reading with its margin. 1,849,773 on hosted CI on 2026-10-27 "
               "(head `f4bdeaee5`, +16,600): the growth is in the code every pico build links "
-              "and is not attributed to one commit; the budget moves to that reading"),
+              "and is not attributed to one commit; the budget moves to that reading. "
+              "1,861,801 on hosted CI on 2026-10-29 (head `017e3c711`), and 1,868,097 on a "
+              "build machine on the tree of round 3938, whose readings track the hosted ones "
+              "(capic-default's note): the budget is that reading and 3,500, to the hundred"),
     Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_528_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
@@ -175,7 +178,7 @@ CASES: tuple[Case, ...] = (
               "queries pending on a face with it (4,173 over 1,520,800): the head under it was "
               "not measured here, so what is that round's and what the earlier rounds' is not "
               "separated, and the budget is that reading and 3,500, rounded up to the hundred"),
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_922_900,
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_933_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED),
@@ -184,7 +187,9 @@ CASES: tuple[Case, ...] = (
               "2026-10-27 (head `f4bdeaee5`, +16,552), the growth pico-client's note states. "
               "1,919,305 on hosted CI on 2026-10-29 (head `1ab111232`, 305 over the 1,919,000 "
               "it held): the one of the cases that read the day's clock growth that the budgets "
-              "above did not move; the budget moves to that reading plus 3,500, to the hundred"),
+              "above did not move; the budget moves to that reading plus 3,500, to the hundred. "
+              "1,929,813 on a build machine on the tree of round 3938, the growth "
+              "pico-client's note states: that reading and 3,500, to the hundred"),
     # The same client on the cooperative engine: the program steps its session, and no runtime
     # thread or tokio is linked. Its links dial UDP in every build, so it is compared with the
     # pico that pico-client-udp is (`link-udp` names that here; it adds nothing to this build).
@@ -415,7 +420,7 @@ CASES: tuple[Case, ...] = (
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_304_900,
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_347_500,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
@@ -428,8 +433,11 @@ CASES: tuple[Case, ...] = (
               "3,790,610 without it. 4,301,320 measured locally on the head of the round that "
               "ends the queries pending on a face with it (1,320 over 4,300,000), the growth "
               "pico-client-small's note states: the budget is that reading and 3,500, rounded "
-              "up to the hundred"),
-    Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
+              "up to the hundred. 4,340,654 on hosted CI on 2026-10-29 (head `017e3c711`) and "
+              "4,343,962 on a build machine on the tree of round 3938: the local readings run "
+              "under the hosted ones (capic-default's note), so the budget is the build "
+              "machine's reading and 3,500, to the hundred"),
+    Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
     Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_973_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
@@ -475,7 +483,7 @@ CASES: tuple[Case, ...] = (
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_340_400,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_423_800,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
@@ -503,7 +511,11 @@ CASES: tuple[Case, ...] = (
               "hundred. 9,336,873 measured locally on the head of the round that ends the "
               "queries pending on a face with it (1,673 over 9,335,200), the growth "
               "capic-client-small's note states: the budget is that reading and 3,500, "
-              "rounded up to the hundred"),
+              "rounded up to the hundred. The local readings above run about 80,000 under "
+              "the hosted ones: hosted CI read 9,416,742 at `017e3c711`, whose local reading "
+              "was 9,331,648, and a build machine reads the hosted figure within a thousand "
+              "bytes. 9,420,262 on a build machine on the tree of round 3938: the budget is "
+              "that reading and 3,500, to the hundred"),
 )
 
 

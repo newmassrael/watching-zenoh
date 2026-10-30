@@ -1042,7 +1042,7 @@ declare -A BASELINE_MC_TEXT=(
     # Old: 70172/70304.
     #
     # 2026-10-30 -- thumbv7m 68712 -> 68952, thumbv7em-hf 68772 -> 69000, read by Layer Q on one
-    # build host (rustc 1.97.0 / gcc 13.2.1) on the tree of round 3932. The hosted runs read
+    # build host (rustc 1.97.0 / gcc 13.2.1) on the tree of round 3938. The hosted runs read
     # thumbv7em-hf 69036 from round 3908 (`078dd714a`) on and 69032 at `017e3c711`, +264 / +260,
     # past the band, while this host read +228 on the same code: the hosted toolchain's usual
     # +32 to +40 over this host is what took it out. The growth arrived with the code of
