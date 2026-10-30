@@ -11029,7 +11029,7 @@ layer_c1co_pico_client_dials_a_listener() {
     # (`crates/wz-capi-pico/tests/mutual_dial.rs`, step L5 of `docs/capi-pico-on-coop-engine.md`).
     # The tokio engine's run is the crate's default test build; this is the cooperative engine's,
     # whose admission rule it reads: with the rule shut off the test fails on a doubled transport.
-    _runci_guarded_test "C1co engine-coop mutual dial" 1 \
+    _runci_guarded_test "C1co engine-coop mutual dial" 2 \
         cargo test -p wz-capi-pico --no-default-features \
         --features "engine-coop,peer,multi-thread,link-udp,connectivity" \
         --test mutual_dial || return 1
