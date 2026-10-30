@@ -299188,6 +299188,62 @@
         "Also owed: the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 3936": {
+      "decision_summary": "The owner restated what wz is, 2026-10-30: upstream zenoh is only a preset of wz, wz is not a mere replacement, and wz must be able to extend further. Upstream zenoh, zenoh-c and zenoh-pico are presets of wz; the parity each one owes its original is the contract of that preset, not the ceiling of wz, and a capability beyond upstream is a wz feature composed with Kconfig and SCE like any other. The texts that stated replacement, or a demonstration of synthesis, as the identity of wz now state the preset frame. The texts that hold a preset to drop-in behaviour stay as they are, since that is the contract of the preset.",
+      "changes_bullets": [
+        "Store section 1: intent and outputs state the framework and its upstream presets; a caveat supersedes the old not-a-rewrite caveat (caveats are append-only).",
+        "Store section 2/2.0: the intent names upstream as presets whose parity is their contract, with zenoh-pico parity as the first milestone.",
+        "Store section 2/2.2: the intent says the items once deferred are in scope with no deferral, and that router, API shims, shm and admin space have landed.",
+        "Store feature inventory section: the north star rationale reads arbitrary composition, with upstream catalogs as presets and not the bound.",
+        "README.md and README.ko.md: the opening and the first item describe the framework and its presets instead of a wire-spec subset.",
+        "ARCHITECTURE.md: section 1 states the preset frame, 2.0 says the framework grows beyond Zenoh, 2.1 keeps the pico criterion as the first milestone, 2.2 gains a status note.",
+        "docs: router-task-per-face, feature_inventory, observation-plane, target-build-contract and agent-reference name the preset where they named replacement; the RFC appendix C gains a superseded note.",
+        "CLAUDE.md and the two oracle manifests: the reference-sources line and its quotes read written from scratch with upstream as presets.",
+        "crates/wz-runtime-tokio/src/zenoh_config.rs: a comment on item 514 names the zenoh preset instead of the north star as the replacement."
+      ],
+      "verification_bullets": [
+        "validate-workspace before and after the store mutations on 3935: entries 3928, sections 266, orphan refs 30+0, T3 warn 4, T4 info 15 in both readings; rc 0.",
+        "claude_md_upstream_pin_gate --check passes (CLAUDE.md states 1.10.1) and reason_review_pin_gate --check passes.",
+        "The commit went through the pre-commit hook (fmt, schema pin, validate-workspace). Only comments and prose changed, so no build or test was run for this round."
+      ],
+      "impact_refs": [
+        "1",
+        "2/2.0",
+        "2/2.2",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "carry_forward_bullets": [
+        "Code and test comments that call the zenoh or zenoh-pico preset a drop-in replacement were left as they are: they state the contract of a preset, which the new frame keeps.",
+        "ARCHITECTURE.md is still dated Round 116 in its header and other sections are stale beyond this frame (MCU target TBD, Phase C in flight); a refresh is owed."
+      ],
+      "publishable_decision_summary": "The owner restated what wz is, 2026-10-30: upstream zenoh is only a preset of wz, wz is not a mere replacement, and wz must be able to extend further. Upstream zenoh, zenoh-c and zenoh-pico are presets of wz; the parity each one owes its original is the contract of that preset, not the ceiling of wz, and a capability beyond upstream is a wz feature composed with Kconfig and SCE like any other. The texts that stated replacement, or a demonstration of synthesis, as the identity of wz now state the preset frame. The texts that hold a preset to drop-in behaviour stay as they are, since that is the contract of the preset.",
+      "publishable_changes_bullets": [
+        "Store section 1: intent and outputs state the framework and its upstream presets; a caveat supersedes the old not-a-rewrite caveat (caveats are append-only).",
+        "Store section 2/2.0: the intent names upstream as presets whose parity is their contract, with zenoh-pico parity as the first milestone.",
+        "Store section 2/2.2: the intent says the items once deferred are in scope with no deferral, and that router, API shims, shm and admin space have landed.",
+        "Store feature inventory section: the north star rationale reads arbitrary composition, with upstream catalogs as presets and not the bound.",
+        "README.md and README.ko.md: the opening and the first item describe the framework and its presets instead of a wire-spec subset.",
+        "ARCHITECTURE.md: section 1 states the preset frame, 2.0 says the framework grows beyond Zenoh, 2.1 keeps the pico criterion as the first milestone, 2.2 gains a status note.",
+        "docs: router-task-per-face, feature_inventory, observation-plane, target-build-contract and agent-reference name the preset where they named replacement; the RFC appendix C gains a superseded note.",
+        "CLAUDE.md and the two oracle manifests: the reference-sources line and its quotes read written from scratch with upstream as presets.",
+        "crates/wz-runtime-tokio/src/zenoh_config.rs: a comment on item 514 names the zenoh preset instead of the north star as the replacement."
+      ],
+      "publishable_verification_bullets": [
+        "validate-workspace before and after the store mutations on 3935: entries 3928, sections 266, orphan refs 30+0, T3 warn 4, T4 info 15 in both readings; rc 0.",
+        "claude_md_upstream_pin_gate --check passes (CLAUDE.md states 1.10.1) and reason_review_pin_gate --check passes.",
+        "The commit went through the pre-commit hook (fmt, schema pin, validate-workspace). Only comments and prose changed, so no build or test was run for this round."
+      ],
+      "publishable_impact_refs": [
+        "1",
+        "2/2.0",
+        "2/2.2",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Code and test comments that call the zenoh or zenoh-pico preset a drop-in replacement were left as they are: they state the contract of a preset, which the new frame keeps.",
+        "ARCHITECTURE.md is still dated Round 116 in its header and other sections are stale beyond this frame (MCU target TBD, Phase C in flight); a refresh is owed."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
