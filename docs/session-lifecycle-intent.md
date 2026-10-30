@@ -180,9 +180,12 @@ authority admits locator targets.
    an open session is success, not an error, or a retransmission reads as a
    failure. The agent writes the session's intent and nothing else: the
    application calls (declare, put, get) it makes through the node's own
-   client interface, so the control boundary is one and not two. What 7d
-   built of this is the `open` command alone, on the fixed-memory profile
-   (see Open, the out-of-band remainder).
+   client interface, so the control boundary is one and not two. 7d built
+   the `open` command on the fixed-memory profile; step 8 (section 6) added
+   `close <peer>`, `reset <peer> <generation>`, `status <peer>` and `whoami`,
+   so the control port reads the commands the contract has and answers each
+   in the words of the in-band verb (`control_port`, held by
+   `deploy/host-slot-node/tests/control_channel.rs`).
 3. **Build-time declaration only:** the verbs are off, the intent is the
    declared peer set, and the machines only reconnect.
 
@@ -1114,21 +1117,22 @@ Each step lands with its own done-when; sizes are not estimated here.
 
 ## 5. Open
 
-- The out-of-band remainder. D7 says the transport maps each command onto
-  the contract, and step 7d built one command, `open <peer>`, because the
-  port it maps onto, `NodeOpening`, is open-only on the fixed-memory profile
-  (6.2b-3 left close, reset and status on the heap profile). Three things of
-  D6 and D7 are therefore not reachable out of band, and none is scheduled:
-  `close` and `reset <generation>` (the generation is what keeps a
-  retransmitted reset once); reading a peer's state (the status document of
-  D6) and the node's own zid, which an agent needs to know which node it
-  drives; and a locator target with no expected zid, which D7 admits "when
-  the authority admits locator targets" and which the fixed profile has no
-  path for (a plain stream is refused `Unverifiable`, D4). A control channel
-  whose owner holds the pipe is such an authority, so the third needs a
-  decision on who the authority is there. Close, reset and status need a
-  port beyond `NodeOpening` on the fixed profile, which is a design step
-  before it is a command.
+- The out-of-band remainder. Step 7d built one command, `open <peer>`, because
+  the port it maps onto, `NodeOpening`, was open-only on the fixed-memory
+  profile. Step 8 (section 6) closed that: the control port reads `close`,
+  `reset <peer> <generation>`, `status <peer>` and `whoami` as well, over
+  `StoreNode`, the verbs over the node's own store, and the host node answers
+  them on standard input. They are held to the table of every verb on the
+  cases a fixed node can be put in (`connect_manager` with a room for peers,
+  `admin_open_query`, and `control_channel` through a real process). What is
+  still not reachable out of band is a locator target with no expected zid,
+  which D7 admits "when the authority admits locator targets" and which the
+  fixed profile has no path for (a plain stream is refused `Unverifiable`,
+  D4). A control channel whose owner holds the pipe is such an authority, so
+  this needs a decision on who the authority is there; none is scheduled.
+  Two things are also not run: a hold that succeeds over a secure channel
+  (the control-channel leg builds the node for no peers by their zid), and a
+  Zephyr image that binds the verbs.
 - Whether a node may be told to open a session as the accepting side (a
   listen intent). The contract of D5 and D6 has the dialling side only; adding
   the other changes the contract, so it is the owner's ruling.
@@ -1149,14 +1153,15 @@ Each step lands with its own done-when; sizes are not estimated here.
   the second keeps a flood of opens from filling the bounded table. Neither is
   measured, and a table that reclaims a refused entry would allow both.
 
-## 6. The contract for every verb (step 8; A built, B to D not yet)
+## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6
-(`close`, `reset <generation>`, `status`) and a node's own identity are not
-yet on the table, because the fixed-memory profile has no port for them. This
-section is the design that closes it, written before the code so that the
-owner could rule on the questions at its end (6.5). Only step A is built
-(6.6).
+(`close`, `reset <generation>`, `status`) and a node's own identity were not
+on the table then, because the fixed-memory profile had no port for them. This
+section is the design that closed it, written before the code so that the
+owner could rule on the questions at its end (6.5). Steps A, B and D are built
+and C in part (6.4); the port, the control channel and the in-band query now
+serve all four verbs.
 
 ### 6.1 What exists, measured by reading the code
 
@@ -1418,8 +1423,9 @@ heap node. What was built and how it differs from the sketch of 6.2:
   held is run twice on the fixed node, with room in the record and with it
   full.
 
-Not built here: the in-band query (6.9) and the split per verb. The count of
-links a node reached through an endpoint holds is not kept per node.
+The in-band query (6.9) and the split per verb (6.10) were built after this
+step. Not built: the count of links a node reached through an endpoint holds is
+not kept per node.
 
 ### 6.9 Step D, built in part: the verbs in band on the fixed node
 
