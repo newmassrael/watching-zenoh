@@ -8062,7 +8062,9 @@ layer_c1am_cargo_test_adminspace() {
     # R2802 — 59 -> 60: `storage_add_payload_values_keep_their_json_type`, the
     # `?k=v` payload reading each value as the JSON5 scalar it spells. PRINTED
     # by `guarded_count_gate.py --range 69a8d5da..715e936a`.
-    _runci_guarded_test "C1AM adminspace 66" 66 \
+    # 66 -> 67: the one more `adminspace` test the lib gained (the other four commands of this
+    # layer moved with it); re-derived on the build host, which printed 67.
+    _runci_guarded_test "C1AM adminspace 67" 67 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -9278,7 +9280,9 @@ layer_c1y_cargo_test_routing_peer() {
     # The three arms stay, for the reason they were three (default, bare, access subset): a
     # table compiled under a feature set no lane builds is not known to compile. They count the
     # same 26 now. Read off each command's own output.
-    _runci_guarded_test "C1y linkstate" 26 \
+    # 26 -> 31 here and in the bare arm below: `linkstate_` selects five more tests since the
+    # forwarders were reworked (hosted C1y printed `31 passed`); re-derived on the build host.
+    _runci_guarded_test "C1y linkstate" 31 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib linkstate_ --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -9294,7 +9298,7 @@ layer_c1y_cargo_test_routing_peer() {
     # R2614 202 -> 203: the unrestricted-interest witness is ungated, so it lands
     # here exactly as the sibling comment above predicts.
     # R2904 205 -> 211, the six above.
-    _runci_guarded_test "C1y linkstate bare" 26 \
+    _runci_guarded_test "C1y linkstate bare" 31 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-router-hat \
         --lib linkstate_ --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
@@ -9431,7 +9435,8 @@ layer_c1y_cargo_test_routing_peer() {
     # R2904 220 -> 226, the same six.
     # Item 751 step 7c -- 234 -> 26 (see "C1y linkstate" above); the access subset names the
     # router hat in place of the retired peer forwarder's `routing-peer`.
-    _runci_guarded_test "C1y linkstate+access" 26 \
+    # 26 -> 31, the five of "C1y linkstate" above; re-derived on the build host.
+    _runci_guarded_test "C1y linkstate+access" 31 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl,access-downsampling,access-quota --lib linkstate_ --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
