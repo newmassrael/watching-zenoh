@@ -39,6 +39,7 @@ not made.
 
 from __future__ import annotations
 
+import difflib
 import pathlib
 import re
 import subprocess
@@ -134,6 +135,23 @@ def main(argv: list[str]) -> int:
             "pinned zenoh-stats writes; regenerate with --write and review the diff",
             file=sys.stderr,
         )
+        # The first lines of the difference, so a red on a machine nobody can reach says WHAT
+        # differs (a version in the provenance header, a metric's name, an ordering) and not
+        # only that something does.
+        shown = list(
+            difflib.unified_diff(
+                committed.splitlines(),
+                text.splitlines(),
+                "committed",
+                "regenerated",
+                lineterm="",
+                n=1,
+            )
+        )
+        for line in shown[:60]:
+            print(f"  {line}", file=sys.stderr)
+        if len(shown) > 60:
+            print(f"  ... {len(shown) - 60} more line(s)", file=sys.stderr)
         return 1
     print(f"zenoh-stats-golden: OK -- {scenarios} scenario(s) match the pinned zenoh-stats")
     return 0
