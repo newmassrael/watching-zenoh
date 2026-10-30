@@ -299602,6 +299602,50 @@
         "The kit rows filed in Round 3944 (text 146,204; 149,404; 163,860, chain 2,560, 2,560, 3,372, bound 3,296, 3,296, 4,564) were measured at the SCE pin 6dbfa6a521; at b1ede72108 the generated codecs return `Result` and the three images are re-measured next, with any row that moved."
       ]
     },
+    "Round 3946": {
+      "decision_summary": "The SCE pin `b1ede72108` that another session took in `69bc0b0e0b` (ADR 0065: the codecs that may refuse an encode return a `Result`) holds ADR 0064's shared engine core below it, which the SCE owner had asked consumers not to take until it is smaller than the copies it replaces. The kit lane is not run by any hook, so the commit landed with the kit gates red. Read at origin's main, the three images: the text 149,336, 152,512 and 168,624 (Round 3944's rows: 146,204, 149,404, 163,860), the worst chain of direct calls 2,560 to 2,740, the bound 3,296 to 3,764 on the fixed and batching images (over three quarters of the 4,480-byte stack) and the kit's peak 2,672 to 3,000.\n\nThe stack bound also met call sites no rule claimed: the shared copy of Appendix D reaches the machine it drives through a reference to the engine's `MainLoop` and `Behaviour`. Two rules state it, one for the file of each trait (`engine-host` for `engine.rs`, `engine-behaviour` for `microstep.rs`), each limited to the methods of its trait, with the number of sites pinned for each image (21 and 11); the line of `engine-clock` and of the two `tx_buf.rs` rules moved with the pins. The main stack of the fixed and batching overlays is 5,056 bytes, a quarter free over the bound.\n\nThe rows (the text and owners, the chain, the bound, the peak) are moved to those readings with the reason, so that the gates hold again and a later change is read against the pin it was made on. The cost is SCE's to take out: its owner works on the shells of the machines and on the core, and sends a commit when its probe shows two machines below the old size; the rows and the stack follow it down. The other session was told.",
+      "changes_bullets": [
+        "deploy/stack_call_contracts.json: the rules engine-host and engine-behaviour with their site pins, and the lines of engine-clock and the two tx_buf.rs rules.",
+        "deploy/zephyr-admin-node/overlays/t2g_client_fixed.conf, t2g_client_batching.conf: the main stack 4,480 to 5,056 bytes.",
+        "scripts/lib/stack_frame_gate.py: the chain of the fixed and batching images, 2,740.",
+        "deploy/resource_budget.json: the chain, the bound and the peak of the fixed and batching images, with the reason.",
+        "deploy/text_budget.json: the text and owners of the three rows (149,336; 152,512; 168,624) and their reasons.",
+        "docs/text-ownership.md: the entry for the pin."
+      ],
+      "verification_bullets": [
+        "On the kit lane (the tree of this round, `vendor/sce` at b1ede72108): the fixed, batching and get images were built and run, each with the stack chain, the stack bound and the text gate holding at the new figures (149,336; 152,512; 168,624 bytes; chain 2,740, 2,740, 3,372; bound 3,764, 3,764, 4,564) and the run inside its row of the resource budget (2,000 queries of each of the two documents answered by the first two, the getter's line after the reset on the third). The builds before the contract and the rows were moved refused each gate by exactly the figures now committed.",
+        "The static gates the pre-push hook defers: 121 run, none failed.",
+        "Not run: the matrix of 12 boots on this tree (the main stack grew 576 bytes on two images and the text is 3 KB over the tree before the pin), the tests of the crates, the hosted lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The text of the answering client at origin's main is 149,336 bytes on the kit-lane build, 3,132 over Round 3944's figure; the graded compare build is about 1,092 above that, so the gap to the single-thread zenoh-pico image (145,364) is about 5,000 bytes, which the matrix has not measured on this tree. The SCE engine's two copies measured 7,908 bytes and the shared core with its two shells 9,512; the SCE owner's next steps are compact tables (about 440 bytes) and an engine body that speaks event numbers (about 1 KB at two machines), and it sends a pin when its probe on the two real documents is below the old size. The wz side of that: take the pin, regenerate, measure the three images, and move these rows and the stack down with it."
+      ],
+      "publishable_decision_summary": "The SCE pin `b1ede72108` that another session took in `69bc0b0e0b` (ADR 0065: the codecs that may refuse an encode return a `Result`) holds ADR 0064's shared engine core below it, which the SCE owner had asked consumers not to take until it is smaller than the copies it replaces. The kit lane is not run by any hook, so the commit landed with the kit gates red. Read at origin's main, the three images: the text 149,336, 152,512 and 168,624 (Round 3944's rows: 146,204, 149,404, 163,860), the worst chain of direct calls 2,560 to 2,740, the bound 3,296 to 3,764 on the fixed and batching images (over three quarters of the 4,480-byte stack) and the kit's peak 2,672 to 3,000.\n\nThe stack bound also met call sites no rule claimed: the shared copy of Appendix D reaches the machine it drives through a reference to the engine's `MainLoop` and `Behaviour`. Two rules state it, one for the file of each trait (`engine-host` for `engine.rs`, `engine-behaviour` for `microstep.rs`), each limited to the methods of its trait, with the number of sites pinned for each image (21 and 11); the line of `engine-clock` and of the two `tx_buf.rs` rules moved with the pins. The main stack of the fixed and batching overlays is 5,056 bytes, a quarter free over the bound.\n\nThe rows (the text and owners, the chain, the bound, the peak) are moved to those readings with the reason, so that the gates hold again and a later change is read against the pin it was made on. The cost is SCE's to take out: its owner works on the shells of the machines and on the core, and sends a commit when its probe shows two machines below the old size; the rows and the stack follow it down. The other session was told.",
+      "publishable_changes_bullets": [
+        "deploy/stack_call_contracts.json: the rules engine-host and engine-behaviour with their site pins, and the lines of engine-clock and the two tx_buf.rs rules.",
+        "deploy/zephyr-admin-node/overlays/t2g_client_fixed.conf, t2g_client_batching.conf: the main stack 4,480 to 5,056 bytes.",
+        "scripts/lib/stack_frame_gate.py: the chain of the fixed and batching images, 2,740.",
+        "deploy/resource_budget.json: the chain, the bound and the peak of the fixed and batching images, with the reason.",
+        "deploy/text_budget.json: the text and owners of the three rows (149,336; 152,512; 168,624) and their reasons.",
+        "docs/text-ownership.md: the entry for the pin."
+      ],
+      "publishable_verification_bullets": [
+        "On the kit lane (the tree of this round, `vendor/sce` at b1ede72108): the fixed, batching and get images were built and run, each with the stack chain, the stack bound and the text gate holding at the new figures (149,336; 152,512; 168,624 bytes; chain 2,740, 2,740, 3,372; bound 3,764, 3,764, 4,564) and the run inside its row of the resource budget (2,000 queries of each of the two documents answered by the first two, the getter's line after the reset on the third). The builds before the contract and the rows were moved refused each gate by exactly the figures now committed.",
+        "The static gates the pre-push hook defers: 121 run, none failed.",
+        "Not run: the matrix of 12 boots on this tree (the main stack grew 576 bytes on two images and the text is 3 KB over the tree before the pin), the tests of the crates, the hosted lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The text of the answering client at origin's main is 149,336 bytes on the kit-lane build, 3,132 over Round 3944's figure; the graded compare build is about 1,092 above that, so the gap to the single-thread zenoh-pico image (145,364) is about 5,000 bytes, which the matrix has not measured on this tree. The SCE engine's two copies measured 7,908 bytes and the shared core with its two shells 9,512; the SCE owner's next steps are compact tables (about 440 bytes) and an engine body that speaks event numbers (about 1 KB at two machines), and it sends a pin when its probe on the two real documents is below the old size. The wz side of that: take the pin, regenerate, measure the three images, and move these rows and the stack down with it."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
