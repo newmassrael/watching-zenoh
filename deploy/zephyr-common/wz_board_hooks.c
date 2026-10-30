@@ -67,6 +67,18 @@ void wz_yield_us(int us)
 	k_usleep(us);
 }
 
+#if defined(__ARM_EABI__)
+/* The Arm EABI's zeroing call, which the Rust code generator emits for every cleared struct and
+ * array, answered by the libc `memset` this image already links. Without it the link takes the
+ * compiler runtime's `__aeabi_memclr`, a second 208-byte byte loop that does what `memset` does;
+ * `__aeabi_memclr4` and `__aeabi_memclr8` stay the runtime's, as the C libraries' own are. The
+ * compiler runtime defines its copy weak, so this definition is the one the link keeps. */
+void __aeabi_memclr(void *dest, size_t n)
+{
+	(void)memset(dest, 0, n);
+}
+#endif
+
 #if defined(CONFIG_WZ_ENABLE_CORE_CACHES)
 
 /* ---- the core's caches ----

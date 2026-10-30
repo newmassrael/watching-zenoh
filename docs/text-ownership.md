@@ -291,6 +291,26 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   maximum, and the scan is over bytes: 386 bytes. The tests keep the old refusals (a `+` sign, a
   port of 0, 256, a fifth field, a name, a bracketed address, `?` and `#`) and add the empty
   fields, a number wider than any integer, leading zeros, and the widest of each number.
+- TAKEN, text -216 bytes (147,772 to 147,556 on the fixed image; -376 on the batching image, 152,060
+  to 151,684, and -208 on the get image, 165,372 to 165,164): the Arm EABI's zeroing call is the
+  libc `memset`. The Rust code generator calls `__aeabi_memclr` for every cleared struct and array;
+  the image's libc has no such symbol, so the link took the compiler runtime's, 208 bytes of its own
+  byte loop beside the `memset` the image carries (the single-thread pico image has no
+  `__aeabi_memclr` at all: its C code calls `memset`). `wz_board_hooks.c` defines it as
+  `memset(dest, 0, n)`; the runtime's copy is weak, so this one is kept, and `__aeabi_memclr4` and
+  `__aeabi_memclr8` stay the runtime's (174 bytes each, in the pico image too). Found by listing the
+  C-named symbols the graded wz image has and the graded pico image has not (13, 886 bytes: this one,
+  `clock_settime` and `z_impl_k_usleep`, which are the board's wall clock and the finer tick,
+  `bind` and `getsockname`, which are the link's local port, and the two address hooks).
+- NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
+  document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
+  commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and
+  the stack peak of the kit run 2,696 to 3,040 bytes. The `sce_rust_runtime` symbols went from 7,908
+  (the two machines, 3,586 and 3,946) to 9,512 (one core of 6,502 and two shells of 1,286 and
+  1,724). With two machines the shared core costs more than the copy it removes; the SCE side
+  works on the shells (`first_enabled_transition`, `take_internal_event`, `end_run`) and on the
+  core under `opt-level=s`, and sends a commit when its probe shows two machines below the old
+  size. The pin stays at 6dbfa6a521.
 - NOT TAKEN, measured: `ClientNode::start` out of line (a call from the image's own `start`): the
   text was 161,700 bytes, 920 more than the image before, for the same frames: the node (152
   bytes) was passed by value across the call and the two functions each paid a prologue.
