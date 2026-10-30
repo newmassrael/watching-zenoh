@@ -75,8 +75,8 @@ async fn arrives(rx: &mut UdpDriver, budget: Duration) -> Option<Vec<u8>> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs a network namespace; Layer M runs it after probing for one"]
-async fn the_fan_out_reaches_an_interface_the_default_route_does_not() {
+#[ignore = "needs a network namespace; Layer M runs via --ignored after probing for one"]
+async fn in_a_netns_the_fan_out_reaches_an_interface_the_default_route_does_not() {
     let _ns = NetnsPair::up("scoutfan", HOST_CIDR, PEER_CIDR);
 
     // The receiver joins the group ONLY through the veth host address, so it

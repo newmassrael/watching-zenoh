@@ -72,6 +72,12 @@ workspace_dir = "crates"
 # its namespace unless an AppArmor profile allows it userns, which no package
 # installs there. That half is machine state this file cannot name; the oracle's
 # selftest refuses by name on a machine without it (`own_network_refusal`).
+#
+# `python3-venv` is the virtual environment the pinned Kconfig interpreter is installed into
+# (`scripts/provision-kconfiglib.sh`, target/kconfig-venv), which Layers E, C1st and Qz provision
+# for themselves. Ubuntu's python3 ships without `ensurepip`, so on a machine without the package
+# the venv cannot be made and those lanes failed before they built anything (measured on a build
+# machine on 2026-10-30: `ensurepip is not available`).
 packages = [
     "shellcheck",
     "actionlint",
@@ -80,6 +86,7 @@ packages = [
     "qemu-system-arm",
     "strace",
     "bubblewrap",
+    "python3-venv",
 ]
 
 min_ram_gb = 16

@@ -75,8 +75,8 @@ fn remove_the_interface(ns: &NetnsPair) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs a network namespace; Layer M runs it after probing for one"]
-async fn a_group_link_whose_interface_is_removed_is_lost_at_its_next_write() {
+#[ignore = "needs a network namespace; Layer M runs via --ignored after probing for one"]
+async fn in_a_netns_a_group_link_whose_interface_is_removed_is_lost_at_its_next_write() {
     let ns = NetnsPair::up("grplost", GROUP_HOST_CIDR, GROUP_PEER_CIDR);
     let mut link = UdpDriver::bind_multicast_link(
         GROUP,
@@ -135,8 +135,8 @@ async fn a_group_link_whose_interface_is_removed_is_lost_at_its_next_write() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs a network namespace; Layer M runs it after probing for one"]
-async fn a_dial_link_whose_route_is_removed_is_lost_at_its_next_write() {
+#[ignore = "needs a network namespace; Layer M runs via --ignored after probing for one"]
+async fn in_a_netns_a_dial_link_whose_route_is_removed_is_lost_at_its_next_write() {
     let ns = NetnsPair::up("diallost", DIAL_HOST_CIDR, DIAL_PEER_CIDR);
     let peer = SocketAddr::from((DIAL_PEER_ADDR, 9));
     let socket = dial_udp(peer, &LinkSocket::NONE)
