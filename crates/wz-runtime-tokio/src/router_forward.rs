@@ -10379,14 +10379,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             + self.dispatch_router_local_queryables(
                 inbound, reliable, request, &keyexpr, &fan, deadline,
             );
-        // The query is held by no branch when every one of them has ended while the route was
-        // being served (a branch an egress chain refused is let go as it is sent, and a hosted
-        // queryable that answered at once is over before this line): the last-out gate could not
+        // The routing call lets go of the query now that its branches are sent. It is the last
+        // holder when every branch has ended while the route was being served (a branch an
+        // egress chain refused is let go as it is sent, a hosted queryable that answered at once
+        // is over before this line, and a link that answered within microseconds has had its
+        // final absorbed because the call still held the query): the last-out gate could not
         // send the final, as this function still held the fan, and so it ends as an empty route
-        // does. §5.23 adminspace-router-linkstate — a GET whose only match is a queryable HOSTED
+        // does. When a branch is still live, the last of them to end sends the final instead,
+        // and the fan's count says which of the two it is whatever the order, which the strong
+        // count of the `Arc` did not, in the window between its check and its drop.
+        // §5.23 adminspace-router-linkstate — a GET whose only match is a queryable HOSTED
         // BY THIS router (self is excluded from the routing targets) ends this way too, its
         // replies sent and its final here, as the peer's `finish_unrouted_request` does.
-        if forwarded == 0 || Arc::strong_count(&fan) == 1 {
+        let ends_here = fan.release();
+        debug_assert!(
+            forwarded > 0 || ends_here,
+            "a query with no branch is over when the call lets go of it"
+        );
+        if ends_here {
             // zenoh route_query EMPTY route: no queryable matched, so PROMPT a
             // ResponseFinal back to the querier (its get() terminates at once). No
             // pending entry (nothing is awaited).

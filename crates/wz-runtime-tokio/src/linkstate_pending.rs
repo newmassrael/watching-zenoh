@@ -30,13 +30,21 @@
 //! `dispatcher/queries.rs:221/236`) and an `Arc::into_inner` gate in
 //! `finalize_pending_query` (`queries.rs:667-681`): only the branch whose removal
 //! drops the LAST strong reference propagates the upstream final. wz mirrors that
-//! exactly with an [`Arc<QueryFan>`] shared by every branch of the fan (an `Rc`
-//! while one task drove every face; an `Arc` now that the faces are driven from
-//! several, where `Arc::into_inner` also keeps its guarantee that of two branches
-//! dropping the last two references at once exactly one is told it was the last):
+//! with one [`Arc<QueryFan>`] shared by every branch of the fan, but decides the
+//! last by a count of the fan's live holders kept in the fan, not by the strong
+//! count of the `Arc`: the count starts at one, the hold of the routing call that
+//! forwards the Query; each [`allocate`](PendingQueries::allocate) adds a branch;
+//! each branch that ends takes one away; and the routing call takes its own away
+//! with [`QueryFan::release`] once it has sent its branches. Whoever takes the
+//! count to zero is the last and owes the querier the closing final, and only one
+//! holder can, from any number of tasks. The strong count could not say it: a
+//! final that arrives while the routing call is still sending (a link answers
+//! within microseconds) finds the call's handle alive, is told it is not the last,
+//! is absorbed, and the call then drops its handle with no branch left to send the
+//! final, so the querier waits out its timeout. The count has no such window.
 //! [`take`](PendingQueries::take) /
-//! [`expired`](PendingQueries::expired) report `last == true` only when the
-//! removed entry held the fan's final reference, and
+//! [`expired`](PendingQueries::expired) report `last == true` only when ending
+//! that branch took the count to zero, and
 //! [`remove_face`](PendingQueries::remove_face) returns the fans a face-down
 //! DRAINED (zenoh `finalize_pending_queries`) so the caller can synthesize their
 //! closing finals. The caller forwards every `Response` unconditionally and the
@@ -62,6 +70,7 @@
 //! on a STILL-UP face cannot leak the entry forever.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -70,18 +79,21 @@ use crate::accept_loop::FaceId;
 /// One logical query's shared RETURN TARGET — the querier's inbound face + the
 /// upstream rid every branch of the fan rewrites its replies back to. The wz
 /// analogue of zenoh's `Query { src_face, src_qid }` (`dispatcher/queries.rs:50`),
-/// shared across the fan's pending entries via `Arc` exactly as zenoh clones one
-/// `Arc<Query>` per branch: ONCE THE CALLER RELEASES ITS CONSTRUCTION HANDLE the
-/// `Arc` strong count is the live-branch count, and the entry whose removal drops
-/// the final reference is the fan's LAST branch (the `Arc::into_inner` last-out
-/// gate, `queries.rs:670`). Construct one per routed Query ([`QueryFan::new`]),
+/// shared across the fan's pending entries via `Arc` as zenoh clones one
+/// `Arc<Query>` per branch. The fan's LAST branch is not read from the `Arc`'s
+/// strong count (zenoh's `Arc::into_inner` gate, `queries.rs:670`, which is
+/// sound there because the dispatcher drops its own handle BEFORE it sends the
+/// branches) but from a count of live holders the fan keeps: one for the routing
+/// call, one for each branch. Construct one per routed Query ([`QueryFan::new`]),
 /// pass it to every [`allocate`](PendingQueries::allocate) of that Query's fan,
-/// and DROP the handle when the routing call returns — a cached handle would
-/// hold a phantom reference and silently suppress `last` forever (the
-/// allocation-scope contract both forwarders follow and the
-/// `a_dropped_construction_handle_leaves_the_last_out_gate_intact` test pins).
+/// and call [`release`](Self::release) exactly once when the routing call has
+/// sent its branches: it answers whether every branch had already ended, in
+/// which case the routing call owes the querier the closing final itself.
 #[derive(Debug)]
 pub struct QueryFan {
+    /// Live holders: the routing call's hold (until [`release`](Self::release))
+    /// plus one for each branch allocated and not yet ended.
+    live: AtomicUsize,
     /// The inbound face the forward Query arrived on — where replies route back.
     inbound: FaceId,
     /// The upstream rid to rewrite each reply's `request_id` back to.
@@ -96,19 +108,41 @@ pub struct QueryFan {
 
 impl QueryFan {
     /// A new fan target for one routed Query — `Arc`-wrapped so each branch's
-    /// [`allocate`](PendingQueries::allocate) shares it. The caller must DROP
-    /// this handle when its routing call returns (see the type docs — a cached
-    /// handle suppresses the last-out gate).
+    /// [`allocate`](PendingQueries::allocate) shares it. The routing call holds
+    /// the fan until it calls [`release`](Self::release) (see the type docs).
     pub fn new(
         inbound: FaceId,
         inbound_rid: u64,
         src_qos: wz_session_core::sample::QosLevel,
     ) -> Arc<Self> {
         Arc::new(Self {
+            live: AtomicUsize::new(1),
             inbound,
             inbound_rid,
             src_qos,
         })
+    }
+
+    /// The routing call has sent its branches: take its hold away. `true` when
+    /// that was the last holder, that is when every branch had already ended (or
+    /// none was sent), and then the caller sends the closing final; `false` when a
+    /// branch is still live, and the last of them to end will say it was the last.
+    /// Exactly once per fan.
+    #[must_use = "the routing call owes the querier the closing final when this is true"]
+    pub fn release(&self) -> bool {
+        self.holder_ended()
+    }
+
+    /// A branch of this Query was forwarded.
+    fn branch_started(&self) {
+        self.live.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// A holder (a branch, or the routing call) is done: whether it was the last.
+    fn holder_ended(&self) -> bool {
+        let before = self.live.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(before > 0, "a fan lost a holder it did not have");
+        before == 1
     }
 }
 
@@ -205,7 +239,7 @@ pub struct ExpiredQuery {
     /// Where the timeout messages go and as what: the querier's face, rid and
     /// QoS (R2595 carried the QoS; R2906 made it the shared [`QueryReturn`]).
     pub to: QueryReturn,
-    /// Whether this branch was the LAST of its fan (the `Arc::into_inner` gate) —
+    /// Whether this branch was the LAST of its fan (the last-out gate) —
     /// only then does the caller send the closing `ResponseFinal`; the `Err`
     /// reply goes per branch (zenoh runs one `QueryCleanup` per branch, each
     /// sending an Err, while `finalize_pending_query` gates the final last-out).
@@ -227,6 +261,9 @@ impl PendingQueries {
     /// `QueryCleanup::spawn_query_clean_up_task` arming the timeout — the `Arc`
     /// clone here IS zenoh's per-branch `Arc<Query>` clone.
     pub fn allocate(&mut self, out_face: FaceId, fan: &Arc<QueryFan>, deadline: Instant) -> u64 {
+        // Counted before the branch can be answered: a final that finds the entry
+        // finds the branch counted.
+        fan.branch_started();
         let fp = self.by_face.entry(out_face).or_default();
         fp.next_qid = fp.next_qid.wrapping_add(1);
         let qid = fp.next_qid;
@@ -255,11 +292,12 @@ impl PendingQueries {
     /// Take (remove) the return mapping for a `ResponseFinal` carrying `qid` on
     /// `out_face` — the final closes this BRANCH and frees the entry (zenoh
     /// `route_send_response_final` removes the pending entry). Returns the
-    /// fan's [`QueryReturn`] and `last`: `last` is `true` IFF this was the fan's FINAL
-    /// live branch (the removed entry held the last `Arc` reference — zenoh's
-    /// `Arc::into_inner` gate in `finalize_pending_query`), and only then must
-    /// the caller forward the closing `ResponseFinal` upstream; a non-last final
-    /// is ABSORBED (the querier still awaits the other branches). The face's
+    /// fan's [`QueryReturn`] and `last`: `last` is `true` IFF ending this branch
+    /// left the fan no holder (zenoh's `Arc::into_inner` gate in
+    /// `finalize_pending_query`, counted here, see the module docs), and only
+    /// then must the caller forward the closing `ResponseFinal` upstream; a
+    /// non-last final is ABSORBED (the querier still awaits the other branches,
+    /// or the routing call, which will say so when it releases the fan). The face's
     /// slot (its `next_qid` allocator) SURVIVES a drain — it is face-lifetime,
     /// freed only by [`remove_face`](Self::remove_face) — so a later query on
     /// this face can never reuse a qid a stale in-flight reply still carries.
@@ -269,7 +307,7 @@ impl PendingQueries {
         let entry = fp.returns.remove(&qid);
         entry.map(|r| {
             let to = r.fan.query_return();
-            let last = Arc::into_inner(r.fan).is_some();
+            let last = r.fan.holder_ended();
             (to, last)
         })
     }
@@ -294,7 +332,7 @@ impl PendingQueries {
             // R2595 — the QoS is carried out with the rid: the drained fan's
             // terminator must read as its query did.
             let to = ret.fan.query_return();
-            if Arc::into_inner(ret.fan).is_some() {
+            if ret.fan.holder_ended() {
                 drained.push(to);
             }
         }
@@ -372,12 +410,17 @@ mod tests {
         base + Duration::from_secs(3600)
     }
 
-    /// R2595 — a fan at the DEFAULT query QoS. These tests are about the
-    /// last-out accounting, not about what the query asked for, so they name
-    /// the QoS once here; `the_fan_carries_its_querys_qos_out_through_every_exit`
-    /// is the case that varies it.
+    /// R2595 — a fan at the DEFAULT query QoS, whose routing call has let go of
+    /// it already, as upstream's has by the time it sends its branches. These
+    /// tests are about the last-out accounting, not about what the query asked
+    /// for, so they name the QoS once here;
+    /// `the_fan_carries_its_querys_qos_out_through_every_exit` is the case that
+    /// varies it, and `a_fan_the_routing_call_still_holds_*` the cases that keep
+    /// the hold.
     fn fan(inbound: FaceId, rid: u64) -> Arc<QueryFan> {
-        QueryFan::new(inbound, rid, wz_session_core::sample::QosLevel::DEFAULT)
+        let fan = QueryFan::new(inbound, rid, wz_session_core::sample::QosLevel::DEFAULT);
+        assert!(fan.release(), "a fan with no branch is over when let go");
+        fan
     }
 
     /// The [`QueryReturn`] a [`fan`] at the DEFAULT query QoS answers with.
@@ -483,24 +526,126 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_construction_handle_leaves_the_last_out_gate_intact() {
-        // The gate counts live Arc REFERENCES (pending entries + any caller
-        // handle), so the allocation-scope contract is load-bearing: the caller
-        // must drop its construction handle when the routing call returns — a
-        // handle still live at take time WOULD suppress `last` (a phantom
-        // branch). This pins the honored side of the contract: with the handle
-        // dropped, a single-branch fan is `last` at its only take. Both
-        // forwarders bind the fan in a scope that ends before any reply event.
+    fn a_single_branch_fan_the_call_let_go_is_last_at_its_only_take() {
         let mut pq = PendingQueries::new();
         let t = never(Instant::now());
         let fan = fan(face(3), 99);
         let qa = pq.allocate(face(10), &fan, t);
-        drop(fan);
         assert_eq!(
             pq.take(face(10), qa),
             Some((to(face(3), 99), true)),
             "a single-branch fan is last at its only take"
         );
+    }
+
+    #[test]
+    fn a_fan_the_routing_call_still_holds_is_not_ended_by_its_last_branch() {
+        // The order that left a get waiting out its timeout: the link answers
+        // while the routing call is still sending, so the branch's final comes
+        // BEFORE the call has let go of the fan. The final is absorbed, as the
+        // call may still send a branch, and the call, which finds no branch
+        // left, is the one that owes the querier the closing final.
+        let mut pq = PendingQueries::new();
+        let t = never(Instant::now());
+        let fan = QueryFan::new(face(3), 99, wz_session_core::sample::QosLevel::DEFAULT);
+        let qa = pq.allocate(face(10), &fan, t);
+        assert_eq!(
+            pq.take(face(10), qa),
+            Some((to(face(3), 99), false)),
+            "the final is absorbed while the routing call holds the fan"
+        );
+        assert!(fan.release(), "the call finds every branch ended");
+    }
+
+    #[test]
+    fn a_fan_the_routing_call_lets_go_of_first_is_ended_by_its_last_branch() {
+        let mut pq = PendingQueries::new();
+        let t = never(Instant::now());
+        let fan = QueryFan::new(face(3), 99, wz_session_core::sample::QosLevel::DEFAULT);
+        let qa = pq.allocate(face(10), &fan, t);
+        assert!(!fan.release(), "a branch is still live");
+        assert_eq!(
+            pq.take(face(10), qa),
+            Some((to(face(3), 99), true)),
+            "the last branch to end closes the fan"
+        );
+    }
+
+    #[test]
+    fn a_fan_with_no_branch_is_over_when_the_call_lets_go() {
+        let fan = QueryFan::new(face(3), 99, wz_session_core::sample::QosLevel::DEFAULT);
+        assert!(fan.release());
+    }
+
+    #[test]
+    fn exactly_one_holder_of_a_fan_is_the_last_in_every_order() {
+        // A routing call and two branches end in each of the six orders: the
+        // querier is owed one closing final, so one of the three says it is the
+        // last, whichever it is.
+        enum End {
+            Call,
+            Branch(usize),
+        }
+        use End::{Branch, Call};
+        let orders = [
+            [Call, Branch(0), Branch(1)],
+            [Call, Branch(1), Branch(0)],
+            [Branch(0), Call, Branch(1)],
+            [Branch(1), Call, Branch(0)],
+            [Branch(0), Branch(1), Call],
+            [Branch(1), Branch(0), Call],
+        ];
+        for order in orders {
+            let mut pq = PendingQueries::new();
+            let t = never(Instant::now());
+            let fan = QueryFan::new(face(3), 99, wz_session_core::sample::QosLevel::DEFAULT);
+            let qids = [
+                pq.allocate(face(10), &fan, t),
+                pq.allocate(face(11), &fan, t),
+            ];
+            let mut lasts = 0;
+            for end in order {
+                lasts += match end {
+                    Call => usize::from(fan.release()),
+                    Branch(i) => {
+                        let out = face(10 + i as u64);
+                        usize::from(pq.take(out, qids[i]).is_some_and(|(_, last)| last))
+                    }
+                };
+            }
+            assert_eq!(lasts, 1, "one holder closes the fan");
+            assert!(pq.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_branch_ending_on_another_task_and_the_call_letting_go_close_a_fan_once() {
+        // The two sides that race in the router: a face's task takes the branch
+        // for the final it received while the routing call lets go of the fan.
+        // Whichever is later says it is the last, never both and never neither.
+        use std::sync::{Barrier, Mutex};
+        for _ in 0..2000 {
+            let pq = Mutex::new(PendingQueries::new());
+            let t = never(Instant::now());
+            let fan = QueryFan::new(face(3), 99, wz_session_core::sample::QosLevel::DEFAULT);
+            let qid = pq.lock().unwrap().allocate(face(10), &fan, t);
+            let start = Barrier::new(2);
+            let (by_face, by_call) = std::thread::scope(|scope| {
+                let face_task = scope.spawn(|| {
+                    start.wait();
+                    pq.lock()
+                        .unwrap()
+                        .take(face(10), qid)
+                        .is_some_and(|(_, last)| last)
+                });
+                let call = scope.spawn(|| {
+                    start.wait();
+                    fan.release()
+                });
+                (face_task.join().unwrap(), call.join().unwrap())
+            });
+            assert!(by_face != by_call, "exactly one of them closes the fan");
+        }
     }
 
     #[test]
@@ -658,7 +803,7 @@ mod tests {
         let t = never(Instant::now());
         let answering = QueryFan::new(face(2), 55, asked);
         let qid = pq.allocate(face(12), &answering, t);
-        drop(answering);
+        assert!(!answering.release(), "a branch is still live");
         assert_eq!(
             pq.peek(face(12), qid),
             Some(owed(face(2), 55)),
@@ -676,7 +821,7 @@ mod tests {
         let soon = base + Duration::from_millis(10);
         let expiring = QueryFan::new(face(3), 99, asked);
         pq.allocate(face(10), &expiring, soon);
-        drop(expiring);
+        assert!(!expiring.release(), "a branch is still live");
         let reaped = pq.expired(base + Duration::from_millis(20));
         assert_eq!(reaped.len(), 1);
         assert_eq!(
@@ -689,7 +834,7 @@ mod tests {
         let mut pq = PendingQueries::new();
         let departing = QueryFan::new(face(4), 77, asked);
         pq.allocate(face(11), &departing, t);
-        drop(departing);
+        assert!(!departing.release(), "a branch is still live");
         assert_eq!(
             pq.remove_face(&face(11)),
             vec![owed(face(4), 77)],
