@@ -893,9 +893,9 @@ id = "clock-source"
 observation_bit = 0
 kconfig = "WZ_CAP_CLOCK_SOURCE"
 os_needs = []
-upstream_off = ["zenoh-pico"]
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 default = "off"
-abis = ["core", "pico"]
+abis = ["core", "pico", "c"]
 implies = ["timestamping", "unstable-api"]
 help = "Register a clock source the node reads instead of the system clock, and report whether it is synchronised."
 
@@ -909,9 +909,9 @@ id = "event-ring"
 observation_bit = 1
 kconfig = "WZ_CAP_EVENT_RING"
 os_needs = []
-upstream_off = ["zenoh-pico"]
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 default = "off"
-abis = ["core", "pico"]
+abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "Write events into the node's event ring and read them back, with no text stored."
 
@@ -926,9 +926,9 @@ id = "supervision"
 observation_bit = 2
 kconfig = "WZ_CAP_SUPERVISION"
 os_needs = []
-upstream_off = ["zenoh-pico"]
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 default = "off"
-abis = ["core", "pico"]
+abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "Supervise checkpoints an application feeds, and run a hook once when one misses its deadline."
 
@@ -942,9 +942,9 @@ id = "resource-snapshot"
 observation_bit = 3
 kconfig = "WZ_CAP_RESOURCE_SNAPSHOT"
 os_needs = []
-upstream_off = ["zenoh-pico"]
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 default = "off"
-abis = ["core", "pico"]
+abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "Take a snapshot of the node's resources and the spacing of the messages it receives."
 

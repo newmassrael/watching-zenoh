@@ -1595,7 +1595,13 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 ///
 /// It moves to 7 for what an open of a configuration would ask of the operating system
 /// (`wz_capi_c_config_device_requires`), one new symbol.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 7;
+///
+/// It moves to 8 for the four instruments of the observation plane
+/// (`crate::clock_source`, `crate::event_log`, `crate::supervision`, `crate::snapshot`),
+/// eighteen new symbols and the code `WZ_CAPI_C_E_FULL`. Each set is a feature that is off in a
+/// build made as the reference is, so a library without it exports none of its doors and the
+/// number says which header the library was built against, not which doors it has.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 8;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

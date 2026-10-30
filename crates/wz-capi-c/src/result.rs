@@ -89,6 +89,13 @@ pub const Z_EBUSY_MUTEX: ZResult = -16;
 /// a key the codec cannot carry. The number is outside zenoh-c's `Z_E*` range
 /// (-1 to -8, -16, -22 and -128), so a later upstream code cannot take it.
 pub const WZ_CAPI_C_E_VALUE_TOO_LARGE: ZResult = -100;
+/// A bounded thing of the observation plane has no room (`wz_capi_c`'s own code, for
+/// the reason the one above is): the clocks a program may register are all taken, a full
+/// event log under `drop-newest` refused an event, or the buffer a program offered is
+/// smaller than the record. Not `Z_EUNAVAILABLE`, which says a resource could not be
+/// obtained and is not the same as one that is full and would take the same call again
+/// after room is made. Outside zenoh-c's `Z_E*` range for the same reason.
+pub const WZ_CAPI_C_E_FULL: ZResult = -101;
 /// An unclassified failure (`Z_EGENERIC` = `INT8_MIN`). zenoh-c spells its
 /// catch-all as the type's minimum rather than as another small negative, so the
 /// value is transcribed rather than chosen.

@@ -10795,7 +10795,11 @@ layer_c1ch_capi_c_config_surface() {
         echo "             must not report green"
         return 1
     }
-    (cd crates && cargo build -p wz-capi-c --quiet) || return 1
+    # The four instruments of the observation plane are features that are off in a build made as
+    # the reference is, and the door set the gates below grade is the library's with them on: a
+    # door behind a feature that no lane turned on would be graded by nothing.
+    local plane="clock-source,event-ring,supervision,resource-snapshot"
+    (cd crates && cargo build -p wz-capi-c --quiet --features "$plane") || return 1
     python3 scripts/lib/capi_c_config_surface.py \
         crates/target/debug/libwz_capi_c.so || return 1
     # R2301 (open-debt item 634) — and the SYMBOL SET of those wz-own doors is
@@ -10836,7 +10840,7 @@ layer_c1ch_capi_c_config_surface() {
     # `wz_capi_c_config_honoured` through the library, so a door LTO removed
     # makes it fail outright rather than pass quietly, and the pin below is
     # what proves no door differs between the two builds in the first place.
-    (cd crates && cargo build -p wz-capi-c --release --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-c --release --quiet --features "$plane") || return 1
     python3 scripts/lib/capi_c_abi_pin.py \
         crates/target/debug/libwz_capi_c.so \
         crates/target/release/libwz_capi_c.so || return 1

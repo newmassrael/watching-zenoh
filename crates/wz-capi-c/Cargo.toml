@@ -383,6 +383,17 @@ zenoh-c-shared-memory = ["wz-runtime-tokio/session-extshm", "wz-capi-core/sessio
 # that only queries leaves it out, and with it the frame writer of `wz-capture` (212 KB of that
 # build's 1.9 MB of symbols).
 e2e-sender = ["dep:wz-capture", "wz-capi-core/e2e-sender"]
+# The four instruments of the observation plane (`docs/observation-plane.md`), and the
+# `wz_capi_c_*` doors that drive them. wz's own, which zenoh-c has not, so each is off as the
+# reference build is: a build without one links none of its doors. What each does is
+# `wz-capi-port`'s `observation`, which the pico ABI's `wz_ext_*` doors act on too, so the two
+# ABIs hold one behaviour. A program registers a clock `z_timestamp_new` then reads
+# (`clock-source`), writes and reads the node's event log (`event-ring`), supervises checkpoints
+# (`supervision`) and asks for a snapshot of the node's resources (`resource-snapshot`).
+clock-source = ["timestamping", "wz-capi-core/clock-source", "wz-capi-port/clock-source"]
+event-ring = ["wz-capi-core/event-ring", "wz-capi-port/event-ring"]
+supervision = ["wz-capi-core/supervision", "wz-capi-port/supervision"]
+resource-snapshot = ["wz-capi-core/resource-snapshot", "wz-capi-port/resource-snapshot"]
 # The batch compression session extension. Off, a session neither offers nor accepts it, as a
 # zenoh-c built without `transport_compression` does.
 transport_compression = ["wz-capi-core/transport_compression"]
@@ -407,7 +418,8 @@ wz-abi-stamp = { path = "../wz-abi-stamp" }
 # dropped.
 wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "open-plan"] }
 # The engine's port and the advanced plane's rules, for the advanced subscriber's host
-# (`advanced`); optional, so a build without the plane links neither.
+# (`advanced`) and for the doors of the observation plane; optional, so a build with neither
+# links neither.
 wz-capi-port = { path = "../wz-capi-port", optional = true }
 wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and

@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 7
+#define WZ_CAPI_C_ABI_REVISION 8
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -804,6 +804,208 @@ void wz_capi_c_internal_group_null(wz_capi_c_owned_group_t *this_);
 bool wz_capi_c_internal_group_check(const wz_capi_c_owned_group_t *this_);
 
 #endif /* Z_FEATURE_UNSTABLE_API */
+
+/* ------------------------------------------------------------------ *
+ * The observation plane (revision 8).
+ *
+ * Four instruments zenoh-c has not, each a feature of the library that
+ * is OFF in a build made as the reference is: a library built without
+ * one does not export its doors, and a program that calls one it was
+ * not built with fails to link, which is the report it is owed. They
+ * are the node's own (one clock registry, one event log, one
+ * supervisor, one resource sampler for the process), and the zenoh-pico
+ * ABI's wz_ext_* doors drive the same four, so a program that moves
+ * between the two ABIs finds the same behaviour under another prefix.
+ *
+ * The library holds no thread and no timer for any of them: the
+ * program calls `check` and `poll` on its own cadence.
+ *
+ * Codes. Z_EINVAL for a value the door does not take, Z_ENULL for a
+ * null pointer it needs, Z_EGENERIC for a refusal with no more to say
+ * (a snapshot not yet taken, a checkpoint that cannot be stopped while
+ * its hook runs), and WZ_CAPI_C_E_FULL for a bounded thing with no room
+ * (every clock registered, a full log that drops its newest event, a
+ * buffer smaller than the record). The last is wz's own and outside
+ * zenoh-c's Z_E* range, as WZ_CAPI_C_E_VALUE_TOO_LARGE is.
+ * ------------------------------------------------------------------ */
+
+#define WZ_CAPI_C_E_FULL (-101)
+
+/* ---- The clock a program registers (feature clock-source) ---------- *
+ *
+ * `z_timestamp_new` stamps with the registered clock in place of the
+ * system clock. The read callback returns 0 with `*secs` (since the
+ * Unix epoch) and `*nanos` (within the second, below 10^9) written, or
+ * any other value when the clock cannot say what time it is; it is
+ * called from whichever thread stamps, possibly several at once. After
+ * unregister returns the library calls it no more, though a call
+ * already running on another thread may still be inside it.
+ *
+ * The library cannot tell whether the clock follows a reference. The
+ * program can, and reports it; a build whose clock-quality-stamping
+ * policy is trusted-only stamps nothing until it has. */
+
+typedef int8_t (*wz_capi_c_clock_read_fn)(void *context, uint64_t *secs, uint32_t *nanos);
+
+typedef uint8_t wz_capi_c_clock_event_t;
+#define WZ_CAPI_C_CLOCK_SYNC_ACQUIRED 0
+#define WZ_CAPI_C_CLOCK_SYNC_LOST 1
+#define WZ_CAPI_C_CLOCK_HOLDOVER_EXPIRED 2
+
+/* Register `read` after the clocks already registered (the first that
+ * can say what time it is answers); `out_handle`, when not NULL,
+ * receives the handle unregister takes. Z_ENULL for a NULL `read`,
+ * WZ_CAPI_C_E_FULL when every clock the build allows is taken. */
+z_result_t wz_capi_c_clock_source_register(wz_capi_c_clock_read_fn read, void *context,
+                                           uint32_t *out_handle);
+/* Z_EINVAL for a handle that is not registered. */
+z_result_t wz_capi_c_clock_source_unregister(uint32_t handle);
+/* One of the three events above; Z_EINVAL for another value. Reporting
+ * what is already so is not an error. */
+z_result_t wz_capi_c_clock_report(wz_capi_c_clock_event_t event);
+
+/* ---- The event log (feature event-ring) ---------------------------- *
+ *
+ * An event is a level, a source and up to the build's integers. It
+ * carries no text: the format it is read with is a constant the reader
+ * holds, keyed by the source. One ring for the process; what a full
+ * one gives up is the build's event-ring-full policy.
+ *
+ * A reader keeps its own cursor (a sequence number, 0 at the start), so
+ * any number of programs read one log and none takes an event from
+ * another. A log that has wrapped tells the reader how many it missed
+ * before it hands over the oldest left. Under drop-newest nothing is
+ * freed by reading: the program says how far it is done with
+ * (release), and that makes room. */
+
+#define WZ_CAPI_C_EVENT_RECORD 0 /* an event */
+#define WZ_CAPI_C_EVENT_EMPTY 1  /* nothing newer than the cursor */
+#define WZ_CAPI_C_EVENT_LOST 2   /* events were overwritten; `sequence` says how many */
+
+/* The level and the sources the library writes with; a program's own
+ * levels and sources are below. */
+#define WZ_CAPI_C_EVENT_LEVEL_LIBRARY 255
+#define WZ_CAPI_C_EVENT_SOURCE_LIBRARY 0xFF00
+/* A supervised checkpoint missed its deadline; one integer, its number. */
+#define WZ_CAPI_C_EVENT_SOURCE_SUPERVISION_EXPIRED 0xFF01
+
+typedef struct wz_capi_c_event_t {
+    uint8_t kind;
+    uint8_t level;
+    uint8_t arg_count; /* integers the event carries (more than fit the buffer is allowed) */
+    uint8_t reserved;
+    uint16_t source;
+    uint16_t reserved2;
+    uint64_t sequence; /* the event's number; for LOST, how many are gone */
+    uint64_t timestamp; /* NTP64, or 0 where the clock did not know the date */
+} wz_capi_c_event_t;
+
+/* WZ_CAPI_C_E_FULL when a full log under drop-newest refused the event
+ * (it was counted); Z_ENULL for a NULL `args` with a count. */
+z_result_t wz_capi_c_event_emit(uint8_t level, uint16_t source, const uint64_t *args,
+                                size_t arg_count);
+/* Read the event at `*cursor` into `out`, its integers into `args` (up
+ * to `args_capacity`; `args` may be NULL when that is 0). `*cursor`
+ * moves past the event read or past the events lost. Z_ENULL for a
+ * NULL `cursor` or `out`, or a NULL `args` with a capacity. */
+z_result_t wz_capi_c_event_read(uint64_t *cursor, wz_capi_c_event_t *out, uint64_t *args,
+                                size_t args_capacity);
+/* Every event before sequence number `upto` has been read and may be
+ * overwritten. Only forward. */
+z_result_t wz_capi_c_event_release(uint64_t upto);
+/* Events a full log refused under drop-newest; 0 under overwrite-oldest. */
+uint32_t wz_capi_c_event_dropped(void);
+
+/* ---- The supervisor (feature supervision) -------------------------- *
+ *
+ * A program that must keep making progress starts a checkpoint with a
+ * timeout and feeds it on every pass, and calls check on its own
+ * cadence; check runs the hook once for each checkpoint whose deadline
+ * has passed. The supervisor is healthy only while every supervised
+ * checkpoint has been fed in time, so a node that feeds a hardware
+ * watchdog feeds it from healthy and from nowhere else. Time is
+ * milliseconds since the first call, in 32 bits that wrap, which the
+ * comparison survives.
+ *
+ * The hook runs on the thread that called check, with no lock of the
+ * library held, so it may call any of these doors; stop on the
+ * checkpoint whose hook is running is refused until the hook returns.
+ * The expiry is written to the event log first, in a build that has it. */
+
+typedef void (*wz_capi_c_supervision_hook_fn)(void *context, uint8_t checkpoint);
+
+#define WZ_CAPI_C_SUPERVISION_DISARMED 0
+#define WZ_CAPI_C_SUPERVISION_ARMED 1
+#define WZ_CAPI_C_SUPERVISION_EXPIRING 2
+#define WZ_CAPI_C_SUPERVISION_EXPIRED 3
+#define WZ_CAPI_C_SUPERVISION_NO_SUCH_CHECKPOINT 255
+
+/* Clear the hook with a NULL `hook`. With none set an expired checkpoint
+ * is still marked expired and makes the supervisor unhealthy. */
+z_result_t wz_capi_c_supervision_set_hook(wz_capi_c_supervision_hook_fn hook, void *context);
+/* A deadline `timeout_ms` after now and after each feed. Z_EINVAL for a
+ * checkpoint the build does not have, or a timeout of 0 or past
+ * 2147483647 ms. A checkpoint already supervised is left as it is. */
+z_result_t wz_capi_c_supervision_start(uint8_t checkpoint, uint32_t timeout_ms);
+/* Start the deadline again; a checkpoint that is not armed ignores it.
+ * Z_EINVAL for a checkpoint the build does not have. */
+z_result_t wz_capi_c_supervision_feed(uint8_t checkpoint);
+/* Z_EGENERIC when its hook is running; Z_EINVAL for a checkpoint the
+ * build does not have. */
+z_result_t wz_capi_c_supervision_stop(uint8_t checkpoint);
+z_result_t wz_capi_c_supervision_check(void);
+/* 1 when at least one checkpoint is supervised and every supervised
+ * one is armed, 0 otherwise. */
+uint8_t wz_capi_c_supervision_healthy(void);
+uint8_t wz_capi_c_supervision_state(uint8_t checkpoint);
+
+/* ---- The resource snapshot (feature resource-snapshot) ------------- *
+ *
+ * A fixed-layout, versioned record (it starts with its own layout
+ * version and size, little-endian, so a reader of an older build can
+ * tell a newer one): the CPU use, the heap and the tasks the platform
+ * reports, and how the messages the session received were spaced. The
+ * platform is the program's: it sets a source that answers what it can,
+ * and a part it cannot answer is marked unavailable in the record, not
+ * read as zero. poll takes a snapshot when the build's period has
+ * passed since the last; read copies the latest out.
+ *
+ * The source runs on the thread that called poll, with no lock of the
+ * library held. Time is microseconds since the first call, in 32 bits
+ * that wrap. A hosted node serves the same record as JSON at
+ * wz/@/<zid>/snapshot on its own. */
+
+typedef struct wz_capi_c_resource_reading_t {
+    uint8_t available; /* WZ_CAPI_C_SNAPSHOT_HAS_*: which of the readings below the source answers */
+    uint8_t reserved;
+    uint16_t cpu_permille; /* busy share of the CPU since the last reading, in thousandths */
+    uint16_t tasks;
+    uint16_t reserved2;
+    uint64_t heap_in_use;
+    uint64_t heap_high_water;
+} wz_capi_c_resource_reading_t;
+
+#define WZ_CAPI_C_SNAPSHOT_HAS_CPU 1
+#define WZ_CAPI_C_SNAPSHOT_HAS_HEAP 2
+#define WZ_CAPI_C_SNAPSHOT_HAS_TASKS 4
+
+/* Fill `out` and return 0, or return anything else when the source
+ * cannot answer at all, which takes the snapshot with no part available. */
+typedef int8_t (*wz_capi_c_snapshot_source_fn)(void *context, wz_capi_c_resource_reading_t *out);
+
+/* Clear the source with a NULL `read`. With none set a snapshot is
+ * still taken, with the message counts and no part of the platform's. */
+z_result_t wz_capi_c_snapshot_set_source(wz_capi_c_snapshot_source_fn read, void *context);
+/* 1 when a snapshot was taken, 0 when none was due, Z_ENULL for a NULL
+ * or closed session. The first call takes one. */
+z_result_t wz_capi_c_snapshot_poll(const z_loaned_session_t *session);
+/* The bytes read writes; it grows with the build's histogram buckets. */
+size_t wz_capi_c_snapshot_size(void);
+/* Copy the latest snapshot into `out` (`capacity` bytes) and its length
+ * into `*length`. Z_EGENERIC before the first snapshot, WZ_CAPI_C_E_FULL
+ * when `capacity` is less than wz_capi_c_snapshot_size, Z_ENULL for a
+ * NULL `out` or `length`. */
+z_result_t wz_capi_c_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
 
 #ifdef __cplusplus
 }

@@ -100,7 +100,16 @@ pub mod config_verdict;
 // column by column from an owned handle, for a caller that attaches a reason to
 // the config field it is about. Ungated for the reason `config_verdict` is.
 pub mod config_verdict_rows;
+// The four sets of doors of the observation plane (`docs/observation-plane.md`), under wz's own
+// `wz_capi_c_` prefix: wz has them and zenoh-c has not, so they carry no upstream gate
+// (`zenoh-c-no-unstable-api` is a question about zenoh-c), and each has a feature of its own that
+// is off, as the reference build is. What they do is `wz-capi-port`'s; these are the names and
+// the result codes of this ABI.
+#[cfg(feature = "clock-source")]
+pub mod clock_source;
 pub mod encoding;
+#[cfg(feature = "event-ring")]
+pub mod event_log;
 // `z_entity_global_id_t`, which the advanced plane and the plain entities (publisher, subscriber,
 // queryable, querier, source info) all report: unstable upstream, and not the advanced plane's.
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
@@ -144,6 +153,10 @@ pub mod put;
 pub mod querier;
 #[cfg(feature = "queryable")]
 pub mod query;
+#[cfg(feature = "resource-snapshot")]
+pub mod snapshot;
+#[cfg(feature = "supervision")]
+pub mod supervision;
 // The rule both ends of a query apply to the key of a reply: the requesting end before it accepts
 // one, the answering end before it queues one.
 #[cfg(any(feature = "query", feature = "queryable"))]

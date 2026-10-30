@@ -120,7 +120,7 @@ config WZ_CAP_CLOCK_SOURCE
 	select WZ_CAP_UNSTABLE_API
 	help
 	  Register a clock source the node reads instead of the system clock, and report whether it is synchronised.
-	  Exported by: pico.
+	  Exported by: pico, c.
 
 config WZ_CAP_EVENT_RING
 	bool "event-ring"
@@ -128,7 +128,7 @@ config WZ_CAP_EVENT_RING
 	select WZ_CAP_UNSTABLE_API
 	help
 	  Write events into the node's event ring and read them back, with no text stored.
-	  Exported by: pico.
+	  Exported by: pico, c.
 
 config WZ_CAP_SUPERVISION
 	bool "supervision"
@@ -136,7 +136,7 @@ config WZ_CAP_SUPERVISION
 	select WZ_CAP_UNSTABLE_API
 	help
 	  Supervise checkpoints an application feeds, and run a hook once when one misses its deadline.
-	  Exported by: pico.
+	  Exported by: pico, c.
 
 config WZ_CAP_RESOURCE_SNAPSHOT
 	bool "resource-snapshot"
@@ -144,7 +144,7 @@ config WZ_CAP_RESOURCE_SNAPSHOT
 	select WZ_CAP_UNSTABLE_API
 	help
 	  Take a snapshot of the node's resources and the spacing of the messages it receives.
-	  Exported by: pico.
+	  Exported by: pico, c.
 
 config WZ_CAP_GROUP
 	bool "group"

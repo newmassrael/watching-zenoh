@@ -139,10 +139,32 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 7
+EXPECTED_REVISION = 8
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
+    # The observation plane (revision 8): the clock a program registers, the event log, the
+    # supervisor and the resource snapshot. Each is a feature that is off in a build made as the
+    # reference is, so the lane builds the library with all four on (`layer_c1ch_capi_c_config_surface`
+    # in run-ci.sh) and the set below is that build's.
+    "wz_capi_c_clock_source_register",
+    "wz_capi_c_clock_source_unregister",
+    "wz_capi_c_clock_report",
+    "wz_capi_c_event_emit",
+    "wz_capi_c_event_read",
+    "wz_capi_c_event_release",
+    "wz_capi_c_event_dropped",
+    "wz_capi_c_supervision_set_hook",
+    "wz_capi_c_supervision_start",
+    "wz_capi_c_supervision_feed",
+    "wz_capi_c_supervision_stop",
+    "wz_capi_c_supervision_check",
+    "wz_capi_c_supervision_healthy",
+    "wz_capi_c_supervision_state",
+    "wz_capi_c_snapshot_set_source",
+    "wz_capi_c_snapshot_poll",
+    "wz_capi_c_snapshot_size",
+    "wz_capi_c_snapshot_read",
     # R311y540 — the drop-in's half of the layout gate.
     "wz_capi_c_layout",
     "wz_capi_c_layout_name",
