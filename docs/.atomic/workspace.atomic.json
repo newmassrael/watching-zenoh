@@ -300508,6 +300508,42 @@
         "Layer Z8 session/shm/routing rows, C1cn and validate+verify+test logs of the previous runs, and the coop text budget attribution stay open. The windows and macos jobs failed on the same cfg and are expected green."
       ]
     },
+    "Round 3971": {
+      "decision_summary": "Until now every zenoh client in the corpus was 1.10.1 and only the router varied. The z_pub and z_sub examples were built from the 1.7.2, 1.8.0 and 1.9.0 tags and each pair was captured against the eclipse/zenoh router of the same release, over TCP and UDP, on a link that loses nothing (a minute each). All six read two yes flows, and none of their 686 SN steps broke. The counts grow by 1040 units and 12 handshakes (units 7115, framing directions 312, cookies 316, Init pairs 318, version headers 636) and the failure weights move by up to 228 millibits: a residual or undecoded unit weighs -11214 on the yes sum, two undecoded units -20652 on the no sum, two residual ones -19592 (not past the threshold). The confirming weights move by at most 1, so the pinned example sums of the session table, the C header and the C consumer stay. No other capture changed word. The mixed case, an older client against a newer router or the reverse, is not in the corpus.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-7-2-tcp`, `-1-7-2-udp`, `-1-8-0-tcp`, `-1-8-0-udp`, `-1-9-0-tcp`, `-1-9-0-udp` (anonymised, 59 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: residual -11214 / -9796, undecoded -11214 / -10326, framing held +2832 / +6447, framing lost -6709 / -6693, cookie differing -6728, Init pair of one kind -5737, another version -7728.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: six rows (2, 0, 0).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on the matched-release clients, and what is still open."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), clippy clean, wz-capi-dissect 227 pass and its C consumer 4 pass; the weights were first recomputed by a port that reproduces the previous weights from the previous counts, then the tests agreed with it. The first test run was ended at its memory reservation by the build host's scheduler and rerun with the doubled one; that was a verdict on the reservation, not on the code. The pre-push static gate array: 121 of 121 pass. The corpus verifier: 59 files are fixed points. The example binaries were built from the upstream tags on the build host. Not run: the hosted layers; the C consumer against the release cdylib (its pinned sums did not move)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: an older client against a newer router and the reverse (the handshake negotiates down), releases other than 1.5.0 and 1.7.2 to 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. The old example builds are on the build host only (home directory, per release); a rebuild takes one cargo build per tag, and two builds at once collide on the pinned toolchain's install."
+      ],
+      "publishable_decision_summary": "Until now every zenoh client in the corpus was 1.10.1 and only the router varied. The z_pub and z_sub examples were built from the 1.7.2, 1.8.0 and 1.9.0 tags and each pair was captured against the eclipse/zenoh router of the same release, over TCP and UDP, on a link that loses nothing (a minute each). All six read two yes flows, and none of their 686 SN steps broke. The counts grow by 1040 units and 12 handshakes (units 7115, framing directions 312, cookies 316, Init pairs 318, version headers 636) and the failure weights move by up to 228 millibits: a residual or undecoded unit weighs -11214 on the yes sum, two undecoded units -20652 on the no sum, two residual ones -19592 (not past the threshold). The confirming weights move by at most 1, so the pinned example sums of the session table, the C header and the C consumer stay. No other capture changed word. The mixed case, an older client against a newer router or the reverse, is not in the corpus.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-7-2-tcp`, `-1-7-2-udp`, `-1-8-0-tcp`, `-1-8-0-udp`, `-1-9-0-tcp`, `-1-9-0-udp` (anonymised, 59 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: residual -11214 / -9796, undecoded -11214 / -10326, framing held +2832 / +6447, framing lost -6709 / -6693, cookie differing -6728, Init pair of one kind -5737, another version -7728.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: six rows (2, 0, 0).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on the matched-release clients, and what is still open."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), clippy clean, wz-capi-dissect 227 pass and its C consumer 4 pass; the weights were first recomputed by a port that reproduces the previous weights from the previous counts, then the tests agreed with it. The first test run was ended at its memory reservation by the build host's scheduler and rerun with the doubled one; that was a verdict on the reservation, not on the code. The pre-push static gate array: 121 of 121 pass. The corpus verifier: 59 files are fixed points. The example binaries were built from the upstream tags on the build host. Not run: the hosted layers; the C consumer against the release cdylib (its pinned sums did not move)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: an older client against a newer router and the reverse (the handshake negotiates down), releases other than 1.5.0 and 1.7.2 to 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. The old example builds are on the build host only (home directory, per release); a rebuild takes one cargo build per tag, and two builds at once collide on the pinned toolchain's install."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
