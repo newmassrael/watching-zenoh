@@ -322,6 +322,99 @@ pub(crate) mod transport {
             Box::new(ReaderResolver::new(storage))
         })
     }
+
+    /// The reference a sender takes for its receiver, counted in the buffer's own header: given
+    /// back when the frame is not sent, and kept for the receiver when it is.
+    #[cfg(test)]
+    mod reservation_tests {
+        use zenoh_core::Wait;
+        use zenoh_shm::api::provider::shm_provider::{
+            ConstBool, Defragment, GarbageCollect, JustAlloc, ShmProviderBuilder,
+        };
+
+        use super::*;
+
+        /// A payload that is one buffer of a provider of its own, and the provider, which must
+        /// outlive it.
+        fn a_shared_payload() -> (impl Sized, ZBytes) {
+            let provider = ShmProviderBuilder::default_backend(65536usize)
+                .wait()
+                .expect("a provider");
+            // SAFETY: the policy is upstream's for a copy into a fresh buffer; the buffer is ours
+            // alone until it is put in the payload.
+            let mut buffer = unsafe {
+                provider
+                    .alloc(64)
+                    .with_unsafe_policy::<Defragment<GarbageCollect<JustAlloc, JustAlloc, ConstBool<false>>>>()
+                    .wait()
+            }
+            .expect("a buffer");
+            buffer.as_mut().copy_from_slice(&[7u8; 64]);
+            let payload = ZBytes::from_shm_slice(buffer.into());
+            (provider, payload)
+        }
+
+        fn references(payload: &ZBytes) -> u32 {
+            let slice = payload
+                .single_shm_slice()
+                .expect("one slice of shared memory");
+            buffer_of(slice)
+                .expect("a buffer of shared memory")
+                .ref_count()
+        }
+
+        #[test]
+        fn a_reservation_that_is_dropped_gives_its_reference_back() {
+            let (_provider, payload) = a_shared_payload();
+            let base = references(&payload);
+            let handle = send_handle_of(&payload).expect("a handle of the buffer");
+
+            let reservation = handle.reserve_for_receiver();
+            assert_eq!(
+                references(&payload),
+                base + 1,
+                "the receiver's reference is taken"
+            );
+            drop(reservation);
+            assert_eq!(
+                references(&payload),
+                base,
+                "the frame was not sent: it is given back"
+            );
+        }
+
+        #[test]
+        fn a_committed_reservation_leaves_the_receivers_reference_and_the_receiver_returns_it() {
+            let (_provider, payload) = a_shared_payload();
+            let base = references(&payload);
+            let handle = send_handle_of(&payload).expect("a handle of the buffer");
+
+            let reservation = handle.reserve_for_receiver();
+            let descriptor = reservation.descriptor();
+            reservation.commit();
+            assert_eq!(
+                references(&payload),
+                base + 1,
+                "the frame left: exactly one reference stands for the receiver"
+            );
+
+            let resolver = ReaderResolver::new(Arc::clone(&GLOBAL_CLIENT_STORAGE.read()));
+            let received = resolver
+                .read(&descriptor)
+                .expect("the receiver reads the descriptor");
+            assert_eq!(
+                references(&payload),
+                base + 1,
+                "reading takes no reference of its own"
+            );
+            drop(received);
+            assert_eq!(
+                references(&payload),
+                base,
+                "the receiver's drop returns the reference"
+            );
+        }
+    }
 }
 
 #[cfg(feature = "unstable")]
