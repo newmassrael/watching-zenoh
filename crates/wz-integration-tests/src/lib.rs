@@ -7279,6 +7279,12 @@ pub mod common {
         ifname: String,
     }
 
+    /// Whether this process runs inside the sandbox of `scripts/lib/netns-topology.sh`
+    /// (`WZ_NETNS_SANDBOX=1`), which holds the capabilities of a namespace itself.
+    pub fn netns_sandboxed() -> bool {
+        std::env::var_os("WZ_NETNS_SANDBOX").is_some_and(|v| v == "1")
+    }
+
     /// `program` with the privilege a namespace needs: under `sudo -n`, or as it
     /// is when the process already runs inside the sandbox of
     /// `scripts/lib/netns-topology.sh` (`WZ_NETNS_SANDBOX=1`), which holds the
@@ -7286,7 +7292,7 @@ pub mod common {
     /// topology the script builds and a command the test runs in it are held
     /// to the same privilege.
     pub fn netns_privileged(program: &str) -> Command {
-        if std::env::var_os("WZ_NETNS_SANDBOX").is_some_and(|v| v == "1") {
+        if netns_sandboxed() {
             Command::new(program)
         } else {
             let mut cmd = Command::new("sudo");
@@ -7386,15 +7392,25 @@ pub mod common {
                 .expect("the user name, to run the legs as the tree's owner");
             let exe = std::env::current_exe().expect("this test binary's path");
             for test in tests {
-                let mut run = self.command(Path::new("runuser"));
-                run.args(["-u", &user, "--", "env"]);
-                for (key, value) in std::env::vars_os() {
-                    let mut pair = key;
-                    pair.push("=");
-                    pair.push(value);
-                    run.arg(pair);
-                }
-                run.arg(&exe).args([
+                let mut run = if netns_sandboxed() {
+                    // Already the tree's owner, with this process's environment: nothing
+                    // entered the namespace as root, so there is nobody to step down from
+                    // (`runuser` refuses a user who is not root) and no `sudo` reset the
+                    // environment.
+                    self.command(&exe)
+                } else {
+                    let mut run = self.command(Path::new("runuser"));
+                    run.args(["-u", &user, "--", "env"]);
+                    for (key, value) in std::env::vars_os() {
+                        let mut pair = key;
+                        pair.push("=");
+                        pair.push(value);
+                        run.arg(pair);
+                    }
+                    run.arg(&exe);
+                    run
+                };
+                run.args([
                     "--exact",
                     test,
                     "--ignored",
