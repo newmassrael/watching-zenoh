@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3961 (no register item) — a zenohd oracle is a fact about a MACHINE, and it
+"""R3978 (no register item) — a zenohd oracle is a fact about a MACHINE, and it
 was stored as a fact about one CHECKOUT.
 
 ## The defect, measured

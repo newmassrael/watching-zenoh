@@ -33,7 +33,7 @@
 #
 # Output: target/zenohd/zenohd
 #
-# R3961 — WHERE IT IS BUILT, and why that is not the checkout. A source-tree
+# R3978 — WHERE IT IS BUILT, and why that is not the checkout. A source-tree
 # oracle is built once per MACHINE, in the store `scripts/lib/oracle_store.py`
 # derives (`$WZ_ORACLE_STORE`, else `~/.cache/watching-zenoh/oracles`): the
 # clone, cargo's target dir and the installed product all live there, keyed by
@@ -163,7 +163,7 @@ elif [[ "${ZENOHD_SHM:-0}" -eq 1 ]]; then
     VARIANT_NAME="shared-memory"
 fi
 
-# R3961 — the store's paths for this oracle (STORE_LOCK, STORE_SRC, STORE_BUILD,
+# R3978 — the store's paths for this oracle (STORE_LOCK, STORE_SRC, STORE_BUILD,
 # STORE_PRODUCT), derived by the module the readers use, so the two cannot name
 # different places.
 ORACLE_DIR="${INSTALL_DIR#"$ROOT"/}"
@@ -263,7 +263,7 @@ if [[ -n "$ZH" ]] && ! zenohd_names_the_pin "$ZH"; then
              "pin is $ZENOHD_VERSION); falling through to the tag clone" >&2
         ZH=""
     else
-        # R3961 — refused, where this used to warn and build. The binary would
+        # R3978 — refused, where this used to warn and build. The binary would
         # report a commit sha, `oracle_pin_gate` would call it STALE, and the store
         # refuses to publish it: eleven minutes for an oracle no lane may use.
         # The tag clone is made once per machine now, so asking for it costs one
@@ -517,7 +517,7 @@ else
     ZENOH_MANIFEST_SRC=""
 fi
 
-# R3961 — a source-tree oracle is installed into a staging directory of the
+# R3978 — a source-tree oracle is installed into a staging directory of the
 # store and published from there; the checkout gets a copy of the product. A
 # crates.io oracle is NOT published: it has neither plugin nor example, and a
 # store entry of it would hand every other checkout of this machine the partial

@@ -3595,7 +3595,7 @@ layer_c0_test_discipline() {
     # binary beside it, an all-absent population armed and unarmed).
     python3 scripts/lib/oracle_pin_gate.py --selftest || return 1
     python3 scripts/lib/oracle_pin_gate.py --check || return 1
-    # R3961 — the machine's store those oracles are built into and copied from.
+    # R3978 — the machine's store those oracles are built into and copied from.
     # The selftest drives publication (refused off the pin), copying, the key that
     # makes a half copy read as stale, pruning and the source view against a
     # temporary store; `check` derives this tree's layout and reads no binary, so
@@ -25154,7 +25154,7 @@ layer_qzb_zephyr_board_matrix() {
 
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
-# R3961 — the oracles this machine has already built, copied into this checkout
+# R3978 — the oracles this machine has already built, copied into this checkout
 # before any lane looks for them. It never builds and never reaches the network
 # (`scripts/lib/oracle_store.py`), so a checkout slot or worktree that did not
 # run `build-zenohd.sh` itself still runs its interop lanes against the oracle

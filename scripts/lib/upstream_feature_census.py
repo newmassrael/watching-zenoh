@@ -366,7 +366,7 @@ def upstream_anchors() -> list[tuple[str, Path]]:
             ROOT / "target" / "zenohd-build" / "zenoh-src" / "zenoh" / "Cargo.toml",
         )
     )
-    # R3961 -- the same clone where build-zenohd.sh makes it, in the machine's
+    # R3978 -- the same clone where build-zenohd.sh makes it, in the machine's
     # oracle store, for a checkout that has not had it copied in yet. The path
     # is the store module's, not spelled a second time here.
     out.append(("manifest", oracle_store.source_dir(UPSTREAM_VERSION) / "zenoh" / "Cargo.toml"))
