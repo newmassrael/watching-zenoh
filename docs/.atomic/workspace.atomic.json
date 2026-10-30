@@ -300906,6 +300906,38 @@
         "Whether the redial reached the new node before the pause ended is not an event the pico ABI emits, so the test holds the end state, one transport on each side naming the other. A cooperative node against a tokio peer that races it is not run: the two keep different rules and a race can close both links until the next redial. The coop engine has no tls link. The pico UUID reader takes only the 36-character shape; pico reads a text of any other shape as whatever its indexes land on, which this refuses."
       ]
     },
+    "Round 3982": {
+      "decision_summary": "The group session task can be spawned from a seed, so its 7.7 KB dispatcher is built inside the task's own state and not on the spawning caller's stack. The disassembly of TwoSessions::spawn showed the dispatcher built in place in one stack slot, moved to a second inside MulticastSession, and copied (7720 bytes each) into the task cell, which made up the 16,208-byte frame. MulticastSessionSeed (wz-session-mcu) and MulticastSeed (lwIP) hold the config, transport, parameters and cadence; the task builds the dispatcher with new_in_place into a slot of the future and drops it there through a guard. The by-value MulticastSession and its spawn stay for their callers.",
+      "changes_bullets": [
+        "`crates/wz-session-mcu/src/group_drive.rs`: `MulticastSessionSeed`, `multicast_session_task_seeded`, `spawn_multicast_session_seeded`, a guard that drops the dispatcher in its slot, and the loop shared with the by-value task (`drive_group_session`).",
+        "`crates/wz-session-lwip/src/multicast_drive.rs`: `MulticastSeed` and `spawn_multicast_session_seeded` over the lwIP driver.",
+        "`deploy/mcu-freertos-demo/src/two_session/scenarios.rs`: the two-session image spawns its group session from a seed."
+      ],
+      "verification_bullets": [
+        "Layer Q ran whole on a build host: the two-session image's largest frame reads 3,960 bytes (parse_batch) against 16,208 (spawn) before, its qemu run passes with a stack peak of 8,968 of 32,768 bytes against 17,792, and its four scenarios and the no-heap-left check held; multicast-e2e text is unchanged at 71,812 and 71,824. Clippy -D warnings with transport-multicast passes for wz-session-mcu and wz-session-lwip (a first run without the feature compiled none of this code and is not the evidence). Not run: the hosted layers, and a host test that spawns from a seed (the target run is the one that does)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open: the stack chain of frt2 has no committed peak (it reads 4,012 bytes with 15 calls through a register not followed); the by-value MulticastSession spawn is still what the host tests and other callers use and still moves the dispatcher twice; no host test spawns from a seed."
+      ],
+      "publishable_decision_summary": "The group session task can be spawned from a seed, so its 7.7 KB dispatcher is built inside the task's own state and not on the spawning caller's stack. The disassembly of TwoSessions::spawn showed the dispatcher built in place in one stack slot, moved to a second inside MulticastSession, and copied (7720 bytes each) into the task cell, which made up the 16,208-byte frame. MulticastSessionSeed (wz-session-mcu) and MulticastSeed (lwIP) hold the config, transport, parameters and cadence; the task builds the dispatcher with new_in_place into a slot of the future and drops it there through a guard. The by-value MulticastSession and its spawn stay for their callers.",
+      "publishable_changes_bullets": [
+        "`crates/wz-session-mcu/src/group_drive.rs`: `MulticastSessionSeed`, `multicast_session_task_seeded`, `spawn_multicast_session_seeded`, a guard that drops the dispatcher in its slot, and the loop shared with the by-value task (`drive_group_session`).",
+        "`crates/wz-session-lwip/src/multicast_drive.rs`: `MulticastSeed` and `spawn_multicast_session_seeded` over the lwIP driver.",
+        "`deploy/mcu-freertos-demo/src/two_session/scenarios.rs`: the two-session image spawns its group session from a seed."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Q ran whole on a build host: the two-session image's largest frame reads 3,960 bytes (parse_batch) against 16,208 (spawn) before, its qemu run passes with a stack peak of 8,968 of 32,768 bytes against 17,792, and its four scenarios and the no-heap-left check held; multicast-e2e text is unchanged at 71,812 and 71,824. Clippy -D warnings with transport-multicast passes for wz-session-mcu and wz-session-lwip (a first run without the feature compiled none of this code and is not the evidence). Not run: the hosted layers, and a host test that spawns from a seed (the target run is the one that does)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the stack chain of frt2 has no committed peak (it reads 4,012 bytes with 15 calls through a register not followed); the by-value MulticastSession spawn is still what the host tests and other callers use and still moves the dispatcher twice; no host test spawns from a seed."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
