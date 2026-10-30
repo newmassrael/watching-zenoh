@@ -99,3 +99,18 @@ min_free_gb = 20
 # `run-ci.sh` is the repo's own full gate and the thing local pushes deliberately
 # do not run.
 verify = "bash scripts/run-ci.sh"
+
+# Regenerating the committed `out/**` from the SCXML sources (`scripts/regen-codegen.sh`): it builds
+# the pinned `sce-codegen` and then the xtask, which compiles `wz-session-core`, so it is a heavy
+# build that used to be refused a build machine because it writes the tree. Declared as an action,
+# it runs on a copy on the build machine and only the files it changed come back, judged here
+# against `outputs` before any is written: `bx --action regen-codegen --host <alias>`.
+#
+# The inputs are not listed one by one: the run reads the sources, the generator crates and the
+# crates they compile, the pinned SCE checkout and the submodules it needs, and a list written by
+# hand is how an input is missed. It is run without `--isolate`, so the whole tracked copy is
+# visible and the declaration is judged only by what the run writes.
+[actions.regen-codegen]
+run = "bash scripts/regen-codegen.sh"
+inputs = ["**"]
+outputs = ["out/**"]
