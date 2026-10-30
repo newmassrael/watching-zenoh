@@ -48,7 +48,7 @@ use crate::sample::{EncodingHint, QosLevel, SourceInfo};
 /// surfaces (R311y325 §LEG B).
 ///
 /// NOT unified with the router relay's identical 10s
-/// (`wz-runtime-tokio`'s `LinkstateForwarder::DEFAULT_QUERY_TIMEOUT`). zenoh keeps
+/// (`wz-runtime-tokio`'s `RouterForwarder::DEFAULT_QUERY_TIMEOUT`). zenoh keeps
 /// ONE config key for both legs (`tables.rs` router-side, `conf` client-side), so
 /// two constants for one concept IS a divergence — a NAMED residual, because
 /// unifying them means deciding whether wz grows a client config plane.

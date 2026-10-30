@@ -3853,8 +3853,8 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // the flag that reaches it.
     //
     // MEASURED. `--timestamping` parses in every build and threads all the way
-    // to `RouterForwarder::with_timestamping` / `LinkstateForwarder::with_
-    // timestamping`, which hand it to `NodeHlc::for_node` — and without
+    // to `RouterForwarder::with_timestamping`, which hands it to
+    // `NodeHlc::for_node` — and without
     // `time-hlc` that type is ZERO-SIZED and `is_stamping()` returns `false`
     // unconditionally (`node_clock.rs`). So the flag is honoured, reported
     // APPLIED, and does NOTHING: the relayed Put comes out bare either way. The

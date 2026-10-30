@@ -25,7 +25,7 @@
 //! (crates/wz-runtime-tokio/Cargo.toml: `adminspace-introspection-handlers =
 //! ["adminspace-core", ...]`), so this binary carries the cfg sites of both atoms
 //! — `Session::declare_adminspace` + the local_data builder for core, the
-//! `answer_admin_query` per-entity legs + `LinkstateForwarder::subscriptions()`
+//! `answer_admin_query` per-entity legs + the forwarder's subscription listing
 //! for introspection. Both claims below name a body only that code can produce:
 //!
 //! - `adminspace-core` — the node record at the root key `@/<zid>/peer`, whose

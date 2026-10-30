@@ -81,7 +81,7 @@
 //!   the matched rule id, not a semantic. wz has no per-face keyexpr cache seam to
 //!   hang it on; the rule lookup is a linear scan of the rule list.
 //! - **The one-shot INFO log flag** (zenoh `:218-219`, `:246-248`). wz witnesses
-//!   drops with the `LinkstateForwarder::interceptor_dropped` counter, which is
+//!   drops with the `RouterForwarder::interceptor_dropped` counter, which is
 //!   what the cross-impl leg reads; a rate-limited log line is not a semantic.
 //!
 //! # Established by read, NOT a residual

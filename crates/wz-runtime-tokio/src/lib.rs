@@ -2350,7 +2350,7 @@ pub(crate) mod peer_identity;
 // `accept_loop::FaceForwarder` (`RouterForwarder`) that ports
 // zenoh `hat/router`'s two link-state graphs — `routers_net` (Router-tier
 // faces) + `linkstatepeers_net` (Peer-tier faces) — distinct from the
-// single-net `linkstate_forward` `LinkstateForwarder` it builds on. Slice 1a
+// single-net forwarder it was built on (retired at item 751 step 7c-2). Slice 1a
 // is the topology-STATE half: dual-net register/deregister/OAM-ingest with a
 // TIER-SCOPED flood (the two graphs never cross-inject). The dual-tier Declare
 // INGEST, the cross-tier bubble, route-compute, and master-election are later

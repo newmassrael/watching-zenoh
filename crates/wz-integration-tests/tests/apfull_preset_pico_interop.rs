@@ -166,7 +166,7 @@ fn apfull_preset_acceptor_round_trips_with_a_real_pico_z_put() {
 /// ## WHICH code this actually binds to — established by damage, not by reading
 ///
 /// Both picos attach as CLIENTS of the one peer, so the delivery path is
-/// `LinkstateForwarder::deliver_to_client_subscribers` (co-attached client
+/// `RouterForwarder::deliver_to_client_subscribers` (co-attached client
 /// egress), NOT the mesh spanning-tree `forward_push`. That was MEASURED:
 /// inverting the tree-forward target predicate in `forward_push` left this leg
 /// GREEN, while inverting the `id == inbound` self-exclusion in

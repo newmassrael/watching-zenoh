@@ -5,7 +5,7 @@
 //! proof: a `--peer` mesh node built `--features transport-qos,transport-multilink`
 //! and driven `--max-links 2 --qos --express-high` ORIGINATES its `--publish` data at
 //! a non-DEFAULT QoS band (`RealTime`, the HIGH band) through the new
-//! `LinkstateForwarder::publish_qos` app path, and the subscriber RECEIVES it over the
+//! `RouterForwarder::publish_qos` app path, and the subscriber RECEIVES it over the
 //! aggregated QoS multilink session. This makes the y217 `select_link` band routing +
 //! y219a per-face band assignment reachable from a real binary — before y220 the
 //! forwarder publish API hard-clamped `Priority::DEFAULT`, so an application could

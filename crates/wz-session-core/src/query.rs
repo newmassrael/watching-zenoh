@@ -1838,7 +1838,7 @@ fn responder_parts(responder: &Option<(heapless::Vec<u8, 16>, u32)>) -> Option<(
 /// --features alloc,codec-response --lib response_build::tests::build_response_err`
 /// composes pico-parity Err bytes with `query-reply-err` OFF. That is
 /// CORRECT, not a hole to plug: the router's query-timeout path emits an
-/// Err through the same primitive (`LinkstateForwarder`, an ungated
+/// Err through the same primitive (`RouterForwarder`, an ungated
 /// production caller of `build_response_err_empty` with a `b"Timeout"`
 /// payload), and it must keep doing so in a build that carries no
 /// queryable Err reply at all. Gating those primitives on this atom would

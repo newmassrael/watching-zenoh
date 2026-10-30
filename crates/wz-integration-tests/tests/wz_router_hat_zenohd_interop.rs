@@ -151,7 +151,7 @@
 //!     matching listener's "NO MORE matching queryables." positive observable — NOT
 //!     a flaky negative). Both are also unit-proven on the forwarder.
 //!   * peer-tier FUTURE-push observability CLOSED (R311y158 counter + R311y165 e2e):
-//!     the peer `LinkstateForwarder` carries its own `future_pushes` counter
+//!     the peer's forwarder carries its own `future_pushes` counter
 //!     (surfaced by run_peer as `pushed a future subscriber`), and the strong
 //!     peer-mode pub-before-sub cross-impl e2e now lands in
 //!     `wz_peer_future_push_pico_interop.rs` — a pico z_pub client of peer-A is

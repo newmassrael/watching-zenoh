@@ -28,7 +28,8 @@
 //! answered messages on its faces itself, because what a face is differs between hosts and the
 //! plane should not know.
 //!
-//! The demo's `LinkstateForwarder` runs the same graph with the whole routing mesh around it.
+//! The peer node's `RouterForwarder` runs the same graph in its north region with the whole
+//! routing mesh around it.
 //! This is the part of that which a session that routes nothing needs, so a session that only
 //! wants to be introduced does not carry the mesh.
 

@@ -10,7 +10,7 @@
 //! `WhatAmI::Peer` and are classified into the router's `linkstatepeers_net`,
 //! while a router-to-router link (ACTIVATION-4) would land in `routers_net`. Until
 //! this slice the forwarder was UNIT-TESTED-ONLY (production wiring still uses
-//! `RoutingForwarder` / `LinkstateForwarder`); these tests stand up the harness
+//! `RoutingForwarder` / the single-net peer forwarder, both retired since); these tests stand up the harness
 //! that composes it — register / tier-classify / OAM ingest / declare
 //! ingest+reflood / data route — through `accept_loop` over loopback TCP, the
 //! load-bearing obligation the R311y116 session review pinned before any run-mode

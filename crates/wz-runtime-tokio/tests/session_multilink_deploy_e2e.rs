@@ -87,7 +87,7 @@ struct CapState {
     /// `register_joined` at each aggregation JOIN. An observation-only forwarder
     /// records them (and keeps `forward` observing the PHYSICAL id, so the per-face
     /// segregation witness is unaffected — the joined->primary resolution is the
-    /// REAL LinkstateForwarder's concern, tested directly in its lib units).
+    /// REAL RouterForwarder's concern, tested directly in its lib units).
     joined_calls: Vec<(u64, u64)>,
     /// R311y221 — the delivered band per received Push, read off the new
     /// `FramePayload.priority` field. The app-observability witness: a prioritized
@@ -704,7 +704,7 @@ async fn deploy_active_qos_priority_segregates_across_links() {
         // (`register_joined`), so a routing forwarder delivers its inbound instead
         // of dropping it at the faces.get gate. The joined id is NEVER `register`ed
         // (it shares the primary's face); the primary IS. (The forwarder RESOLUTION
-        // itself — the delivery — is proven directly in the LinkstateForwarder lib
+        // itself — the delivery — is proven directly in the RouterForwarder lib
         // unit `joined_link_inbound_delivers_...`; here we only prove the loop wires
         // the mapping.) Barrier on `joined_calls` ITSELF (not the `live_link_count`
         // barrier above): `register_joined` is written AFTER `join_link` bumps the

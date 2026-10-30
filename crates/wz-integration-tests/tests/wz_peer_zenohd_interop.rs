@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! wz-PEER <-> zenohd-PEER linkstate FEDERATION interop: a wz node in PEER mode
-//! (`LinkstateForwarder`, wire `WhatAmI::Peer`) forms a link-state peer mesh with
+//! (`RouterForwarder`, wire `WhatAmI::Peer`) forms a link-state peer mesh with
 //! a REAL zenohd 1.5.0 running `mode=peer` + `routing/peer/mode=linkstate`, and
 //! DECODES zenohd's `linkstatepeers_net` `LinkStateList` OAM flood over the wire.
 //!

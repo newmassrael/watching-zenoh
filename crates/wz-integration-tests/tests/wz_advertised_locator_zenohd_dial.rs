@@ -20,7 +20,7 @@
 //!
 //! wz runs as a linkstate PEER, so it takes the advertise path
 //! (`run_peer` -> `BoundListener::advertised_locator` -> `set_self_locators` ->
-//! `LinkstateForwarder` -> the neighbour graph). It logs its choice, and this
+//! the forwarder -> the neighbour graph). It logs its choice, and this
 //! test READS that line and hands the string, verbatim, to zenohd's `-e`.
 //! Nothing here knows what a unixsock locator looks like:
 //!

@@ -74,7 +74,7 @@
 //!   seam to hang it on; the limit lookup is a linear scan of the rule list.
 //! - **Per-flow drop STATS** (zenoh `:417-428`, behind zenoh's `stats` feature).
 //!   wz witnesses drops with the flow-agnostic
-//!   `LinkstateForwarder::interceptor_dropped` counter.
+//!   `RouterForwarder::interceptor_dropped` counter.
 
 use wz_codecs::push::PushOwnedVariant;
 use wz_codecs::query_ext_entry::QueryExtEntryOwned;

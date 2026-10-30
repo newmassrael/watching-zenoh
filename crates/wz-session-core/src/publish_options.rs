@@ -267,7 +267,7 @@ impl PublishOptions {
     /// the y226/y232 two-input split where a caller had to set `with_qos` AND call `publish_qos`
     /// with matching bands. One `with_priority` cannot diverge, mirroring zenoh's single
     /// `QoSType` (`resolve_put`) and the already-unified peer path
-    /// (`LinkstateForwarder::publish_qos` in `wz-runtime-tokio`).
+    /// (`RouterForwarder::publish_qos` in `wz-runtime-tokio`).
     ///
     /// R311y307 — gated on `pubsub-qos` (the QoS-ext compile unit), NOT on a per-field
     /// `pubsub-priority` gate. The three sub-fields share ONE packed byte, one ext, one encode

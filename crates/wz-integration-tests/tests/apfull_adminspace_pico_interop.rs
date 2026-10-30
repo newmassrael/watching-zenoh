@@ -464,7 +464,7 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
          — the record is rendered from live state, not from configuration\n  got: {core}"
     );
     // R2415 (open-debt items 675/678) — the pin's per-transport `shm` field, on the
-    // FORWARDER-hosted path. That path (`LinkstateForwarder::admin_sessions`) is
+    // FORWARDER-hosted path. That path (`RouterForwarder::admin_sessions`) is
     // reached only from wz-ap-demo, so no unit test can witness it: the lane IS the
     // test, which is why the assertion lives here.
     //

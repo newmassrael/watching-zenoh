@@ -911,7 +911,7 @@ enum Space {
 
 /// Absorb one keyexpr (un)declaration into a peer's `id -> literal` mapping
 /// table — the SSOT shared by the unicast router faces (each
-/// `LinkstateForwarder` / `RouterForwarder` per-face `keyexpr_table`) and the
+/// `RouterForwarder` per-face `keyexpr_table`) and the
 /// multicast per-peer ingress plane
 /// (`MulticastDispatcher::apply_declared_aliases`, §5.21 router-multicast-faces
 /// I3a). A `DeclKexpr` resolves its own (possibly itself-aliased) keyexpr

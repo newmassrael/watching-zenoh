@@ -1585,7 +1585,7 @@ impl WzConfig {
     /// interceptor settings. Called once at routing setup — the same
     /// [`InterceptorSink::set_interceptors`] seam the live reconfigure re-uses,
     /// so setup and runtime go through ONE code path. `sink` is the abstract
-    /// interceptor target (the production impl is the `LinkstateForwarder`); the
+    /// interceptor target (the production impl is the `RouterForwarder`); the
     /// trait seam is what lets the §5.23 combined node compose the config-drive
     /// surface without depending on the concrete forwarder type.
     #[cfg(feature = "routing-peer")]

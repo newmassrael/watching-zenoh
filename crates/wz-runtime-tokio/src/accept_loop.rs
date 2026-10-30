@@ -53,8 +53,8 @@
 //! holds: `sce-rust-runtime`'s `completion_callback` and `on_http_send` are both
 //! `+ Send` at the pinned revision, and the drive future of a face is `Send`
 //! when its forwarder is `Sync`. What keeps this the default is the forwarder:
-//! the routing forwarders (`LinkstateForwarder`, `RouterForwarder`) keep their
-//! tables in `Rc`/`RefCell`, so they can only be called from one task. A node
+//! the routing forwarder (`RouterForwarder`) keeps its link-state graphs in
+//! `Rc`/`RefCell`, so it can only be called from one task. A node
 //! whose forwarder is `Send + Sync` (the C ABI's) is being moved to a task per
 //! face's drive instead; the plan and its stages are in
 //! `docs/parallel-faces-design.md`.
@@ -723,8 +723,8 @@ pub enum AcceptEvent {
 /// ([`deregister`](Self::deregister)).
 ///
 /// The hold-only path passes [`NoOpForwarder`]; a routing node passes one of
-/// the mesh forwarders (the peer's `LinkstateForwarder`, the router hat's
-/// `RouterForwarder`). R2912 retired the third, the single-hop star engine
+/// the mesh forwarder (`RouterForwarder`, which the peer node and the router hat both
+/// run). R2912 retired the single-hop star engine
 /// over session-core's `RouteTable`, which no run-mode had built since R2886.
 /// Taken as `&dyn` so the loop carries one concrete future type in its
 /// [`FuturesUnordered`] regardless of which forwarder is wired, and `!Send` is

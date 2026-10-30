@@ -709,7 +709,10 @@ primary face's and its shared-memory slices are acknowledged to the link's own p
 the five `WzConfig`-drives-the-forwarder tests; and the interest broker (section 13).
 `routing-peer` alone is no longer a configuration of the runtime crate that stands by itself,
 since the peer node is the router hat's forwarder, so the lanes that built it build
-`routing-router-hat`. The module keeps its name; renaming it is a change of its own.
+`routing-router-hat`. The module keeps its name, which was decided afterwards and not only deferred: the
+cores it holds are still forwarding over a link-state net, and
+`wz::runtime_tokio::linkstate_forward::{..}` is the path a deploy builds its policy and
+configuration from, so a rename would move a public path for a word.
 
 **7c: retirement.** `LinkstateForwarder` goes with the tests that only it carries; what
 the router also uses (`NetHandle`, the route cores, `QueryFan`) stays where it is. The

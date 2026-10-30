@@ -4002,8 +4002,7 @@ fn render_qos_link(state: &wz::runtime_tokio::extqos::QosLinkState) -> String {
 
 /// R311y220 (transport-qos) — the QoS band a `--publish` peer originates its data
 /// Puts at, selected by `--express-high` / `--low`. Maps to the `(priority, express)`
-/// pair [`LinkstateForwarder::publish_qos`](wz::runtime_tokio::linkstate_forward)
-/// threads to the transport: on an aggregated QoS multilink session
+/// pair `RouterForwarder::publish_qos` threads to the transport: on an aggregated QoS multilink session
 /// (`--max-links > 1 --qos`) the priority pins the Put onto the per-face band link
 /// (`select_link`), so qos priority-band link SELECTION becomes reachable from the
 /// demo binary. Absent -> plain `publish` (DEFAULT = Data, the LOW band). NOTE: this
@@ -4578,7 +4577,7 @@ async fn run_peer_until(
     let params = demo_session_init_params(NodeKind::Peer, node_zid, &tuning)?;
 
     // R311rb/rf — the peer maintains a linkstate-peer routing graph: each held
-    // face feeds the topology graph ([`LinkstateForwarder`]), which floods its
+    // face feeds the topology graph (the `RouterForwarder`'s north net), which floods its
     // own link-state on its OWN periodic tick and bootstraps each new neighbour
     // at face-up, so the mesh converges for every peer_loop caller (the flood
     // is on the FaceForwarder seam now, not a hand-rolled select here).
@@ -4823,7 +4822,7 @@ async fn run_peer_until(
     // R311y41/y43 — the interceptor install routes deploy-opts -> WzConfig ->
     // forwarder through the typed config, now via the `InterceptorSink` TRAIT SEAM
     // (R311y43: WzConfig drives an abstract sink, decoupled from the concrete
-    // LinkstateForwarder — the same seam a runtime reconfigure re-uses, so setup
+    // RouterForwarder — the same seam a runtime reconfigure re-uses, so setup
     // and runtime share ONE code path). The startup log shows the read-at-open
     // mirror.
     //
@@ -5542,7 +5541,7 @@ async fn run_peer_until(
     // High-water mark of the MUTUAL-edge count, sampled each tick — the
     // reciprocal-link witness distinct from `peak_nodes`. An edge forms only
     // when a neighbour's INGESTED link-state advertises a link back to self
-    // (`LinkstateForwarder::edge_count`), so `peak_edges > 0` proves this peer
+    // (`RouterForwarder::north_net_edge_count`), so `peak_edges > 0` proves this peer
     // ingested a FULL-LINKSTATE flood (self-entry `links={self}`), not merely a
     // gossip self-announcement (which bumps `ingested`/`peak_nodes` but carries
     // no reciprocal link → no edge). Sampled at the tick because teardown prunes

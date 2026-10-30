@@ -127,8 +127,7 @@ use crate::timestamp_source::wall_clock_ntp64;
 /// because THIS CONSUMER passes it, while a default `Session::query` never
 /// expired (`QueryOptions` derived `Default` -> `timeout_ms` 0 -> the
 /// never-expire sentinel). The RELAY already mirrored zenoh
-/// (`LinkstateForwarder::DEFAULT_QUERY_TIMEOUT` = 10_000ms,
-/// `linkstate_forward.rs:661`); only the client leg diverged.
+/// (`RouterForwarder::DEFAULT_QUERY_TIMEOUT` = 10_000ms); only the client leg diverged.
 ///
 /// R311y326 — the divergence is now CLOSED: `QueryOptions::effective_timeout_ms`
 /// resolves the `0` default to `DEFAULT_QUERY_TIMEOUT_MS`, so a default

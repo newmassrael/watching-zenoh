@@ -572,7 +572,7 @@ fn demo_main() -> ExitCode {
             // forms, and a wz peer in EITHER mode exchanged no pub/sub data with
             // it at all -- `linkstate` because its tree had no children,
             // `peer-to-peer` because it only ever did discovery. The gossip arms
-            // in `LinkstateForwarder` (origin declaration, join-time
+            // in the peer's forwarder (origin declaration, join-time
             // re-advertise, self-originated data) are what closed that, so this
             // mode is now the one to run against a stock zenoh subsystem.
             let full_linkstate = match crate::args::parse_peer_mode(rest) {

@@ -20,7 +20,7 @@
 //!
 //! [`RouterForwarder`] is the 4th [`FaceForwarder`],
 //! the wz port of zenoh's `hat/router` routing strategy. Where the
-//! single-net `LinkstateForwarder`(crate::linkstate_forward) ports
+//! retired single-net peer forwarder (`LinkstateForwarder`, item 751 step 7c-2) ported
 //! `hat/linkstate_peer` (ONE [`LinkstateNetwork`] graph), the router maintains
 //! TWO graphs — `routers_net` (the Router-tier mesh) and `linkstatepeers_net`
 //! (the Peer-tier mesh) — exactly as zenoh's `HatTables` keeps `routers_net`
@@ -37,8 +37,8 @@
 //! [`FaceForwarder`] trait is the same
 //! multi-hat seam expressed without type erasure: each forwarder owns TYPED
 //! self-state, and the run-mode selects the concrete forwarder. The router is
-//! the third such type alongside `NoOpForwarder` and `LinkstateForwarder`
-//! (R2912 retired a fourth, the single-hop `RoutingForwarder`).
+//! the routing type beside `NoOpForwarder` (R2912 retired the single-hop `RoutingForwarder`,
+//! item 751 step 7c-2 the single-net `LinkstateForwarder`).
 //!
 //! ## Slice 1a (topology STATE)
 //!
@@ -70,8 +70,8 @@
 //! subs table (`router_subs` for a Router face, `linkstatepeer_subs` for a Peer
 //! face), keyed by the resolve-source-resolved SOURCE zid, and — only on a real
 //! change — re-floods a clean literal declaration WITHIN THAT TIER to the
-//! source's spanning-tree children (the per-tier analogue of
-//! `LinkstateForwarder`'s `forward_subscription`). `UndeclareSubscriber`
+//! source's spanning-tree children (the per-tier analogue of the retired single-net
+//! forwarder's `forward_subscription`). `UndeclareSubscriber`
 //! withdraws + re-floods the retraction the same way; a `DeclKexpr` / `UndeclKexpr`
 //! records the link-local keyexpr alias so an aliased declaration resolves.
 //!
@@ -144,8 +144,8 @@
 //! publish (`publish_client_push_into_meshes`),
 //! so it reaches subscribing MESH peers (the client→peer direction, not just
 //! other clients). A client is a leaf below exactly one router, so self is the
-//! unique origin node in each net; this mirrors `LinkstateForwarder::publish`
-//! via the shared `compute_self_publish_forward` core (self tree-root, node_id
+//! unique origin node in each net; this is the single-net forwarder's `publish`
+//! (retired) via the shared `compute_self_publish_forward` core (self tree-root, node_id
 //! 0, fresh per-net hop budget) — self-origination, NOT the transit re-forward
 //! (a client zid is no mesh node, so `resolve_source_in` would drop it). Faithful
 //! to zenoh's `route_data`: the peer-net publish leg is NOT master-gated for a
@@ -231,7 +231,7 @@
 //!
 //! A queryable's `Response` / `ResponseFinal` is routed BACK toward the querier
 //! via the pending table — the reverse of C5b's per-face allocate, mirroring the
-//! single-net `LinkstateForwarder`'s proven return path:
+//! retired single-net forwarder's proven return path:
 //! `forward_response` peeks (more replies may
 //! follow) and `forward_response_final`
 //! takes — freeing that BRANCH; the closing final propagates upstream only from
@@ -336,7 +336,7 @@
 //!   cover the mechanism meanwhile. (The client-behind-a-router variant was already
 //!   rescued by C2.)
 //! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
-//!   `LinkstateForwarder` carries; added as the router gains the corresponding
+//!   retired single-net forwarder carried; added as the router gains the corresponding
 //!   plane. (The pending-query GC — the timeout sweep — landed with C5c above.)
 //!   NOTE (impl-panel R311y113): NEITHER the tier-scoped
 //!   `fan_out_tier` NOR the single-target
@@ -1589,7 +1589,7 @@ struct RouterFaceState {
     /// Per-face keyexpr-alias table (1b): a `DeclKexpr` maps `id -> resolved
     /// keyexpr` here so a later aliased `DeclareSubscriber` on this link resolves
     /// to a literal. Link-local (each link negotiates its own aliases), the same
-    /// shape as `LinkstateForwarder`'s `FaceState.keyexpr_table`
+    /// shape the retired single-net forwarder's face state had
     /// (`hashbrown` to match `resolve_wireexpr`'s table type).
     keyexpr_table: hashbrown::HashMap<u64, String>,
     /// The messages this face, as a DESTINATION, has not taken yet: held in order until its link
@@ -1941,7 +1941,7 @@ impl RouterDeclarationsView {
     /// declarations live in `client_subs` / `client_qabls`, which the peer's old
     /// accessor never read — so that body was not locally true, it was silently
     /// missing a tier. The peer now folds two tiers of its own
-    /// (`linkstate_forward::LinkstateForwarder::bucket_by_tier`) and no longer
+    /// (the retired single-net forwarder's `bucket_by_tier`) and no longer
     /// has a `sources` closure. THREE tables is still what makes the router
     /// distinct, and the pin agrees by
     /// a route this fold mirrors: each HAT fills ONE bucket for its own tier and
@@ -2303,8 +2303,8 @@ pub(crate) struct Tables {
     joined_links: HashMap<FaceId, JoinedLink>,
     /// Queryables HOSTED BY THIS ROUTER (§5.23 `adminspace-router-linkstate`) —
     /// e.g. the built-in admin queryable on `@/<self-zid>/router/**`. The
-    /// router-idiom `derive-not-store` analogue of the peer
-    /// `LinkstateForwarder`'s `local_queryables`: the store FEEDS the cross-tier
+    /// router-idiom `derive-not-store` analogue of the retired peer forwarder's
+    /// `local_queryables`: the store FEEDS the cross-tier
     /// derive (`derived_cross_tier_qabl_info`
     /// / [`derived_cross_tier_qabls_into`](RouterForwarder::derived_cross_tier_qabls_into)), so
     /// a self-hosted queryable advertises into BOTH meshes + re-advertises to
@@ -2323,7 +2323,7 @@ pub(crate) struct Tables {
     /// [`register_local_queryable`](RouterForwarder::register_local_queryable)) and could not be
     /// TOLD anything: there was no way for a host to receive a Put, which is why the
     /// runtime connect-list reconcile had exactly one producer, a one-shot CLI timer.
-    /// `LinkstateForwarder` has carried this since R311y46 (§5.23 Phase 3a); the
+    /// The retired single-net forwarder carried this from R311y46 (§5.23 Phase 3a); the
     /// router had only half the pair, and the asymmetry was invisible until something
     /// needed the other half. (This line first cited R311y146, which IS a real
     /// round in this file — the FUTURE-mode subscriber-interest store and the
@@ -2461,8 +2461,8 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
 
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
 /// (Router-tier) and `linkstatepeers_net` (Peer-tier) — from the face lifecycle
-/// and inbound `OAM_LINKSTATE` topology. The router counterpart to the
-/// single-net `LinkstateForwarder`(crate::linkstate_forward). Slice 1a owns
+/// and inbound `OAM_LINKSTATE` topology. It replaced the single-net
+/// `LinkstateForwarder` as the peer node's forwarder too (item 751 step 7c-2). Slice 1a owns
 /// the topology STATE; see the module docs for the deferred slices.
 pub struct RouterForwarder {
     /// The routing tables: the hats, the faces and the stores a declaration writes, in one
@@ -2490,8 +2490,8 @@ pub struct RouterForwarder {
     ///
     /// It lives on the DRIVER rather than on a `LinkstateNetwork`, for the
     /// reason that crate's own module doc gives: the gossip driver applies the
-    /// gate at its discovery emit and the accept loop dials. Same placement as
-    /// `LinkstateForwarder`(crate::linkstate_forward::LinkstateForwarder).
+    /// gate at its discovery emit and the accept loop dials. Same placement as the
+    /// retired single-net forwarder had.
     ///
     /// Default `disabled` is the prior behaviour EXACTLY — an empty matcher
     /// admits nobody, so a host that never calls
@@ -2562,7 +2562,7 @@ pub struct RouterForwarder {
     /// [`route_request`](Self::route_request) ALLOCATES an entry per forwarded
     /// Request; the reverse Response route (peek/take) + the timeout sweep are C5c.
     /// The standalone [`PendingQueries`] struct is reused verbatim (the same one the
-    /// single-net `LinkstateForwarder`(crate::linkstate_forward) holds).
+    /// retired single-net forwarder held).
     pending: PlainMutex<PendingQueries>,
     /// §5.21 `routing-interest-pending-gc` — the interests a peer node brokers for its clients to
     /// its gateways: the pending table, its deadline and the live CurrentFuture copies (see
@@ -2586,8 +2586,7 @@ pub struct RouterForwarder {
     /// mesh where every branch finalizes.
     timed_out: Counter,
     /// Running total of link-state lists ingested across both nets — the
-    /// control-plane work witness (the router twin of
-    /// `LinkstateForwarder::ingested`).
+    /// control-plane work witness.
     ingested: Counter,
     /// Running total of data `Push` messages received — the data-plane
     /// reception witness, raised ONCE on EVERY inbound Push before it is routed.
@@ -2701,8 +2700,7 @@ pub struct RouterForwarder {
     #[cfg(feature = "routing-token-tables")]
     future_token_pushes: Counter,
     /// §5.16 access-control INGRESS interceptor chain — consulted at the top of
-    /// [`forward`](FaceForwarder::forward) before the kind-dispatch, the router twin
-    /// of `LinkstateForwarder`(crate::linkstate_forward)'s `ingress_interceptors`.
+    /// [`forward`](FaceForwarder::forward) before the kind-dispatch.
     /// Empty (admits everything) until [`set_interceptors`](Self::set_interceptors).
     ingress_interceptors: PlainRwLock<InterceptorChain>,
     /// The authentication this router asks of the sessions it accepts and answers to the ones it
@@ -2792,8 +2790,7 @@ pub struct RouterForwarder {
     /// The monotonic clock the pending-query deadlines are stamped from (C5b) and
     /// reaped against (C5c) — [`Box`]ed so a deterministic test injects a
     /// controllable `base + offset` closure via [`with_clock`](Self::with_clock),
-    /// exactly as the single-net `LinkstateForwarder`(crate::linkstate_forward)
-    /// does. Production is `Instant::now`.
+    /// exactly as the retired single-net forwarder did. Production is `Instant::now`.
     clock: Box<dyn Fn() -> Instant + Send + Sync>,
     /// R311y450 — THIS router's §5.18 wall-clock HLC, the source of the
     /// forward-path timestamp [`route_push`](Self::route_push) applies. A distinct
@@ -3856,9 +3853,10 @@ impl RouterForwarder {
     /// with its faces placed by [`region_of`] at node mode Peer.
     ///
     /// Public since step 7 of `docs/peer-region-hats.md`: the publish and subscribe,
-    /// query, token and interest planes and the node's own surfaces are held to
-    /// `LinkstateForwarder` and to the pin by the differential and the network
-    /// gates (steps 3 to 6). `timestamping` is the `timestamping.enabled` map a
+    /// query, token and interest planes and the node's own surfaces were held to
+    /// the single-net `LinkstateForwarder` and to the pin by the differential and the network
+    /// gates (steps 3 to 6; the former is retired and the gates are frozen scenes now).
+    /// `timestamping` is the `timestamping.enabled` map a
     /// host read out of its config document, resolved against Peer here, as
     /// [`with_timestamping`](Self::with_timestamping) does against Router.
     pub fn peer_with_timestamping(
@@ -4017,9 +4015,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// advertised locators) whose role and zid the policy admits is emitted as a
     /// [`DialIntent`]; the accept loop drains the receiver and dials.
     ///
-    /// The router twin of
-    /// [`LinkstateForwarder::enable_autoconnect`](crate::linkstate_forward::LinkstateForwarder::enable_autoconnect),
-    /// deliberately the same shape: one policy, one channel, the gate applied at
+    /// Deliberately the shape the retired single-net forwarder's `enable_autoconnect`
+    /// had: one policy, one channel, the gate applied at
     /// the discovery emit. BOTH tiers feed it, because the policy's own role
     /// matcher is what separates a Router target from a Peer one — this
     /// forwarder's tier gate scopes FLOODS, not dials.
@@ -4081,8 +4078,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// Item 751, step 6 — advertise self's dial locators (its listen
     /// addresses): they ride every FULL flood self originates, so a neighbour
-    /// learns where to reach this node. The twin of
-    /// [`LinkstateForwarder::set_self_locators`](crate::linkstate_forward::LinkstateForwarder::set_self_locators).
+    /// learns where to reach this node.
     ///
     /// Every mesh hat's net takes them: the pin asks the RUNTIME for self's
     /// locators when it builds a net's link-state message
@@ -4321,9 +4317,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Number of nodes in the ROUTER-tier graph (self + every learned Router) —
-    /// the `routers_net` state witness. The dual-tier router twin of
-    /// [`LinkstateForwarder::node_count`](crate::linkstate_forward::LinkstateForwarder::node_count);
-    /// exposed as its own method (not a `(usize, usize)` tuple with the peer
+    /// the `routers_net` state witness. Exposed as its own method (not a `(usize, usize)` tuple with the peer
     /// count) so each mirrors the field it reads and a caller cannot transpose
     /// them. A single-router topology (no Router faces) reads 1 (self alone).
     pub fn routers_net_node_count(&self) -> usize {
@@ -4331,17 +4325,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Number of nodes in the NORTH region's graph: the routers' on a router
-    /// node and the peers' on a peer node (item 751, step 6). The twin of
-    /// [`LinkstateForwarder::node_count`](crate::linkstate_forward::LinkstateForwarder::node_count),
-    /// which a peer reads as its one graph.
+    /// node and the peers' on a peer node (item 751, step 6), which a peer reads as its
+    /// one graph.
     pub fn north_net_node_count(&self) -> usize {
         self.north_net().node_count()
     }
 
     /// Number of mutual links in the NORTH region's graph: a link counts only
     /// when both of its ends advertise it, so a gossip peer's flood adds nodes
-    /// and no edge. The twin of
-    /// [`LinkstateForwarder::edge_count`](crate::linkstate_forward::LinkstateForwarder::edge_count).
+    /// and no edge.
     pub fn north_net_edge_count(&self) -> usize {
         self.north_net().edge_count()
     }
@@ -4356,8 +4348,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Total link-state lists ingested across both nets — the control-plane
-    /// convergence witness (name-matched to
-    /// [`LinkstateForwarder::ingested`](crate::linkstate_forward::LinkstateForwarder::ingested)).
+    /// convergence witness.
     /// Rising above zero proves this router ingested a neighbour's link-state
     /// flood, i.e. topology converged over the wire (not merely that a face is
     /// held).
@@ -4366,8 +4357,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Total data `Push` messages received across all faces — the data-plane
-    /// TRANSIT witness (name-matched to
-    /// [`LinkstateForwarder::data_seen`](crate::linkstate_forward::LinkstateForwarder::data_seen)).
+    /// TRANSIT witness.
     /// Raised once at the `Push` dispatch arm, immediately before
     /// [`route_push`](Self::route_push) routes it — on EVERY inbound Push, so a
     /// pure router that hosts no subscription still counts a Push it forwarded —
@@ -4623,8 +4613,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Total distinct client-hosted queryables this node currently holds (every broker hat's
-    /// `qabls`), the query-plane twin of [`client_subs_seen`](Self::client_subs_seen) and the
-    /// twin of [`LinkstateForwarder::client_qabls_seen`](crate::linkstate_forward::LinkstateForwarder::client_qabls_seen)
+    /// `qabls`), the query-plane twin of [`client_subs_seen`](Self::client_subs_seen)
     /// (item 751, step 6). [`queryables_seen`](Self::queryables_seen) adds the mesh's, which a
     /// readiness barrier for a CLIENT's queryable must not count.
     pub fn client_queryables_seen(&self) -> usize {
@@ -4634,9 +4623,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// The nodes of the NORTH region interested in `keyexpr`: the peers on a peer node, the
-    /// routers on a router. The twin of
-    /// [`LinkstateForwarder::interested`](crate::linkstate_forward::LinkstateForwarder::interested),
-    /// the subscription filter the data route reads, exposed for the demo's shutdown summary.
+    /// routers on a router. It is the subscription filter the data route reads, exposed for the
+    /// demo's shutdown summary.
     pub fn north_interested(&self, keyexpr: &str) -> Vec<Zid> {
         self.tables.mesh(NORTH_REGION).subs.interested(keyexpr)
     }
@@ -4655,8 +4643,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.mesh_hats().map(|h| h.subs.count()).sum()
     }
 
-    /// Install the full §5.16 interceptor configuration — the router twin of
-    /// [`LinkstateForwarder::set_interceptors`](crate::linkstate_forward::LinkstateForwarder::set_interceptors).
+    /// Install the full §5.16 interceptor configuration.
     /// Builds BOTH the ingress and egress chains from ONE [`InterceptorConfig`] in
     /// zenoh's fixed factory order; a later call REPLACES both (no accumulation), so
     /// a re-config is idempotent. Empty config -> both chains empty -> every message
@@ -4755,8 +4742,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Whether the INGRESS chain admits this inbound `msg` arriving on face `id` —
-    /// the router twin of
-    /// [`LinkstateForwarder::admit_inbound`](crate::linkstate_forward::LinkstateForwarder).
+    /// the INGRESS interceptor gate.
     /// Consulted at the top of [`forward`](FaceForwarder::forward) ahead of the
     /// kind-dispatch. Empty chain (no ACL) admits without touching the face table.
     fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> InterceptorVerdict {
@@ -5101,8 +5087,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// SSOT. The `state.tier == tier` gate is the load-bearing router property
     /// (the module docs' CRITICAL note): a `routers_net` flood reaches only
     /// Router faces and a `linkstatepeers_net` flood only Peer faces, so the two
-    /// nets' psid spaces never cross-inject. The single-net
-    /// `LinkstateForwarder`(crate::linkstate_forward) gates on a `gossip_target`
+    /// nets' psid spaces never cross-inject. The retired single-net
+    /// forwarder gated on a `gossip_target`
     /// role matcher instead, which CANNOT separate the router's two nets
     /// (`default_gossip_target(Router) == default_gossip_target(Peer)`), hence
     /// the router's own per-tier fan-out. Holds only the `faces` borrow; a
@@ -5249,8 +5235,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // §5.16 EGRESS access control (y113): gate the built message by the
         // DESTINATION face's subject before it leaves — a denied outbound is
         // dropped for THIS face (not sent, not counted) and witnessed. The
-        // router twin of `LinkstateForwarder::fan_out`'s `admit_outbound`
-        // gate; empty chain (no ACL) is a no-op fast path.
+        // outbound interceptor gate; empty chain (no ACL) is a no-op fast path.
         let verdict = self.admit_outbound(id, state, &msg, known);
         if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped.bump();
@@ -5311,8 +5296,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Flood self's GAINED-link event within `tier`'s net (the
-    /// [`register`](FaceForwarder::register) path), the per-net mirror of
-    /// [`LinkstateForwarder::register`]'s `flood_link_added`: the NEW face is
+    /// [`register`](FaceForwarder::register) path), the per-net form of the
+    /// retired single-net forwarder's `flood_link_added`: the NEW face is
     /// bootstrapped with `net`'s FULL topology; every EXISTING face OF THE SAME
     /// TIER gets the minimal delta (the `[neighbour zid-only, self links-only]`
     /// pair when the neighbour is new to the graph, else just self's
@@ -6502,7 +6487,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the flood, and a push there would be a duplicate declaration). The pin's peer hat
         // reports such an interest as a peers source
         // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_publishers`). The peer
-        // plane's admission is the same, `LinkstateForwarder::respond_to_interest`.
+        // node's admission is the same, as it runs this forwarder.
         #[cfg(feature = "adminspace-introspection-handlers")]
         if interest.f() && !self.is_client_face(inbound) {
             if let Some(t) = target.as_deref() {
@@ -7491,8 +7476,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
-    /// of [`LinkstateForwarder::forward_push`], calling the shared
+    /// Route a data `Push` WITHIN its inbound tier's mesh (C1), calling the shared
     /// `compute_push_forward` core on the INBOUND tier's `(net, subs)` and
     /// fanning the result out tier-scoped. This is the WITHIN-TIER half only: it
     /// maps to zenoh's non-cross-tier route blocks — a peer-sourced Push to
@@ -7703,7 +7687,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// client->peer blackhole: a client's Put now reaches subscribing MESH peers,
     /// not just other clients ([`deliver_to_client_subscribers`], C3a). A client
     /// is a leaf below exactly ONE router, so SELF is the unique origin node in
-    /// each net; this mirrors `LinkstateForwarder::publish` via the shared
+    /// each net; this is the retired single-net forwarder's `publish`, via the shared
     /// `compute_self_publish_forward` core (self as tree root, node_id 0, fresh
     /// per-net hop budget) — NOT the transit `compute_push_forward`, which
     /// would DROP a client source (the client zid is not a mesh node, so
@@ -7820,7 +7804,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// Recompute `tier`'s spanning trees and re-advertise its NATIVE subscription
     /// and queryable interest to whatever NEW children the recompute produced
-    /// (C1) — the per-tier mirror of `LinkstateForwarder`'s
+    /// (C1) — the per-tier form of the retired single-net forwarder's
     /// `recompute_and_advertise`, so a declaration made before a peer joined
     /// converges onto the new branch. Both tables re-advertise through the shared
     /// `re_advertise_interest_into` core bound to THIS tier's net (its psid
@@ -7907,7 +7891,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Flood a re-advertised declaration to a tree-recompute's NEW children within
-    /// `tier` — the per-tier analogue of `LinkstateForwarder`'s
+    /// `tier` — the per-tier analogue of the retired single-net forwarder's
     /// `flood_to_children`. No inbound face to exclude: self is the re-advertise
     /// source, and the delta already names exactly the newly-gained children.
     fn flood_delta_tier(&self, tier: Region, children: &[Zid], declare: &DeclareOwned) {
@@ -8644,7 +8628,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// Flood a self-sourced declaration for `keyexpr` (node_id 0) to self's tree
     /// children in `tier`'s net — the immediate advertisement/withdrawal seam.
-    /// Mirrors `LinkstateForwarder`'s `declare_subscription` flood, but keyed on
+    /// Like the retired single-net forwarder's `declare_subscription` flood, but keyed on
     /// the DERIVED client interest, not a stored self-native.
     fn flood_self_sourced(
         &self,
@@ -8728,8 +8712,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Register a queryable HOSTED BY THIS router (§5.23 `adminspace-router-
-    /// linkstate`) — the router twin of the peer
-    /// [`LinkstateForwarder::register_local_queryable`](crate::linkstate_forward::LinkstateForwarder::register_local_queryable).
+    /// linkstate`).
     /// Stores the handler in [`local_queryables`](Self#structfield.local_queryables)
     /// (so a matching GET self-dispatches at the `route_request` empty-route tail)
     /// AND advertises the self-hosted queryable into BOTH meshes — a self-host is a
@@ -8832,9 +8815,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// R2393 (§5.21) — register a subscriber HOSTED BY THIS ROUTER: the Push-plane
-    /// twin of [`register_local_queryable`](Self::register_local_queryable) and the
-    /// router counterpart of
-    /// [`LinkstateForwarder::register_local_subscriber`](crate::linkstate_forward::LinkstateForwarder::register_local_subscriber).
+    /// twin of [`register_local_queryable`](Self::register_local_queryable).
     ///
     /// Stores the handler in
     /// `local_subscribers` — so a routed Put
@@ -9029,8 +9010,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Item 751, step 6 — take back the subscribers this node hosts on `keyexpr`: the inverse of
-    /// [`register_local_subscriber`](Self::register_local_subscriber), and the twin of
-    /// [`LinkstateForwarder::undeclare_subscription`](crate::linkstate_forward::LinkstateForwarder::undeclare_subscription).
+    /// [`register_local_subscriber`](Self::register_local_subscriber).
     /// A retracted subscriber stops receiving at once, including what was queued for it, and the
     /// interest is withdrawn from every mesh unless a client or another hosted subscriber still
     /// holds it (the same fold that decided the registration). Answers whether one was hosted.
@@ -9169,8 +9149,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// R2393 — deliver a routed Put to any subscriber HOSTED BY THIS ROUTER whose
     /// declared pattern matches the concrete key: the Push-plane twin of
-    /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) and the router
-    /// counterpart of `LinkstateForwarder::dispatch_local_subscribers`.
+    /// [`dispatch_local_queryables`](Self::dispatch_local_queryables).
     ///
     /// RUNNING A HANDLER (`docs/router-task-per-face.md`, phase 3e): the matching handlers are
     /// cloned out of `local_subscribers` and run one at a time, each through [`Hosted::call`], so
@@ -9403,8 +9382,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// Item 751, step 6 — originate a Put as THIS node's own session. The twin of
-    /// [`LinkstateForwarder::publish`](crate::linkstate_forward::LinkstateForwarder::publish).
+    /// Item 751, step 6 — originate a Put as THIS node's own session.
     ///
     /// The pin routes a node's own put as a message from a face of its own, in
     /// the `Local` region (`zenoh/src/net/routing/gateway.rs` @
@@ -10758,8 +10736,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// A `Response` (a queryable's reply to a routed Query) arrived on `inbound`:
     /// route it BACK toward the querier via the pending-query table (C5c) — the
-    /// reverse of [`route_request`](Self::route_request)'s allocate, the router
-    /// twin of [`LinkstateForwarder::forward_response`]. The response's
+    /// reverse of [`route_request`](Self::route_request)'s allocate. The response's
     /// `request_id` is the local qid THIS router stamped on the Request it
     /// forwarded out `inbound`; look it up ([`PendingQueries::peek`], NOT taking —
     /// more replies may follow), rewrite the `request_id` back to the recorded
@@ -10829,8 +10806,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `inbound`: FREE this branch's pending entry and — only when it was the
     /// fan's LAST live branch — route the closing final BACK toward the querier
     /// (C5c), the [`PendingQueries::take`] twin of
-    /// [`forward_response`](Self::forward_response)'s peek, the router twin of
-    /// [`LinkstateForwarder::forward_response_final`]. A Query the router fanned
+    /// [`forward_response`](Self::forward_response)'s peek. A Query the router fanned
     /// to several queryables (`QueryTarget::All` / `AllComplete` / BestMatching's
     /// fall-back — across BOTH mesh tiers and clients) must close upstream exactly
     /// ONCE, after ALL branches finalize: a NON-last final is ABSORBED (the
@@ -10867,8 +10843,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         });
     }
 
-    /// Reap pending query BRANCHES past their deadline (C5c) — the router twin
-    /// of [`LinkstateForwarder::reap_timed_out_queries`], the wz form of zenoh's
+    /// Reap pending query BRANCHES past their deadline (C5c) — the wz form of zenoh's
     /// per-branch `QueryCleanup::run` (`dispatcher/queries.rs:305-349`). The
     /// [`tick`](FaceForwarder::tick) calls this each coalescing window: sweep the
     /// pending table ([`PendingQueries::expired`]) for branches whose
@@ -10901,15 +10876,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Total live pending query branches — the pending-table witness the shutdown
-    /// summary (and a test) reads; the router twin of
-    /// [`LinkstateForwarder::pending_len`].
+    /// summary (and a test) reads.
     pub fn pending_len(&self) -> usize {
         self.pending.guard().len()
     }
 
     /// Total pending query BRANCHES reaped by the timeout sweep (a 2-branch fan
-    /// expiring counts 2) — the GC witness; the router twin of
-    /// [`LinkstateForwarder::pending_timed_out`].
+    /// expiring counts 2) — the GC witness.
     pub fn pending_timed_out(&self) -> usize {
         self.timed_out.get()
     }
@@ -11160,8 +11133,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// §5.16 INGRESS access control (y113): consult the ingress chain ONCE for a message from
     /// face `id`, ahead of the kind-dispatch — a denied message is dropped (not counted as
-    /// received Push/Query, not routed) and witnessed. The router twin of
-    /// `LinkstateForwarder::forward`'s admit_inbound gate; the empty-chain fast path (no ACL) is
+    /// received Push/Query, not routed) and witnessed. The empty-chain fast path (no ACL) is
     /// a single predicate read.
     fn admits_ingress(&self, id: FaceId, message: &NetworkMessage) -> bool {
         let verdict = self.admit_inbound(id, message);
@@ -11311,7 +11283,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // guard skips the petgraph self-EDGE but does NOT scrub that
                 // `node.links` entry, so the self-loop still floods. zenoh relies
                 // on its transport manager never handing `add_link` a
-                // self-transport; wz guards it here (mirror in `LinkstateForwarder`).
+                // self-transport; wz guards it here.
                 peer_zid_routing(actions)
                     .filter(|neighbour| *neighbour != self_zid)
                     .map(|neighbour| {
@@ -12130,8 +12102,7 @@ impl FaceForwarder for RouterForwarder {
     }
 }
 
-/// The per-message [`InterceptorContext`] for one router face — the router twin of
-/// `LinkstateForwarder`(crate::linkstate_forward)'s `FaceContext`. Borrows the
+/// The per-message [`InterceptorContext`] for one router face. Borrows the
 /// face's state so an enforcer reads the subject (the peer's routing zid) and
 /// resolves a governed message's keyexpr against that face's link-local alias
 /// table. Serves BOTH flows: the inbound face for ingress, the destination face
@@ -12173,8 +12144,8 @@ impl InterceptorContext for RouterFaceContext<'_> {
 }
 
 /// The production [`InterceptorSink`](crate::interceptor::InterceptorSink) impl for
-/// the router — the typed config SSOT drives the live forwarder through this seam
-/// (parity with `LinkstateForwarder`(crate::linkstate_forward)). Delegates to the
+/// the router — the typed config SSOT drives the live forwarder through this seam.
+/// Delegates to the
 /// inherent [`set_interceptors`](RouterForwarder::set_interceptors).
 impl crate::interceptor::InterceptorSink for RouterForwarder {
     fn set_interceptors(&self, config: crate::interceptor::InterceptorConfig) {

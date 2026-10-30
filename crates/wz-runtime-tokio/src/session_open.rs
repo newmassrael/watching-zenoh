@@ -1242,7 +1242,7 @@ impl BoundListener {
     ///
     /// This matters because these strings are not diagnostics: `run_router` /
     /// `run_peer` hand them to `set_self_locators`, which floods them through
-    /// `LinkstateForwarder` into the neighbour graph and hence to peers.
+    /// the forwarder into the neighbour graph and hence to peers.
     ///
     /// The match is WILDCARD-FREE, like [`Self::supports_mesh_multi_peer`] and
     /// [`Self::transport_name`]: a new variant must state its advertised scheme
@@ -6994,7 +6994,7 @@ mod tests {
     // separates them by `rel` (`io/zenoh-link/src/lib.rs:165-171`), so an
     // unknown scheme lands on its `_ => bail!("Unicast not supported")` arm
     // (:183). These strings are FLOODED to peers via `set_self_locators` ->
-    // `LinkstateForwarder` -> the neighbour graph, so they are a wire surface.
+    // the forwarder -> the neighbour graph, so they are a wire surface.
 
     #[cfg(all(feature = "transport-link-unixsock", unix))]
     #[tokio::test]

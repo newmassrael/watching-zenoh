@@ -24,7 +24,8 @@
 //!   wz's proactive push and by pico replaying its OWN `_remote_tokens` cache
 //!   (`vendor/zenoh-pico/src/net/liveliness.c:133-163`).
 //! - A `--peer` node cannot either, and for a reason worth stating plainly because
-//!   R311y461 got it wrong: `--peer` builds a `LinkstateForwarder`
+//!   R311y461 got it wrong: `--peer` then built a single-net `LinkstateForwarder` (retired at
+//!   item 751 step 7c-2; the peer node runs the region-hat forwarder now)
 //!   (`wz-ap-demo/src/runner.rs:2465`), which — **when this file was written** —
 //!   had NO client-token plane at all: its only two mentions of one were comments
 //!   pointing AT the router's, and the entire plane (`ingest_client_token`,

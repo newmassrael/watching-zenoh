@@ -21,6 +21,11 @@
 //!   (`wz::runtime_tokio::linkstate_forward::{AutoConnect, TransportWeight, AclPolicy, ..}`).
 //!
 //! `routing-router-hat`-gated: the cores have no caller without the forwarder.
+//!
+//! The name stays. What is here is still the forwarding cores over a link-state net, and
+//! `wz::runtime_tokio::linkstate_forward::{..}` is the path a deploy names its policy and its
+//! configuration by, so a rename would move a public path to say what the module's doc already
+//! says (item 751 step 7c-2 left the name for that reason).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
