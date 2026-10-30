@@ -299490,6 +299490,40 @@
         "The new generator may move the fixed images' text and stack figures; Layer Q and the kit were not read at this pin, so the footprint baselines and resource_budget.json rows are the next hosted read's to correct. Other sessions that call encode_to_vec on a may-fail codec now get a Result and a total codec still gets a Vec; generic code over a sink needs the CodecError: From<S::Error> bound. emit_algorithm and the two deadline algorithm documents (ADR 0063) are next; the Rust deadline functions stay until then."
       ]
     },
+    "Round 3943": {
+      "decision_summary": "The two deadline functions of the observation plane are SCE algorithm documents now. SCE's ADR 0063 gave the language wrappingSub and saturatingSub, and the pin of the last round carries it, so sources/algorithms/tick_elapsed.scxml and tick_until_due.scxml state them, Codegen::emit_algorithm in wz-codegen-build writes them (the document's name= is the file and the function), xtask regenerates them into out/wz-session-core, and wrapping_ticks::elapsed and until_due are the generated functions that the supervisor and Sampler::until_due_us call. They are no longer const fn, which the generator does not emit and nothing used. The Rust wrap test stays the oracle: it now holds the generated bodies to the standard library's wrapping_sub and saturating_sub over the edges of the range, so a generator that changed what either subtraction means is seen. The Decided entry of the plan records it.",
+      "changes_bullets": [
+        "`sources/algorithms/tick_elapsed.scxml`, `tick_until_due.scxml`: the two documents, copied in shape from SCE's fixtures with wz's header; `crates/wz-codegen-build/src/lib.rs`: `Codegen::emit_algorithm`; `xtask/src/main.rs`: the emit step into out/wz-session-core.",
+        "`out/wz-session-core/tick_elapsed.rs`, `tick_until_due.rs`: generated.",
+        "`crates/wz-session-core/src/wrapping_ticks.rs`: the module includes the generated functions and re-exports them as `elapsed` and `until_due`, with two tests (the generated bodies against the standard library's arithmetic over the edges, and the overdue and wrapped cases); `resource_snapshot.rs`: `Sampler::until_due_us` calls `until_due`.",
+        "`docs/observation-plane.md`: Decided item 2 records that it is done."
+      ],
+      "verification_bullets": [
+        "On a build host: the 4 wrapping_ticks tests, the 27 resource_snapshot tests of wz-session-core, the 8 supervision tests with all features, the 6 resource_snapshot tests of wz-runtime-tokio with the capability and the pico observation_links test pass; clippy with warnings denied is clean for wz-session-core (default and all features) and wz-codegen-build. scripts/regen-codegen.sh ran clean and the two files are what it wrote. The pre-push static array ran 121 gates and none failed. Not run: the hosted layers, Layer Q, the nondefault lanes other than all-features, and the C11 emit of the two documents."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Open: the C11 backend could emit the same two documents for the C ABI, which no consumer asks for yet; a gate that the by-hand cfg! feature lists match the crates' features; the zenoh-c doors; the host source on platforms without /proc; a test that asks the demo router for a snapshot with a joined multicast group; rustdoc and the wide nondefault leg for the plane changes; Layer Q and the kit were not read at the new SCE pin."
+      ],
+      "publishable_decision_summary": "The two deadline functions of the observation plane are SCE algorithm documents now. SCE's ADR 0063 gave the language wrappingSub and saturatingSub, and the pin of the last round carries it, so sources/algorithms/tick_elapsed.scxml and tick_until_due.scxml state them, Codegen::emit_algorithm in wz-codegen-build writes them (the document's name= is the file and the function), xtask regenerates them into out/wz-session-core, and wrapping_ticks::elapsed and until_due are the generated functions that the supervisor and Sampler::until_due_us call. They are no longer const fn, which the generator does not emit and nothing used. The Rust wrap test stays the oracle: it now holds the generated bodies to the standard library's wrapping_sub and saturating_sub over the edges of the range, so a generator that changed what either subtraction means is seen. The Decided entry of the plan records it.",
+      "publishable_changes_bullets": [
+        "`sources/algorithms/tick_elapsed.scxml`, `tick_until_due.scxml`: the two documents, copied in shape from SCE's fixtures with wz's header; `crates/wz-codegen-build/src/lib.rs`: `Codegen::emit_algorithm`; `xtask/src/main.rs`: the emit step into out/wz-session-core.",
+        "`out/wz-session-core/tick_elapsed.rs`, `tick_until_due.rs`: generated.",
+        "`crates/wz-session-core/src/wrapping_ticks.rs`: the module includes the generated functions and re-exports them as `elapsed` and `until_due`, with two tests (the generated bodies against the standard library's arithmetic over the edges, and the overdue and wrapped cases); `resource_snapshot.rs`: `Sampler::until_due_us` calls `until_due`.",
+        "`docs/observation-plane.md`: Decided item 2 records that it is done."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the 4 wrapping_ticks tests, the 27 resource_snapshot tests of wz-session-core, the 8 supervision tests with all features, the 6 resource_snapshot tests of wz-runtime-tokio with the capability and the pico observation_links test pass; clippy with warnings denied is clean for wz-session-core (default and all features) and wz-codegen-build. scripts/regen-codegen.sh ran clean and the two files are what it wrote. The pre-push static array ran 121 gates and none failed. Not run: the hosted layers, Layer Q, the nondefault lanes other than all-features, and the C11 emit of the two documents."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the C11 backend could emit the same two documents for the C ABI, which no consumer asks for yet; a gate that the by-hand cfg! feature lists match the crates' features; the zenoh-c doors; the host source on platforms without /proc; a test that asks the demo router for a snapshot with a joined multicast group; rustdoc and the wide nondefault leg for the plane changes; Layer Q and the kit were not read at the new SCE pin."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
