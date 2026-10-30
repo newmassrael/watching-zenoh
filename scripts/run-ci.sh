@@ -11027,6 +11027,15 @@ layer_c1co_pico_client_dials_a_listener() {
         cargo test -p wz-capi-pico --no-default-features \
         --features "engine-coop,link-udp,scout" \
         --test open_scouts_for_a_locator || return 1
+    # A sixth: the observation plane's instruments hosted by the cooperative engine with no task
+    # and no tokio engine in the build (`docs/observation-plane.md` M3). The supervisor and the
+    # event log are the node's and not a session's (`wz-capi-port`'s `observation`), so the same
+    # two door tests the default build runs run here, one test each, and a build that stopped
+    # linking them without the tokio engine would fail to compile or to run them.
+    _runci_guarded_test "C1co observation plane engine-coop" 2 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features "engine-coop,link-udp,supervision,event-ring,clock-source,resource-snapshot" \
+        --test supervision_doors --test event_log_doors || return 1
 }
 
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────

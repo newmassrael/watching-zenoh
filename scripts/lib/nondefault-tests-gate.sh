@@ -330,6 +330,12 @@ transport-link-unixpipe,transport-link-ws|"
     # clock's time on an event, a supervision expiry written as an event, the ring's loss count in
     # the snapshot (`observation_links`, which `Cargo.toml` requires all four features for).
     "wz-capi-pico|hook|clock-source,event-ring,supervision,resource-snapshot,peer|--test=observation_links"
+    # What those doors do, once, in the port both C ABIs and both engines share
+    # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
+    "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot|"
+    # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
+    # a build made as the reference is compiles none of.
+    "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot|"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the

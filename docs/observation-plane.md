@@ -261,9 +261,8 @@ and operation traces are what a differential run between the two would be fed.
 * The deadline is a pure comparison of `now`, `last_feed` and `timeout` over the monotonic
   `TimeSource`, `now - last_feed >= timeout` taken modulo 2^32 (`supervisor::elapsed`), so a wrap
   of a 32-bit tick counter is the ordinary case; a timeout past `2^31 - 1` ticks is refused where
-  it is set. It is written in Rust with a test across a wrap and NOT yet as an SCE `algorithm`
-  document: that generation is open, and is the part of this item that waits on the choice of
-  whether an `algorithm` kind is worth a generator for one comparison.
+  it is set. It is an SCE `algorithm` document (`sources/algorithms/tick_elapsed.scxml`, Decided
+  2), held to the standard library's wrapping subtraction by a test over the edges of the range.
 * Landed (step 4b): `wz_session_core::supervisor::Supervisor<N>`, `N` machines, healthy only while
   at least one checkpoint is supervised and every supervised one is armed (a supervisor watching
   nothing is not healthy, so a watchdog is not fed on the strength of nothing), with the limit
@@ -275,9 +274,11 @@ and operation traces are what a differential run between the two would be fed.
   cadence, the hook runs on that thread with no lock of the library held (so it may call any door,
   and a stop of its own checkpoint is refused until it returns), and time is milliseconds on the
   monotonic clock in 32 wrapping bits. The same doors are the zenoh-c ABI's too
-  (`wz_capi_c_supervision_*`, see Decided 4). Not yet: the hosting test on the cooperative engine.
-* Who calls `check` is the `exec` axis and not a new switch: the cooperative engine calls it
-  every turn of its loop; a build with tasks gives it one. The supervisor itself has no task.
+  (`wz_capi_c_supervision_*`, see Decided 4), and the doors' two tests run on the cooperative
+  engine's build, with no tokio engine and no task (Layer C1co, `engine-coop`).
+* Who calls `check` is the program's, on the `exec` axis and not a new switch: a program on the
+  cooperative engine calls it on each turn of its own loop; a build with tasks may give it one.
+  The supervisor itself has no task, and the library calls `check` from nowhere.
 
 **Tests.** Conformance over every event order of the machine. A property test of the comparison
 across a counter wrap. A host test on the cooperative engine with no task present.
