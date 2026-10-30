@@ -2272,13 +2272,20 @@ mod tests {
     /// A manager that held them would pass every other test here and overflow that stack, which
     /// round 3613 did and this bound exists to refuse. The bound is loose on purpose: it says
     /// "a few rows and some references", not an exact figure a field would move.
+    ///
+    /// The store's side of it is relative to the manager and not a byte count: a machine's size
+    /// moves with the frames a refactor brings down (the store of the default rows was over 8 KiB
+    /// when this was written and 3,456 bytes after the machines shrank), and a floor in bytes then
+    /// failed on a store that still held every machine. What the test needs is that the machines
+    /// are the larger part, so the store must stay well above the manager.
     #[test]
     fn the_manager_does_not_carry_the_machines_of_its_peers() {
         let manager = core::mem::size_of::<ConnectManager<FakeDialer>>();
         let store = core::mem::size_of::<PeerStore>();
         std::assert!(
-            store > 8 * 1024,
-            "the store is where the machines are ({store} bytes), or this test guards nothing"
+            store > 2 * manager,
+            "the store is where the machines are ({store} bytes) and must be well above the \
+             manager ({manager} bytes), or this test guards nothing"
         );
         std::assert!(
             manager < 4 * 1024,
