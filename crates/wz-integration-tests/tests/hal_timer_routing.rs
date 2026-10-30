@@ -112,6 +112,10 @@ impl StatePolicy for TimerProbePolicy {
     // queue — the behaviour-preserving choice vs the pre-bump default.
     type EventQueue = sce_rust_runtime::EventQueue<Self::Payload>;
     type ScheduledSendId = sce_rust_runtime::SceString;
+    // The probe arms delayed sends, so it keeps the queue for them; its document has no
+    // `<final>` with a `<donedata>`, so it keeps no slot for one (SCE ADR 0075).
+    type Scheduler = sce_rust_runtime::PullScheduler<Self::ScheduledSendId>;
+    type DoneData = sce_rust_runtime::NoDoneData;
     // What a document's state tree bounds, which a generated machine's policy
     // reads off its document: this one is a single state with no `<history>`
     // and no transition of its own, one level below `<scxml>`, so a
