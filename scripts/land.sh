@@ -154,9 +154,20 @@ while :; do
             exit 5
         fi
         echo "land: filing ledger round $round"
+        # What the tree already differs from the index by is not the append's: a submodule whose
+        # checkout sits at another commit than the one recorded, or a file another session is
+        # editing in this tree, shows in `git diff` before the append writes anything. Rounds
+        # 3969 to 3971 each carried such a pointer into their ledger commit and moved the
+        # recorded SCE pin three times in a row. Only the paths the append itself changed are
+        # the round's.
+        before="$(git diff --name-only)"
         bash scripts/append-round.sh --entry-id "Round $round" "${ledger_args[@]}"
         changed=()
         while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            if grep -qxF -- "$path" <<<"$before"; then
+                continue
+            fi
             changed+=("$path")
         done < <(git diff --name-only)
         [[ ${#changed[@]} -gt 0 ]] || { echo "land: the append changed no file" >&2; exit 1; }
