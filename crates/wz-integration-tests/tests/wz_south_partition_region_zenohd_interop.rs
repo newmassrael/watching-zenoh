@@ -31,8 +31,8 @@
 //!
 //! ## What it reaches, and what it cannot
 //!
-//! The demo probes are nodes on the `auto` preset (no wz node reads the key
-//! yet), so they announce no `RemoteBound` and every probe takes the arms of the
+//! The demo probes of the first legs are nodes on the `auto` preset (they state
+//! no partition), so they announce no `RemoteBound` and every probe takes the arms of the
 //! pin's match where the remote announced nothing: the auto table, "our rule
 //! puts it south", and "our rule puts it north, which the auto table must agree
 //! with", the last of which zenohd REFUSES for a client below a router. Of the
@@ -44,6 +44,12 @@
 //! The probes are three partitions: three rules whose order, negation and
 //! role set all matter; an empty list, which puts everyone north; and one rule
 //! that matches everyone.
+//!
+//! The last two legs are the same claim for the other node that holds a
+//! region-hat forwarder: a wz `--peer` process started with `--gateway-south`
+//! announces its bound on the Open it sends, and zenohd's logged decision for it
+//! is the one the pin's rule gives a remote that announced that bound, against a
+//! control started without the flag.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -183,13 +189,18 @@ fn strip_ansi(s: &str) -> String {
 
 /// A zenohd router config whose `gateway.south` is `south`, verbatim.
 fn zenohd_config(tcp: u16, south: &str) -> tempfile::NamedTempFile {
+    zenohd_config_in_mode("router", tcp, south)
+}
+
+/// [`zenohd_config`] for a zenohd of any mode (`router`, `peer`).
+fn zenohd_config_in_mode(mode: &str, tcp: u16, south: &str) -> tempfile::NamedTempFile {
     let mut config = tempfile::Builder::new()
         .suffix(".json5")
         .tempfile()
         .expect("zenohd config file");
     write!(
         config,
-        "{{ mode: \"router\", listen: {{ endpoints: [\"tcp/127.0.0.1:{tcp}\"] }}, \
+        "{{ mode: \"{mode}\", listen: {{ endpoints: [\"tcp/127.0.0.1:{tcp}\"] }}, \
          scouting: {{ multicast: {{ enabled: false }} }}, \
          gateway: {{ south: {south} }} }}"
     )
@@ -627,14 +638,25 @@ async fn zenohd_places_a_wz_router(south: &str) -> (String, Option<Bound>) {
 /// What zenohd's own rule makes of a remote router that announced `bound`, as
 /// wz's region function words it: zenohd is a router on the `auto` preset.
 fn zenohd_should_decide(bound: Option<Bound>) -> String {
-    let wire = zenoh_hex_to_zid(WZ_ROUTER_ZID).expect("a valid zid");
+    zenohd_should_decide_for(WhatAmI::Router, WZ_ROUTER_ZID, WhatAmI::Router, bound)
+}
+
+/// [`zenohd_should_decide`] for a zenohd of any mode on the `auto` preset and a
+/// remote of any role and zid.
+fn zenohd_should_decide_for(
+    own: WhatAmI,
+    zid: &str,
+    whatami: WhatAmI,
+    bound: Option<Bound>,
+) -> String {
+    let wire = zenoh_hex_to_zid(zid).expect("a valid zid");
     let facts = RemoteFacts {
         zid: &wire,
-        whatami: WhatAmI::Router,
+        whatami,
         region_name: None,
         interfaces: &["lo"],
     };
-    match region_of(WhatAmI::Router, &SouthPartition::Auto, &facts, bound) {
+    match region_of(own, &SouthPartition::Auto, &facts, bound) {
         Ok((r, b)) => format!("Ok(({}, {}))", render_region(r), render_bound(b)),
         Err(e) => format!("Err({e}"),
     }
@@ -669,4 +691,124 @@ async fn zenohd_places_a_wz_router_that_announces_nothing_beside_it() {
     );
     assert_eq!(region, "Ok((North, North))");
     assert_eq!(region, zenohd_should_decide(announced));
+}
+
+// ── the bound a wz PEER announces on its Open, as zenohd reads it ──
+
+/// The zid of the wz peer process, as zenoh spells it.
+const WZ_PEER_ZID: &str = "f1b2c3d4";
+
+/// Start a zenohd PEER on the `auto` preset, dial it with a wz `--peer` process
+/// whose south is partitioned as `south` (no flag when `None`), and return what
+/// zenohd decided for wz (`compute_region_of`'s return text).
+///
+/// The reference node is a peer and not a router on purpose. A wz peer whose
+/// subregion takes a ROUTER remote is refused by the pin's own rule on its side
+/// (`zenoh/src/net/runtime/region.rs` @ `Router regions cannot be subregions of non-router regions (unsupported)`),
+/// so no peer announces a south bound to a router; what a peer node can put in
+/// its south is another peer, which is what a zenohd peer is.
+fn zenohd_places_a_wz_peer(south: Option<&str>) -> String {
+    let port = PortReservation::pick();
+    let tcp = port.port();
+    let config = zenohd_config_in_mode("peer", tcp, r#""auto""#);
+    let log = tempfile::tempfile().expect("zenohd log");
+    let mut log_reader: File = log.try_clone().expect("dup log handle");
+    let mut zenohd = ChildGuard::wrap(
+        "zenohd (reference peer)",
+        Command::new(zenohd_binary())
+            .arg("-c")
+            .arg(config.path())
+            .args(["--rest-http-port", "none"])
+            .env("RUST_LOG", "zenoh=debug")
+            .stdout(Stdio::from(log.try_clone().expect("dup log handle")))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("spawn zenohd"),
+    );
+    if let Err(e) = wait_for_tcp_accept_alive(zenohd.child_mut(), tcp, ZENOHD_TCP_ACCEPT_BUDGET) {
+        panic!("zenohd (reference peer): {e}");
+    }
+    let dial = format!("127.0.0.1:{tcp}");
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+
+    let mut command = Command::new(&demo);
+    command.args(["--peer", "127.0.0.1:0", "--key", "demo/x"]);
+    if let Some(south) = south {
+        command.args(["--gateway-south", south]);
+    }
+    command
+        .args(["--zid", WZ_PEER_ZID, "--connect", &dial])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut node = ChildGuard::wrap(
+        "wz peer (partitioned)",
+        command.spawn().expect("spawn the wz peer"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let region = loop {
+        let text = read_captured(&mut log_reader);
+        if let (_, Some(region)) = decisions_in(&text, WZ_PEER_ZID) {
+            break region;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "zenohd never logged a region for the wz peer\n--- zenohd log ---\n{}",
+                strip_ansi(&text)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = node.child_mut().kill();
+    let _ = node.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    region
+}
+
+/// THE CLAIM: a wz peer started with a partition whose one open subregion puts
+/// the zenohd peer in its south announces SOUTH on its Open, and zenohd, reading
+/// it, places the peer in its north with wz as its gateway, as the pin's rule does
+/// for a remote that announced south. The control below is the same peer without
+/// the flag, and the two readings differ, or the flag reached the wire no more
+/// than it does without it.
+// wz-proves: none -- the Open's bound announcement of a peer node read by zenohd;
+// no atom's claim, the router's twin is the legs above.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
+fn zenohd_places_a_wz_peer_that_calls_it_south_below_wz() {
+    let region = zenohd_places_a_wz_peer(Some(ONE_OPEN_SUBREGION));
+    assert_eq!(
+        region,
+        zenohd_should_decide_for(
+            WhatAmI::Peer,
+            WZ_PEER_ZID,
+            WhatAmI::Peer,
+            Some(Bound::South)
+        ),
+        "zenohd read the peer's announcement as the pin's rule reads a south bound"
+    );
+    assert_eq!(region, "Ok((North, South))");
+}
+
+/// THE CONTROL: the same peer without `--gateway-south` announces nothing, and
+/// zenohd places it by its own rule for a peer that announced nothing.
+// wz-proves: none -- harness control for the leg above.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
+fn zenohd_places_a_wz_peer_that_announces_nothing_by_its_own_rule() {
+    let region = zenohd_places_a_wz_peer(None);
+    let announced_south = zenohd_should_decide_for(
+        WhatAmI::Peer,
+        WZ_PEER_ZID,
+        WhatAmI::Peer,
+        Some(Bound::South),
+    );
+    let announced_nothing =
+        zenohd_should_decide_for(WhatAmI::Peer, WZ_PEER_ZID, WhatAmI::Peer, None);
+    assert_ne!(
+        announced_south, announced_nothing,
+        "the two readings of the pin's rule differ, or the claim above proves nothing"
+    );
+    assert_eq!(region, announced_nothing);
 }

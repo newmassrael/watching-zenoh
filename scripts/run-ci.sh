@@ -21114,10 +21114,11 @@ layer_z_zenohd_interop() {
     # Open-debt item 751 -- the region a router puts a remote in when it PARTITIONS
     # its south (`gateway/south` as a list of subregions): wz's pure region function
     # against zenohd's own logged decisions, three partitions by four roles.
-    # GUARDED at 6, one per partition, the key's reader against zenohd's own
+    # GUARDED at 8, one per partition, the key's reader against zenohd's own
     # config loading, and the bound a wz router announces on its Open with its
+    # control, then the bound a wz `--peer --gateway-south` announces with its
     # control (the legs are `#[ignore]`d).
-    _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 8 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_south_partition_region_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Open-debt item 751 -- a router placed in two routers' south subregion: each
     # Put crosses the boundary once in each direction, two zenohd gateways as the

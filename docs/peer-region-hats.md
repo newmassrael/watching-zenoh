@@ -731,8 +731,13 @@ honoured, and the census pins move in the same commit.
   subregion's peers are south and not leaves. Both call sites ask the pin's predicate now
   (`a_put_from_a_subregions_peer_reaches_a_gateway_and_one_from_the_north_does_not` and its
   query twin), and the binary test `peer_gateway_south_binary` holds the flag at argv.
-  Not witnessed here: a peer with a partition against a stock zenohd, which needs the
-  foreign binary (the router's twin is `wz_south_partition_region_zenohd_interop`).
+  Witnessed afterwards, against a built zenohd, in `wz_south_partition_region_zenohd_interop`
+  (the router's legs beside it): a peer started with an open subregion announces south to a
+  zenohd PEER, which places it in its north with the peer as its gateway, and the control
+  without the flag is placed as a plain peer. The reference node is a peer because the pin
+  refuses a router in a peer node's subregion (`zenoh/src/net/runtime/region.rs` @
+  `Router regions cannot be subregions of non-router regions (unsupported)`), which a first
+  draft of the leg ran into: wz refuses it the same way and closed the handshake.
 - **7d-2, the config key (landed).** `gateway/south` moved from `UNHONOURED_BEYOND_WZ` to
   `HONOURED_CONFIG_KEYS` (its `GatewayConf` group and its not-this-key row went with it,
   the surface total is unchanged). `ZenohNodeConfig.gateway_south` carries the partition,
