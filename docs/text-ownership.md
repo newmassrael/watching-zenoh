@@ -366,6 +366,16 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   same Arm EABI variants (GCC emits them for a cleared object), so its text fell by the same 504
   bytes (145,364 to 144,860 in run 20261030T193533) and the ratio stayed 1.0031 (145,312 against
   144,860). Both images are smaller; the gap, 452 bytes, is what it was.
+- TAKEN, measured 2026-10-30: the stack contract stops counting the edge from the entry walk to
+  the Behaviour hooks (`deploy/stack_call_contracts.json`, rule `walk-entry-tables`): `walk_entry`,
+  `effective_target_states_on` and `is_in_final_state` take no Behaviour, and their four calls
+  through a register are the history and parallel procedures read from the document's tables, which
+  a document without a `<history>` and a `<parallel>` does not carry and so does not link (the rule's
+  premise, which the gate checks: no function of the image is named for either). The hooks are
+  called from `enter_states`, beside them. The bound of the fixed and batching images fell from
+  3,588 to 3,476 bytes and their main stack from 4,800 to 4,672 (128 bytes of `.bss`); the text, the
+  chain and the kit's peak, which are what the image holds and runs, did not move. The SCE owner's
+  own probe resolves each call by what its source can reach (`STACK_DYN` in its footprint budget).
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

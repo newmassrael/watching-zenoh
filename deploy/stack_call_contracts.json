@@ -6,7 +6,8 @@
   ],
   "site_pins": {
     "engine-host": {"zephyr-client-fixed": 42, "zephyr-client-fixed-batching": 42, "zephyr-client-fixed-get": 42},
-    "engine-behaviour": {"zephyr-client-fixed": 17, "zephyr-client-fixed-batching": 17, "zephyr-client-fixed-get": 17},
+    "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
+    "engine-behaviour": {"zephyr-client-fixed": 13, "zephyr-client-fixed-batching": 13, "zephyr-client-fixed-get": 13},
     "exec-drop": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
     "waker": {"zephyr-client-fixed": 8, "zephyr-client-fixed-batching": 8, "zephyr-client-fixed-get": 8},
     "planner-call": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
@@ -97,6 +98,13 @@
       "where": {"file": "engine.rs", "line": 1369},
       "callees": "mac_cyt4bf::now_us$",
       "why": "the clock source the engine was given"
+    },
+    {
+      "id": "walk-entry-tables",
+      "where": {"function": "microstep::(walk_entry|effective_target_states_on|is_in_final_state)$"},
+      "callees": "NONE",
+      "absent": "microstep::(effective_history_targets|descend_into_history|history_recorded_from|record_histories|default_regions|remove_conflicting_transitions|parallel_in_final_state)$",
+      "why": "the entry walk, the effective targets and the final-state test take the document's tables, the store and sets, and no Behaviour (microstep.rs, `walk_entry`, `effective_target_states_on`, `is_in_final_state`): their calls through a register are the history and parallel procedures read from the tables (`HISTORY` and `PARALLEL`), which a document without a <history> and a <parallel> does not carry, so none is linked (the premise: no function of the image is one of the seven procedures of the two tables). The Behaviour hooks are called from `enter_states`, beside them and not under them, and the rule below claims them there"
     },
     {
       "id": "engine-host",
