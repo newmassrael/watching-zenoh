@@ -22,7 +22,7 @@ use wz_runtime_coop::{ClockSource, CoopRuntime};
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_coop::{CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::driver_loop::IterationEvent;
-use wz_session_core::multicast_dispatch::MulticastDispatcher;
+use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::MulticastTxOffer;
 use wz_session_mcu::group_drive as group;
@@ -379,6 +379,84 @@ where
     group::spawn_multicast_session(
         local,
         session.into_group(link),
+        on_event,
+        next_tx,
+        should_stop,
+    )
+}
+
+/// A multicast session before its dispatcher exists: [`MulticastSession`] without the dispatcher,
+/// which [`spawn_multicast_session_seeded`] builds where the task keeps it. A caller that spawns
+/// the session beside others uses this one to keep the dispatcher (7.7 KB at four peers) off its
+/// own stack, where [`MulticastSession`] makes it hold two.
+pub struct MulticastSeed<const MAX_PEERS: usize> {
+    config: MulticastConfig,
+    driver: LwipMulticastDriver,
+    params: MulticastParams,
+    tick_ms: u64,
+    max_iters: Option<usize>,
+}
+
+impl<const MAX_PEERS: usize> MulticastSeed<MAX_PEERS> {
+    /// A seed over `driver`, with no test budget; the fields of [`MulticastSession`] of the same
+    /// names mean the same here, and `config` is what the dispatcher is built over.
+    pub fn new(
+        config: MulticastConfig,
+        driver: LwipMulticastDriver,
+        params: MulticastParams,
+        tick_ms: u64,
+    ) -> Self {
+        Self {
+            config,
+            driver,
+            params,
+            tick_ms,
+            max_iters: None,
+        }
+    }
+
+    /// The test budget (see [`MulticastDriveConfig::max_iters`]); `None` in production.
+    pub fn with_max_iters(mut self, max_iters: Option<usize>) -> Self {
+        self.max_iters = max_iters;
+        self
+    }
+
+    /// The shared seed over `link`, the driver paired to the lwIP link it is pumped through.
+    pub fn into_group<L: Deref<Target = LwipLink>>(
+        self,
+        link: L,
+    ) -> group::MulticastSessionSeed<LwipGroupTransport<L, LwipMulticastDriver>, MAX_PEERS> {
+        group::MulticastSessionSeed::new(
+            self.config,
+            LwipGroupTransport::new(link, self.driver),
+            self.params,
+            self.tick_ms,
+        )
+        .with_max_iters(self.max_iters)
+    }
+}
+
+/// [`spawn_multicast_session`] from a [`MulticastSeed`]: the same task, with the dispatcher built
+/// in the task and not on the caller's stack (absent under `session-slot`, as that one is).
+#[cfg(not(feature = "session-slot"))]
+pub fn spawn_multicast_session_seeded<C, L, F, G, H, const MAX_PEERS: usize>(
+    local: &CoopLocalSet<C>,
+    link: L,
+    seed: MulticastSeed<MAX_PEERS>,
+    on_event: F,
+    next_tx: G,
+    should_stop: H,
+) -> CoopLocalJoinHandle<MulticastOutcome>
+where
+    C: ClockSource + 'static,
+    L: Deref<Target = LwipLink> + 'static,
+    F: FnMut(IterationEvent<'_>) + 'static,
+    G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
+    H: FnMut() -> bool + 'static,
+{
+    group::spawn_multicast_session_seeded(
+        local,
+        seed.into_group(link),
         on_event,
         next_tx,
         should_stop,

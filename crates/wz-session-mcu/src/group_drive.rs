@@ -147,6 +147,7 @@
     )
 ))]
 use alloc::rc::Rc;
+use core::mem::MaybeUninit;
 pub use wz_runtime_coop::group_transport::GroupTransport;
 
 #[cfg(feature = "reassembly")]
@@ -158,7 +159,9 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
 use wz_session_core::link::LostCause;
-use wz_session_core::multicast_dispatch::{MulticastDispatcher, MulticastLinkDuties};
+use wz_session_core::multicast_dispatch::{
+    MulticastConfig, MulticastDispatcher, MulticastLinkDuties,
+};
 use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
 // R311mf/R311mh — multicast Fragment RX reassembly. The reassembly-divergent
@@ -1206,6 +1209,49 @@ pub struct MulticastSession<T: GroupTransport, const MAX_PEERS: usize> {
 pub async fn multicast_session_task<'g, C, T, F, G, H, const MAX_PEERS: usize>(
     runtime: CoopRuntime<C>,
     session: MulticastSession<T, MAX_PEERS>,
+    on_event: F,
+    next_tx: G,
+    should_stop: H,
+) -> MulticastOutcome
+where
+    C: ClockSource,
+    T: GroupTransport,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
+    H: FnMut() -> bool,
+{
+    let MulticastSession {
+        mut dispatcher,
+        transport,
+        params,
+        tick_ms,
+        max_iters,
+    } = session;
+    drive_group_session(
+        runtime,
+        &mut dispatcher,
+        transport,
+        params,
+        tick_ms,
+        max_iters,
+        on_event,
+        next_tx,
+        should_stop,
+    )
+    .await
+}
+
+/// The loop of a multicast session task over a dispatcher it is lent: the part of
+/// [`multicast_session_task`] and [`multicast_session_task_seeded`] that does not depend on where
+/// the dispatcher was built.
+#[allow(clippy::too_many_arguments)]
+async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
+    runtime: CoopRuntime<C>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    mut transport: T,
+    params: MulticastParams,
+    tick_ms: u64,
+    max_iters: Option<usize>,
     mut on_event: F,
     mut next_tx: G,
     mut should_stop: H,
@@ -1217,15 +1263,8 @@ where
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
-    let MulticastSession {
-        mut dispatcher,
-        mut transport,
-        params,
-        tick_ms,
-        max_iters,
-    } = session;
     let mut pump = MulticastPump::new(
-        &mut dispatcher,
+        dispatcher,
         MulticastDriveConfig {
             params: &params,
             tick_ms,
@@ -1240,6 +1279,117 @@ where
         }
         yield_now().await;
     }
+}
+
+/// A multicast session before its dispatcher exists: what [`MulticastSession`] holds apart from
+/// the dispatcher, and the config the dispatcher is built over.
+///
+/// The dispatcher is the session's one large value (its machine and `MAX_PEERS` peer slots, 7.7 KB
+/// at four peers on a 32-bit target). A [`MulticastSession`] holds it, so a caller builds it on
+/// its own stack, moves it into the session and moves the session into the task: the caller's
+/// frame held two of it at once in the two-session image (16,208 bytes against a budget of 16,384).
+/// The seed is small, so the task is spawned from a few hundred bytes and
+/// [`multicast_session_task_seeded`] builds the dispatcher where the task keeps it.
+pub struct MulticastSessionSeed<T: GroupTransport, const MAX_PEERS: usize> {
+    config: MulticastConfig,
+    transport: T,
+    params: MulticastParams,
+    tick_ms: u64,
+    max_iters: Option<usize>,
+}
+
+impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEERS> {
+    /// A seed over the group `transport`, with the same parameters and cadence as the fields of
+    /// [`MulticastSession`] of those names, and no test budget.
+    pub fn new(
+        config: MulticastConfig,
+        transport: T,
+        params: MulticastParams,
+        tick_ms: u64,
+    ) -> Self {
+        Self {
+            config,
+            transport,
+            params,
+            tick_ms,
+            max_iters: None,
+        }
+    }
+
+    /// The test budget (see [`MulticastDriveConfig::max_iters`]); `None` in production.
+    pub fn with_max_iters(mut self, max_iters: Option<usize>) -> Self {
+        self.max_iters = max_iters;
+        self
+    }
+}
+
+/// A dispatcher built inside a slot its owner keeps, and dropped there: the guard that makes
+/// [`MulticastDispatcher::new_in_place`] usable for a value that must be dropped, which a bare
+/// `MaybeUninit` is not.
+struct Placed<'s, const MAX_PEERS: usize>(&'s mut MaybeUninit<MulticastDispatcher<MAX_PEERS>>);
+
+impl<'s, const MAX_PEERS: usize> Placed<'s, MAX_PEERS> {
+    /// The dispatcher over `config`, written into `slot`, which may be uninitialised.
+    fn build(
+        slot: &'s mut MaybeUninit<MulticastDispatcher<MAX_PEERS>>,
+        config: MulticastConfig,
+    ) -> Self {
+        MulticastDispatcher::new_in_place(slot, config);
+        Self(slot)
+    }
+
+    fn get(&mut self) -> &mut MulticastDispatcher<MAX_PEERS> {
+        // SAFETY: `build` is the only way to make a `Placed`, and it wrote the dispatcher whole.
+        unsafe { self.0.assume_init_mut() }
+    }
+}
+
+impl<const MAX_PEERS: usize> Drop for Placed<'_, MAX_PEERS> {
+    fn drop(&mut self) {
+        // SAFETY: as in `get`, the slot holds a dispatcher, and nothing else drops it.
+        unsafe { self.0.assume_init_drop() }
+    }
+}
+
+/// [`multicast_session_task`] from a [`MulticastSessionSeed`]: the same task, with the dispatcher
+/// built inside the future's own state when the task first runs, and not moved into it.
+pub async fn multicast_session_task_seeded<'g, C, T, F, G, H, const MAX_PEERS: usize>(
+    runtime: CoopRuntime<C>,
+    seed: MulticastSessionSeed<T, MAX_PEERS>,
+    on_event: F,
+    next_tx: G,
+    should_stop: H,
+) -> MulticastOutcome
+where
+    C: ClockSource,
+    T: GroupTransport,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
+    H: FnMut() -> bool,
+{
+    let MulticastSessionSeed {
+        config,
+        transport,
+        params,
+        tick_ms,
+        max_iters,
+    } = seed;
+    // A local that lives across the await below lies in the future's state, so this slot is
+    // where the dispatcher is stored for as long as the task runs.
+    let mut slot = MaybeUninit::uninit();
+    let mut dispatcher = Placed::<MAX_PEERS>::build(&mut slot, config);
+    drive_group_session(
+        runtime,
+        dispatcher.get(),
+        transport,
+        params,
+        tick_ms,
+        max_iters,
+        on_event,
+        next_tx,
+        should_stop,
+    )
+    .await
 }
 
 /// Spawn one MCU multicast session onto `local` and return its join handle —
@@ -1269,6 +1419,33 @@ where
     local.spawn_local(multicast_session_task(
         local.runtime().clone(),
         session,
+        on_event,
+        next_tx,
+        should_stop,
+    ))
+}
+
+/// [`spawn_multicast_session`] from a [`MulticastSessionSeed`]: the dispatcher is built in the
+/// task and not on the caller's stack, which is what keeps a caller's frame small when it spawns
+/// the group session beside others (absent under `session-slot`, for the reason above).
+#[cfg(not(feature = "session-slot"))]
+pub fn spawn_multicast_session_seeded<C, T, F, G, H, const MAX_PEERS: usize>(
+    local: &CoopLocalSet<C>,
+    seed: MulticastSessionSeed<T, MAX_PEERS>,
+    on_event: F,
+    next_tx: G,
+    should_stop: H,
+) -> CoopLocalJoinHandle<MulticastOutcome>
+where
+    C: ClockSource + 'static,
+    T: GroupTransport + 'static,
+    F: FnMut(IterationEvent<'_>) + 'static,
+    G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
+    H: FnMut() -> bool + 'static,
+{
+    local.spawn_local(multicast_session_task_seeded(
+        local.runtime().clone(),
+        seed,
         on_event,
         next_tx,
         should_stop,

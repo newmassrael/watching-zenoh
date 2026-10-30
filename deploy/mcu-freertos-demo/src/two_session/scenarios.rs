@@ -11,7 +11,7 @@
 //! - the ROUTER it dials, an acceptor standing in for zenohd (a fixture in this
 //!   image, as the acceptor e2e's peer is: the QEMU machine has no NIC here);
 //! - a GROUP session, a peer in a multicast group, run by
-//!   `spawn_multicast_session`;
+//!   `spawn_multicast_session_seeded`;
 //! - a MEMBER socket that plays the other group member, so the group's traffic
 //!   comes from a source that is not the group session's own socket.
 //!
@@ -40,13 +40,13 @@ use wz::runtime_coop::session_runtime::new_session_actions;
 use wz::runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_freertos::{FreertosClock, FreertosEntropy};
 use wz::session_lwip::multicast_drive::{
-    spawn_multicast_session, LwipMulticastDriver, MulticastSession,
+    spawn_multicast_session_seeded, LwipMulticastDriver, MulticastSeed,
 };
 use wz::session_lwip::LwipLinks;
 use wz_codecs::push::PushOwnedVariant;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverLoopOutcome, DriverOutcome, IterationEvent};
-use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
+use wz_session_core::multicast_dispatch::MulticastConfig;
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit};
@@ -282,20 +282,18 @@ impl TwoSessions {
         let log = group_log.clone();
         let group_stop = Rc::new(Cell::new(false));
         let stop = group_stop.clone();
-        let group_task = spawn_multicast_session(
+        // A seed and not a session: the dispatcher is 7.7 KB, which a session would have this
+        // frame build and move twice before it reached the task, and the seed lets the task
+        // build it where it keeps it.
+        let group_task = spawn_multicast_session_seeded(
             &local,
             link.clone(),
-            MulticastSession {
-                dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
-                driver: LwipMulticastDriver::new(
-                    group_socket,
-                    SESSION_MULTICAST_GROUP_DEFAULT,
-                    group_port,
-                ),
-                params: group_params(GROUP_ZID, 10_000),
-                tick_ms: 5,
-                max_iters: None,
-            },
+            MulticastSeed::<4>::new(
+                MulticastConfig::new(5_000),
+                LwipMulticastDriver::new(group_socket, SESSION_MULTICAST_GROUP_DEFAULT, group_port),
+                group_params(GROUP_ZID, 10_000),
+                5,
+            ),
             move |event| {
                 log.puts.borrow_mut().extend(put_payloads(&event));
                 if let IterationEvent::MulticastPeerLost(_) = event {
