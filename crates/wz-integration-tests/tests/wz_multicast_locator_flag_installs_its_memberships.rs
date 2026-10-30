@@ -51,7 +51,12 @@ use wz_integration_tests::common::{
 /// holds an IPv6 address, from the kernel's own tables (`/proc/net/if_inet6` and
 /// sysfs). Sorted so a host with several answers the same way each run.
 fn ipv6_multicast_interface() -> String {
-    // `IFF_UP` and `IFF_MULTICAST` from `<net/if.h>`; sysfs prints the flags in hex.
+    // `IFF_UP` and `IFF_MULTICAST` from `<net/if.h>`; sysfs prints the flags in hex. They do not
+    // carry `IFF_RUNNING` (sysfs shows the device's own flags, and `0x1003` is an interface that
+    // is running as well as one that is not), so the carrier is read from its own file: an
+    // interface that is up with no carrier (a docker bridge with no container on it sorts first on
+    // a build machine) is one wz refuses to bind a multicast socket on, as upstream's
+    // `is_running` filter does, so it is no interface to name here.
     const IFF_UP: u32 = 0x1;
     const IFF_MULTICAST: u32 = 0x1000;
     let table = std::fs::read_to_string("/proc/net/if_inet6")
@@ -66,14 +71,20 @@ fn ipv6_multicast_interface() -> String {
     names
         .into_iter()
         .find(|name| {
+            let has_carrier = || {
+                // A device that is not up refuses the read, and one without a carrier says `0`.
+                std::fs::read_to_string(format!("/sys/class/net/{name}/carrier"))
+                    .is_ok_and(|s| s.trim() == "1")
+            };
             std::fs::read_to_string(format!("/sys/class/net/{name}/flags"))
                 .ok()
                 .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
                 .is_some_and(|flags| flags & IFF_UP != 0 && flags & IFF_MULTICAST != 0)
+                && has_carrier()
         })
         .expect(
-            "a non-loopback interface that is up, has IFF_MULTICAST and holds an IPv6 \
-             address; this test cannot run without one",
+            "a non-loopback interface that is up, has a carrier, has IFF_MULTICAST and holds \
+             an IPv6 address; this test cannot run without one",
         )
 }
 
