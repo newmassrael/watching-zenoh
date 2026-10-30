@@ -7878,6 +7878,60 @@ pub mod common {
         Some(parse_igmp_devices(&table, group))
     }
 
+    /// The addresses this host's interfaces hold right now, as `<device>=<address>`: every
+    /// non-loopback IPv4 or IPv6 address of an interface that is up, or `None` where the C
+    /// library cannot list them.
+    ///
+    /// A node bound to the wildcard names exactly these in the Hello it answers a Scout with,
+    /// and a scout asks once per address of a multicast interface, so a comparison of two
+    /// scouts that ran one after the other holds only while this set did not move between
+    /// them. It does move on a shared lab host (an interface is given an address for a link
+    /// and loses it again), and [`devices_holding_group`] does not see that: the device keeps
+    /// its membership while its address comes and goes.
+    pub fn host_addresses() -> Option<BTreeSet<String>> {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        // SAFETY: `list` is a live pointer the call fills, and it is freed below on success.
+        if unsafe { libc::getifaddrs(&mut list) } != 0 {
+            return None;
+        }
+        let mut addresses = BTreeSet::new();
+        let mut at = list;
+        while !at.is_null() {
+            // SAFETY: `at` is an entry of the list `getifaddrs` returned, live until
+            // `freeifaddrs`.
+            let entry = unsafe { &*at };
+            at = entry.ifa_next;
+            let flags = entry.ifa_flags;
+            if flags & libc::IFF_UP as u32 == 0 || flags & libc::IFF_LOOPBACK as u32 != 0 {
+                continue;
+            }
+            if entry.ifa_addr.is_null() {
+                continue;
+            }
+            // SAFETY: a non-null `ifa_addr` points at a socket address whose family is valid.
+            let family = unsafe { (*entry.ifa_addr).sa_family } as libc::c_int;
+            let address = match family {
+                libc::AF_INET => {
+                    // SAFETY: an `AF_INET` address is a `sockaddr_in`.
+                    let sin = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
+                    std::net::IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)))
+                }
+                libc::AF_INET6 => {
+                    // SAFETY: an `AF_INET6` address is a `sockaddr_in6`.
+                    let sin6 = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr))
+                }
+                _ => continue,
+            };
+            // SAFETY: `ifa_name` is a NUL-terminated string of the entry.
+            let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_string_lossy();
+            addresses.insert(format!("{name}={address}"));
+        }
+        // SAFETY: `list` is the list `getifaddrs` returned, freed once.
+        unsafe { libc::freeifaddrs(list) };
+        Some(addresses)
+    }
+
     /// [`devices_holding_group`] over the text of the table. Each device block starts
     /// with `<idx>\t<device> : <count> <querier>` and its groups follow, one per
     /// indented line, the first field being the group as the `__be32` it is stored as,

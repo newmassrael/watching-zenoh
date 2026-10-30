@@ -47,8 +47,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _};
 use wz_integration_tests::common::{
-    assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
-    zenoh_c_shared_library, NetnsPair, PortReservation,
+    assert_zenoh_c_arm_pairing, compile_zenoh_c_example, host_addresses, wz_capi_c_cdylib,
+    zenoh_c_oracle, zenoh_c_shared_library, NetnsPair, PortReservation,
 };
 
 /// A node: it opens a session of the given mode on the endpoints stated (a port of 0 states none)
@@ -1150,37 +1150,81 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
         (Shape::ClientConnectedWithNone, Some(&no_locator_client[..])),
         (Shape::ClientStillSearching, Some(&[][..])),
     ] {
-        let oracle = hellos_of(
-            &programs.reference,
-            &programs.reference,
-            &programs.probe,
-            shape,
-        );
-        match expected {
-            Some(rows) => assert_eq!(
-                oracle, rows,
-                "the REAL library's Hello for {shape:?} is not what this file expects"
-            ),
-            // The wildcard row names the host's own addresses, so what is fixed is its SHAPE:
-            // one peer Hello of IPv4 and IPv6 locators and not one of them on loopback.
-            None => {
-                assert_eq!(oracle.len(), 1, "one Hello for {shape:?}: {oracle:?}");
-                assert!(
-                    oracle[0].starts_with("hello whatami=peer locators=[tcp/")
-                        && !oracle[0].contains("127.0.0.1")
-                        && !oracle[0].contains("[::1]")
-                        && !oracle[0].contains("locators=[]"),
-                    "the real wildcard Hello is the host's own non-loopback addresses: {oracle:?}"
-                );
+        // The two Hellos are read one after the other, and a node on the wildcard names the
+        // host's own addresses in them, so they are comparable only while those did not move.
+        // They do move on a shared lab host (an address given to a link for a while: the lab
+        // run that read `192.168.100.1` in the real library's Hello and not in wz's had it
+        // there at one read and gone at the next). A window in which the set moved is read
+        // again, and one in which it held is the comparison, so a difference that survives a
+        // steady host is still a difference.
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let before = host_addresses();
+            let oracle = hellos_of(
+                &programs.reference,
+                &programs.reference,
+                &programs.probe,
+                shape,
+            );
+            match expected {
+                Some(rows) => assert_eq!(
+                    oracle, rows,
+                    "the REAL library's Hello for {shape:?} is not what this file expects"
+                ),
+                // The wildcard row names the host's own addresses, so what is fixed is its
+                // SHAPE: one peer Hello of IPv4 and IPv6 locators and not one of them on
+                // loopback.
+                None => {
+                    assert_eq!(oracle.len(), 1, "one Hello for {shape:?}: {oracle:?}");
+                    assert!(
+                        oracle[0].starts_with("hello whatami=peer locators=[tcp/")
+                            && !oracle[0].contains("127.0.0.1")
+                            && !oracle[0].contains("[::1]")
+                            && !oracle[0].contains("locators=[]"),
+                        "the real wildcard Hello is the host's own non-loopback addresses: \
+                         {oracle:?}"
+                    );
+                }
             }
+            let between = host_addresses();
+            let wz = hellos_of(&programs.wz, &programs.reference, &programs.probe, shape);
+            let after = host_addresses();
+            if wz == oracle {
+                break;
+            }
+            let steady = before == between && between == after;
+            if !steady && attempt < HOST_ADDRESS_RETRIES {
+                eprintln!(
+                    "the host's addresses moved while {shape:?} was read ({before:?} -> \
+                     {between:?} -> {after:?}); reading it again (attempt {attempt})"
+                );
+                continue;
+            }
+            assert_eq!(
+                wz,
+                oracle,
+                "§5.27 api-compat-c: a wz node of shape {shape:?} does not answer a Scout with \
+                 the Hello the real library's does (the host's addresses were {} over the \
+                 window, attempt {attempt})",
+                if steady { "steady" } else { "still moving" }
+            );
         }
-        let wz = hellos_of(&programs.wz, &programs.reference, &programs.probe, shape);
-        assert_eq!(
-            wz, oracle,
-            "§5.27 api-compat-c: a wz node of shape {shape:?} does not answer a Scout with the \
-             Hello the real library's does"
-        );
     }
+}
+
+/// How many times a Hello comparison is read again when the host's addresses moved under it.
+const HOST_ADDRESS_RETRIES: u32 = 5;
+
+/// Whether `addresses` (as `host_addresses` reads them) holds an IPv4 address of the device
+/// `name`.
+fn holds_ipv4(addresses: &Option<std::collections::BTreeSet<String>>, name: &str) -> bool {
+    let prefix = format!("{name}=");
+    addresses.iter().flatten().any(|entry| {
+        entry
+            .strip_prefix(&prefix)
+            .is_some_and(|address| address.parse::<std::net::Ipv4Addr>().is_ok())
+    })
 }
 
 /// The two directions of scouting, scouting and being found, in a network namespace with NO
@@ -2936,41 +2980,90 @@ fn a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_li
     }
     cases.push(("no-such-nic0".to_owned(), true));
     let mut mismatches: Vec<String> = Vec::new();
+    // Texts whose host never held still across a read, after `HOST_ADDRESS_RETRIES` of them.
+    let mut moved: Vec<String> = Vec::new();
     for (n, (text, alone_by_source)) in cases.iter().enumerate() {
         let key = format!("wz/scouting/ifacelist/{n}");
-        let group = next_group();
-        let (oracle_y, oracle_x) =
-            two_peers_on_iface(&programs.reference, &programs.reference, &key, &group, text);
-        let met = "open=0 | declare=0 senders=X,Y dups=0";
-        for (row, tag) in [(&oracle_y.row, "Y"), (&oracle_x.row, "X")] {
-            let alone = format!("open=0 | declare=0 senders={tag} dups=0");
-            if *alone_by_source {
-                assert_eq!(
-                    *row, alone,
-                    "the REAL library, given {text:?}, has no interface to scout by, so its node \
-                     ends alone (orchestrator.rs @ get_interfaces)"
-                );
-            } else {
-                assert!(
-                    row == met || *row == alone,
-                    "the REAL library's row for a peer on {group} by {text:?} is neither met nor \
-                     alone: {row}"
-                );
+        // The two arms run one after the other, and what a text reaches is the host's own
+        // interfaces: an address given to a link for a while and taken away again (a USB
+        // adapter on a shared lab host did exactly that to the one text that names it, `open=-4`
+        // at one arm and `open=0` at the other) is the host changing between them and says
+        // nothing of either arm. A window in which the addresses moved is read again, and a text
+        // the host never held still for is named and not graded.
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let before = host_addresses();
+            let group = next_group();
+            let (oracle_y, oracle_x) =
+                two_peers_on_iface(&programs.reference, &programs.reference, &key, &group, text);
+            let between = host_addresses();
+            let (wz_y, wz_x) =
+                two_peers_on_iface(&programs.wz, &programs.reference, &key, &group, text);
+            let after = host_addresses();
+            // A text that names an interface with no IPv4 address is graded as "ends alone" from
+            // the host as it was when the texts were listed, so a window in which that interface
+            // held an address is a different case than the one listed, and is read again too.
+            let held_an_address = *alone_by_source
+                && text != "no-such-nic0"
+                && [&before, &between, &after]
+                    .into_iter()
+                    .any(|set| holds_ipv4(set, text));
+            if !(before == between && between == after) || held_an_address {
+                if attempt < HOST_ADDRESS_RETRIES {
+                    eprintln!(
+                        "the host's addresses moved while {text:?} was read ({before:?} -> \
+                         {between:?} -> {after:?}); reading it again (attempt {attempt})"
+                    );
+                    continue;
+                }
+                eprintln!("{text:?} was never read on a host that held still; not graded");
+                moved.push(text.clone());
+                break;
             }
+            let met = "open=0 | declare=0 senders=X,Y dups=0";
+            for (row, tag) in [(&oracle_y.row, "Y"), (&oracle_x.row, "X")] {
+                let alone = format!("open=0 | declare=0 senders={tag} dups=0");
+                if *alone_by_source {
+                    assert_eq!(
+                        *row, alone,
+                        "the REAL library, given {text:?}, has no interface to scout by, so its \
+                         node ends alone (orchestrator.rs @ get_interfaces)"
+                    );
+                } else {
+                    assert!(
+                        row == met || *row == alone,
+                        "the REAL library's row for a peer on {group} by {text:?} is neither met \
+                         nor alone: {row}"
+                    );
+                }
+            }
+            // Every text is graded before the row decides: which texts differ, and how, is the
+            // finding, and the first one alone hides the rest.
+            if (wz_y.row.as_str(), wz_x.row.as_str())
+                != (oracle_y.row.as_str(), oracle_x.row.as_str())
+            {
+                mismatches.push(format!(
+                    "{text:?}: wz {} / {}, real {} / {}",
+                    wz_y.row, wz_x.row, oracle_y.row, oracle_x.row
+                ));
+            }
+            eprintln!("graded {text:?}: {} / {}", oracle_y.row, oracle_x.row);
+            break;
         }
-        let (wz_y, wz_x) =
-            two_peers_on_iface(&programs.wz, &programs.reference, &key, &group, text);
-        // Every text is graded before the row decides: which texts differ, and how, is the
-        // finding, and the first one alone hides the rest.
-        if (wz_y.row.as_str(), wz_x.row.as_str()) != (oracle_y.row.as_str(), oracle_x.row.as_str())
-        {
-            mismatches.push(format!(
-                "{text:?}: wz {} / {}, real {} / {}",
-                wz_y.row, wz_x.row, oracle_y.row, oracle_x.row
-            ));
-        }
-        eprintln!("graded {text:?}: {} / {}", oracle_y.row, oracle_x.row);
     }
+    if !moved.is_empty() {
+        eprintln!(
+            "{} of {} interface text(s) were not graded because the host's addresses kept \
+             moving: {moved:?}",
+            moved.len(),
+            cases.len()
+        );
+    }
+    assert!(
+        moved.len() < cases.len(),
+        "not one interface text was read on a host that held still: {moved:?}"
+    );
     eprintln!(
         "graded {} interface text(s) over {} multicast interface(s) of this host: {interfaces:?}",
         cases.len(),

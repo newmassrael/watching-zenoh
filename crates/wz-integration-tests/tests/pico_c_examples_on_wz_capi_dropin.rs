@@ -2585,8 +2585,18 @@ fn hello_lines_for_port(printed: &str, port: u16) -> impl Iterator<Item = &str> 
 /// where a container's virtual interface comes and goes. The leg used to assert the
 /// equality without ever measuring the premise, and a lab run read 5 against the
 /// oracle's 6 once.
+///
+/// The set also holds the host's interface ADDRESSES (`<device>=<address>`). A scout asks once
+/// per address of a multicast interface, and a device that keeps its group membership while an
+/// address comes and goes (a link given an address for a while on a shared lab host) changes the
+/// number of asks without changing the devices: the lab run that read wz 5 against the oracle's 6
+/// with the devices unchanged had one address more at the oracle's window.
 fn scouting_devices() -> Option<BTreeSet<String>> {
-    devices_holding_group(wz_integration_tests::common::ZENOH_MULTICAST_GROUP)
+    let mut world = devices_holding_group(wz_integration_tests::common::ZENOH_MULTICAST_GROUP)?;
+    if let Some(addresses) = wz_integration_tests::common::host_addresses() {
+        world.extend(addresses);
+    }
+    Some(world)
 }
 
 /// The set a window can be compared under: the same at both of its ends.
