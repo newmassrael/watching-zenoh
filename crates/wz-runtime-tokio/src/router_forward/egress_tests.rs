@@ -8,7 +8,7 @@
 //! by what the driver answers and by a clock the test moves, and none by a socket or a sleep.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use super::egress::{message_cost, EgressBudget};
 use super::*;
@@ -33,6 +33,14 @@ pub(super) struct RoomLink {
     /// What the router asked to be called when the link makes room, as a real writer's queue
     /// keeps it.
     waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Whether an ask that waits (a blocking message's, with a time to wait) blocks until
+    /// [`Self::release`], as a writer's queue blocks the sender of a message that may not be
+    /// dropped. An ask that does not wait is answered by `full`, as before.
+    stalls: AtomicBool,
+    /// Whether an ask is blocked now.
+    waiting: AtomicBool,
+    /// Whether the stalled ask may go on, and the signal that says so.
+    released: (Mutex<bool>, Condvar),
 }
 
 impl RoomLink {
@@ -42,7 +50,27 @@ impl RoomLink {
             frames: Mutex::new(Vec::new()),
             sent: AtomicUsize::new(0),
             waker: Mutex::new(None),
+            stalls: AtomicBool::new(false),
+            waiting: AtomicBool::new(false),
+            released: (Mutex::new(false), Condvar::new()),
         })
+    }
+
+    /// From now an ask that waits blocks until [`Self::release`].
+    fn stall_waits(&self) {
+        self.stalls.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an ask that waits is blocked on this link.
+    fn is_waiting(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst)
+    }
+
+    /// Let the blocked ask go on: the link has room.
+    fn release(&self) {
+        *self.released.0.lock().expect("released") = true;
+        self.released.1.notify_all();
+        self.set_full(false);
     }
 
     /// Whether the router is waiting to be told of room on this link.
@@ -91,7 +119,24 @@ impl BoxedLinkDriver for RoomLink {
     fn watch_room(&self, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
         *self.waker.lock().expect("waker") = waker;
     }
-    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+    fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+        if self.stalls.load(Ordering::SeqCst) {
+            if let RoomWait::Block { wait_us } = wait {
+                if wait_us > 0 {
+                    self.waiting.store(true, Ordering::SeqCst);
+                    let (released, signal) = &self.released;
+                    let mut released = released.lock().expect("released");
+                    while !*released {
+                        released = signal.wait(released).expect("released");
+                    }
+                    self.waiting.store(false, Ordering::SeqCst);
+                    return RoomAnswer {
+                        room: LinkRoom::Free,
+                        waited_us: 1,
+                    };
+                }
+            }
+        }
         RoomAnswer::at_once(if self.full.load(Ordering::SeqCst) {
             LinkRoom::Congested
         } else {
@@ -881,6 +926,73 @@ fn the_credit_stage_and_its_view_can_be_shared_between_threads() {
     shared::<super::egress::Credit>();
     shared::<EgressView>();
     shared::<crate::sync::PlainMutex<super::egress::EgressQueue>>();
+}
+
+/// A put of the node's own session that may not be dropped waits for room without the tables.
+/// The route is made with the tables read, and the wait used to be made inside it, so that while a
+/// publisher waited for room (up to `wait_before_close`, 5 s) nothing could take the tables for
+/// writing: a face could not come up, a topology list could not be taken in, a dial that had
+/// completed could not be registered. With a publisher that puts without pause that was the whole
+/// time. The wait is the publisher's own now, made after the tables are released, and the node
+/// goes on while it waits.
+#[test]
+fn a_blocking_local_put_waits_for_room_without_the_tables() {
+    let rig = Rig::new(true);
+    rig.link.stall_waits();
+    let mut options = PublishOptions::put();
+    options.qos = Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block));
+
+    let mut node_went_on = false;
+    std::thread::scope(|scope| {
+        let publisher = scope.spawn(|| rig.fwd.publish_with("demo/x", b"waited", &options));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !rig.link.is_waiting() {
+            assert!(
+                Instant::now() < deadline,
+                "the publisher never waited for room"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The publisher is waiting for room. The node must still be able to write its tables.
+        let (done, finished) = std::sync::mpsc::channel();
+        let fwd = &rig.fwd;
+        let node = scope.spawn(move || {
+            fwd.tick();
+            let _ = done.send(());
+        });
+        node_went_on = finished.recv_timeout(Duration::from_secs(2)).is_ok();
+        // Whatever happened, the link has room now, so that both threads end.
+        rig.link.release();
+        publisher
+            .join()
+            .expect("the publisher ended")
+            .expect("the put was built");
+        node.join().expect("the node ended");
+    });
+    assert!(
+        node_went_on,
+        "the tick, which writes the tables, waited for a publisher that was waiting for room"
+    );
+    assert!(
+        rig.link.sent() > rig.baseline,
+        "the put left once the link had room: the wait was moved, not dropped"
+    );
+}
+
+/// A put that finds room does not wait at all, and the same put to a link that is full and does
+/// not stall (the answer of a probe) is still sent: the deferral is only for what would wait.
+#[test]
+fn a_blocking_local_put_that_finds_room_leaves_at_once() {
+    let rig = Rig::new(false);
+    let mut options = PublishOptions::put();
+    options.qos = Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block));
+    rig.fwd
+        .publish_with("demo/x", b"at once", &options)
+        .expect("the put was built");
+    assert!(
+        rig.link.sent() > rig.baseline,
+        "a link with room is given the put before the call returns"
+    );
 }
 
 /// The face whose frame is being routed belongs to the call that routes it and to the thread that

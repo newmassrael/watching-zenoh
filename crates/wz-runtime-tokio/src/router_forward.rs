@@ -454,6 +454,7 @@ mod egress;
 mod egress_tests;
 #[cfg(all(test, feature = "transport-multilink"))]
 mod joined_link_tests;
+mod local_publish;
 #[cfg(test)]
 mod peer_differential_tests;
 #[cfg(test)]
@@ -3545,29 +3546,6 @@ router_entry_points! { on_tables:
     ) -> bool;
     fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut));
     fn release_held(&self, record: &HeldRecord);
-    fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError>;
-    fn publish_with(
-        &self,
-        keyexpr: &str,
-        payload: &[u8],
-        options: &PublishOptions,
-    ) -> Result<(), CodecError>;
-    #[cfg(feature = "transport-shm")]
-    fn publish_shm_with(
-        &self,
-        keyexpr: &str,
-        payload: wz_session_core::extshm::ShmSendHandle,
-        options: &PublishOptions,
-    ) -> Result<(), CodecError>;
-    fn publish_qos(
-        &self,
-        keyexpr: &str,
-        payload: &[u8],
-        priority: Priority,
-        express: bool,
-    ) -> Result<(), CodecError>;
-    #[cfg(feature = "pubsub-delete")]
-    fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError>;
     fn north_net_node_count(&self) -> usize;
     fn north_net_edge_count(&self) -> usize;
     fn client_queryables_seen(&self) -> usize;
@@ -3653,6 +3631,71 @@ router_entry_points! { on_tables:
     fn linkstate_regions_text(&self) -> Vec<(String, String)>;
     fn pending_len(&self) -> usize;
     fn pending_timed_out(&self) -> usize;
+}
+
+/// The entry points of a local publish. They are not in the lists above because a put must not
+/// wait for room with the tables held: the route is made with the tables read, and what the route
+/// found no room for is sent once they are released ([`local_publish`]).
+impl RouterForwarder {
+    /// Route a publish with the tables read, then make the sends it owes with them released.
+    fn publishing<R>(
+        &self,
+        publish: impl FnOnce(OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>>) -> R,
+    ) -> R {
+        let scope = local_publish::Scope::enter();
+        let result = publish(self.on_tables());
+        for owed in scope.finish() {
+            owed.send();
+        }
+        result
+    }
+
+    /// The router's `publish`, with the sends it must wait for made after its tables are released.
+    pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError> {
+        self.publishing(|on| on.publish(keyexpr, payload))
+    }
+
+    /// The router's `publish_with`, with the sends it must wait for made after its tables are
+    /// released.
+    pub fn publish_with(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        options: &PublishOptions,
+    ) -> Result<(), CodecError> {
+        self.publishing(|on| on.publish_with(keyexpr, payload, options))
+    }
+
+    /// The router's `publish_shm_with`, with the sends it must wait for made after its tables
+    /// are released.
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm_with(
+        &self,
+        keyexpr: &str,
+        payload: wz_session_core::extshm::ShmSendHandle,
+        options: &PublishOptions,
+    ) -> Result<(), CodecError> {
+        self.publishing(|on| on.publish_shm_with(keyexpr, payload, options))
+    }
+
+    /// The router's `publish_qos`, with the sends it must wait for made after its tables are
+    /// released.
+    pub fn publish_qos(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        priority: Priority,
+        express: bool,
+    ) -> Result<(), CodecError> {
+        self.publishing(|on| on.publish_qos(keyexpr, payload, priority, express))
+    }
+
+    /// The router's `publish_delete`, with the sends it must wait for made after its tables are
+    /// released.
+    #[cfg(feature = "pubsub-delete")]
+    pub fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError> {
+        self.publishing(|on| on.publish_delete(keyexpr))
+    }
 }
 
 impl RouterForwarder {
@@ -4190,9 +4233,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// R2639 — emit a [`DialIntent`] for each node this ingest DISCOVERED that
-    /// the autoconnect policy admits. Called with the `Changes` an ingest
-    /// produced, for EITHER tier.
+    /// R2639 — emit a [`DialIntent`] for each node this ingest named or changed
+    /// that the autoconnect policy admits and this node holds no link to. Called
+    /// with the `Changes` an ingest produced, for EITHER tier.
     ///
     /// A node with no advertised locators is skipped (nothing to dial), and one
     /// whose role has not surfaced is skipped too: a `None` whatami cannot pass
@@ -4201,15 +4244,30 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// what keeps the loop's gossip counter a gossip discriminator now that the
     /// scouting plane shares the channel.
     fn emit_dial_intents(&self, tier: Region, changes: &Changes) {
-        if changes.new.is_empty() {
+        if changes.new.is_empty() && changes.updated.is_empty() {
             return;
         }
         let Some((net, _)) = self.plane(tier) else {
             return;
         };
         let autoconnect = self.autoconnect.get();
-        for zid in &changes.new {
-            let Some(locators) = net.node_locators(zid) else {
+        let self_zid = *net.self_zid();
+        // Upstream checks every entry a list tells of, new or not: the list that names a node and
+        // the list that carries its locators need not be one, and a node first named without
+        // them is dialled when they arrive (`GossipCore::received` does the same). A node this
+        // one holds a link to is not dialled again; the host weighs each intent against its
+        // faces as well, since a link can come up between this answer and the dial.
+        for zid in changes.new.iter().chain(changes.updated.iter()) {
+            if *zid == self_zid
+                || self
+                    .tables
+                    .faces
+                    .values()
+                    .any(|state| peer_zid_routing(&state.actions) == Some(*zid))
+            {
+                continue;
+            }
+            let Some(locators) = net.node_locators(zid).filter(|l| !l.is_empty()) else {
                 continue;
             };
             let Some(whatami) = net.get_node(zid).and_then(|n| n.whatami) else {
@@ -5379,6 +5437,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 egress::Credited::Refused => false,
             };
         }
+        // A put of the node's own session that would wait for room does not wait here, with the
+        // tables held: it is owed to the publisher, who sends it once they are released
+        // ([`local_publish`]). Anything else is sent as it always was.
+        let msg = match local_publish::send_or_owe(&state.actions, msg, reliable, express, priority)
+        {
+            Ok(sent) => {
+                if sent {
+                    self.note_sent(was_push);
+                }
+                return sent;
+            }
+            Err(msg) => msg,
+        };
         let sent = self.send_to_face_actions(&state.actions, msg, reliable, express, priority);
         if sent {
             self.note_sent(was_push);
@@ -13706,6 +13777,60 @@ mod tests {
         assert!(
             seen.contains(&zid(0xDD).as_slice().to_vec()),
             "the DISCOVERED node is dialled, not the face it arrived on: {seen:?}"
+        );
+    }
+
+    /// A node that was first named WITHOUT locators is dialled when they arrive. Upstream checks
+    /// every entry a list tells of, new or not, because the list that names a node and the list
+    /// that carries its locators need not be one (the second peer of a router is told of the first
+    /// as the router learns it, and its locators follow); a forwarder that dialled only the nodes
+    /// it newly discovered never linked the two peers when the locators came second, and a
+    /// publisher peer then put for ever to a subscriber peer it had no link to.
+    #[test]
+    fn autoconnect_dials_a_node_whose_locators_arrive_after_it_was_named() {
+        use wz_routing_graph::AutoConnectStrategy;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let policy = AutoConnect::new(
+            zid(0x01),
+            wz_codecs::whatami::WhatAmIMatcher::empty().router().peer(),
+            AutoConnectStrategy::Always,
+        );
+        let mut rx = fwd.enable_autoconnect(policy);
+        let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a_r);
+        let dialled = |rx: &mut crate::accept_loop::DialIntentReceiver| {
+            let mut seen: Vec<Vec<u8>> = Vec::new();
+            while let Ok(intent) = rx.try_recv() {
+                seen.push(intent.zid);
+            }
+            seen.contains(&zid(0xDD).as_slice().to_vec())
+        };
+
+        // The node is named, and advertises no locator: there is nothing to dial.
+        let named = build_linkstate_oam_owned(&list(vec![
+            entry(0, 1, 0x01, &[]),
+            entry(12, 5, 0xDD, &[1]),
+            entry(1, 5, 0xAA, &[0, 12]),
+        ]))
+        .expect("build oam");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Oam(named));
+        assert!(
+            !dialled(&mut rx),
+            "a node with no locator is recorded and not dialled"
+        );
+
+        // Its locators arrive in a later list, under a newer sequence number.
+        let located = build_linkstate_oam_owned(&list(vec![
+            entry(0, 1, 0x01, &[]),
+            entry_with_locators(12, 6, 0xDD, &[1], &["tcp/10.0.0.187:7447"]),
+            entry(1, 6, 0xAA, &[0, 12]),
+        ]))
+        .expect("build oam");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Oam(located));
+        assert!(
+            dialled(&mut rx),
+            "the node is dialled when its locators arrive, though it was named before"
         );
     }
 
