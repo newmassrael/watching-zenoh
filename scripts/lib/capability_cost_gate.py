@@ -216,12 +216,15 @@ CASES: tuple[Case, ...] = (
     # 41008974420 (head `c7f635944`) plus 3,500, to the hundred: pico-client-coop 951,015 (+9,815
     # over its old budget), -unstable 1,063,222, -local 958,719, -connectivity 1,134,334,
     # -admin-space 1,306,849, -query 1,249,068, -local-queryable 1,267,360, -scout 1,030,994 and
-    # pico-peer-coop 1,079,216. The five and six KB of the smallest are in every one of them, so
-    # the growth is in what every cooperative build links; the window since the last move holds
-    # the observation plane's doors (`e7e7da0049`, `f04bb6ecb0`), the resource snapshot's
-    # receive ledger and the report of a link's negotiated band. It is NOT attributed to one
-    # commit (no symbol diff was taken): the budget follows the reading, and the attribution is
-    # the round's carry.
+    # pico-peer-coop 1,079,216. MEASURED on pc2 the same day, `size` text of `pico-client-coop`'s
+    # build (`cargo build --release -p wz-capi-pico --no-default-features --features
+    # engine-coop,link-udp`): 937,467 at `04d21adb3` and 940,971 at the head, +3,504 (+0.4%). So
+    # the code grew about a third of what the hosted reading grew since its last move (937,699 to
+    # 951,015, +13,316), and the rest is a gap between the two machines that was 232 bytes then
+    # and is about 10,000 now. It is not explained: the nm listing of the head's build holds no
+    # symbol of the observation plane's doors (supervision, event log, clock source, snapshot), so
+    # they are not what grew. The budgets follow the hosted reading because the hosted lane is the
+    # one that grades them; which commit moved the gap is open.
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
          954_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
