@@ -6,6 +6,7 @@
   ],
   "site_pins": {
     "engine-host": {"zephyr-client-fixed": 42, "zephyr-client-fixed-batching": 42, "zephyr-client-fixed-get": 42},
+    "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1},
     "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
     "engine-behaviour": {"zephyr-client-fixed": 13, "zephyr-client-fixed-batching": 13, "zephyr-client-fixed-get": 13},
     "exec-drop": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
@@ -100,6 +101,12 @@
       "why": "the clock source the engine was given"
     },
     {
+      "id": "tx-encoder",
+      "where": {"file": "function.rs"},
+      "callees": "(send_response_final|dispatch_declare_lent|send_reply_parts)::\\{closure",
+      "why": "a call of the `Fn` the send's dispatch was handed (`as_encoder`, a trait object), made in the dispatch and in the frame writer under it that a batching window uses: the closure of `send_response_final`, of `dispatch_declare_lent` or of `send_reply_parts`, each written at the call that sends and passed by reference for the length of it. The rule is the call's own place in the library (`core::ops::function`) and not the function that makes it, so the calls through a `TxBuf` that sit in the same functions stay the rules of `tx_buf.rs` below; its number of sites is pinned for each image, so another call through a `Fn` is read before it is claimed"
+    },
+    {
       "id": "walk-entry-tables",
       "where": {"function": "microstep::(walk_entry|effective_target_states_on|is_in_final_state)$"},
       "callees": "NONE",
@@ -126,7 +133,7 @@
     },
     {
       "id": "entropy-draw",
-      "where": {"file": "session_actions.rs", "line": 6169},
+      "where": {"file": "session_actions.rs", "line": 6145},
       "callees": "EntropySource>::try_next_u64$",
       "why": "the draw of the session's initial value"
     },

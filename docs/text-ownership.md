@@ -391,6 +391,18 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   stack 4,672 to 4,480 bytes; (3) `log_parts` and `log_args` fill one buffer and do not take one back
   by value (832 bytes of frame, the largest of the image, to under 736). Text: -48 (fixed and
   batching) and -64 (get) bytes; the kit's reading 2,896 to 2,720.
+- TAKEN, measured 2026-10-30: the send's dispatch is one copy on the slot profile
+  (`dispatch_network_message_at`, with `as_encoder` handing the message's encoder over as a trait
+  object, as the host build already did). The profile had kept the closure itself, a copy of the
+  dispatch for each kind of message with the encoder inlined in it, because the stack gate
+  followed only direct calls; the bound gate follows a call through a register by the rule that
+  claims its site (`tx-encoder`, the call's place in `core::ops::function`, with its sites pinned
+  for each image), so that reason is gone. Three copies of 1,334, 810 and 632 bytes are one now:
+  -816 (fixed, 143,356), -2,272 (batching, 145,092: each copy carries the batching window's code) and
+  -1,216 (get, 161,644). The get image's stack came down with it, the reply's dispatch having been
+  a frame of 2,448 bytes with its encoder: the chain 3,372 to 2,972, the bound 4,564 to 4,284, its
+  main stack 6,144 to 5,760 bytes and the kit's reading 4,328 to 4,168; the fixed and batching
+  images' stack did not move. One call through a pointer per message sent.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

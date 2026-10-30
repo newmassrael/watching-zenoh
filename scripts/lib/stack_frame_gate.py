@@ -443,6 +443,11 @@ IMAGES = (
     # the main frame is 176 bytes, the loop under it. The kit's reading is 4,328.
     #
     # 3,372 bytes with the runtime taking no interrupt lock (see the fixed client's row), 16 less.
+    #
+    # 2,972 bytes once the send's dispatch is one copy that calls the message's encoder through a
+    # pointer (`as_encoder`): the dispatch of the reply was inlined with its encoder into a frame of
+    # 2,448 bytes, and is a frame of 2,392 under the encoder's own now, 13 frames. The kit's
+    # reading is 4,168, 1,196 over the chain.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -450,7 +455,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3372,
+        peak=2972,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every

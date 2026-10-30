@@ -2734,52 +2734,26 @@ enum Dispatched {
     Chain,
 }
 
-/// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`].
+/// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`]: a trait
+/// object, so the dispatch (some 7 KB on a host, 1.3 KB on the slot profile) is one copy and not
+/// one per kind of message sent, at the cost of one call through a pointer per message.
 ///
-/// On the slot profile the closure itself, so each kind of message keeps its own copy of the
-/// dispatch and the stack gate (`scripts/lib/stack_frame_gate.py`) can follow the direct calls
-/// from it down the image: a call through a pointer ends the chain it reads, and the frame of
-/// the dispatch is on the deepest one.
-#[cfg(all(
-    feature = "session-slot",
-    any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    )
-))]
-#[inline(always)]
-fn as_encoder<P>(encode_body: &P) -> &P
-where
-    P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
-{
-    encode_body
-}
-
-/// The same hand-over everywhere else: a trait object, so the dispatch (some 7 KB) is one copy
-/// and not one per kind of message sent, at the cost of one call through a pointer per message.
-#[cfg(all(
-    not(feature = "session-slot"),
-    any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    )
-))]
+/// The slot profile took the closure itself, so that the stack gate could follow the direct
+/// calls from the dispatch down the image. The bound gate (`scripts/lib/stack_bound_gate.py`)
+/// follows a call through a register now, by the rule that claims its site, so the profile pays
+/// for one copy of the dispatch and not three (`stack_call_contracts.json`, `tx-encoder`).
+#[cfg(all(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+)))]
 #[inline(always)]
 fn as_encoder<P>(
     encode_body: &P,
@@ -9528,11 +9502,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    // The encoder is handed over by reference through [`as_encoder`]: a trait object on a host
-    // build, where this body is some 7 KB and a closure of its own for each kind of message sent
-    // made eight copies of it, differing in nothing but the call that writes the message; the
-    // closure itself on the slot profile, where the stack gate follows the direct calls of the
-    // image and a call through a pointer would hide everything beneath this frame from it.
+    // The encoder is handed over by reference through [`as_encoder`], as a trait object: a
+    // closure of its own for each kind of message sent made a copy of this body (some 7 KB on a
+    // host build, eight copies; 1.3 KB on the slot profile, three), differing in nothing but the
+    // call that writes the message. The stack bound follows the call through the pointer by the
+    // rule of `stack_call_contracts.json` that claims its site.
     fn dispatch_network_message_at<P>(
         &self,
         stage: DispatchStage,
