@@ -300974,6 +300974,34 @@
         "Both wz clients win every cell of the matrix against both pico arms on the T2G kit; the margins are small (text about 0.7 percent, stack used 0.4 and 0.7) and the result is one kit's. Open: the ram cell holds the 128 KiB kernel heap pool of each image, so the smallest pool each image runs in is to be measured before ram is claimed (the heap client's block is 8,384 bytes now); SCE ADR 0076 states the proven queue bound of the session document (16 is declared, the bound found by hand is 9); the bound rose 8 bytes at the SCE pin and the frame was not attributed. Beside the MCU: the host matrix is not started (the round trip of the pico ABI against pico reads a tie at 10 to 11 microseconds, the throughput has no valid pico control), and zenoh-c and zenoh have no counterpart yet."
       ]
     },
+    "Round 3984": {
+      "decision_summary": "Run 41095349469 (head 2c4ac86da, after the pin was restored) failed twelve jobs, each read to its own line. Paid: the C1bzr link from router_forward to the private local_publish module (six shards and the settle job), three guard counts (C1AM hotreload 67, C1y linkstate, bare and access 31 each; layers C1y and C1am run whole on pc2 and pass), a diff in the stats golden's failure so a hosted-only red says what differs, and a step that reads the runner's shm limits around Z8. Z8 session passed 5/5 this run; shm creation answered ENOMEM seven times and the file then hung at zenoh_shm_unicast_implicit_optimization.",
+      "changes_bullets": [
+        "run-ci.sh counts, router_forward.rs doc link, zenoh_stats_golden.py diff output, ci.yml shm facts steps."
+      ],
+      "verification_bullets": [
+        "pc2: layer C1y whole (exit 0), layer C1am whole (exit 0), actionlint and the workflow gates pass. E17, Z8 shm and C1cn are judged by the next hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "E17 stats golden differs on hosted only (cause unread, the diff now prints), Z8 shm ENOMEM and hang (the runner facts now print), C1cn two unclaimed zenoh-protocol endpoint tests whose names are no longer in the tree."
+      ],
+      "publishable_decision_summary": "Run 41095349469 (head 2c4ac86da, after the pin was restored) failed twelve jobs, each read to its own line. Paid: the C1bzr link from router_forward to the private local_publish module (six shards and the settle job), three guard counts (C1AM hotreload 67, C1y linkstate, bare and access 31 each; layers C1y and C1am run whole on pc2 and pass), a diff in the stats golden's failure so a hosted-only red says what differs, and a step that reads the runner's shm limits around Z8. Z8 session passed 5/5 this run; shm creation answered ENOMEM seven times and the file then hung at zenoh_shm_unicast_implicit_optimization.",
+      "publishable_changes_bullets": [
+        "run-ci.sh counts, router_forward.rs doc link, zenoh_stats_golden.py diff output, ci.yml shm facts steps."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: layer C1y whole (exit 0), layer C1am whole (exit 0), actionlint and the workflow gates pass. E17, Z8 shm and C1cn are judged by the next hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "E17 stats golden differs on hosted only (cause unread, the diff now prints), Z8 shm ENOMEM and hang (the runner facts now print), C1cn two unclaimed zenoh-protocol endpoint tests whose names are no longer in the tree."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
