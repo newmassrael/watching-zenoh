@@ -100,24 +100,22 @@
     enforced by the statechart rather than by a dispatcher convention.
 -->
 <!--
-  Queue depth: the host gives the machine one event at a time (`process_event`, which runs the
-  event to the end before it returns) and no transition raises or sends another, so what the
-  queues hold is the event being run and the events the engine itself raises while it runs it:
-  an `error.*` for a block that failed and a `done.state.*` for a final that completed its parent,
-  a handful in one macrostep: the states nest two deep, so an event's microstep runs at most two
-  exit blocks, one transition block and two entry blocks (5), the one eventless transition
-  (GotInitAck to Established) runs at most three more, and a full queue stops the engine, so the
-  bound is the sum, 8 `error.*` and the one `done.state.*` of the root: 9. Declared at 16 because a
-  machine that declares nothing gets the runtime's depth of 64 in BOTH queues, which is 272 bytes
-  each (`sce:capacity`), in the engine every session slot holds; 16 is 80 bytes each. The bound the
-  engine proves for this document replaces the number when SCE states it.
+  Queue depth: a full queue stops the engine, so each queue is sized by what can fill it.
+  The INTERNAL queue is the generator's: this document has no `<raise>`, no `<send>`, no
+  `<donedata>`, no fallible guard, and its only `<final>` is top-level, so nothing it does can
+  put an event on that queue and the generator proves the depth 0 (SCE ADR 0076; a build with
+  debug assertions holds every raise to it). The EXTERNAL queue is the host's statement: the
+  host gives the machine one event at a time (`process_event`, which runs the event to the end
+  before it returns), so it holds one event at most. Declared at 2 because a machine that
+  declares nothing gets the runtime's depth of 64 in BOTH queues, 272 bytes each, in the engine
+  every session slot holds (`sce:capacity` states the external depth).
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
        sce:kind="statechart"
-       sce:capacity="16"
+       sce:capacity="2"
        name="session_fsm_unicast"
        version="1.0"
        initial="Init">

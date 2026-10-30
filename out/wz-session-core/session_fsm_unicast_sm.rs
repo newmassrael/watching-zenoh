@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: c6f6e770e510191e2cea921e51603ac135aa318cc1f53a9971dd87722932673c
+// source-hash: b80d38d95eadd9a4e5c97eebb3b0f3d99ccf9e81bab4326367a306318e893659
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -71,7 +71,7 @@
 // closure; this one suspicious-category lint reads the `match` of a constant
 // default as a hand-written `unwrap_or_default`.
 
-// SCE-MAP: session_fsm_unicast.scxml:115 :: _machine
+// SCE-MAP: session_fsm_unicast.scxml:113 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -80,10 +80,11 @@ use sce_rust_runtime::{Engine, StatePolicy};
 // event-queue capacity declared via
 // `<scxml sce:capacity="N">` or sourced from deploy.yaml
 // `machines.<m>.scheduler.default_event_queue_capacity`. Consumed
-// below by `type EventQueue` as the no_std `heapless::Deque` depth
-// for this machine's W3C Appendix D internal/external queues
+// below by `type ExternalQueue` as the no_std ring depth of this
+// machine's W3C Appendix D external queue, and by `type InternalQueue`
+// when no internal depth is proven from the document (docs/adr/0076)
 // (the policy-carried SSOT for the per-machine queue size).
-pub const EVENT_QUEUE_CAPACITY: usize = 16;
+pub const EVENT_QUEUE_CAPACITY: usize = 2;
 
 // ======================================================================
 // State enum (W3C SCXML 3.3)
@@ -544,14 +545,25 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // engine externally must provide a real `Hal` impl.
     type Hal = sce_rust_runtime::NoOpHal;
 
-    // W3C SCXML Appendix D internalQueue / externalQueue. Under no_std the
-    // depth is the per-document `<scxml sce:capacity>` / deploy value (emitted
-    // as the const consumed below); absent a declared capacity the bare form
-    // inherits the runtime default `MAX_EVENT_QUEUE_DEPTH` (the single source of
-    // the default). Inert under std (`VecDeque`), so this one emission compiles
-    // on both runtime profiles. The queue holds events as numbers and only the
+    // W3C SCXML Appendix D externalQueue: what the host and other sessions
+    // deliver, at a rate no document states. Under no_std the depth is the
+    // per-document `<scxml sce:capacity>` / deploy value (emitted as the const
+    // consumed below); absent a declared capacity the bare form inherits the
+    // runtime default `MAX_EVENT_QUEUE_DEPTH` (the single source of the
+    // default). Inert under std (`VecDeque`), so this one emission compiles on
+    // both runtime profiles. The queue holds events as numbers and only the
     // payloads as this machine's type (docs/adr/0068).
-    type EventQueue = sce_rust_runtime::EventQueue<Self::Payload, { EVENT_QUEUE_CAPACITY }>;
+    type ExternalQueue = sce_rust_runtime::EventQueue<Self::Payload, { EVENT_QUEUE_CAPACITY }>;
+
+    // W3C SCXML Appendix D internalQueue: only what this machine raises for
+    // itself during a macrostep, so its no_std depth is the bound the
+    // generator proves from the document, and the external rule where it
+    // proves none (docs/adr/0076). Inert under std, as above.
+    // Proven depth 0: nothing this document does can put an event on its
+    // internal queue.
+    type InternalQueue = sce_rust_runtime::EventQueue<Self::Payload, 0>;
+    // The same bound, held to every run a test build makes (docs/adr/0076).
+    const INTERNAL_QUEUE_BOUND: Option<usize> = Some(0);
 
     // W3C SCXML 6.3: the delayed-send scheduler keeps a per-entry `send_id` only
     // so `<cancel sendid>` can find and drop the matching entry; the timer-fire
@@ -561,7 +573,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // dead weight with no cancel reader. A cancelling document keeps the
     // load-bearing `SceString`. Behaviour-preserving under std either way, so
     // this one emission compiles on both runtime profiles. Mirrors the
-    // EventQueue per-machine sizing lever above.
+    // ExternalQueue per-machine sizing lever above.
     type ScheduledSendId = sce_rust_runtime::ElidedSendId;
     // W3C SCXML 6.2: this document has no `<send delay>`, no `<send delayexpr>`,
     // no `<cancel>` and no host-run deadline, so nothing is ever armed on the
@@ -774,12 +786,12 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:115 :: _machine"]
-// SCE-MAP: session_fsm_unicast.scxml:115 :: _machine
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:113 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:113 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             SessionFsmUnicastState::Closed => {
-                // SCE-MAP: session_fsm_unicast.scxml:249 :: Closed :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:247 :: Closed :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -792,7 +804,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             SessionFsmUnicastState::Closing => {
-                // SCE-MAP: session_fsm_unicast.scxml:241 :: Closing :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:239 :: Closing :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -802,7 +814,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             SessionFsmUnicastState::Established => {
-                // SCE-MAP: session_fsm_unicast.scxml:214 :: Established :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:212 :: Established :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -821,7 +833,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             SessionFsmUnicastState::GotInitAck => {
-                // SCE-MAP: session_fsm_unicast.scxml:160 :: GotInitAck :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:158 :: GotInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -831,7 +843,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             SessionFsmUnicastState::LinkOpening => {
-                // SCE-MAP: session_fsm_unicast.scxml:133 :: LinkOpening :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:131 :: LinkOpening :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -841,7 +853,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => {
-                // SCE-MAP: session_fsm_unicast.scxml:191 :: SentInitAck :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:189 :: SentInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -851,7 +863,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             SessionFsmUnicastState::SentInitSyn => {
-                // SCE-MAP: session_fsm_unicast.scxml:151 :: SentInitSyn :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:149 :: SentInitSyn :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -861,7 +873,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => {
-                // SCE-MAP: session_fsm_unicast.scxml:197 :: SentOpenAck :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:195 :: SentOpenAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -881,8 +893,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // recorded runs nothing.
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:115 :: _machine"]
-// SCE-MAP: session_fsm_unicast.scxml:115 :: _machine
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:113 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:113 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -895,7 +907,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         // `state` from the configuration after this returns.
         match state {
             SessionFsmUnicastState::Established => {
-                // SCE-MAP: session_fsm_unicast.scxml:214 :: Established :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:212 :: Established :: _state_body
                 // W3C SCXML 3.9: onexit block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.9: error stops block)
                 'action_block: {
@@ -920,8 +932,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
     // the ordered set. `Event::Null` asks for eventless transitions.
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:115 :: _machine"]
-// SCE-MAP: session_fsm_unicast.scxml:115 :: _machine
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:113 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:113 :: _machine
     fn first_enabled_transition(
         &mut self,
         state: Self::State,
@@ -1162,8 +1174,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:115 :: _machine"]
-// SCE-MAP: session_fsm_unicast.scxml:115 :: _machine
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:113 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:113 :: _machine
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
@@ -1172,7 +1184,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         match transition.0 {
             // Established, transition 0
             #[cfg(not(feature = "session-unicast-accept"))] 12 => {
-                // SCE-MAP: session_fsm_unicast.scxml:225 :: Established :: _transition_0
+                // SCE-MAP: session_fsm_unicast.scxml:223 :: Established :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1183,7 +1195,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Established, transition 1
             #[cfg(not(feature = "session-unicast-accept"))] 13 => {
-                // SCE-MAP: session_fsm_unicast.scxml:228 :: Established :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:226 :: Established :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1194,7 +1206,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Established, transition 2
             14 => {
-                // SCE-MAP: session_fsm_unicast.scxml:231 :: Established :: _transition_2
+                // SCE-MAP: session_fsm_unicast.scxml:229 :: Established :: _transition_2
                 // W3C SCXML 3.13: Transition 2 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1205,7 +1217,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Accepting, transition 2
             15 => {
-                // SCE-MAP: session_fsm_unicast.scxml:207 :: Accepting :: _transition_2
+                // SCE-MAP: session_fsm_unicast.scxml:205 :: Accepting :: _transition_2
                 // W3C SCXML 3.13: Transition 2 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1219,7 +1231,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // GotInitAck, transition 1
             #[cfg(not(feature = "session-unicast-accept"))] 11 => {
-                // SCE-MAP: session_fsm_unicast.scxml:165 :: GotInitAck :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:163 :: GotInitAck :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1230,7 +1242,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // LinkOpening, transition 1
             #[cfg(not(feature = "session-unicast-accept"))] 2 => {
-                // SCE-MAP: session_fsm_unicast.scxml:138 :: LinkOpening :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:136 :: LinkOpening :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1241,7 +1253,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Opening, transition 0
             #[cfg(not(feature = "session-unicast-accept"))] 4 => {
-                // SCE-MAP: session_fsm_unicast.scxml:169 :: Opening :: _transition_0
+                // SCE-MAP: session_fsm_unicast.scxml:167 :: Opening :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1252,7 +1264,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Established, transition 0
             #[cfg(feature = "session-unicast-accept")] 21 => {
-                // SCE-MAP: session_fsm_unicast.scxml:225 :: Established :: _transition_0
+                // SCE-MAP: session_fsm_unicast.scxml:223 :: Established :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1263,7 +1275,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Established, transition 1
             #[cfg(feature = "session-unicast-accept")] 22 => {
-                // SCE-MAP: session_fsm_unicast.scxml:228 :: Established :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:226 :: Established :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1274,7 +1286,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Established, transition 2
             #[cfg(feature = "session-unicast-accept")] 23 => {
-                // SCE-MAP: session_fsm_unicast.scxml:231 :: Established :: _transition_2
+                // SCE-MAP: session_fsm_unicast.scxml:229 :: Established :: _transition_2
                 // W3C SCXML 3.13: Transition 2 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1285,7 +1297,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Established, transition 3
             #[cfg(feature = "session-unicast-accept")] 24 => {
-                // SCE-MAP: session_fsm_unicast.scxml:234 :: Established :: _transition_3
+                // SCE-MAP: session_fsm_unicast.scxml:232 :: Established :: _transition_3
                 // W3C SCXML 3.13: Transition 3 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1296,7 +1308,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // GotInitAck, transition 1
             #[cfg(feature = "session-unicast-accept")] 12 => {
-                // SCE-MAP: session_fsm_unicast.scxml:165 :: GotInitAck :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:163 :: GotInitAck :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1307,7 +1319,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // LinkOpening, transition 1
             #[cfg(feature = "session-unicast-accept")] 3 => {
-                // SCE-MAP: session_fsm_unicast.scxml:138 :: LinkOpening :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:136 :: LinkOpening :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1318,7 +1330,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Opening, transition 0
             5 => {
-                // SCE-MAP: session_fsm_unicast.scxml:169 :: Opening :: _transition_0
+                // SCE-MAP: session_fsm_unicast.scxml:167 :: Opening :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1332,7 +1344,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // SentInitSyn, transition 1
             #[cfg(not(feature = "session-unicast-accept"))] 9 => {
-                // SCE-MAP: session_fsm_unicast.scxml:156 :: SentInitSyn :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:154 :: SentInitSyn :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1343,7 +1355,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // Opening, transition 1
             #[cfg(feature = "session-unicast-accept")] 6 => {
-                // SCE-MAP: session_fsm_unicast.scxml:172 :: Opening :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:170 :: Opening :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1354,7 +1366,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             },
             // SentInitSyn, transition 1
             #[cfg(feature = "session-unicast-accept")] 10 => {
-                // SCE-MAP: session_fsm_unicast.scxml:156 :: SentInitSyn :: _transition_1
+                // SCE-MAP: session_fsm_unicast.scxml:154 :: SentInitSyn :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {

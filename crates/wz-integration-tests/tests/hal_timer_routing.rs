@@ -110,7 +110,8 @@ impl StatePolicy for TimerProbePolicy {
     // substrate (it schedules with real send_ids), so it keeps the
     // non-eliding `SceString` send-id store and the default-depth event
     // queue — the behaviour-preserving choice vs the pre-bump default.
-    type EventQueue = sce_rust_runtime::EventQueue<Self::Payload>;
+    type InternalQueue = sce_rust_runtime::EventQueue<Self::Payload>;
+    type ExternalQueue = sce_rust_runtime::EventQueue<Self::Payload>;
     type ScheduledSendId = sce_rust_runtime::SceString;
     // The probe arms delayed sends, so it keeps the queue for them; its document has no
     // `<final>` with a `<donedata>`, so it keeps no slot for one (SCE ADR 0075).
