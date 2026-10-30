@@ -300450,6 +300450,36 @@
         "The fixed client wins every cell of the matrix against the single-threaded pico image on the T2G kit, by 380 bytes of text, 476 of flash and 40 of stack used; the heap client does not win its cells, and no other board is measured. Waiting: the SCE session's compile-time session id (376 bytes) and its per-turn bookkeeping moved into the core (the two machines' shells, about 1,180 bytes); each is measured on the three kit images and the matrix when its head arrives. The wz side that remains is small: the handshake decode frames (`read_unit_in` 452, `parse_init` 432, `decode_unit_in` 320 bytes) for the stack used margin, and the node's loop (3.9 KB) and the pump task (2.4 KB) for text."
       ]
     },
+    "Round 3969": {
+      "decision_summary": "The session lifecycle design note is brought in line with the code. It said in decision D7 and in its Open section that the out-of-band transport built the open command alone, and its section 6 said only step A of step 8 was built. Since the commit of 2026-10-27 that serves close, reset and status on the fixed node, the control port reads open, close, reset with a generation, status and whoami, and the host node answers them on standard input. That commit left the note alone, and nothing checks a design note against the code, so the note disagreed with itself as well. It now says what the code does, names the tests that hold it (all run and passing), and keeps the real remainder: a locator target with no expected zid, a hold over a secure channel that no lane runs, and a Zephyr image that binds the verbs.",
+      "changes_bullets": [
+        "docs/session-lifecycle-intent.md: decision D7 item 2, the first bullet of section 5, the heading and opening of section 6, and the closing note of 6.8."
+      ],
+      "verification_bullets": [
+        "The claims were checked against the code and run on a build host with a room for two peers, as the CI legs state it: the fixed node's connect manager legs (26 passed, the number the lane pins), the in-band query table (10 passed, the number the lane pins) and the control channel through a real process (4 passed). Without a stated room the held-peer tests return without checking, so a run without it would have proved nothing. Documentation only; no code changed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The held-peer cases are run with fake dialers only; a hold over a real secure channel is run by no lane, and whether a two-node integration test of close and reset over TLS exists was not looked for. The atom session-close-ingress is still graded PARTIAL and its seven listed residuals were not recounted against the code. Read the hosted run of the current tree."
+      ],
+      "publishable_decision_summary": "The session lifecycle design note is brought in line with the code. It said in decision D7 and in its Open section that the out-of-band transport built the open command alone, and its section 6 said only step A of step 8 was built. Since the commit of 2026-10-27 that serves close, reset and status on the fixed node, the control port reads open, close, reset with a generation, status and whoami, and the host node answers them on standard input. That commit left the note alone, and nothing checks a design note against the code, so the note disagreed with itself as well. It now says what the code does, names the tests that hold it (all run and passing), and keeps the real remainder: a locator target with no expected zid, a hold over a secure channel that no lane runs, and a Zephyr image that binds the verbs.",
+      "publishable_changes_bullets": [
+        "docs/session-lifecycle-intent.md: decision D7 item 2, the first bullet of section 5, the heading and opening of section 6, and the closing note of 6.8."
+      ],
+      "publishable_verification_bullets": [
+        "The claims were checked against the code and run on a build host with a room for two peers, as the CI legs state it: the fixed node's connect manager legs (26 passed, the number the lane pins), the in-band query table (10 passed, the number the lane pins) and the control channel through a real process (4 passed). Without a stated room the held-peer tests return without checking, so a run without it would have proved nothing. Documentation only; no code changed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The held-peer cases are run with fake dialers only; a hold over a real secure channel is run by no lane, and whether a two-node integration test of close and reset over TLS exists was not looked for. The atom session-close-ingress is still graded PARTIAL and its seven listed residuals were not recounted against the code. Read the hosted run of the current tree."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
