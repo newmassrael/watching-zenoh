@@ -300636,6 +300636,44 @@
         "Which change widened the gap between pc2 and the hosted text reading from 232 to about 10,000 bytes is open; the hosted artifact of a coop build would settle it."
       ]
     },
+    "Round 3975": {
+      "decision_summary": "The corpus had a client and a router of one release, and 1.10.1 clients against older routers, but no client older than its router. Six pairs are added: 1.7.2 clients against a 1.10.0 and a 1.9.0 router, and 1.9.0 clients against a 1.10.0 router, over TCP and UDP, a minute each, on a link that loses nothing; the clients are the z_pub and z_sub examples built from the upstream tags. Every session opened, all six captures read two yes flows, and none of their 685 SN steps broke. The counts grow by 1039 units and 12 handshakes (units 8154, framing 324, cookies 328, Init pairs 330, versions 660). The failure weights move by up to 197 millibits: a residual or undecoded unit weighs -11411 on the yes sum; two undecoded ones -21044 on the no sum, two residual ones -19984, 16 short of the threshold. Three confirming weights move by one millibit, and the pinned example sums move with them. No other capture changed word.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-mixed-c1-7-2-r1-10-0-tcp|udp`, `zenoh-mixed-c1-9-0-r1-10-0-tcp|udp`, `zenoh-mixed-c1-7-2-r1-9-0-tcp|udp` (anonymised, 65 files are fixed points), with manifest entries and a README row.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie fidelity -13 and differing -6781, Init roles +987 and one kind -5790, another version -7781, unit read whole +966 / +3545, residual -11411 / -9992, undecoded -11411 / -10522, framing lost -6764 / -6747 (framing held unchanged at +2832 / +6447); the cookie-weight test follows.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: six rows (2, 0, 0).",
+        "Pinned sums moved with the weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (yes sum 2898).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on clients older than the router, and what is still open."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, and its C consumer built against the release cdylib and read the tree. The weights were recomputed by a port that first reproduces the previous weights from the previous counts. The pre-push static gate array ran whole on the changed tree: 121 of 121 pass. The corpus verifier: 65 files are fixed points. The worktree's SCE submodule matched the pin before the run. Not run: the hosted layers. The first measurement run failed to compile because the worktree's SCE checkout had been left on an older commit by the previous round's ledger commit, which also moved the pin on main; another session restored it before this round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: a client newer than its router at the same time as other pairs (1.10.1 against 1.5.0 exists), releases other than 1.5.0 and 1.7.2 to 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. A weights round must re-pin the C consumer's opening, and after pulling main the SCE submodule must be updated before land.sh: the previous round's ledger commit moved the pin because it was not."
+      ],
+      "publishable_decision_summary": "The corpus had a client and a router of one release, and 1.10.1 clients against older routers, but no client older than its router. Six pairs are added: 1.7.2 clients against a 1.10.0 and a 1.9.0 router, and 1.9.0 clients against a 1.10.0 router, over TCP and UDP, a minute each, on a link that loses nothing; the clients are the z_pub and z_sub examples built from the upstream tags. Every session opened, all six captures read two yes flows, and none of their 685 SN steps broke. The counts grow by 1039 units and 12 handshakes (units 8154, framing 324, cookies 328, Init pairs 330, versions 660). The failure weights move by up to 197 millibits: a residual or undecoded unit weighs -11411 on the yes sum; two undecoded ones -21044 on the no sum, two residual ones -19984, 16 short of the threshold. Three confirming weights move by one millibit, and the pinned example sums move with them. No other capture changed word.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-mixed-c1-7-2-r1-10-0-tcp|udp`, `zenoh-mixed-c1-9-0-r1-10-0-tcp|udp`, `zenoh-mixed-c1-7-2-r1-9-0-tcp|udp` (anonymised, 65 files are fixed points), with manifest entries and a README row.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie fidelity -13 and differing -6781, Init roles +987 and one kind -5790, another version -7781, unit read whole +966 / +3545, residual -11411 / -9992, undecoded -11411 / -10522, framing lost -6764 / -6747 (framing held unchanged at +2832 / +6447); the cookie-weight test follows.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: six rows (2, 0, 0).",
+        "Pinned sums moved with the weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (yes sum 2898).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on clients older than the router, and what is still open."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, and its C consumer built against the release cdylib and read the tree. The weights were recomputed by a port that first reproduces the previous weights from the previous counts. The pre-push static gate array ran whole on the changed tree: 121 of 121 pass. The corpus verifier: 65 files are fixed points. The worktree's SCE submodule matched the pin before the run. Not run: the hosted layers. The first measurement run failed to compile because the worktree's SCE checkout had been left on an older commit by the previous round's ledger commit, which also moved the pin on main; another session restored it before this round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: a client newer than its router at the same time as other pairs (1.10.1 against 1.5.0 exists), releases other than 1.5.0 and 1.7.2 to 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. A weights round must re-pin the C consumer's opening, and after pulling main the SCE submodule must be updated before land.sh: the previous round's ledger commit moved the pin because it was not."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
