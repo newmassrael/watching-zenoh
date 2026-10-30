@@ -11805,11 +11805,13 @@ layer_c1m_session_lwip() {
     # and the liveliness tokens (declared last, refused by a node that cannot send one).
     # Round 3798 -- 28 -> 29: the group membership the node holds beside its sessions, read off
     # the run (the tokens leg below is the same number).
-    _runci_guarded_test "C1m mcu slot node" 29 \
+    # 29 -> 31: the peers a command line holds by their zid (`LaunchedPeers`), a cell set once
+    # and read as the list the node holds, and its refusals.
+    _runci_guarded_test "C1m mcu slot node" 31 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
     # them assert is the other half (a token is declared, and is not refused).
-    _runci_guarded_test "C1m mcu slot node with tokens" 29 \
+    _runci_guarded_test "C1m mcu slot node with tokens" 31 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The client that answers queries and subscribes to nothing (`client-slot-queryable`, what
     # `CONFIG_WZ_SUBSCRIBE=n` builds): the declaration of a subscriber is refused and the registry of
@@ -20873,10 +20875,18 @@ layer_z_zenohd_interop() {
     # built with `tls`, over `wz-tls-mbedtls`) dials zenohd's mutual-TLS listener,
     # which pins the certificate the image printed. Three legs, each the control
     # of another: a router whose zid its key names is verified, one whose zid it
-    # does not name is not, and a router pinning another device admits nothing.
+    # does not name is not, and a router pinning another device admits nothing. A
+    # fourth leg takes the channel to the lifecycle verbs: a second image, built with
+    # `control` and room for one node held by its zid (`WZ_LIMIT_MAX_PEER_NODES=1`,
+    # in its own target directory so the first image is not overwritten), holds the
+    # router by its zid from its first tick (`--peer`), and a test agent on its
+    # standard input asks for status, close, open and reset.
     (cd deploy/host-slot-node && cargo build --release -p host-slot-node --features tls --quiet) \
         || return 1
-    _runci_guarded_test Ztls 3 env WZ_ZENOHD_BIN="$zenohd" \
+    (cd deploy/host-slot-node && WZ_LIMIT_MAX_PEER_NODES=1 cargo build --release -p host-slot-node \
+        --features tls,control --target-dir target/tls-control --quiet) || return 1
+    _runci_guarded_test Ztls 4 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_HOST_SLOT_NODE_TLS_CONTROL="$PWD/deploy/host-slot-node/target/tls-control/release/host-slot-node" \
         WZ_HOST_SLOT_NODE_TLS="$PWD/deploy/host-slot-node/target/release/host-slot-node" \
         cargo test -p wz-integration-tests --test wz_fixed_memory_tls_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || return 1

@@ -431,6 +431,79 @@ impl EndpointSource for SingleEndpoint {
     }
 }
 
+/// Why [`LaunchedPeers`] refused the peers it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchedPeersRefused {
+    /// More peers than the cell has places for.
+    TooMany,
+    /// The peers were set before.
+    Twice,
+}
+
+impl LaunchedPeersRefused {
+    /// The console line.
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::TooMany => "wz: FAIL - more --peer arguments than the node has places for",
+            Self::Twice => "wz: FAIL - the peers were set twice",
+        }
+    }
+}
+
+/// The peers a node holds by their zid that are learned after the program starts (a command line):
+/// the same peers [`ClientNode::peers`] takes from a declaration, written once, before the node
+/// exists, and read as the list the node holds from its first tick. A peer known when the image is
+/// built is a `DeclaredPeer` in a `static` slice, which the declaration checks at compile time.
+///
+/// `N` is the most it holds. Holding one still needs a dialer that verifies the node it dialled
+/// for and room for it in the connect manager (`MAX_PEER_NODES`); a build with neither stops at
+/// start and names the peer, as it does for a declared one.
+pub struct LaunchedPeers<const N: usize> {
+    peers: core::cell::OnceCell<([DeclaredPeer; N], usize)>,
+}
+
+// SAFETY: the profile's rule, as for `SingleEndpoint`: one thread runs the program, and the cell is
+// written once, before the node that reads it exists.
+unsafe impl<const N: usize> Sync for LaunchedPeers<N> {}
+
+impl<const N: usize> LaunchedPeers<N> {
+    /// No peers yet: the node holds none.
+    pub const fn new() -> Self {
+        Self {
+            peers: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// Set the peers to `given`, in order.
+    pub fn set(&self, given: &[DeclaredPeer]) -> Result<(), LaunchedPeersRefused> {
+        if given.len() > N {
+            return Err(LaunchedPeersRefused::TooMany);
+        }
+        let mut table = [DeclaredPeer {
+            zid: [0; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
+            locator: "",
+        }; N];
+        table[..given.len()].copy_from_slice(given);
+        self.peers
+            .set((table, given.len()))
+            .map_err(|_| LaunchedPeersRefused::Twice)
+    }
+
+    /// The peers that were set, or none.
+    pub fn peers(&'static self) -> &'static [DeclaredPeer] {
+        match self.peers.get() {
+            Some((table, count)) => &table[..*count],
+            None => &[],
+        }
+    }
+}
+
+impl<const N: usize> Default for LaunchedPeers<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The declarations the node sends on each session, in the order of their registrations: a
 /// `&'static [Declaration]` of at most `N`, held in storage the image declares. `N` is the image's
 /// number of documents (each is one queryable), so the list is no longer than what it holds.
@@ -1998,6 +2071,39 @@ mod tests {
         let (generation, list) = endpoint.endpoints();
         assert_eq!(generation, 0);
         assert_eq!(list.len(), 1);
+    }
+
+    fn peer(byte: u8, locator: &'static str) -> DeclaredPeer {
+        DeclaredPeer {
+            zid: [byte; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
+            locator,
+        }
+    }
+
+    #[test]
+    fn launched_peers_are_none_until_set_and_then_the_ones_given_in_order() {
+        let peers: &'static LaunchedPeers<3> = Box::leak(Box::new(LaunchedPeers::new()));
+        assert!(peers.peers().is_empty());
+        let given = [peer(1, "tls/10.0.0.1:7447"), peer(2, "tls/10.0.0.2:7447")];
+        peers.set(&given).unwrap();
+        assert_eq!(peers.peers(), &given[..]);
+    }
+
+    #[test]
+    fn launched_peers_are_set_once_and_never_more_than_the_cell_holds() {
+        let peers: &'static LaunchedPeers<1> = Box::leak(Box::new(LaunchedPeers::new()));
+        let two = [peer(1, "a"), peer(2, "b")];
+        assert_eq!(peers.set(&two), Err(LaunchedPeersRefused::TooMany));
+        assert!(
+            peers.peers().is_empty(),
+            "a refused set leaves the cell as it was"
+        );
+        peers.set(&two[..1]).unwrap();
+        assert_eq!(peers.set(&two[..1]), Err(LaunchedPeersRefused::Twice));
+        assert_ne!(
+            LaunchedPeersRefused::TooMany.message(),
+            LaunchedPeersRefused::Twice.message()
+        );
     }
 
     #[test]

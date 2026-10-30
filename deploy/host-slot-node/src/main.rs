@@ -32,7 +32,8 @@
 //! date, the socket and the entry point (`wz-runtime-posix`).
 //!
 //! ```text
-//! host-slot-node <router [udp/|tcp/|tls/]a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...
+//! host-slot-node [<router [udp/|tcp/|tls/]a.b.c.d:port>] [--peer ZID=LOCATOR]...
+//!                [--local a.b.c.d] [--doc KEY:BYTES]...
 //! ```
 //!
 //! It dials the router (over UDP when the address names no scheme), declares a queryable under
@@ -40,6 +41,15 @@
 //! key the query asked. Built with `tls`, it can dial `tls/` (the secure channel, `tls.rs`), and
 //! the line it prints when a session is established says whether the router's zid is the one the
 //! key it proved names.
+//!
+//! A `--peer ZID=LOCATOR` (at most two) is a node the process holds by its zid from its first
+//! tick, as a declaration holds one at build time (decision D7 of
+//! `docs/session-lifecycle-intent.md`, the third transport): `ZID` is spelled as a key spells it
+//! (lowercase hex, no leading zero) and `LOCATOR` is where it may be found, a hint every dial is
+//! made for the zid. With a `--peer` the router may be left out, and the node dials only the
+//! peers. Holding one needs a dialer that verifies the node it dialled for (`tls/`) and room for
+//! it in the connect manager (`WZ_LIMIT_MAX_PEER_NODES` when the image is built); a build with
+//! neither stops at start and says which peer.
 #![no_std]
 #![no_main]
 
@@ -62,14 +72,16 @@ use wz_runtime_posix::slot::PosixStack;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::MAX_QUERYABLES;
+use wz_session_core::credential_identity::{zid_from_key_text, CREDENTIAL_ZID_BYTES};
+use wz_session_mcu::connect_manager::DeclaredPeer;
 use wz_session_mcu::dial::parse_locator;
 use wz_session_mcu::slot_client::Listening;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::NoPlane;
 use wz_session_mcu::slot_node::{
-    documents_of, BodyPool, ClientNode, Declared, Entities, NodeIdentity, NodePort, NodeStorage,
-    SingleEndpoint,
+    documents_of, BodyPool, ClientNode, Declared, Entities, LaunchedPeers, NodeIdentity,
+    NodeStorage, SingleEndpoint,
 };
 
 wz_runtime_posix::posix_image_no_heap!();
@@ -114,6 +126,12 @@ static BODY: BodyPool<DOC_MAX> = BodyPool::new();
 /// The router the node dials, set once from the command line before the node starts.
 static ROUTER: SingleEndpoint = SingleEndpoint::new();
 
+/// The most peers a command line may hold the node to by their zid.
+const LAUNCHED: usize = 2;
+
+/// The peers the node holds by their zid, set once from the command line before the node starts.
+static PEERS: LaunchedPeers<LAUNCHED> = LaunchedPeers::new();
+
 /// The queryables the node declares on each session, in the order of their registrations: a
 /// `&'static [Declaration]` whose length the command line chose (at most [`DOCS`]), held in
 /// storage this file declares.
@@ -131,7 +149,11 @@ type Port = HostPort<Console>;
 
 /// What the command line asked for.
 struct Args {
-    router: Locator,
+    /// The router it dials, or none for a node that dials only its peers.
+    router: Option<Locator>,
+    /// The peers it holds by their zid, the first `peer_count` of the table.
+    peers: [DeclaredPeer; LAUNCHED],
+    peer_count: usize,
     local: [u8; 4],
     docs: [Option<(&'static str, usize)>; DOCS],
     /// The key to ask, how many times, and how long a query may stay pending (zero is the
@@ -172,16 +194,36 @@ fn parse_router(text: &str) -> Option<Locator> {
     }
 }
 
+/// `ZID=LOCATOR`: a node to hold by its zid, with where it may be found. The zid is spelled as a
+/// key spells one; the locator is kept as the text it was given, which lives as long as the
+/// process does.
+fn parse_peer(text: &'static str) -> Option<DeclaredPeer> {
+    let (zid, locator) = text.split_once('=')?;
+    if locator.is_empty() {
+        return None;
+    }
+    Some(DeclaredPeer {
+        zid: zid_from_key_text(zid)?,
+        locator,
+    })
+}
+
 fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static str> {
     #[cfg(not(feature = "get"))]
-    const USAGE: &str = "usage: host-slot-node <router [udp/|tcp/|tls/]a.b.c.d:port> \
-                         [--local a.b.c.d] [--doc KEY:BYTES]...";
+    const USAGE: &str = "usage: host-slot-node [<router [udp/|tcp/|tls/]a.b.c.d:port>] \
+                         [--peer ZID=LOCATOR]... [--local a.b.c.d] [--doc KEY:BYTES]...";
     #[cfg(feature = "get")]
     const USAGE: &str =
-        "usage: host-slot-node <router [udp/|tcp/|tls/]a.b.c.d:port> [--local a.b.c.d] \
+        "usage: host-slot-node [<router [udp/|tcp/|tls/]a.b.c.d:port>] [--peer ZID=LOCATOR]... \
+                         [--local a.b.c.d] \
                          [--doc KEY:BYTES]... [--get KEY --count N [--warmup N] [--timeout-ms MS] \
                          [--inflight K] [--mailbox]]";
     let mut router = None;
+    let mut peers = [DeclaredPeer {
+        zid: [0; CREDENTIAL_ZID_BYTES],
+        locator: "",
+    }; LAUNCHED];
+    let mut peer_count = 0;
     let mut local = [0u8; 4];
     let mut docs = [None; DOCS];
     let mut taken = 0;
@@ -228,6 +270,15 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
                 let value = if at < argc { argument(argv, at) } else { None };
                 get_timeout = value.ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
             }
+            "--peer" => {
+                at += 1;
+                let value = if at < argc { argument(argv, at) } else { None };
+                if peer_count == LAUNCHED {
+                    return Err("at most two --peer, each a node held by its zid");
+                }
+                peers[peer_count] = parse_peer(value.ok_or(USAGE)?).ok_or(USAGE)?;
+                peer_count += 1;
+            }
             "--local" => {
                 at += 1;
                 let value = if at < argc { argument(argv, at) } else { None };
@@ -261,8 +312,14 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
         (None, 0) => None,
         _ => return Err(USAGE),
     };
+    // A node dials something: the router, or the peers it is told to hold.
+    if router.is_none() && peer_count == 0 {
+        return Err(USAGE);
+    }
     Ok(Args {
-        router: router.ok_or(USAGE)?,
+        router,
+        peers,
+        peer_count,
         local,
         docs,
         #[cfg(feature = "get")]
@@ -304,7 +361,13 @@ fn run(args: Args) -> i32 {
         }
     };
 
-    if let Err(why) = ROUTER.set(&args.router) {
+    if let Some(router) = &args.router {
+        if let Err(why) = ROUTER.set(router) {
+            log(why.message());
+            return 2;
+        }
+    }
+    if let Err(why) = PEERS.set(&args.peers[..args.peer_count]) {
         log(why.message());
         return 2;
     }
@@ -344,7 +407,7 @@ fn run(args: Args) -> i32 {
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,
         endpoints: &ROUTER,
-        peers: &[],
+        peers: PEERS.peers(),
         documents: &documents[..taken],
         entities: Entities::NONE,
         #[cfg(not(feature = "get"))]
@@ -373,10 +436,10 @@ fn run(args: Args) -> i32 {
     node.run(&mut Port::new(), &mut app, |_, zid_hex| {
         // The router is a `Locator`, which is printed through its `Display`: the host has no
         // image size to keep, so this line is the one that does not go through the port's parts.
-        log_args(format_args!(
-            "HOST-WZ-CLIENT READY {zid_hex} {}",
-            args.router
-        ));
+        match &args.router {
+            Some(router) => log_args(format_args!("HOST-WZ-CLIENT READY {zid_hex} {router}")),
+            None => log_args(format_args!("HOST-WZ-CLIENT READY {zid_hex} -")),
+        }
     })
 }
 

@@ -21,12 +21,23 @@
 //! - the router pins another device's certificate: no session is established, so the first two
 //!   are the router verifying the image and not a router that admits anyone.
 //!
+//! A fourth leg takes the same channel to the lifecycle verbs of decision D7: an image built with
+//! `control` and room for one node (`WZ_HOST_SLOT_NODE_TLS_CONTROL`) is told a router by its zid
+//! and where to look (`--peer ZID=LOCATOR`), holds it from its first tick over mutual TLS, and a
+//! test agent on its standard input then asks for `status`, `close`, `open` and `reset`: a close
+//! brings the session down and the node does not dial again, an open brings it back, a reset with
+//! a generation dials once more, and the same generation sent again does nothing. The
+//! contract's table holds these on a fake dialer; this is the verbs on the real channel.
+//!
 //! Requires the image (`WZ_HOST_SLOT_NODE_TLS`, built by Layer Z) and the reference zenohd.
 //! Runs on the `--ignored` lane; the file's `zenohd` token keeps Layer E's sweep off it.
 
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, wait_for_substring, zenohd_binary, ChildGuard,
@@ -258,6 +269,272 @@ fn zenohd_claiming_a_zid_its_key_does_not_name_is_not_verified() {
         "a router claiming a zid its key does not name was read as verified\n{}",
         report(&outcome)
     );
+}
+
+// ---- the lifecycle verbs on a router the image holds by its zid, over the same channel ----
+
+/// The image built with `tls` and `control`, and room for one node held by its zid
+/// (`WZ_LIMIT_MAX_PEER_NODES=1`), as Layer Z names it.
+fn control_binary() -> PathBuf {
+    let path = PathBuf::from(std::env::var("WZ_HOST_SLOT_NODE_TLS_CONTROL").expect(
+        "WZ_HOST_SLOT_NODE_TLS_CONTROL names deploy/host-slot-node built with \
+         `--features tls,control` and WZ_LIMIT_MAX_PEER_NODES=1 (Layer Z builds it)",
+    ));
+    assert!(path.is_file(), "no image at {}", path.display());
+    path
+}
+
+/// The lines a child printed on one stream, collected as they come.
+struct Printed {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl Printed {
+    fn collect(stream: impl Read + Send + 'static) -> Self {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&lines);
+        thread::spawn(move || {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                sink.lock().expect("lines").push(line);
+            }
+        });
+        Self { lines }
+    }
+
+    fn all(&self) -> Vec<String> {
+        self.lines.lock().expect("lines").clone()
+    }
+
+    /// How many lines hold `needle`.
+    fn count(&self, needle: &str) -> usize {
+        self.all().iter().filter(|l| l.contains(needle)).count()
+    }
+
+    /// Wait until `needle` has been printed `times` times, for up to `budget`.
+    fn wait_for(&self, needle: &str, times: usize, budget: Duration) -> bool {
+        let end = Instant::now() + budget;
+        while Instant::now() < end {
+            if self.count(needle) >= times {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.count(needle) >= times
+    }
+}
+
+/// The image, driven on its control channel: a line written to its standard input is answered
+/// with one line on its standard output.
+struct Agent {
+    child: ChildGuard,
+    stdin: std::process::ChildStdin,
+    answers: Printed,
+    log: Printed,
+}
+
+impl Agent {
+    /// Send one line and take the one answer it gets.
+    fn ask(&mut self, line: &str) -> String {
+        let before = self.answers.all().len();
+        writeln!(self.stdin, "{line}").expect("the control channel is open");
+        self.stdin.flush().expect("flush");
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end {
+            if let Some(answer) = self.answers.all().get(before) {
+                return answer.clone();
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "no answer to {line:?}\n--- image ---\n{}",
+            self.log.all().join("\n")
+        );
+    }
+}
+
+// wz-proves: none -- the hold, the close and the reset of a node by its zid over a verified secure channel are the lifecycle contract of decision D7, which has its own atom's witnesses on a fake dialer; this is the same verbs on the real channel
+#[test]
+#[ignore = "binary-dep e2e (the tls and control build of deploy/host-slot-node, which Layer Z makes, + zenohd); runs via --ignored"]
+fn an_image_closes_and_resets_the_router_it_holds_by_its_zid_over_mutual_tls() {
+    let node = control_binary();
+    let port = free_port();
+    let base = std::env::temp_dir().join(format!("wz-fixed-life-{}-{port}", std::process::id()));
+    let path = |suffix: &str| PathBuf::from(format!("{}.{suffix}", base.display()));
+    let (device_pem, router_cert, router_key, config) = (
+        path("device.pem"),
+        path("router.pem"),
+        path("router.key"),
+        path("zenohd.json5"),
+    );
+    let _cleanup = TempFiles(vec![
+        device_pem.clone(),
+        router_cert.clone(),
+        router_key.clone(),
+        config.clone(),
+    ]);
+
+    // The router's identity first: the image is told its zid and where to look for it, so the
+    // node is held BY its zid from the first tick, and nothing about it is known by the image
+    // otherwise.
+    let router: KeyNamedIdentity = key_named_identity();
+    let router_zid = zid_from_spki_der(&router.spki_der);
+    let zid = config_id(&router_zid);
+
+    let mut child = Command::new(&node)
+        .arg("--peer")
+        .arg(format!("{zid}=tls/127.0.0.1:{port}"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the image");
+    let stdin = child.stdin.take().expect("stdin");
+    let answers = Printed::collect(child.stdout.take().expect("stdout"));
+    let log = Printed::collect(child.stderr.take().expect("stderr"));
+    let mut image = Agent {
+        child: ChildGuard::wrap("host-slot-node (tls, control)", child),
+        stdin,
+        answers,
+        log,
+    };
+
+    // It prints its certificate for the router's operator to pin.
+    assert!(
+        image
+            .log
+            .wait_for("-----END CERTIFICATE-----", 1, Duration::from_secs(10)),
+        "the image printed no certificate\n--- image ---\n{}",
+        image.log.all().join("\n")
+    );
+    let device = printed_certificate(&image.log.all().join("\n")).expect("a whole PEM block");
+    std::fs::write(&device_pem, device).expect("write the pinned certificate");
+    std::fs::write(&router_cert, &router.cert_pem).expect("write the router certificate");
+    std::fs::write(&router_key, &router.key_pem).expect("write the router key");
+    std::fs::write(
+        &config,
+        format!(
+            "{{ id: {zid:?}, mode: \"router\", transport: {{ link: {{ tls: {{ \
+             listen_certificate: {cert:?}, listen_private_key: {key:?}, \
+             root_ca_certificate: {root:?}, enable_mtls: true }} }} }} }}",
+            cert = router_cert.display().to_string(),
+            key = router_key.display().to_string(),
+            root = device_pem.display().to_string(),
+        ),
+    )
+    .expect("write the router configuration");
+    let mut router_out = tempfile::tempfile().expect("a capture for the router");
+    let mut zenohd = ChildGuard::wrap(
+        "zenohd (reference router, mutual tls)",
+        Command::new(zenohd_binary())
+            .arg("--config")
+            .arg(&config)
+            .arg("-l")
+            .arg(format!("tls/127.0.0.1:{port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::from(router_out.try_clone().expect("dup capture")))
+            .stderr(Stdio::from(router_out.try_clone().expect("dup capture")))
+            .spawn()
+            .expect("spawn zenohd"),
+    );
+    let report = |image: &Agent, router_out: &mut std::fs::File| {
+        format!(
+            "--- image ---\n{}\n--- zenohd ---\n{}",
+            image.log.all().join("\n"),
+            read_captured(router_out)
+        )
+    };
+
+    // THE HOLD: the image dials the router for the zid it was told, over the channel, and reads
+    // it as the holder of the key that zid names.
+    assert!(
+        image.log.wait_for(VERIFIED, 1, ESTABLISH_BUDGET),
+        "the image did not hold the router by its zid\n{}",
+        report(&image, &mut router_out)
+    );
+    let held = image.ask(&format!("status {zid}"));
+    println!("status (held): {held}");
+    assert!(
+        held.contains("\"verdict\":\"status\"")
+            && held.contains("\"open\":1")
+            && held.contains("\"intent\":true")
+            && held.contains("\"state\":\"established\""),
+        "status of a held peer must say one open link, the peer in the intent and its machine \
+         established: {held}"
+    );
+
+    // CLOSE: the session goes down and the node does not dial the router again.
+    let closed = image.ask(&format!("close {zid}"));
+    println!("close: {closed}");
+    assert!(
+        closed.contains("\"verdict\":\"closing\""),
+        "close of a held peer: {closed}"
+    );
+    assert!(
+        image
+            .log
+            .wait_for("session lost", 1, Duration::from_secs(20)),
+        "the session did not go down after a close\n{}",
+        report(&image, &mut router_out)
+    );
+    thread::sleep(Duration::from_secs(8));
+    assert_eq!(
+        image.log.count(VERIFIED),
+        1,
+        "the node dialled the router again after a close\n{}",
+        report(&image, &mut router_out)
+    );
+    // A close sent again, as a retransmission is, closes nothing: the peer is out of the intent.
+    let again = image.ask(&format!("close {zid}"));
+    println!("close (repeated): {again}");
+    assert!(
+        !again.contains("\"verdict\":\"closing\""),
+        "a repeated close ordered a close again: {again}"
+    );
+
+    // OPEN brings it back, by the same zid, as the intent says.
+    let reopened = image.ask(&format!("open {zid}"));
+    println!("open: {reopened}");
+    assert!(
+        reopened.contains("\"verdict\":\"opening\""),
+        "open of a closed peer: {reopened}"
+    );
+    assert!(
+        image.log.wait_for(VERIFIED, 2, ESTABLISH_BUDGET),
+        "the node did not hold the router again after an open\n{}",
+        report(&image, &mut router_out)
+    );
+
+    // RESET with a generation: the session is closed once and dialled again, and the same
+    // generation sent again (a retransmission) does nothing.
+    let reset = image.ask(&format!("reset {zid} 1"));
+    println!("reset: {reset}");
+    assert!(
+        reset.contains("\"verdict\":\"resetting\""),
+        "reset of a held peer: {reset}"
+    );
+    assert!(
+        image.log.wait_for(VERIFIED, 3, ESTABLISH_BUDGET),
+        "the node did not dial the router again after a reset\n{}",
+        report(&image, &mut router_out)
+    );
+    let duplicate = image.ask(&format!("reset {zid} 1"));
+    println!("reset (same generation): {duplicate}");
+    assert!(
+        duplicate.contains("duplicate"),
+        "the same generation again was not a duplicate: {duplicate}"
+    );
+    thread::sleep(Duration::from_secs(8));
+    assert_eq!(
+        image.log.count(VERIFIED),
+        3,
+        "a repeated generation closed the session again\n{}",
+        report(&image, &mut router_out)
+    );
+
+    graceful_terminate(image.child.child_mut(), Duration::from_secs(5));
+    graceful_terminate(zenohd.child_mut(), Duration::from_secs(5));
 }
 
 // wz-proves: none -- the control of the first leg, for the same reason: no catalog atom names the fixed-memory profile's channel
