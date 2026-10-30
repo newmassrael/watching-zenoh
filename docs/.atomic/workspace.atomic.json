@@ -299782,6 +299782,36 @@
         "Layer Q reds at the SCE pin b1ede72108, not yet attributed or paid: the multicast-e2e text reads 76,232 and 76,248 bytes (baselines 68,712 and 68,772, +7,280 and +7,248) on thumbv7m and thumbv7em, and the stack-frame gate reds the two-session freertos image, whose `TwoSessions::spawn` has a frame of 18,600 bytes against the budget of 16,384. A Layer Q run at the commit before the pin was started to say how much is the pin's. The qemu-demo image grew by 36 to 64 bytes, inside its band. Open: the host source on platforms without /proc, which cannot be built or measured here; the C11 emit of the deadline documents; hosted CI per job, every run of these pushes having been cancelled by the next push."
       ]
     },
+    "Round 3951": {
+      "decision_summary": "The two Layer Q reds at the SCE pin were attributed by building the multicast-e2e image and the two-session freertos image at the commit before the pin and after it; one is paid. TwoSessions::spawn grew from 14,344 to 18,600 bytes and session_duties from 6,392 to 7,712: the dispatcher was built by value and rebuilt its whole array of peer slots by value when a link went down. The dispatcher and its slots are now built in place (MulticastDispatcher::new_in_place, PeerSlot::init_in over Engine::new_in_place, a slot reset in its cell), as the SCE session advised: spawn reads 15,968 (budget 16,384), session_duties left the largest frames, and the qemu peak is 17,552 of 32,768 (21,328 before this, 16,544 before the pin). The multicast image's text, 76,136 against a baseline of 68,712, is the pin's (SCE: ADR 0064, cut by later ADRs), so the baseline and the red stay until the next pin. scripts/lib/image_top_report.py lists an image's largest frames and symbols.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/multicast_dispatch.rs`: `MulticastDispatcher::new_in_place` and `PeerSlot::init_in` write each machine and slot where it lives, with `fields_are_written_by_*` functions that name every field so a new one stops the build until it is written; `new` is `new_in_place` into a local; the link going down resets each slot with `reset_in_place` and no longer assigns a rebuilt array.",
+        "`scripts/lib/image_top_report.py`: the largest frames and symbols of an image."
+      ],
+      "verification_bullets": [
+        "On a build host: the 127 multicast tests of wz-session-core with all features and 67 with the multicast feature set pass, the tests of wz-session-lwip and wz-session-mcu pass, and clippy with warnings denied is clean for wz-session-core with and without its features. Layer Q was run whole: the stack-frame gate on the two-session image is green (15,968 against 16,384), its qemu run passes at a peak of 17,552 of 32,768, the multicast loopback boots pass, and the one failing step is the multicast-e2e text, 76,136 and 76,132 bytes against baselines of 68,712 and 68,772, unchanged in kind from before this change (it was 76,232 and 76,248). Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open: the multicast-e2e text red stays until the next SCE pin (the session that owns the runtime will send the sha; both images are to be measured again with image_top_report.py and the baselines and budgets moved only by what remains); the workspace the runtime inlines through initialize still makes spawn about 1.6 KB larger than before the pin; the host source on platforms without /proc; the C11 emit of the deadline documents; hosted CI per job."
+      ],
+      "publishable_decision_summary": "The two Layer Q reds at the SCE pin were attributed by building the multicast-e2e image and the two-session freertos image at the commit before the pin and after it; one is paid. TwoSessions::spawn grew from 14,344 to 18,600 bytes and session_duties from 6,392 to 7,712: the dispatcher was built by value and rebuilt its whole array of peer slots by value when a link went down. The dispatcher and its slots are now built in place (MulticastDispatcher::new_in_place, PeerSlot::init_in over Engine::new_in_place, a slot reset in its cell), as the SCE session advised: spawn reads 15,968 (budget 16,384), session_duties left the largest frames, and the qemu peak is 17,552 of 32,768 (21,328 before this, 16,544 before the pin). The multicast image's text, 76,136 against a baseline of 68,712, is the pin's (SCE: ADR 0064, cut by later ADRs), so the baseline and the red stay until the next pin. scripts/lib/image_top_report.py lists an image's largest frames and symbols.",
+      "publishable_changes_bullets": [
+        "`crates/wz-session-core/src/multicast_dispatch.rs`: `MulticastDispatcher::new_in_place` and `PeerSlot::init_in` write each machine and slot where it lives, with `fields_are_written_by_*` functions that name every field so a new one stops the build until it is written; `new` is `new_in_place` into a local; the link going down resets each slot with `reset_in_place` and no longer assigns a rebuilt array.",
+        "`scripts/lib/image_top_report.py`: the largest frames and symbols of an image."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the 127 multicast tests of wz-session-core with all features and 67 with the multicast feature set pass, the tests of wz-session-lwip and wz-session-mcu pass, and clippy with warnings denied is clean for wz-session-core with and without its features. Layer Q was run whole: the stack-frame gate on the two-session image is green (15,968 against 16,384), its qemu run passes at a peak of 17,552 of 32,768, the multicast loopback boots pass, and the one failing step is the multicast-e2e text, 76,136 and 76,132 bytes against baselines of 68,712 and 68,772, unchanged in kind from before this change (it was 76,232 and 76,248). Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the multicast-e2e text red stays until the next SCE pin (the session that owns the runtime will send the sha; both images are to be measured again with image_top_report.py and the baselines and budgets moved only by what remains); the workspace the runtime inlines through initialize still makes spawn about 1.6 KB larger than before the pin; the host source on platforms without /proc; the C11 emit of the deadline documents; hosted CI per job."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
