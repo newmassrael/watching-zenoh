@@ -3635,7 +3635,7 @@ router_entry_points! { on_tables:
 
 /// The entry points of a local publish. They are not in the lists above because a put must not
 /// wait for room with the tables held: the route is made with the tables read, and what the route
-/// found no room for is sent once they are released ([`local_publish`]).
+/// found no room for is sent once they are released (`local_publish`, a private module).
 impl RouterForwarder {
     /// Route a publish with the tables read, then make the sends it owes with them released.
     fn publishing<R>(
