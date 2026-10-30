@@ -194,7 +194,7 @@ pub(crate) mod transport {
         fn drop(&mut self) {
             if !self.committed {
                 // SAFETY: the reference this reservation took and nobody was sent.
-                unsafe { self.buffer.buffer().dec_ref_count() };
+                unsafe { self.buffer.buffer().release_reference() };
             }
         }
     }

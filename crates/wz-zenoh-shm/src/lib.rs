@@ -255,20 +255,34 @@ impl ShmBufInner {
 
     /// Decrements buffer's reference count
     ///
-    /// Public for the transport of the crate that sends a buffer: it takes a reference for the
-    /// receiver with [`Self::inc_ref_count`] before the descriptor is built and gives it back with
-    /// this when the frame is not sent, which a clone of the buffer cannot do (a clone also
-    /// holds the buffer's confirmation of its memory, which the receiver's reference does not).
-    ///
     /// # Safety
     /// You should understand what you are doing, as underestimation
     /// of the reference counter can lead to memory being stalled or double-freed.
-    pub unsafe fn dec_ref_count(&self) {
+    unsafe fn dec_ref_count(&self) {
         self.metadata
             .owned
             .header()
             .refcount
             .fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Gives back the reference [`Self::inc_ref_count`] took, for the transport of the crate that
+    /// sends a buffer: it takes a reference for the receiver before the descriptor is built and
+    /// returns it with this when the frame is not sent, which a clone of the buffer cannot do (a
+    /// clone also holds the buffer's confirmation of its memory, which the receiver's reference
+    /// does not).
+    ///
+    /// Upstream's `dec_ref_count` is private, and this crate's surface is held to upstream's, so
+    /// the way in is hidden from the documentation, which is what the surface is read from: it is
+    /// there for the crates of this repository and is no part of the API a user replaces.
+    ///
+    /// # Safety
+    /// As [`Self::inc_ref_count`]: a reference given back that was never taken lets the buffer be
+    /// freed under a reader.
+    #[doc(hidden)]
+    pub unsafe fn release_reference(&self) {
+        // SAFETY: the caller's contract above is `dec_ref_count`'s.
+        unsafe { self.dec_ref_count() }
     }
 
     /// Gets a mutable slice.
