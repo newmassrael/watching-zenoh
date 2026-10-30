@@ -10486,6 +10486,55 @@ mod tests {
             );
         }
 
+        /// Two peers on one multicast group, each the router node at node mode Peer: upstream's
+        /// second regions scenario, `toksub`, between the peers of one group.
+        fn group_pair(ids: (&str, &str)) -> (Session, Session) {
+            let group = format!("224.2.9.1:{}", unautoselected_port());
+            let on = |id: &str| {
+                let mut config = Config::default();
+                for (key, value) in [
+                    ("mode", r#""peer""#.to_owned()),
+                    ("id", format!("{id:?}")),
+                    ("listen/endpoints", r#"["tcp/0.0.0.0:0"]"#.to_owned()),
+                    ("scouting/multicast/enabled", "true".to_owned()),
+                    ("scouting/multicast/address", format!("{group:?}")),
+                ] {
+                    config.insert_json5(key, &value).expect("a key zenoh reads");
+                }
+                with_the_node(|| open(config).wait().expect("a peer of the group"))
+            };
+            (on(ids.0), on(ids.1))
+        }
+
+        #[test]
+        fn a_token_of_a_peer_of_the_group_is_told_alive_and_gone() {
+            let (writer, reader) = group_pair(("a1b2d1", "a1b2d2"));
+            let (callback, told) = changes();
+            let _subscriber = reader
+                .liveliness()
+                .declare_subscriber("demo/g/**")
+                .history(true)
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let token = writer
+                .liveliness()
+                .declare_token("demo/g/a")
+                .wait()
+                .expect("declares");
+            assert_eq!(
+                told.recv_timeout(WAIT),
+                Ok("demo/g/a Put 0".to_owned()),
+                "the token is told alive"
+            );
+            token.undeclare().wait().expect("undeclares");
+            assert_eq!(
+                told.recv_timeout(WAIT),
+                Ok("demo/g/a Delete 0".to_owned()),
+                "the token is told gone"
+            );
+        }
+
         #[test]
         fn the_history_of_a_liveliness_subscriber_is_the_tokens_already_alive() {
             let (writer, reader) = pair(("a1b2cb", "a1b2cc"));
