@@ -8022,7 +8022,7 @@ layer_c1am_cargo_test_adminspace() {
     # `51 passed`); re-derived on the build host.
     _runci_guarded_test "C1AM adminspace introspection 51" 51 \
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 50" 50 \
+    _runci_guarded_test "C1AM adminspace 51" 51 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
@@ -8030,7 +8030,7 @@ layer_c1am_cargo_test_adminspace() {
     # guard below because `wz-session-core`'s own `adminspace-config-hotreload`
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
-    _runci_guarded_test "C1AM adminspace 58" 58 \
+    _runci_guarded_test "C1AM adminspace 59" 59 \
         cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
@@ -8194,9 +8194,11 @@ layer_c1am_cargo_test_adminspace() {
 #      consumers), both of which only surface WITHOUT the full default codec set.
 layer_c1an_cargo_test_adminspace_nodefault() {
     # R2859 — both +2, as the C1AM guards (see there).
-    _runci_guarded_test "C1AN adminspace 45" 45 \
+    _runci_guarded_test "C1AN adminspace 46" 46 \
         cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AN adminspace 50" 50 \
+    # The one more `adminspace` test the lib gained is in each of these four commands (C1AM 51
+    # and 59 above, C1AN 46 and 51), re-derived on the build host.
+    _runci_guarded_test "C1AN adminspace 51" 51 \
         cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AN declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
