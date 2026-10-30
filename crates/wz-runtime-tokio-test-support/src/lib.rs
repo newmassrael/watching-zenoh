@@ -1740,8 +1740,18 @@ mod port_tests {
             matches!(pick_in(&dir, used), Pick::InUse),
             "{used} is bound by a listener and must not be picked"
         );
+        // A leak would hold the number for good; a child another test of this binary spawns
+        // while the look's file is open shares that file's lock from its fork to its exec, and
+        // holds it for that moment only (measured: the claim refused once in a workspace run, and
+        // never with the test run by itself). So the claim is asked again over a short window.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut claimed = claim_in(&dir, used);
+        while !claimed && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            claimed = claim_in(&dir, used);
+        }
         assert!(
-            claim_in(&dir, used),
+            claimed,
             "{used} was refused as in use, so the look at it must not leave it claimed"
         );
         let _ = std::fs::remove_dir_all(&dir);

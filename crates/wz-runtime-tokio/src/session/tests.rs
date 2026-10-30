@@ -10521,7 +10521,8 @@ fn declare_token_assigns_monotonic_ids_per_session() {
     let t2 = session
         .declare_token("liveliness/z", LivelinessOptions::default())
         .expect("hardcoded canonical literal keyexpr");
-    assert_eq!((t0.id(), t1.id(), t2.id()), (0, 1, 2));
+    // From 1, as pico's and upstream's counters: 0 is a router's.
+    assert_eq!((t0.id(), t1.id(), t2.id()), (1, 2, 3));
     // Avoid drop wire emits in this counter-only test.
     std::mem::forget(t0);
     std::mem::forget(t1);
@@ -10870,7 +10871,7 @@ fn declare_token_aliased_wire_frame_uses_alias_form() {
         "aliased declare emits exactly one Declare(DeclToken) frame",
     );
     let expected = build_declare_token(
-        /*token_id=*/ 0,
+        /*token_id=*/ 1,
         /*mapping_id=*/ 7,
         Some("/sensor"),
     )
@@ -11414,7 +11415,7 @@ fn liveliness_subscriber_alias_error_display_message_hints_remediation() {
 fn liveliness_token_id_counter_independent_of_request_id() {
     // Token id space is a separate AtomicU64 from the request id
     // counter (R239) — declaring a token before any query must
-    // still start the token counter at 0 regardless of how many
+    // still start the token counter at 1 regardless of how many
     // request ids were burned, and vice versa. This pins the
     // independent-counter invariant documented on
     // SessionLinkActions::next_outbound_token_id.
@@ -11424,13 +11425,13 @@ fn liveliness_token_id_counter_independent_of_request_id() {
     let r1 = session.actions().alloc_next_request_id();
     let r2 = session.actions().alloc_next_request_id();
     assert_eq!((r0, r1, r2), (0, 1, 2));
-    // Token allocation still starts from 0.
+    // Token allocation still starts from its own first id, 1.
     let t = session
         .declare_token("liveliness/x", LivelinessOptions::default())
         .expect("hardcoded canonical literal keyexpr");
     assert_eq!(
         t.id(),
-        0,
+        1,
         "token id counter independent from request id counter"
     );
     std::mem::forget(t);

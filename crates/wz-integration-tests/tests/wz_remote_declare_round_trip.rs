@@ -22,7 +22,7 @@
 //!      parsed from the acceptor log + cross-referenced below (R311oy — the
 //!      retired `--declare-subscriber` / `--declare-queryable` raw-emit hooks
 //!      used hard-coded 1001 / 2001). Token id is auto-allocated by
-//!      `SessionLinkActions::alloc_next_token_id`; the first call returns 0
+//!      `SessionLinkActions::alloc_next_token_id`; the first call returns 1
 //!      (per-session counter, independent of the sub / queryable id spaces).
 //!   3. Wait up to 5s for the acceptor's stderr to contain
 //!      "listening on" — bind succeeded.
