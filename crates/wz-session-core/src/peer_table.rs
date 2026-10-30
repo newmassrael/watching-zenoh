@@ -249,6 +249,20 @@ pub struct PeerTable<K, const N: usize> {
     refused: usize,
 }
 
+impl<K, const N: usize> PeerTable<K, N> {
+    /// Names every field of the table. [`PeerPlanner::new_boxed`](crate::peer_planner::PeerPlanner::new_boxed)
+    /// takes the all-zero bytes of a table for an empty one, which holds while every field is a
+    /// length-bounded vector or a count; a field added here stops this from compiling, so that
+    /// whoever adds it reads that claim against it.
+    #[allow(dead_code)]
+    pub(crate) fn fields_are_read_by_the_boxed_planner(self) {
+        let Self {
+            entries: _,
+            refused: _,
+        } = self;
+    }
+}
+
 impl<K: PartialEq, const N: usize> Default for PeerTable<K, N> {
     fn default() -> Self {
         Self::new()

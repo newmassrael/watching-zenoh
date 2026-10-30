@@ -138,7 +138,7 @@ impl LoopPeers {
     /// No peer held, retries on `policy` (upstream's `connect/retry`).
     pub fn new(policy: RetryPolicy) -> Self {
         Self {
-            planner: Box::new(LoopPlanner::new()),
+            planner: LoopPlanner::new_boxed(),
             endpoints: BTreeMap::new(),
             retry: RedialSchedule::new(policy),
         }
@@ -412,6 +412,23 @@ mod tests {
             }] => (key.clone(), *generation, *after_ms),
             other => panic!("expected one retry, got {other:?}"),
         }
+    }
+
+    /// The peers of a loop are built on the heap and not passed through the stack: a planner holds its
+    /// rows inline, and an unoptimised build that moved one through its frames needed a stack of a
+    /// megabyte or more, so an ordinary test thread of two overflowed when a generated machine grew.
+    /// A thread of 256 KiB, a small share of that, builds and drops them.
+    #[test]
+    fn the_peers_of_a_loop_are_built_without_a_large_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let peers = LoopPeers::new(RetryPolicy::constant(1000));
+                assert_eq!(peers.state(&NODE), None);
+            })
+            .expect("a thread of 256 KiB")
+            .join()
+            .expect("the peers of a loop are built within 256 KiB of stack");
     }
 
     #[test]

@@ -200,6 +200,46 @@ where
         }
     }
 
+    /// No peer held, built on the heap and never as a value on the stack.
+    ///
+    /// A planner holds its rows inline, so a large one is hundreds of kilobytes, and `Box::new(Self::new())`
+    /// builds it on the stack first: an unoptimised build passes it through several frames, and a thread of
+    /// the ordinary two-megabyte stack overflows. The empty planner is the all-zero bytes: every field is a
+    /// vector bounded in length, which is empty at length zero whatever its buffer holds, or a count that
+    /// starts at zero. A field of another kind has to be read against this, which the pattern below makes
+    /// the compiler ask of whoever adds one.
+    #[cfg(feature = "alloc")]
+    pub fn new_boxed() -> alloc::boxed::Box<Self> {
+        // Exhaustive on purpose: see above.
+        let _fields_are_read = |planner: Self| {
+            let Self {
+                table,
+                dials: _,
+                held: _,
+                armed: _,
+                remotes: _,
+                next_generation: _,
+            } = planner;
+            table.fields_are_read_by_the_boxed_planner();
+        };
+        let layout = core::alloc::Layout::new::<Self>();
+        // A planner holds a length and a generation at the least, so its size is never zero, which
+        // `alloc_zeroed` needs.
+        debug_assert!(layout.size() != 0);
+        // SAFETY: the layout is that of `Self`, of a size that is not zero. Each field of `Self` is valid
+        // as all-zero bytes and is then the field of `new()`: a `heapless::Vec` of length zero (its buffer
+        // is never read below its length), a `usize` count of zero, a `u64` generation of zero, and
+        // `table` is a vector and a count. The pointer is the allocator's own for that layout, which
+        // `Box` frees with the same one.
+        unsafe {
+            let at = alloc::alloc::alloc_zeroed(layout).cast::<Self>();
+            if at.is_null() {
+                alloc::alloc::handle_alloc_error(layout);
+            }
+            alloc::boxed::Box::from_raw(at)
+        }
+    }
+
     /// `open` for `key`, which the authority admitted. A peer already held or being
     /// reached is unchanged, and one its machine refused tries again (decision D6).
     /// `Err` when the table has no room to hold another peer.
@@ -538,6 +578,35 @@ mod tests {
 
     type Plan = PeerPlanner<u8, Face, 4, 6>;
     type Action = PeerAction<u8, Face, &'static str>;
+
+    #[test]
+    fn a_planner_built_on_the_heap_holds_and_dials_as_one_built_by_value() {
+        let mut by_value = Plan::new();
+        let mut on_heap = Plan::new_boxed();
+        assert_eq!(on_heap.state(&1), None);
+        let (mut host, mut next_id) = (
+            Host {
+                candidates: Vector::from([1]),
+                ..Host::default()
+            },
+            0,
+        );
+        let (mut host_heap, mut next_heap) = (
+            Host {
+                candidates: Vector::from([1]),
+                ..Host::default()
+            },
+            0,
+        );
+        let value = actions(|e| by_value.open(1, &mut host, &mut next_id, e).unwrap());
+        let heap = actions(|e| on_heap.open(1, &mut host_heap, &mut next_heap, e).unwrap());
+        let (id_value, id_heap) = (dial_of(&value), dial_of(&heap));
+        assert_eq!(id_value, id_heap);
+        assert_eq!(by_value.state(&1), on_heap.state(&1));
+        assert_eq!(on_heap.state(&1), Some(S::Connecting));
+        assert!(on_heap.is_dialing(id_heap));
+        assert_eq!(on_heap.dial_key(id_heap), Some(&1));
+    }
 
     /// Run one planner call and return what it asked of the host.
     fn actions(call: impl FnOnce(&mut dyn FnMut(Action))) -> Vector<Action> {
