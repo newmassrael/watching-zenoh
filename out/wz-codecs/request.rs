@@ -1,4 +1,4 @@
-// SCE-MAP: request:110 :: _forge_body
+// SCE-MAP: request:119 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -24,14 +24,18 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::wireexpr::Wireexpr;
 use super::ext_entry::ExtEntry;
+#[cfg(feature = "request-put-del")]
 use super::msg_put::MsgPut;
+#[cfg(feature = "request-put-del")]
 use super::msg_del::MsgDel;
 use super::query::Query;
 
 use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
+#[cfg(feature = "request-put-del")]
 use super::msg_put::MsgPutView;
+#[cfg(feature = "request-put-del")]
 use super::msg_del::MsgDelView;
 use super::query::QueryView;
 
@@ -42,7 +46,9 @@ use super::query::QueryView;
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestVariant<'a> {
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgPut(MsgPut<'a>),
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgDel(MsgDel<'a>),
     CodecZenohQuery(Query<'a>),
     Default {
@@ -175,20 +181,29 @@ impl<'a> Request<'a> {
         // that body is decoded where it sits, so no arm body is returned up
         // through the variant wrapper.
         match _peek & 0x1F {
+            #[cfg(feature = "request-put-del")]
             1u8 => {
                 _out.body = RequestVariant::CodecZenohMsgPut(MsgPut::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohMsgPut(_b) = &mut _out.body {
                     MsgPut::decode_into(cursor, _b)?;
                 }
             }
+            #[cfg(not(feature = "request-put-del"))]
+            1u8 => return Err(CodecError::VariantArmNotBuilt),
+            #[cfg(feature = "request-put-del")]
             2u8 => {
                 _out.body = RequestVariant::CodecZenohMsgDel(MsgDel::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohMsgDel(_b) = &mut _out.body {
                     MsgDel::decode_into(cursor, _b)?;
                 }
             }
+            #[cfg(not(feature = "request-put-del"))]
+            2u8 => return Err(CodecError::VariantArmNotBuilt),
             3u8 => {
                 _out.body = RequestVariant::CodecZenohQuery(Query::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohQuery(_b) = &mut _out.body {
                     Query::decode_into(cursor, _b)?;
                 }
@@ -198,6 +213,7 @@ impl<'a> Request<'a> {
                     tag: other,
                     body: Query::default(),
                 };
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::Default { body: _b, .. } = &mut _out.body {
                     Query::decode_into(cursor, _b)?;
                 }
@@ -303,8 +319,10 @@ impl<'a> Request<'a> {
 // A default arm's tag is read by the codec that embeds this one and
 // derives its own carrier bits from the arm, which not every build uses.
 #[allow(dead_code)]
-pub enum RequestVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized> {
+pub enum RequestVariantSource<'s, #[cfg(feature = "request-put-del")] A0: ?Sized, #[cfg(feature = "request-put-del")] A1: ?Sized, A2: ?Sized, D: ?Sized> {
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgPut(&'s A0),
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgDel(&'s A1),
     CodecZenohQuery(&'s A2),
     Default { tag: u8, body: &'s D },
@@ -342,6 +360,10 @@ pub trait RequestSource {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
     fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    #[cfg(not(feature = "request-put-del"))]
+    /// The arm of the variant this value holds.
+    fn body(&self) -> RequestVariantSource<'_, impl super::query::QuerySource, impl super::query::QuerySource>;
+    #[cfg(feature = "request-put-del")]
     /// The arm of the variant this value holds.
     fn body(&self) -> RequestVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::query::QuerySource, impl super::query::QuerySource>;
 }
@@ -359,6 +381,11 @@ impl<T: RequestSource + ?Sized> RequestSource for &T {
     fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
         (**self).extensions()
     }
+    #[cfg(not(feature = "request-put-del"))]
+    fn body(&self) -> RequestVariantSource<'_, impl super::query::QuerySource, impl super::query::QuerySource> {
+        (**self).body()
+    }
+    #[cfg(feature = "request-put-del")]
     fn body(&self) -> RequestVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::query::QuerySource, impl super::query::QuerySource> {
         (**self).body()
     }
@@ -368,7 +395,9 @@ impl<T: RequestSource + ?Sized> RequestSource for &T {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum RequestPartsBody<'a> {
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgPut(&'a super::msg_put::MsgPutParts<'a>),
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgDel(&'a super::msg_del::MsgDelParts<'a>),
     CodecZenohQuery(&'a super::query::QueryParts<'a>),
     /// The tag the grammar could not name, and the body it holds.
@@ -405,9 +434,23 @@ impl<'a> RequestSource for RequestParts<'a> {
     fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
         self.extensions.map(<[_]>::iter)
     }
+    #[cfg(not(feature = "request-put-del"))]
+    fn body(&self) -> RequestVariantSource<'_, impl super::query::QuerySource, impl super::query::QuerySource> {
+        match &self.body {
+            #[cfg(feature = "request-put-del")]
+            RequestPartsBody::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(*_b),
+            #[cfg(feature = "request-put-del")]
+            RequestPartsBody::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(*_b),
+            RequestPartsBody::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(*_b),
+            RequestPartsBody::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body: *body },
+        }
+    }
+    #[cfg(feature = "request-put-del")]
     fn body(&self) -> RequestVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::query::QuerySource, impl super::query::QuerySource> {
         match &self.body {
+            #[cfg(feature = "request-put-del")]
             RequestPartsBody::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(*_b),
+            #[cfg(feature = "request-put-del")]
             RequestPartsBody::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(*_b),
             RequestPartsBody::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(*_b),
             RequestPartsBody::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body: *body },
@@ -428,9 +471,23 @@ impl<'a> RequestSource for Request<'a> {
     fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
+    #[cfg(not(feature = "request-put-del"))]
+    fn body(&self) -> RequestVariantSource<'_, impl super::query::QuerySource, impl super::query::QuerySource> {
+        match &self.body {
+            #[cfg(feature = "request-put-del")]
+            RequestVariant::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(_b),
+            #[cfg(feature = "request-put-del")]
+            RequestVariant::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(_b),
+            RequestVariant::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(_b),
+            RequestVariant::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body },
+        }
+    }
+    #[cfg(feature = "request-put-del")]
     fn body(&self) -> RequestVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::query::QuerySource, impl super::query::QuerySource> {
         match &self.body {
+            #[cfg(feature = "request-put-del")]
             RequestVariant::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(_b),
+            #[cfg(feature = "request-put-del")]
             RequestVariant::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(_b),
             RequestVariant::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(_b),
             RequestVariant::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body },
@@ -451,9 +508,23 @@ impl<'a> RequestSource for RequestView<'a> {
     fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
+    #[cfg(not(feature = "request-put-del"))]
+    fn body(&self) -> RequestVariantSource<'_, impl super::query::QuerySource, impl super::query::QuerySource> {
+        match &self.body {
+            #[cfg(feature = "request-put-del")]
+            RequestViewVariant::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(_b),
+            #[cfg(feature = "request-put-del")]
+            RequestViewVariant::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(_b),
+            RequestViewVariant::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(_b),
+            RequestViewVariant::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body },
+        }
+    }
+    #[cfg(feature = "request-put-del")]
     fn body(&self) -> RequestVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::query::QuerySource, impl super::query::QuerySource> {
         match &self.body {
+            #[cfg(feature = "request-put-del")]
             RequestViewVariant::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(_b),
+            #[cfg(feature = "request-put-del")]
             RequestViewVariant::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(_b),
             RequestViewVariant::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(_b),
             RequestViewVariant::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body },
@@ -474,9 +545,23 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestSource for RequestOwned
     fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
         self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
     }
+    #[cfg(not(feature = "request-put-del"))]
+    fn body(&self) -> RequestVariantSource<'_, impl super::query::QuerySource, impl super::query::QuerySource> {
+        match &self.body {
+            #[cfg(feature = "request-put-del")]
+            RequestOwnedVariant::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(_b),
+            #[cfg(feature = "request-put-del")]
+            RequestOwnedVariant::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(_b),
+            RequestOwnedVariant::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(_b),
+            RequestOwnedVariant::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body },
+        }
+    }
+    #[cfg(feature = "request-put-del")]
     fn body(&self) -> RequestVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::query::QuerySource, impl super::query::QuerySource> {
         match &self.body {
+            #[cfg(feature = "request-put-del")]
             RequestOwnedVariant::CodecZenohMsgPut(_b) => RequestVariantSource::CodecZenohMsgPut(_b),
+            #[cfg(feature = "request-put-del")]
             RequestOwnedVariant::CodecZenohMsgDel(_b) => RequestVariantSource::CodecZenohMsgDel(_b),
             RequestOwnedVariant::CodecZenohQuery(_b) => RequestVariantSource::CodecZenohQuery(_b),
             RequestOwnedVariant::Default { tag, body } => RequestVariantSource::Default { tag: *tag, body },
@@ -525,7 +610,9 @@ impl<'a> Request<'a> {
             }
         }
         match src.body() {
+            #[cfg(feature = "request-put-del")]
             RequestVariantSource::CodecZenohMsgPut(_b) => MsgPut::write_source(_b, w)?,
+            #[cfg(feature = "request-put-del")]
             RequestVariantSource::CodecZenohMsgDel(_b) => MsgDel::write_source(_b, w)?,
             RequestVariantSource::CodecZenohQuery(_b) => Query::write_source(_b, w)?,
             RequestVariantSource::Default { body: _b, .. } => Query::write_source(_b, w)?,
@@ -584,7 +671,9 @@ impl<'a> Request<'a> {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestViewVariant<'a> {
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgPut(MsgPutView<'a>),
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgDel(MsgDelView<'a>),
     CodecZenohQuery(QueryView<'a>),
     Default {
@@ -700,20 +789,29 @@ impl<'a> RequestView<'a> {
         // that body is decoded where it sits, so no arm body is returned up
         // through the variant wrapper.
         match _peek & 0x1F {
+            #[cfg(feature = "request-put-del")]
             1u8 => {
                 _out.body = RequestViewVariant::CodecZenohMsgPut(MsgPutView::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestViewVariant::CodecZenohMsgPut(_b) = &mut _out.body {
                     MsgPutView::decode_into(cursor, _b)?;
                 }
             }
+            #[cfg(not(feature = "request-put-del"))]
+            1u8 => return Err(CodecError::VariantArmNotBuilt),
+            #[cfg(feature = "request-put-del")]
             2u8 => {
                 _out.body = RequestViewVariant::CodecZenohMsgDel(MsgDelView::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestViewVariant::CodecZenohMsgDel(_b) = &mut _out.body {
                     MsgDelView::decode_into(cursor, _b)?;
                 }
             }
+            #[cfg(not(feature = "request-put-del"))]
+            2u8 => return Err(CodecError::VariantArmNotBuilt),
             3u8 => {
                 _out.body = RequestViewVariant::CodecZenohQuery(QueryView::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestViewVariant::CodecZenohQuery(_b) = &mut _out.body {
                     QueryView::decode_into(cursor, _b)?;
                 }
@@ -723,6 +821,7 @@ impl<'a> RequestView<'a> {
                     tag: other,
                     body: QueryView::default(),
                 };
+                #[allow(irrefutable_let_patterns)]
                 if let RequestViewVariant::Default { body: _b, .. } = &mut _out.body {
                     QueryView::decode_into(cursor, _b)?;
                 }
@@ -756,20 +855,25 @@ impl<'a> RequestView<'a> {
             None => _out.extensions = None,
         }
         match &self.body {
+            #[cfg(feature = "request-put-del")]
             RequestViewVariant::CodecZenohMsgPut(_b) => {
                 _out.body = RequestVariant::CodecZenohMsgPut(MsgPut::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohMsgPut(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
+            #[cfg(feature = "request-put-del")]
             RequestViewVariant::CodecZenohMsgDel(_b) => {
                 _out.body = RequestVariant::CodecZenohMsgDel(MsgDel::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohMsgDel(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             RequestViewVariant::CodecZenohQuery(_b) => {
                 _out.body = RequestVariant::CodecZenohQuery(Query::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohQuery(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
@@ -779,6 +883,7 @@ impl<'a> RequestView<'a> {
                     tag: *tag,
                     body: Query::default(),
                 };
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::Default { body: _o, .. } = &mut _out.body {
                     body.into_builder(_o)?;
                 }
@@ -862,7 +967,9 @@ impl<'a> RequestView<'a> {
 // so no call site repeats a `sce:max-size` / `sce:max-count` constant.
 use super::wireexpr::WireexprOwned;
 use super::ext_entry::ExtEntryOwned;
+#[cfg(feature = "request-put-del")]
 use super::msg_put::MsgPutOwned;
+#[cfg(feature = "request-put-del")]
 use super::msg_del::MsgDelOwned;
 use super::query::QueryOwned;
 // Same pub-API policy as the borrowed view above: the owned mirror and its
@@ -913,7 +1020,9 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwned<S> {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgPut(MsgPutOwned<S>),
+    #[cfg(feature = "request-put-del")]
     CodecZenohMsgDel(MsgDelOwned<S>),
     CodecZenohQuery(QueryOwned<S>),
     Default {
@@ -930,7 +1039,9 @@ impl<'a> RequestVariant<'a> {
     /// enforces) — on the growable profile no check can fire.
     pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<RequestOwnedVariant<S>, CodecError> {
         Ok(match self {
+            #[cfg(feature = "request-put-del")]
             RequestVariant::CodecZenohMsgPut(_b) => RequestOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in::<S>()?),
+            #[cfg(feature = "request-put-del")]
             RequestVariant::CodecZenohMsgDel(_b) => RequestOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in::<S>()?),
             RequestVariant::CodecZenohQuery(_b) => RequestOwnedVariant::CodecZenohQuery(_b.try_into_owned_in::<S>()?),
             RequestVariant::Default { tag, body } => RequestOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
@@ -966,26 +1077,32 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwnedVariant<S> {
     /// destination it owns. On `Err`, `_out` holds what was projected so far.
     pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut RequestVariant<'o>) -> Result<(), CodecError> {
         match self {
+            #[cfg(feature = "request-put-del")]
             RequestOwnedVariant::CodecZenohMsgPut(_b) => {
                 *_out = RequestVariant::CodecZenohMsgPut(Default::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohMsgPut(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
+            #[cfg(feature = "request-put-del")]
             RequestOwnedVariant::CodecZenohMsgDel(_b) => {
                 *_out = RequestVariant::CodecZenohMsgDel(Default::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohMsgDel(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             RequestOwnedVariant::CodecZenohQuery(_b) => {
                 *_out = RequestVariant::CodecZenohQuery(Default::default());
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::CodecZenohQuery(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             RequestOwnedVariant::Default { tag, body } => {
                 *_out = RequestVariant::Default { tag: *tag, body: Default::default() };
+                #[allow(irrefutable_let_patterns)]
                 if let RequestVariant::Default { body: _o, .. } = _out {
                     body.try_as_borrowed_into(_o)?;
                 }
@@ -1112,7 +1229,9 @@ impl<'a> RequestVariant<'a> {
     /// from `origin` — what the decoded bytes were taken from.
     pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<RequestOwnedVariant<S>, CodecError> {
         Ok(match self {
+            #[cfg(feature = "request-put-del")]
             RequestVariant::CodecZenohMsgPut(_b) => RequestOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in_origin::<S>(origin)?),
+            #[cfg(feature = "request-put-del")]
             RequestVariant::CodecZenohMsgDel(_b) => RequestOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in_origin::<S>(origin)?),
             RequestVariant::CodecZenohQuery(_b) => RequestOwnedVariant::CodecZenohQuery(_b.try_into_owned_in_origin::<S>(origin)?),
             RequestVariant::Default { tag, body } => RequestOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },

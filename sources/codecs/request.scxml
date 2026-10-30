@@ -59,6 +59,15 @@
        FAILED, so default arm is a defensive recovery shape rather
        than a routine path).
 
+     The Put and Del arms are compiled under the build feature
+     `request-put-del` (SCE ADR 0072). Upstream zenoh 1.10.1 accepts
+     only a Query as a request body (zenoh-codec/src/zenoh/mod.rs,
+     RCodec<RequestBody>); zenoh-pico's decoder takes all three. The
+     feature is on by default, the pico preset's contract, and a
+     zenoh-preset image leaves it off: a Put or Del tag under
+     Z_REQUEST is then refused with CodecError::VariantArmNotBuilt and
+     does not reach the catch-all.
+
      Cross-codec validator (RFC §5.B Y3 atomic 2b-ii peek-byte)
      confirms: codec_zenoh_msg_put.header.mid + codec_zenoh_msg_del.
      header.mid + codec_zenoh_query.header.mid (all bit=0 width=5)
@@ -137,8 +146,8 @@
       <sce:peek-byte id="peek" sce:type="uint8">
         <sce:flag name="mid" bit="0" width="5"/>
       </sce:peek-byte>
-      <sce:arm value="0x01" type="codec_zenoh_msg_put"/>
-      <sce:arm value="0x02" type="codec_zenoh_msg_del"/>
+      <sce:arm value="0x01" type="codec_zenoh_msg_put" feature="request-put-del"/>
+      <sce:arm value="0x02" type="codec_zenoh_msg_del" feature="request-put-del"/>
       <sce:arm value="0x03" type="codec_zenoh_query" default="true"/>
       <sce:default type="codec_zenoh_query"/>
     </sce:variant>
