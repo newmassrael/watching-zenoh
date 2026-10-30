@@ -28,11 +28,10 @@
 //! `Lost`, which is the seam item 900's re-join loop was waiting on.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::process::Command;
 use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
-use wz_integration_tests::common::NetnsPair;
+use wz_integration_tests::common::{netns_privileged, NetnsPair};
 use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::udp_pipeline::{dial_udp, wire_udp_socket};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, McastSocketConfig, UdpDriver};
@@ -62,8 +61,8 @@ const LOST_WITHIN: Duration = Duration::from_secs(5);
 /// Delete the host end of the pair, as a hot-unplugged or reconfigured
 /// interface is deleted. The peer end goes with it.
 fn remove_the_interface(ns: &NetnsPair) {
-    let out = Command::new("sudo")
-        .args(["-n", "ip", "link", "del", "dev", &ns.host_iface()])
+    let out = netns_privileged("ip")
+        .args(["link", "del", "dev", &ns.host_iface()])
         .output_bounded()
         .expect("run ip link del");
     assert!(

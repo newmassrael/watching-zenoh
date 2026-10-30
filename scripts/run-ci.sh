@@ -19031,16 +19031,23 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     local netns_rc=0
     # shellcheck source=scripts/lib/netns-topology.sh
     (source scripts/lib/netns-topology.sh && netns_topology_probe) || netns_rc=$?
+    # 3 = no sudo, but a namespace can be built inside the sandbox: the legs behind this probe
+    # run under it (absolute, because `_runci_guarded_test` runs its command from `crates`).
+    local -a netns_wrap=()
+    if (( netns_rc == 3 )); then
+        netns_wrap=(bash "$PWD/scripts/lib/netns-sandbox.sh")
+        netns_rc=0
+    fi
     if (( netns_rc == 2 && ! m_required )); then
         echo "Layer M SKIP pico->wz #join= across a namespace (this host cannot build" \
-             "a network namespace: no ip, or no non-interactive sudo)"
+             "a network namespace: no ip, or neither non-interactive sudo nor a bwrap sandbox)"
     elif (( netns_rc != 0 )); then
         echo "  Layer M FAIL: netns-topology probe rc=$netns_rc (4 = the build broke;" \
              "2 under WZ_M_REQUIRE = this job was meant to provision it)" >&2
         return 1
     else
         _runci_guarded_test "M pico->wz #join= across a namespace" 1 \
-            cargo test -p wz-integration-tests \
+            "${netns_wrap[@]}" cargo test -p wz-integration-tests \
             --test wz_multicast_extra_join_pico_netns_interop -- --ignored || return 1
         # R2612 — the scouting fan-out's DELIVERY witness, on the same substrate
         # and behind the same probe. The veth host end is a second
@@ -19051,7 +19058,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         # Count-guarded for the reason its neighbour above is: a renamed fn would
         # select nothing and pass.
         _runci_guarded_test "M scout fan-out reaches a second interface" 1 \
-            cargo test -p wz-integration-tests \
+            "${netns_wrap[@]}" cargo test -p wz-integration-tests \
             --test wz_scout_fanout_netns -- --ignored || return 1
         # Open-debt item 902 -- a datagram link whose interface is removed is LOST
         # at its next failed write, group link and dial link both. Behind the same
@@ -19061,7 +19068,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         # guarded at 2 (the group leg and the dial leg): the legs are `#[ignore]`,
         # so a dropped attribute or a rename would select zero and pass.
         _runci_guarded_test "M datagram link lost at a failed write" 2 \
-            cargo test -p wz-integration-tests \
+            "${netns_wrap[@]}" cargo test -p wz-integration-tests \
             --test wz_datagram_carrier_loss_netns -- --ignored --test-threads=1 || return 1
     fi
     # R311y193 — router-multicast-faces S4: a wz `--router-hat` egresses a routed,
@@ -19181,7 +19188,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         echo "Layer M SKIP multicast ttl on the wire (no network namespace on this host)"
     else
         _runci_guarded_test "M multicast ttl on the wire vs zenohd" 2 \
-            cargo test -p wz-integration-tests \
+            "${netns_wrap[@]}" cargo test -p wz-integration-tests \
             --test wz_multicast_ttl_on_the_wire_netns_zenohd_interop \
             -- --ignored --test-threads=1 || return 1
     fi
@@ -20622,14 +20629,21 @@ layer_z_zenohd_interop() {
     local z_netns_rc=0
     # shellcheck source=scripts/lib/netns-topology.sh
     (source scripts/lib/netns-topology.sh && netns_topology_probe) || z_netns_rc=$?
+    # 3 = no sudo, but a namespace can be built inside the sandbox: the leg runs under it.
+    local -a z_netns_wrap=()
+    if (( z_netns_rc == 3 )); then
+        z_netns_wrap=(bash "$PWD/scripts/lib/netns-sandbox.sh")
+        z_netns_rc=0
+    fi
     if (( z_netns_rc == 2 )); then
-        _z_unavailable "no network namespace on this host (no ip, or no non-interactive sudo)" \
+        _z_unavailable "no network namespace on this host (no ip, or neither non-interactive sudo nor a bwrap sandbox)" \
             || return 1
     elif (( z_netns_rc != 0 )); then
         echo "  Layer Z FAIL: netns-topology probe rc=$z_netns_rc (4 = the build broke)" >&2
         return 1
     else
-        _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        _runci_guarded_test Z 1 "${z_netns_wrap[@]}" env WZ_ZENOHD_BIN="$zenohd" \
+            cargo test -p wz-integration-tests \
             --test pico_c_examples_on_wz_capi_dropin \
             pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd \
             -- --ignored --quiet --test-threads=1 || return 1
@@ -23639,6 +23653,12 @@ layer_c1cc_api_compat_c() {
     local c1cc_netns_rc=0
     # shellcheck source=scripts/lib/netns-topology.sh
     (source scripts/lib/netns-topology.sh && netns_topology_probe) || c1cc_netns_rc=$?
+    # 3 = no sudo, but a namespace can be built inside the sandbox: the leg runs under it.
+    local -a c1cc_netns_wrap=()
+    if (( c1cc_netns_rc == 3 )); then
+        c1cc_netns_wrap=(bash "$PWD/scripts/lib/netns-sandbox.sh")
+        c1cc_netns_rc=0
+    fi
     if (( c1cc_netns_rc == 2 )) && [[ -z "${WZ_C1CC_REQUIRE:-}" ]]; then
         echo "  Layer C1cc SKIP scouting without a default route (no network namespace here)"
     elif (( c1cc_netns_rc != 0 )); then
@@ -23648,7 +23668,7 @@ layer_c1cc_api_compat_c() {
     else
         _runci_guarded_test \
             "C1cc the_scouting_legs_hold_in_a_namespace_with_no_default_route" 1 \
-            cargo test -p wz-integration-tests \
+            "${c1cc_netns_wrap[@]}" cargo test -p wz-integration-tests \
             --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
             --test-threads=1 \
             --exact the_scouting_legs_hold_in_a_namespace_with_no_default_route \

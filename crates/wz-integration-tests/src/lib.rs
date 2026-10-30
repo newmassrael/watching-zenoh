@@ -7279,6 +7279,22 @@ pub mod common {
         ifname: String,
     }
 
+    /// `program` with the privilege a namespace needs: under `sudo -n`, or as it
+    /// is when the process already runs inside the sandbox of
+    /// `scripts/lib/netns-topology.sh` (`WZ_NETNS_SANDBOX=1`), which holds the
+    /// capabilities itself. The Rust twin of that script's `netns_priv`, so a
+    /// topology the script builds and a command the test runs in it are held
+    /// to the same privilege.
+    pub fn netns_privileged(program: &str) -> Command {
+        if std::env::var_os("WZ_NETNS_SANDBOX").is_some_and(|v| v == "1") {
+            Command::new(program)
+        } else {
+            let mut cmd = Command::new("sudo");
+            cmd.args(["-n", program]);
+            cmd
+        }
+    }
+
     impl NetnsPair {
         /// Build `wzns<tag>` with the host end at `host_cidr` and the peer end at
         /// `peer_cidr`. Tear-down runs on drop, and also first, so a previous
@@ -7325,9 +7341,8 @@ pub mod common {
 
         /// `program`, to be run inside the namespace.
         pub fn command(&self, program: &Path) -> Command {
-            let mut cmd = Command::new("sudo");
-            cmd.args(["-n", "ip", "netns", "exec", &self.ns])
-                .arg(program);
+            let mut cmd = netns_privileged("ip");
+            cmd.args(["netns", "exec", &self.ns]).arg(program);
             cmd
         }
 
@@ -7878,8 +7893,8 @@ pub mod common {
             // sudo child: SIGKILL is not relayed. So every process still in the
             // namespace is killed by pid here, BEFORE the namespace is deleted —
             // deleting the name would leave such a process running, unreachable.
-            if let Ok(out) = Command::new("sudo")
-                .args(["-n", "ip", "netns", "pids", &self.ns])
+            if let Ok(out) = netns_privileged("ip")
+                .args(["netns", "pids", &self.ns])
                 .output_bounded()
             {
                 let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
@@ -7887,8 +7902,8 @@ pub mod common {
                     .map(str::to_string)
                     .collect();
                 if !pids.is_empty() {
-                    let _ = Command::new("sudo")
-                        .args(["-n", "kill", "-KILL"])
+                    let _ = netns_privileged("kill")
+                        .args(["-KILL"])
                         .args(&pids)
                         .status_bounded();
                 }
