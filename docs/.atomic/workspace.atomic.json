@@ -300336,6 +300336,42 @@
         "Open: the action has run only for the whole of out/**; its inputs are everything tracked, so a cache (`cache = true`) is not claimed and each run builds the generator in the copy's shared cache; the first reservation of an unmeasured command is still half of what the host has free (bx's `peak_gb_per_task` is per repository, a per-command key is the owner's to decide); the two-session image holds three sessions' states by value in `spawn`; the host source on platforms without /proc; the C11 emit of the deadline documents; hosted CI per job."
       ]
     },
+    "Round 3966": {
+      "decision_summary": "Running the namespace legs through the sandbox on a build machine found three more faults, none in the sandbox itself. (1) rerun_tests_inside stepped down with runuser, which refuses a caller who is not root; in the sandbox the process already is the tree's owner, so it runs the leg as it is. (2) The pico raweth legs skipped for want of sudo although they need only CAP_NET_RAW and a lo of their own, which the sandbox holds; Layer M now runs them there. (3) wz-zenoh-shm had made dec_ref_count public for the top crate, which put a line on a surface held equal to upstream's and reddened the surface gate; it is private again as upstream has it, and release_reference is a doc(hidden) item the surface is not read from. A feature for it was tried first and refused by the feature census, which admits only arms of upstream's surface.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: netns_sandboxed, and rerun_tests_inside runs the leg directly in the sandbox instead of through runuser.",
+        "crates/wz-integration-tests/tests/pico_raweth_on_wz_capi.rs: the raweth programs run as they are in the sandbox.",
+        "scripts/run-ci.sh: Layer M probes the sandbox when there is no sudo and wraps the raweth legs in it.",
+        "crates/wz-zenoh-shm/src/lib.rs: dec_ref_count private as upstream, release_reference doc(hidden) for the top crate.",
+        "crates/wz-zenoh/src/api/shm.rs: the reservation gives its reference back through release_reference."
+      ],
+      "verification_bullets": [
+        "On a build machine with no sudo: Layer M passes with the three raweth legs run and not skipped, and the namespace legs of the round before still run; the Layer Z namespace leg passes under the sandbox (1 passed, no skip line). rust_api_surface for zenoh-shm reports 0 differences on both arms for upstream and for the wz crate; the zenoh crate with shared-memory, engine-tokio and unstable runs its 8 shm tests. Layer Z reached that leg after one run in which a scout count read 5 against 6 and passed on the next. The 121 static gates and the guarded-count gate pass on the rebased tree."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Layer C1cc's namespace leg runs through the same helper but was not run here: the host has no zenoh-c oracle, which is a provisioning step and not a limit. The Layer M zenoh-c multicast leg skips for the same reason. The scout count leg of Layer Z compares replies counted over a window and read 5 against 6 once under load; it has no bound that makes it stable. A wz crate that needs a private item of upstream's has no registered way, and this round chose doc(hidden)."
+      ],
+      "publishable_decision_summary": "Running the namespace legs through the sandbox on a build machine found three more faults, none in the sandbox itself. (1) rerun_tests_inside stepped down with runuser, which refuses a caller who is not root; in the sandbox the process already is the tree's owner, so it runs the leg as it is. (2) The pico raweth legs skipped for want of sudo although they need only CAP_NET_RAW and a lo of their own, which the sandbox holds; Layer M now runs them there. (3) wz-zenoh-shm had made dec_ref_count public for the top crate, which put a line on a surface held equal to upstream's and reddened the surface gate; it is private again as upstream has it, and release_reference is a doc(hidden) item the surface is not read from. A feature for it was tried first and refused by the feature census, which admits only arms of upstream's surface.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: netns_sandboxed, and rerun_tests_inside runs the leg directly in the sandbox instead of through runuser.",
+        "crates/wz-integration-tests/tests/pico_raweth_on_wz_capi.rs: the raweth programs run as they are in the sandbox.",
+        "scripts/run-ci.sh: Layer M probes the sandbox when there is no sudo and wraps the raweth legs in it.",
+        "crates/wz-zenoh-shm/src/lib.rs: dec_ref_count private as upstream, release_reference doc(hidden) for the top crate.",
+        "crates/wz-zenoh/src/api/shm.rs: the reservation gives its reference back through release_reference."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine with no sudo: Layer M passes with the three raweth legs run and not skipped, and the namespace legs of the round before still run; the Layer Z namespace leg passes under the sandbox (1 passed, no skip line). rust_api_surface for zenoh-shm reports 0 differences on both arms for upstream and for the wz crate; the zenoh crate with shared-memory, engine-tokio and unstable runs its 8 shm tests. Layer Z reached that leg after one run in which a scout count read 5 against 6 and passed on the next. The 121 static gates and the guarded-count gate pass on the rebased tree."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer C1cc's namespace leg runs through the same helper but was not run here: the host has no zenoh-c oracle, which is a provisioning step and not a limit. The Layer M zenoh-c multicast leg skips for the same reason. The scout count leg of Layer Z compares replies counted over a window and read 5 against 6 once under load; it has no bound that makes it stable. A wz crate that needs a private item of upstream's has no registered way, and this round chose doc(hidden)."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
