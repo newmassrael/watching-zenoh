@@ -300674,6 +300674,52 @@
         "Open: a client newer than its router at the same time as other pairs (1.10.1 against 1.5.0 exists), releases other than 1.5.0 and 1.7.2 to 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. A weights round must re-pin the C consumer's opening, and after pulling main the SCE submodule must be updated before land.sh: the previous round's ledger commit moved the pin because it was not."
       ]
     },
+    "Round 3976": {
+      "decision_summary": "The zenoh reference train moves from 1.10.1 to 1.10.2: UPSTREAM_VERSION, the zenohd and zenoh-c pins, the manifests and locks of the conformance and oracle workspaces, the version and notice of the 13 family crates, and the surfaces re-emitted at the new pin. The release changed two public lines of the Rust API, Hello::locators_iter and the unstable Link::interfaces_iter, ported with tests, and one C declaration that wz accepts as it is; the zenoh-c census, re-measured on both oracles, holds its counts. Taken in the same round: the QUIC locator key segmentation_offload, and dropping multicast addresses from a tcp or tls name. zenoh-pico stays at 1.10.1, its own round. What 1.10.2 changed beyond that is carried by name in docs/zenoh-api-on-the-engine.md, O4.",
+      "changes_bullets": [
+        "scripts/lib and scripts/build-zenohd.sh and scripts/zenoh-c-oracle.pin: the version constants are 1.10.2; the zenoh-c archive arm and the sn-resolution words are re-derived at it, and the release distance table is moved.",
+        "crates/wz-zenoh*: version 1.10.2 and the notice of each file; Hello::locators_iter, Link::interfaces_iter and the empty address of an endpoint ported from upstream, with their tests; the FreeBSD cfgs of the util and shm crates.",
+        "deploy/upstream-api: the surfaces of upstream and of the family, re-emitted at 1.10.2.",
+        "crates/wz-session-core/src/locator.rs and crates/wz-runtime-tokio/src/link_socket.rs: the QUIC key segmentation_offload, read from the locator and applied to quinn on both sides.",
+        "crates/wz-runtime-tokio/src/link_pipeline.rs and crates/wz-runtime-tokio/src/session_open.rs: a tcp or tls name keeps its unicast addresses only.",
+        "crates/wz-integration-tests/tests/zenoh_c_abi_symbol_census.rs: the two census rows move to 1.10.2 with their counts.",
+        "docs/z8-expected.tsv, docs/reason-review-pins.md, docs/zenoh-api-on-the-engine.md: a row for the new upstream file, five pins, and the carried list."
+      ],
+      "verification_bullets": [
+        "Locally at the pin: the surface gate, the family notice gate and the citation anchor gate (both with resolution), the pin sweep, the pin binding gates and the store reason gates pass; one store reason whose needle upstream dropped was re-pointed.",
+        "The zenoh-c census legs ran one test each and passed on the 1.10.2 archive oracle and on the unstable arm built from the 1.10.2 source; upstream's own suite at 1.10.2 through the Z8 harness: shm 10 of 10, liveliness 46 of 46, interest_undeclare 1 of 1; the capability cost gate reads 19 cases within budget; clippy of the touched crates is clean.",
+        "Not run: the hosted lanes, the whole Z8 lane at 1.10.2, and the cooperative and MCU lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: what 1.10.2 changed and wz does not carry, named in docs/zenoh-api-on-the-engine.md under O4 (a) to (g): the lazy QUIC control stream, multicast compression from the configuration, the mixed-reliability companion's limit, the stricter shared-memory negotiation, the unresponsive peer's close, the restated role of a link-state node with the cleared interest flags, and the synchronous start condition.",
+        "Owed: the zenoh-pico submodule at 1.10.2, as its own round; the first hosted run of the Z8 lane at the new pin."
+      ],
+      "publishable_decision_summary": "The zenoh reference train moves from 1.10.1 to 1.10.2: UPSTREAM_VERSION, the zenohd and zenoh-c pins, the manifests and locks of the conformance and oracle workspaces, the version and notice of the 13 family crates, and the surfaces re-emitted at the new pin. The release changed two public lines of the Rust API, Hello::locators_iter and the unstable Link::interfaces_iter, ported with tests, and one C declaration that wz accepts as it is; the zenoh-c census, re-measured on both oracles, holds its counts. Taken in the same round: the QUIC locator key segmentation_offload, and dropping multicast addresses from a tcp or tls name. zenoh-pico stays at 1.10.1, its own round. What 1.10.2 changed beyond that is carried by name in docs/zenoh-api-on-the-engine.md, O4.",
+      "publishable_changes_bullets": [
+        "scripts/lib and scripts/build-zenohd.sh and scripts/zenoh-c-oracle.pin: the version constants are 1.10.2; the zenoh-c archive arm and the sn-resolution words are re-derived at it, and the release distance table is moved.",
+        "crates/wz-zenoh*: version 1.10.2 and the notice of each file; Hello::locators_iter, Link::interfaces_iter and the empty address of an endpoint ported from upstream, with their tests; the FreeBSD cfgs of the util and shm crates.",
+        "deploy/upstream-api: the surfaces of upstream and of the family, re-emitted at 1.10.2.",
+        "crates/wz-session-core/src/locator.rs and crates/wz-runtime-tokio/src/link_socket.rs: the QUIC key segmentation_offload, read from the locator and applied to quinn on both sides.",
+        "crates/wz-runtime-tokio/src/link_pipeline.rs and crates/wz-runtime-tokio/src/session_open.rs: a tcp or tls name keeps its unicast addresses only.",
+        "crates/wz-integration-tests/tests/zenoh_c_abi_symbol_census.rs: the two census rows move to 1.10.2 with their counts.",
+        "docs/z8-expected.tsv, docs/reason-review-pins.md, docs/zenoh-api-on-the-engine.md: a row for the new upstream file, five pins, and the carried list."
+      ],
+      "publishable_verification_bullets": [
+        "Locally at the pin: the surface gate, the family notice gate and the citation anchor gate (both with resolution), the pin sweep, the pin binding gates and the store reason gates pass; one store reason whose needle upstream dropped was re-pointed.",
+        "The zenoh-c census legs ran one test each and passed on the 1.10.2 archive oracle and on the unstable arm built from the 1.10.2 source; upstream's own suite at 1.10.2 through the Z8 harness: shm 10 of 10, liveliness 46 of 46, interest_undeclare 1 of 1; the capability cost gate reads 19 cases within budget; clippy of the touched crates is clean.",
+        "Not run: the hosted lanes, the whole Z8 lane at 1.10.2, and the cooperative and MCU lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: what 1.10.2 changed and wz does not carry, named in docs/zenoh-api-on-the-engine.md under O4 (a) to (g): the lazy QUIC control stream, multicast compression from the configuration, the mixed-reliability companion's limit, the stricter shared-memory negotiation, the unresponsive peer's close, the restated role of a link-state node with the cleared interest flags, and the synchronous start condition.",
+        "Owed: the zenoh-pico submodule at 1.10.2, as its own round; the first hosted run of the Z8 lane at the new pin."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
