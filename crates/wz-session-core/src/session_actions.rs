@@ -2742,7 +2742,7 @@ enum Dispatched {
 /// calls from the dispatch down the image. The bound gate (`scripts/lib/stack_bound_gate.py`)
 /// follows a call through a register now, by the rule that claims its site, so the profile pays
 /// for one copy of the dispatch and not three (`stack_call_contracts.json`, `tx-encoder`).
-#[cfg(all(any(
+#[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
     feature = "codec-response",
@@ -2753,7 +2753,7 @@ enum Dispatched {
     feature = "declare-token",
     feature = "declare-interest",
     feature = "liveliness-token",
-)))]
+))]
 #[inline(always)]
 fn as_encoder<P>(
     encode_body: &P,
