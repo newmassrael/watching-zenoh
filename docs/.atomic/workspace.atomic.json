@@ -299714,6 +299714,40 @@
         "Read the hosted run of the current tree: the Layer Z legs ran on a built zenohd for the first time in the previous round, and other legs outside the two files run there may hold unchecked keys. The Layer C1bzr failures of the last completed hosted run are being fixed by the ci-red session. Two comments in scripts/run-ci.sh and three in gate docstrings still name the retired LinkstateForwarder as history."
       ]
     },
+    "Round 3949": {
+      "decision_summary": "A peer of a router's peer region that asked for the liveliness tokens, with its history, was answered with the tokens of every hat, those of the other peers of its own region among them. The pin's dispatcher answers a current interest from the declarations of the other regions only, because the peers of one region are linked to one another and are told what each declares: the copy sent to the asking peer was a second source of the token, and the withdrawal, which applies the same rule, never retracted it, so the peer held the token for ever and its liveliness subscribers were never told it had gone. The answer to a current interest of a subscriber, a queryable or a token now leaves out the hat of the region of the asker when the peer hat serves that region.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: mesh_hats_answering, the mesh hats a current interest of a face is answered from, which leaves out the hat of the face's own region when the peer hat serves it; dump_interest_subs, dump_interest_qabls and dump_interest_tokens fold from it; a test that a peer is not replayed a token of another peer of its region.",
+        "docs/z8-expected.tsv: the regions row to 41 passed with its remaining causes."
+      ],
+      "verification_bullets": [
+        "Locally, on 3945 with the planner of the loop built on the heap (b573186a2): clippy with warnings denied passes for the runtime with all features; its tests pass (2143, three of them the answers to a peer's token interest, the new one among them). The text gates pass. Upstream: regions passes 42 of 126 where it passed 40 on the same tree without the change: toksub of scenario 3 passes in the orders 2 and 3 that timed out, and in the harness the test of order 2 alone passes and every subscriber hears all nine tokens go. Not run: the hosted run, the other upstream files."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, first: regions fails 84 of 126. Ten tests of scenario 1 time out (the client node); 71 fail on the count of upstream's routing steps by tracing span, after their delivery passes; three more time out: toksub of scenario 7 in orders 2 and 3, and queque of scenario 6 in order 1; toksub of scenario 7 in orders 1 and 4 passes in some runs and not in others.",
+        "Owed: three_node_combination of upstream's routing file loses one recipe of its publishers and subscribers in about one run in four, so that row holds seven; a peer of the regions tests needs more than 1024 open files for twelve nodes in one process, which upstream's does not, and the harness raises the limit; the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2, the four budgets re-measured on the hosted run."
+      ],
+      "publishable_decision_summary": "A peer of a router's peer region that asked for the liveliness tokens, with its history, was answered with the tokens of every hat, those of the other peers of its own region among them. The pin's dispatcher answers a current interest from the declarations of the other regions only, because the peers of one region are linked to one another and are told what each declares: the copy sent to the asking peer was a second source of the token, and the withdrawal, which applies the same rule, never retracted it, so the peer held the token for ever and its liveliness subscribers were never told it had gone. The answer to a current interest of a subscriber, a queryable or a token now leaves out the hat of the region of the asker when the peer hat serves that region.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: mesh_hats_answering, the mesh hats a current interest of a face is answered from, which leaves out the hat of the face's own region when the peer hat serves it; dump_interest_subs, dump_interest_qabls and dump_interest_tokens fold from it; a test that a peer is not replayed a token of another peer of its region.",
+        "docs/z8-expected.tsv: the regions row to 41 passed with its remaining causes."
+      ],
+      "publishable_verification_bullets": [
+        "Locally, on 3945 with the planner of the loop built on the heap (b573186a2): clippy with warnings denied passes for the runtime with all features; its tests pass (2143, three of them the answers to a peer's token interest, the new one among them). The text gates pass. Upstream: regions passes 42 of 126 where it passed 40 on the same tree without the change: toksub of scenario 3 passes in the orders 2 and 3 that timed out, and in the harness the test of order 2 alone passes and every subscriber hears all nine tokens go. Not run: the hosted run, the other upstream files."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, first: regions fails 84 of 126. Ten tests of scenario 1 time out (the client node); 71 fail on the count of upstream's routing steps by tracing span, after their delivery passes; three more time out: toksub of scenario 7 in orders 2 and 3, and queque of scenario 6 in order 1; toksub of scenario 7 in orders 1 and 4 passes in some runs and not in others.",
+        "Owed: three_node_combination of upstream's routing file loses one recipe of its publishers and subscribers in about one run in four, so that row holds seven; a peer of the regions tests needs more than 1024 open files for twelve nodes in one process, which upstream's does not, and the harness raises the limit; the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2, the four budgets re-measured on the hosted run."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
