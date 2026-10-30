@@ -12095,6 +12095,122 @@ mod tests {
             );
         }
 
+        /// The Pub and Sub recipes of upstream's three node test, all six start orders at once
+        /// with the subscriber a peer and a client: a publisher that puts without a pause, as
+        /// upstream's does, is heard fifty times in ten seconds by a subscriber that comes after it.
+        #[cfg(feature = "unstable")]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 9)]
+        async fn a_publisher_is_heard_fifty_times_in_every_start_order() {
+            use std::time::{Duration, Instant};
+
+            let orders = [
+                (0, 1, 2),
+                (0, 2, 1),
+                (1, 2, 0),
+                (1, 0, 2),
+                (2, 0, 1),
+                (2, 1, 0),
+            ];
+            let mut recipes = Vec::new();
+            for (n, (router_s, publisher_s, subscriber_s)) in orders.into_iter().enumerate() {
+                for (m, subscribing) in ["peer", "client"].into_iter().enumerate() {
+                    recipes.push(tokio::spawn(async move {
+                        let port = unautoselected_port();
+                        let config = move |id: String, mode: &'static str, listens: bool| {
+                            let endpoints = if listens {
+                                format!(r#"listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},"#)
+                            } else {
+                                format!(r#"connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},"#)
+                            };
+                            Config::from_json5(&format!(
+                                r#"{{ id: "{id}", mode: "{mode}", {endpoints}
+                                      scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                            ))
+                            .expect("a configuration zenoh reads")
+                        };
+                        let started = Instant::now();
+                        let router_task = tokio::spawn({
+                            async move {
+                                tokio::time::sleep(Duration::from_secs(router_s)).await;
+                                let router = open(config(format!("a1b2c{n}{m}0"), "router", true))
+                                    .await
+                                    .expect("a router opens");
+                                tokio::time::sleep(Duration::from_secs(40)).await;
+                                drop(router);
+                            }
+                        });
+                        // The publisher puts without ever waiting, so it is told to stop and not
+                        // aborted: a task that never yields is not aborted, and the runtime would
+                        // wait for it for ever.
+                        let stopped =
+                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let publisher_stopped = stopped.clone();
+                        let publisher_task = tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(publisher_s)).await;
+                            let peer = open(config(format!("a1b2c{n}{m}1"), "peer", false))
+                                .await
+                                .expect("a peer opens");
+                            while !publisher_stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                                let _ = tokio::time::timeout(
+                                    Duration::from_secs(1),
+                                    peer.put("demo/every/heard", vec![0u8; 8])
+                                        .congestion_control(CongestionControl::Block),
+                                )
+                                .await;
+                            }
+                        });
+                        tokio::time::sleep(Duration::from_secs(subscriber_s)).await;
+                        // A client that comes before its router cannot connect, and asks again, as
+                        // upstream's test does for the clients it opens.
+                        let subscriber_node = loop {
+                            match open(config(format!("a1b2c{n}{m}2"), subscribing, false)).await {
+                                Ok(node) => break node,
+                                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                            }
+                        };
+                        let subscriber = subscriber_node
+                            .declare_subscriber("demo/every/heard")
+                            .await
+                            .expect("declares");
+                        let mut heard = 0usize;
+                        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                            while heard < 50 {
+                                if subscriber.recv_async().await.is_ok() {
+                                    heard += 1;
+                                }
+                            }
+                        })
+                        .await;
+                        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let _ = publisher_task.await;
+                        router_task.abort();
+                        (
+                            n,
+                            subscribing,
+                            (router_s, publisher_s, subscriber_s),
+                            outcome.is_ok(),
+                            heard,
+                            started.elapsed(),
+                        )
+                    }));
+                }
+            }
+            let mut failed = Vec::new();
+            for recipe in recipes {
+                let (n, subscribing, order, ok, heard, elapsed) =
+                    recipe.await.expect("a recipe ends");
+                eprintln!(
+                    "order {n} {order:?} subscriber {subscribing}: ok={ok} heard={heard} in {elapsed:?}"
+                );
+                if !ok {
+                    failed.push(format!(
+                        "{order:?} subscriber {subscribing} heard {heard} of 50"
+                    ));
+                }
+            }
+            assert!(failed.is_empty(), "not heard fifty times: {failed:?}");
+        }
+
         /// The Queryable and Get recipes of upstream's three node test, all six start orders at
         /// once as four of its recipes run: each asker is answered fifty times in ten seconds,
         /// asking again at once whenever an ask finds nothing, as upstream's test does.
