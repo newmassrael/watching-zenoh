@@ -19211,6 +19211,19 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M router multicast group in its node registry" 1 \
         cargo test -p wz-integration-tests \
         --test wz_router_serves_its_multicast_group_in_its_node_registry -- --ignored || return 1
+    # The same router PROCESS counts what its group delivers in its resource snapshot
+    # (`docs/observation-plane.md` M4): a router alone in a group, then with a second member whose
+    # beacons arrive on `lo`, and the count rises by what they are. It rebuilds the demo with the
+    # admin read permit and the snapshot, a different feature set from the build above, so it is
+    # built here and not shared. Needs no foreign binary and no namespace (`#iface=lo`). 1 = the
+    # number this command PRINTED.
+    (cd crates \
+        && cargo build -p wz-ap-demo --quiet --features \
+            router-multicast-faces,locator-iface,adminspace-router-linkstate,adminspace-read,resource-snapshot \
+        && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    _runci_guarded_test "M router multicast group in its snapshot" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_hat_counts_its_multicast_group_in_its_snapshot -- --ignored || return 1
     # R2859 (`adminspace-core`) — the same router PROCESS lists a foreign pico
     # multicast member in its adminspace `sessions[]`, as a row of upstream's
     # multicast shape: the group face the router joins with is the one its
