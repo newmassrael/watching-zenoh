@@ -1327,6 +1327,28 @@ mod tests {
         assert_eq!(feature_bits::RESOURCE_SNAPSHOT, 8);
     }
 
+    /// The macro a crate states its features word with reads the features of the crate it is
+    /// expanded in. Here that is this crate, which has three of the four capabilities as
+    /// features: each is in the word exactly when it is on, and the fourth, which it has no
+    /// feature for (the ring is `wz-node-time`'s), is off.
+    #[test]
+    fn a_crates_features_word_follows_the_features_the_crate_has() {
+        let word = crate::built_feature_bits!();
+        assert_eq!(
+            word & feature_bits::RESOURCE_SNAPSHOT != 0,
+            cfg!(feature = "resource-snapshot")
+        );
+        assert_eq!(
+            word & feature_bits::SUPERVISION != 0,
+            cfg!(feature = "supervision")
+        );
+        assert_eq!(
+            word & feature_bits::CLOCK_SOURCE != 0,
+            cfg!(feature = "clock-source")
+        );
+        assert_eq!(word & feature_bits::EVENT_RING, 0);
+    }
+
     #[test]
     fn a_snapshot_is_read_back_as_it_was_written() {
         let snapshot = sample_snapshot();

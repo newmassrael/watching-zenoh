@@ -26,8 +26,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use wz_session_core::resource_snapshot::{
-    feature_bits, BuildSampler, HeapReading, MessageReading, ResourceReading, Snapshot, HAS_CPU,
-    HAS_HEAP, HAS_TASKS,
+    BuildSampler, HeapReading, MessageReading, ResourceReading, Snapshot, HAS_CPU, HAS_HEAP,
+    HAS_TASKS,
 };
 
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
@@ -116,19 +116,11 @@ impl Doors {
 }
 
 /// The instruments of the observation plane this image was built with, as the bits of
-/// [`feature_bits`]: this snapshot's own, and each of the other three this crate has a feature for.
+/// [`feature_bits`](wz_session_core::resource_snapshot::feature_bits): the capabilities of the
+/// declaration that this crate has a feature of the
+/// same name for, which is this snapshot's own and each of the other three.
 fn features() -> u64 {
-    let mut word = feature_bits::RESOURCE_SNAPSHOT;
-    if cfg!(feature = "clock-source") {
-        word |= feature_bits::CLOCK_SOURCE;
-    }
-    if cfg!(feature = "event-ring") {
-        word |= feature_bits::EVENT_RING;
-    }
-    if cfg!(feature = "supervision") {
-        word |= feature_bits::SUPERVISION;
-    }
-    word
+    wz_session_core::built_feature_bits!()
 }
 
 /// The latest snapshot as the admin space's JSON document, or `None` before the program has taken

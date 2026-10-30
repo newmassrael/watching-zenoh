@@ -30,7 +30,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use wz_session_core::resource_snapshot::{
-    feature_bits, BuildMessageReading, BuildSampler, ResourceReading, ResourceSource,
+    BuildMessageReading, BuildSampler, ResourceReading, ResourceSource,
 };
 
 /// The message reading a node hands the service on each sample.
@@ -119,16 +119,11 @@ impl ResourceSource for HostResourceSource {
     }
 }
 
-/// The instruments of the observation plane this build has, as [`feature_bits`].
+/// The instruments of the observation plane this build has, as
+/// [`feature_bits`](wz_session_core::resource_snapshot::feature_bits): the capabilities of the
+/// declaration that this crate has a feature of the same name for.
 fn build_features() -> u64 {
-    let mut word = feature_bits::RESOURCE_SNAPSHOT;
-    if cfg!(feature = "clock-source") {
-        word |= feature_bits::CLOCK_SOURCE;
-    }
-    if cfg!(feature = "event-ring") {
-        word |= feature_bits::EVENT_RING;
-    }
-    word
+    wz_session_core::built_feature_bits!()
 }
 
 /// The sampler of a hosted node and what serves its latest snapshot.

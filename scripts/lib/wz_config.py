@@ -1620,6 +1620,33 @@ def emit_rust_feature_bits(decl: dict) -> str:
     out += ["", f"pub(super) const NAMES: [(u64, &str); {len(names)}] = ["]
     out += [f'    ({const}, "{cid}"),' for const, cid, _bit in names]
     out.append("];")
+    # The word of the instruments a crate was built with, written once for every crate. A crate
+    # lists no feature by hand: `cfg!` needs a literal, so a list written in each crate drifts from
+    # the crate's `[features]` without anything failing, and the generated macro lists the declared
+    # capabilities, which a crate's features are named after. A crate with none of a capability's
+    # feature reads that bit as off, which is what it is.
+    out += [
+        "",
+        "/// The `features` word of the instruments the CALLING crate was built with: the bit of each",
+        "/// capability whose cargo feature is on in that crate (`cfg!` is read where the macro is",
+        "/// expanded). The list is the declaration's, so a crate states no list of its own.",
+        "#[macro_export]",
+        "macro_rules! built_feature_bits {",
+        "    () => {{",
+        "        // A crate that has no such feature reads it as off; the lint that asks for a feature",
+        "        // to be declared is for a typo, and each name here is the declaration's.",
+        "        let mut word = 0u64;",
+    ]
+    for const, cid, _bit in names:
+        var = cid.replace("-", "_")
+        out += [
+            "        #[allow(unexpected_cfgs)]",
+            f'        let {var} = cfg!(feature = "{cid}");',
+            f"        if {var} {{",
+            f"            word |= $crate::resource_snapshot::feature_bits::{const};",
+            "        }",
+        ]
+    out += ["        word", "    }};", "}"]
     return "\n".join(out) + "\n"
 
 
@@ -2906,6 +2933,12 @@ def cmd_selftest() -> int:
            "CLOCK_SOURCE: u64 = 1 << 0;" in feature_bits and "RESOURCE_SNAPSHOT: u64 = 1 << 3;" in feature_bits
            and feature_bits.index("(CLOCK_SOURCE,") < feature_bits.index("(EVENT_RING,")
            < feature_bits.index("(SUPERVISION,") < feature_bits.index("(RESOURCE_SNAPSHOT,"))
+    expect("a crate's features word is read from the declaration, one cfg! for each capability, and "
+           "the lint for an undeclared feature is allowed at each",
+           all(f'cfg!(feature = "{cid}")' in feature_bits for cid in
+               ("clock-source", "event-ring", "supervision", "resource-snapshot"))
+           and feature_bits.count("#[allow(unexpected_cfgs)]") == 4
+           and "macro_rules! built_feature_bits" in feature_bits)
     # The operating-system facilities and the platforms (docs/target-build-contract.md T3, T9).
     expect("a capability that was never assessed for facilities is refused",
            caps_refused('os_needs = ["sockets-udp"]\n', "", "has no os_needs"))
