@@ -202,11 +202,32 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # track-every-release policy). `UPSTREAM_VERSION`, `ZENOHD_VERSION` and
 # `ZENOH_C_VERSION` are 1.10.2. zenoh-pico stays at 1: it is a vendored C
 # submodule, so its move is its own round, as R2527 and R2528 separated them.
+#
+# R3987 (open-debt item 711) — zenoh-pico 1 -> 0, 1.10.1 -> 1.10.2, and FreeRTOS-Kernel
+# 0 -> 1 -> 0, V11.3.2 -> V11.3.3 (upstream published V11.3.3 between the two rounds, and this
+# gate named it as a FAIL on the run that found it). Both are submodule pointer moves, made
+# though patches do not require them (the owner's track-every-release policy).
+#
+# zenoh-pico, measured first on the 32-file diff of the two tags: the core is three fixes (a
+# ZID length bound when a timestamp is decoded, which the wz view decode of the Timestamp
+# codec does not state (it slices `zid_len` bytes with no bound of 16; the owned form's
+# `heapless::Vec<u8, 16>` is bounded), carried as its own item; a mistyped variable in the queryable undeclare path that only builds with
+# session checks off; an unset index in the executor), a C++ `z_clone` overload, and the Zephyr
+# module rebuilt on Kconfig (every feature switch is a Kconfig symbol, the switch definitions
+# moved from CMakeLists.txt to `cmake/feature_config.cmake`, Zephyr 3.7 or later, no
+# `CONFIG_POSIX_API`). No switch was added or dropped (49 before and after), which
+# `upstream_switch_map.py` reads from the new file now (`pico_cmake_text`).
+#
+# FreeRTOS-Kernel, measured on the surface `freertos-sys` has (the R3361 list): every change
+# in the files it compiles and the headers it binds is a version banner or the
+# `tskKERNEL_VERSION_*` macros. The one code change of the release is in queue.c, in the queue
+# set select functions (`xQueueSelectFromSet`, `xQueueSelectFromSetFromISR` now assert the
+# handle and check the item size), which no wz source calls.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 0),
     "eclipse-zenoh/zenoh": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh-pico": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh-pico": ("MEASURED", 0),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),
     "zephyrproject-rtos/mbedtls": ("NO_RELEASES", 0),

@@ -1051,7 +1051,7 @@ Each lands whole with its surface lines, tests and faults in one round.
   a program that wants both would be two processes.
 - **O4. The pin moved to 1.10.2 (round 3976), and what that release changed that wz does not
   carry yet.** The family follows upstream's version, so `zenoh`, `zenoh-c` and the reference
-  train are 1.10.2 (zenoh-pico stays at 1.10.1: its own round). Measured by diffing the two
+  train are 1.10.2 (zenoh-pico followed in round R3987, see the end of this bullet). Measured by diffing the two
   releases' trees: the public Rust API grew by two lines, `Hello::locators_iter` and the unstable
   `Link::interfaces_iter`, both ported with their tests; the C API changed one declaration (the
   `_options` of `z_open` lost its `const`), which wz's `z_open` accepts as it is; no
@@ -1067,4 +1067,20 @@ Each lands whole with its surface lines, tests and faults in one round.
   (`crates/wz-routing-graph/src/lib.rs` fills it only while unknown), and an interest that goes
   away clears the finalised flags of its face; (g) the start conditions of a peer are released
   by a synchronous call. Taken in the same round: the key `segmentation_offload` of a QUIC
-  locator, and the dropping of multicast addresses from a `tcp` or `tls` name.
+  locator, and the dropping of multicast addresses from a `tcp` or `tls` name. Round R3987 moved
+  the zenoh-pico submodule to 1.10.2 and FreeRTOS-Kernel to V11.3.3 (which upstream published in
+  between). Measured: the pico CLI oracles build from the new tree (its CMake now includes
+  `cmake/feature_config.cmake`, where the switch definitions moved, and
+  `scripts/lib/upstream_switch_map.py` reads both files; 49 switches before and after), the arm
+  headers agree with the defconfig, the pico drop-in programs on the tokio engine and the
+  `--ignored` demo sweep pass, and the Zephyr comparison image builds in both arms once its
+  Kconfig states the switches pico's own defaults had on (the module's Kconfig has no default
+  for a switch, so an unstated one is off, which dropped `z_encoding_application_json`). FreeRTOS
+  V11.3.3 built on `thumbv7m` and booted on `mps2-an385` (session established). (h) carried from
+  the pico release: 1.10.2 refuses a timestamp whose ZID length is over 16 when it decodes one
+  (#1345), and so does zenoh; the wz decode of the `Timestamp` codec as a view slices `zid_len`
+  bytes without that bound (`out/wz-codecs/timestamp.rs`, generated from `sce:max-size="16"` in
+  `sources/codecs/timestamp.scxml`, which the view decode does not enforce), and the sample
+  projection then truncates to 16 (`crates/wz-session-core/src/sample.rs`). Read in the
+  generated code, not run; the repair is in the generator's decode of a bounded length-ref
+  field, which is the SCE owner's.
