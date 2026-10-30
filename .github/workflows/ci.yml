@@ -4532,8 +4532,7 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1ci
       - name: Layer C1ab — vsock backend compile + clippy (R311y413)
         run: bash scripts/run-ci.sh --layer C1ab
-      - name: Layer C1t — serial (PTY) link e2e (R311y413)
-        run: bash scripts/run-ci.sh --layer C1t
+      # (Layer C1t, the serial link e2e, runs in `feature-gates-peel` now: see that job.)
       # (R2778 — C1bl, the demo-router half of this pair, runs in
       # `feature-gates-peel` now; C1bm, the pico half, stays.)
       - name: Layer C1bm — pico unixpipe/quic --listen admit (R311y413)
@@ -4554,8 +4553,7 @@ jobs:
       # group sockets.
       # The name is QUOTED: an unquoted YAML scalar treats ` #` as a comment start, so
       # `locator-iface #iface= honor` would silently truncate to `locator-iface`.
-      - name: "Layer C1bd — locator-iface #iface= honor (R311y454)"
-        run: bash scripts/run-ci.sh --layer C1bd
+      # (Layer C1bd, locator-iface `#iface=` honor, runs in `feature-gates-peel` now.)
 
       # R311y424 — routing-peer / access-* / extauth, and it lands here because
       # this job's genre line describes it exactly: an off-default feature subset
@@ -4615,8 +4613,7 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1av
       - name: Layer C1aw — ext-pubsub group membership (R311y425)
         run: bash scripts/run-ci.sh --layer C1aw
-      - name: Layer C1ah — time-hlc timestamp source (R311y425)
-        run: bash scripts/run-ci.sh --layer C1ah
+      # (Layer C1ah, the time-hlc timestamp source, runs in `feature-gates-peel` now.)
       - name: Layer C1ai — liveliness effective-history gating (R311y425)
         run: bash scripts/run-ci.sh --layer C1ai
       - name: Layer C1k — scouting-static (R311y425)
@@ -4947,6 +4944,17 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1bl
       - name: Layer C1bi — pubsub-qos merged gate (R311y307)
         run: bash scripts/run-ci.sh --layer C1bi
+
+      # Three more, peeled from `feature-gates` for its budget: run 41008974420 put that job at
+      # 97% of its 2700s (2464s of lanes over 38, no one hot step; the largest three plain-cargo
+      # lanes without provisioning of their own are these, 114s + 113s + 111s). Taking them
+      # leaves it near 2270s (84%), under the alarm, and this job near 1100s of its 1800s.
+      - name: Layer C1ah — time-hlc timestamp source (R311y425)
+        run: bash scripts/run-ci.sh --layer C1ah
+      - name: "Layer C1bd — locator-iface #iface= honor (R311y454)"
+        run: bash scripts/run-ci.sh --layer C1bd
+      - name: Layer C1t — serial (PTY) link e2e (R311y413)
+        run: bash scripts/run-ci.sh --layer C1t
 
       - name: Disk headroom after the lanes (measurement, not a gate)
         if: always()
