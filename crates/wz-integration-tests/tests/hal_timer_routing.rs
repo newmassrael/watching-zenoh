@@ -34,7 +34,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use sce_rust_runtime::helpers::hierarchy::BoundedVec;
 use sce_rust_runtime::{
     state_scratch, state_words, DocumentTables, Engine, EventId, Hal, HistoryId, NoHistory,
-    RunStore, Span, StateId, StateKind, StatePolicy, StateRow, Target, TransitionId, TransitionRow,
+    RunStore, StateId, StateKind, StatePolicy, StateRow, Target, TransitionId, TransitionRow,
     Workspace,
 };
 use wz_runtime_tokio_test_support::{
@@ -110,9 +110,7 @@ impl StatePolicy for TimerProbePolicy {
     // substrate (it schedules with real send_ids), so it keeps the
     // non-eliding `SceString` send-id store and the default-depth event
     // queue — the behaviour-preserving choice vs the pre-bump default.
-    type EventQueue = sce_rust_runtime::EventQueueManager<
-        sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>,
-    >;
+    type EventQueue = sce_rust_runtime::EventQueue<Self::Payload>;
     type ScheduledSendId = sce_rust_runtime::SceString;
     // What a document's state tree bounds, which a generated machine's policy
     // reads off its document: this one is a single state with no `<history>`
@@ -125,18 +123,25 @@ impl StatePolicy for TimerProbePolicy {
 
     // A flat machine: one child of the `<scxml>` element, and the only row of
     // the transitions table is the document's own initial transition, which
-    // enters that state.
+    // enters that state through its one target (a single target is the row's
+    // own, so the list table is empty). The null event is the first of
+    // `EVENTS`, and none of the events is an `error.` one.
     const TABLES: &'static DocumentTables = &DocumentTables {
         states: &[StateRow::new(None, StateKind::Atomic, StateId(0), None)],
         histories: &[],
         transitions: &[TransitionRow::new(
             None,
-            Span { start: 0, len: 1 },
+            Target::state(StateId(0)),
             false,
             false,
         )],
-        targets: &[Target::state(StateId(0))],
+        targets: &[],
         initial: TransitionId(0),
+        default_state: StateId(0),
+        null_event: EventId(0),
+        error_events: &[],
+        history: None,
+        parallel: None,
     };
     const STATES: &'static [St] = &[St::S0];
     const HISTORIES: &'static [NoHistory] = &[];
