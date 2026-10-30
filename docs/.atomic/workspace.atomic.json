@@ -300832,6 +300832,40 @@
         "Open: the cause of the 1040-byte fall is not separated between the pin move and the kit commits; the two-session spawn frame still holds three sessions' states by value (16208 of 16384); hosted CI is cancelled by each push, so no per-job verdict has been read since 1d234b06ba."
       ]
     },
+    "Round 3980": {
+      "decision_summary": "Provisioning the zenoh-c oracle on the build machine (the pinned release archive and its examples, 17 s) made the scouting legs reachable, and three of them failed for the host and not for wz. A scout comparison reads the real library and wz one after the other, a wildcard node names the host's own addresses, and an interface of the build machine was given an IPv4 address for a while and lost it again, so two reads of one case saw two hosts. host_addresses reads them, the count leg's steady-world premise now holds them, and the Hello and interface-text legs read a moved window again (a text that never saw a steady host is named and not graded, and a difference on a steady host still fails). The IPv6 membership leg picked a docker bridge that is up with no carrier, which wz rightly refuses to bind; it now requires the carrier file, since sysfs flags do not carry IFF_RUNNING.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: host_addresses, the interface addresses as device=address.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: the scout count leg's world holds the addresses too.",
+        "crates/wz-integration-tests/tests/zenoh_c_scouting_twice_and_diff.rs: the Hello leg and the interface-text leg read a window in which the addresses moved again, and the interface-text leg re-derives \"ends alone\" from the host of each window.",
+        "crates/wz-integration-tests/tests/wz_multicast_locator_flag_installs_its_memberships.rs: the IPv6 interface must have a carrier."
+      ],
+      "verification_bullets": [
+        "On a build machine with the zenoh-c oracle at the then pin (1.10.1): Layer C1cc passes (3031 s), its namespace leg under the count guard of exactly one pass and no skip; Layer M passes with no skip at all, the zenoh-c multicast legs included (4 tests ok); the membership leg passes alone (1 passed). Each failure was read to its cause before a change: C1cc failed three times, on the Hello list (one address more at one read), on 5 of 51 interface texts all naming one interface whose address came and went, and on a text classed alone that held an address by then. The pin moved to 1.10.2 on origin while this was verified, so the runs above are at 1.10.1. The 121 static gates pass on the rebased tree after the sce submodule was moved to the pin."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The oracles of the build machine (zenohd, zenoh-c) are at 1.10.1 and the pin is now 1.10.2: they must be provisioned again at the pin before Layers Z, M and C1cc are read there. The scouting legs now tolerate a host whose interface addresses move, by reading again; a host whose addresses never hold still across five reads grades those texts as not graded and says so. The coop engine has no tls link, and whether a redial reached the new node is not observable through the pico ABI."
+      ],
+      "publishable_decision_summary": "Provisioning the zenoh-c oracle on the build machine (the pinned release archive and its examples, 17 s) made the scouting legs reachable, and three of them failed for the host and not for wz. A scout comparison reads the real library and wz one after the other, a wildcard node names the host's own addresses, and an interface of the build machine was given an IPv4 address for a while and lost it again, so two reads of one case saw two hosts. host_addresses reads them, the count leg's steady-world premise now holds them, and the Hello and interface-text legs read a moved window again (a text that never saw a steady host is named and not graded, and a difference on a steady host still fails). The IPv6 membership leg picked a docker bridge that is up with no carrier, which wz rightly refuses to bind; it now requires the carrier file, since sysfs flags do not carry IFF_RUNNING.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: host_addresses, the interface addresses as device=address.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: the scout count leg's world holds the addresses too.",
+        "crates/wz-integration-tests/tests/zenoh_c_scouting_twice_and_diff.rs: the Hello leg and the interface-text leg read a window in which the addresses moved again, and the interface-text leg re-derives \"ends alone\" from the host of each window.",
+        "crates/wz-integration-tests/tests/wz_multicast_locator_flag_installs_its_memberships.rs: the IPv6 interface must have a carrier."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine with the zenoh-c oracle at the then pin (1.10.1): Layer C1cc passes (3031 s), its namespace leg under the count guard of exactly one pass and no skip; Layer M passes with no skip at all, the zenoh-c multicast legs included (4 tests ok); the membership leg passes alone (1 passed). Each failure was read to its cause before a change: C1cc failed three times, on the Hello list (one address more at one read), on 5 of 51 interface texts all naming one interface whose address came and went, and on a text classed alone that held an address by then. The pin moved to 1.10.2 on origin while this was verified, so the runs above are at 1.10.1. The 121 static gates pass on the rebased tree after the sce submodule was moved to the pin."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The oracles of the build machine (zenohd, zenoh-c) are at 1.10.1 and the pin is now 1.10.2: they must be provisioned again at the pin before Layers Z, M and C1cc are read there. The scouting legs now tolerate a host whose interface addresses move, by reading again; a host whose addresses never hold still across five reads grades those texts as not graded and says so. The coop engine has no tls link, and whether a redial reached the new node is not observable through the pico ABI."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
