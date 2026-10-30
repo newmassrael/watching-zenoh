@@ -301112,6 +301112,46 @@
         "Open, outside the repository: mold 2.30.0 aborts that one link on this machine; a newer mold or a link with GNU ld is the owner's choice of the global cargo configuration."
       ]
     },
+    "Round 3988": {
+      "decision_summary": "The host fixed-memory image holds peers a command line names by their zid, and a Layer Z leg uses it to run the lifecycle verbs on the real secure channel. --peer ZID=LOCATOR fills a set-once cell (LaunchedPeers, beside SingleEndpoint) that the node holds from its first tick as a declaration holds peers; the router argument is optional when a peer is named. The fourth leg of the fixed-memory TLS witness builds the image with control and room for one node, tells it the zid of a zenohd that pins its certificate, and drives status, close, open and reset: the held peer reads one open link and an established machine; a close brings the session down and the node does not dial again; an open brings it back; a reset with a generation dials once; the same generation again is a duplicate. No lane ran this case before; the design note and the close-ingress reason now record it as run. A stale byte floor in a connect-manager test is now relative. The grade stays PARTIAL.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/slot_node.rs: LaunchedPeers, a set-once cell of the peers a command line names, with its refusals and two tests.",
+        "deploy/host-slot-node/src/main.rs: --peer ZID=LOCATOR, the router argument optional when a peer is named, the unused NodePort import removed.",
+        "crates/wz-integration-tests/tests/wz_fixed_memory_tls_zenohd_interop.rs: a fourth leg, status, close, open and reset of a router held by its zid over mutual TLS.",
+        "scripts/run-ci.sh: the second image is built in its own target directory, the Ztls lane goes 3 to 4, C1m mcu slot node and its tokens twin go 29 to 31.",
+        "crates/wz-session-mcu/src/connect_manager.rs: the store is bounded against the manager and not by a byte floor.",
+        "docs/session-lifecycle-intent.md and the inventory entry session-close-ingress: the hold over a secure channel is recorded as run."
+      ],
+      "verification_bullets": [
+        "On a build host with a built zenohd and the two images: the four legs of the fixed-memory TLS witness pass (the three existing and the new one, whose answers were read: status of the held peer, closing with one link, not_found for a repeated close, opening, resetting with one link, duplicate for the same generation, and no new session after a close or a repeated generation within eight seconds); the host node's own control-channel tests (4), the slot_node tests (31, the new pinned count), the connect-manager legs with a room for two peers (26) and the in-band query table (10) pass; the two adminspace legs that the count guard flagged pass at 48 and 58. Clippy with -D warnings is clean for the host node with control, and with get, tls and control. The guarded count gate over the range passes; its eight Layer Z guards are deferred to the hosted lane and the new Ztls count was read by hand. validate-workspace has 14 T1 orphans, none new, and the reason citation gate passes. The first image build failed because it was made from the repository root and so missed the image's own cargo limits; it is made from the package directory, as Layer Z does."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The new leg and the second image are read by a hosted run for the first time: Layer Z builds the image with WZ_LIMIT_MAX_PEER_NODES=1 in a separate target directory and passes its path in WZ_HOST_SLOT_NODE_TLS_CONTROL. Still open on the close-ingress atom: the Hello source of the locator directory on the fixed-memory profile, a witness on a built Zephyr image of an open by zid, and a Zephyr image that binds the verbs with a decision of who may use them. The connect-manager test that was red is fixed here, but the other sessions' reds in the Layer C1bzr docs ledger are with the ci-red session."
+      ],
+      "publishable_decision_summary": "The host fixed-memory image holds peers a command line names by their zid, and a Layer Z leg uses it to run the lifecycle verbs on the real secure channel. --peer ZID=LOCATOR fills a set-once cell (LaunchedPeers, beside SingleEndpoint) that the node holds from its first tick as a declaration holds peers; the router argument is optional when a peer is named. The fourth leg of the fixed-memory TLS witness builds the image with control and room for one node, tells it the zid of a zenohd that pins its certificate, and drives status, close, open and reset: the held peer reads one open link and an established machine; a close brings the session down and the node does not dial again; an open brings it back; a reset with a generation dials once; the same generation again is a duplicate. No lane ran this case before; the design note and the close-ingress reason now record it as run. A stale byte floor in a connect-manager test is now relative. The grade stays PARTIAL.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/slot_node.rs: LaunchedPeers, a set-once cell of the peers a command line names, with its refusals and two tests.",
+        "deploy/host-slot-node/src/main.rs: --peer ZID=LOCATOR, the router argument optional when a peer is named, the unused NodePort import removed.",
+        "crates/wz-integration-tests/tests/wz_fixed_memory_tls_zenohd_interop.rs: a fourth leg, status, close, open and reset of a router held by its zid over mutual TLS.",
+        "scripts/run-ci.sh: the second image is built in its own target directory, the Ztls lane goes 3 to 4, C1m mcu slot node and its tokens twin go 29 to 31.",
+        "crates/wz-session-mcu/src/connect_manager.rs: the store is bounded against the manager and not by a byte floor.",
+        "docs/session-lifecycle-intent.md and the inventory entry session-close-ingress: the hold over a secure channel is recorded as run."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host with a built zenohd and the two images: the four legs of the fixed-memory TLS witness pass (the three existing and the new one, whose answers were read: status of the held peer, closing with one link, not_found for a repeated close, opening, resetting with one link, duplicate for the same generation, and no new session after a close or a repeated generation within eight seconds); the host node's own control-channel tests (4), the slot_node tests (31, the new pinned count), the connect-manager legs with a room for two peers (26) and the in-band query table (10) pass; the two adminspace legs that the count guard flagged pass at 48 and 58. Clippy with -D warnings is clean for the host node with control, and with get, tls and control. The guarded count gate over the range passes; its eight Layer Z guards are deferred to the hosted lane and the new Ztls count was read by hand. validate-workspace has 14 T1 orphans, none new, and the reason citation gate passes. The first image build failed because it was made from the repository root and so missed the image's own cargo limits; it is made from the package directory, as Layer Z does."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The new leg and the second image are read by a hosted run for the first time: Layer Z builds the image with WZ_LIMIT_MAX_PEER_NODES=1 in a separate target directory and passes its path in WZ_HOST_SLOT_NODE_TLS_CONTROL. Still open on the close-ingress atom: the Hello source of the locator directory on the fixed-memory profile, a witness on a built Zephyr image of an open by zid, and a Zephyr image that binds the verbs with a decision of who may use them. The connect-manager test that was red is fixed here, but the other sessions' reds in the Layer C1bzr docs ledger are with the ci-red session."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
