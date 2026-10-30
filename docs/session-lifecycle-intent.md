@@ -1130,9 +1130,13 @@ Each step lands with its own done-when; sizes are not estimated here.
   fixed profile has no path for (a plain stream is refused `Unverifiable`,
   D4). A control channel whose owner holds the pipe is such an authority, so
   this needs a decision on who the authority is there; none is scheduled.
-  Two things are also not run: a hold that succeeds over a secure channel
-  (the control-channel leg builds the node for no peers by their zid), and a
-  Zephyr image that binds the verbs.
+  A hold that succeeds over a secure channel is run by the fourth leg of
+  `wz_fixed_memory_tls_zenohd_interop`: the host image, built with `control`
+  and room for one node and told a router by `--peer ZID=LOCATOR` (peers a
+  command line names, held from the first tick as a declaration holds them),
+  holds it over mutual TLS against zenohd, and `status`, `close`, `open` and
+  `reset` with a generation on the control channel do what the contract says.
+  What is not run is a Zephyr image that binds the verbs.
 - Whether a node may be told to open a session as the accepting side (a
   listen intent). The contract of D5 and D6 has the dialling side only; adding
   the other changes the contract, so it is the owner's ruling.
