@@ -14,8 +14,9 @@ declaration of step 1 together.
 
 ## The population
 
-* **zenoh-pico**: every `Z_FEATURE_*` name its `CMakeLists.txt` defines with `set(` or
-  `option(`. The pinned source is the `vendor/zenoh-pico` submodule, present in every
+* **zenoh-pico**: every `Z_FEATURE_*` name its CMake defines with `set(` or `option(` --
+  `CMakeLists.txt`, and from 1.10.2 `cmake/feature_config.cmake`, where the definitions moved
+  (`pico_cmake_text` reads both). The pinned source is the `vendor/zenoh-pico` submodule, present in every
   clone that initialised submodules, so this arm runs in the DEFAULT mode.
 * **zenoh-c**: every cargo feature of its package, by cargo's own answer
   (`cargo metadata --no-deps`), less the two kinds that are derivable rather than
@@ -61,7 +62,7 @@ a `maps` row.
 The declaration also states each original's own default (`upstream_on` /
 `upstream_off`, docs/build-configuration.md step 2). Each run holds the original it
 grades: the default run every capability zenoh-pico has a switch for against the
-first definition of that switch in the pinned CMakeLists (on when every switch the
+first definition of that switch in the pinned pico CMake (on when every switch the
 capability names is on), `--zenoh-c` every capability a zenoh-c `maps` row reaches
 against zenoh-c's `default` features. A capability neither reaches (the query plane in
 zenoh-c, which has no switch for it) is judged in the declaration alone, and the run
@@ -252,15 +253,29 @@ PICO_DEFAULT = re.compile(
 )
 
 
+def pico_cmake_text(source: Path) -> str:
+    """The CMake text in which a zenoh-pico source tree DEFINES its switches. Up to 1.10.1 that is
+    its `CMakeLists.txt`; 1.10.2 moved every definition into `cmake/feature_config.cmake`, which
+    the CMakeLists `include()`s before it reads a switch, and left only the uses behind. The
+    definition file comes first, as it does in the build, so a switch's FIRST definition is the
+    same text under either layout."""
+    parts = []
+    for rel in (("cmake", "feature_config.cmake"), ("CMakeLists.txt",)):
+        path = source.joinpath(*rel)
+        if path.is_file():
+            parts.append(path.read_text(errors="replace"))
+    return "\n".join(parts)
+
+
 def pico_value_defaults(source: Path) -> dict[str, str]:
     """Each VALUE switch of a zenoh-pico source tree (the CMake variables its config template
     substitutes, `wz_config.pico_value_macros`) to the text of its first definition in the
-    CMakeLists, which is its default: `set(<name> <value> CACHE ...)`. A switch with no such
-    definition reads as the empty text."""
+    pico CMake (`pico_cmake_text`), which is its default: `set(<name> <value> CACHE ...)`. A
+    switch with no such definition reads as the empty text."""
     template = source / "include" / "zenoh-pico" / "config.h.in"
     if not template.is_file():
         raise InputError(f"no zenoh-pico config template at {template}")
-    text = (source / "CMakeLists.txt").read_text(errors="replace")
+    text = pico_cmake_text(source)
     out: dict[str, str] = {}
     for name in wz_config.pico_value_macros(template.read_text(errors="replace")):
         m = re.search(rf'^\s*set\(\s*{name}\s+("[^"]*"|[^\s)]+)', text, re.MULTILINE)
@@ -317,16 +332,17 @@ def pico_switches(source: Path) -> tuple[str, set[str]]:
             f"no zenoh-pico source at {source} (CMakeLists.txt and version.txt). It is a "
             f"submodule: `git submodule update --init vendor/zenoh-pico`"
         )
-    switches = set(PICO_SWITCH.findall(cmake.read_text(errors="replace")))
+    switches = set(PICO_SWITCH.findall(pico_cmake_text(source)))
     if not switches:
-        raise InputError(f"{cmake} defines no Z_FEATURE_* switch -- not a zenoh-pico CMakeLists")
+        raise InputError(f"{cmake} and cmake/feature_config.cmake define no Z_FEATURE_* switch -- "
+                         f"not a zenoh-pico source")
     return version_file.read_text().strip(), switches
 
 
 def pico_defaults(source: Path) -> dict[str, bool]:
-    """Each switch of a zenoh-pico CMakeLists to whether its default build has it on."""
+    """Each switch of a zenoh-pico CMake (`pico_cmake_text`) to whether its default build has it on."""
     out: dict[str, bool] = {}
-    text = (source / "CMakeLists.txt").read_text(errors="replace")
+    text = pico_cmake_text(source)
     for m in PICO_DEFAULT.finditer(text):
         name = m.group(1) or m.group(3)
         out.setdefault(name, (m.group(2) or m.group(4)) in ("1", "ON"))
@@ -702,6 +718,21 @@ def selftest() -> int:
         else:
             print("  selftest FAIL [a CMakeLists with no switch]: ACCEPTED", file=sys.stderr)
             return 1
+        # The 1.10.2 layout: the definitions in cmake/feature_config.cmake, the CMakeLists only
+        # including it and reading the switches.
+        (src / "cmake").mkdir()
+        (src / "cmake" / "feature_config.cmake").write_text(
+            'set(Z_FEATURE_QUERY 1 CACHE STRING "q")\nset(Z_FEATURE_RX_CACHE 0 CACHE STRING "r")\n'
+            'if(X)\n  set(Z_FEATURE_QUERY 0 CACHE STRING "q" FORCE)\nendif()\n')
+        (src / "CMakeLists.txt").write_text("include(feature_config)\nmessage(${Z_FEATURE_QUERY})\n")
+        version, found = pico_switches(src)
+        if version != "1.0.0" or found != {"Z_FEATURE_QUERY", "Z_FEATURE_RX_CACHE"} \
+                or pico_defaults(src) != {"Z_FEATURE_QUERY": True, "Z_FEATURE_RX_CACHE": False}:
+            print(f"  selftest FAIL [the pico reader on the split layout]: read {version} "
+                  f"{sorted(found)} {pico_defaults(src)}", file=sys.stderr)
+            return 1
+        (src / "cmake" / "feature_config.cmake").unlink()
+        (src / "cmake").rmdir()
 
         meta = src / "meta.json"
         meta.write_text(json.dumps({"packages": [{
