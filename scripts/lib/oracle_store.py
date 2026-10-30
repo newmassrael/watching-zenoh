@@ -335,7 +335,9 @@ def selftest() -> int:
             publish(layout, target, off).startswith(g.STALE), "a STALE oracle was published"
         )
         expect(not layout.product(target).exists(), "a refused oracle reached the store")
-        shutil.rmtree(off)
+        # Gone already when the refusal failed and the oracle was published.
+        shutil.rmtree(off, ignore_errors=True)
+        shutil.rmtree(layout.product(target), ignore_errors=True)
 
         # An oracle at the pin is published, then materialized, then current.
         good = stage("zenohd v9.9.9 built with rustc 1.97.1")
