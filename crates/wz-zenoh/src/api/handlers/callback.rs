@@ -226,8 +226,10 @@ where
     }
 }
 
+#[cfg(feature = "engine-tokio")]
 pub(crate) use ordered::Ordered;
 
+#[cfg(feature = "engine-tokio")]
 mod ordered {
     //! Where the callback of an entity runs.
     //!

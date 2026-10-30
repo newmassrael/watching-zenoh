@@ -23,10 +23,12 @@
 // so the tables are not copied, and the entities that read them (publishers, subscribers, queries,
 // liveliness and matching) arrive with slices Z2 to Z6, and the three other channel sizes with Z3.
 
+#[cfg(feature = "engine-tokio")]
+use std::sync::atomic::AtomicU64;
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
