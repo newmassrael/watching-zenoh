@@ -340,6 +340,20 @@ IMAGES = (
         entry="wz_app_main",
         peak=2416,
     ),
+    # The fixed client with its storage block taken from the kernel heap at start
+    # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
+    # the fixed client, the slot profile's, with `node_storage` calling the allocator once, in the
+    # image's `start`, whose frame is gone before the first round. The longest chain is the fixed
+    # client's, so the figure is the same; its stack is the overlay's own, the same bytes.
+    Image(
+        key="zephyr-client-heap",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_client_heap.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="wz_app_main",
+        peak=2416,
+    ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
     # frames under the observer's drain, which the overlay says: 7,204 bytes in the image of

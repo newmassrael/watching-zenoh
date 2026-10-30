@@ -16,14 +16,15 @@
 #   scripts/kit-lane.sh list                 the images
 #   scripts/kit-lane.sh --selftest           the table of images against the gates and the overlays
 #
-# Images are the keys of the stack gate: zephyr-client-fixed, zephyr-client-fixed-batching (they answer,
+# Images are the keys of the stack gate: zephyr-client-heap (the fixed client with its storage on the
+# kernel heap), zephyr-client-fixed, zephyr-client-fixed-batching (they answer,
 # and the host measures a GET through a router), zephyr-client-fixed-get (it asks a responder, and its
 # own console line carries the round trip) and zephyr-client-fixed-tls, a VERIFY image: it dials a router
 # over the secure channel, the lane configures the router to pin the certificate the image prints, holds
 # the run to the image's line that its peer is verified, and then measures a GET as for an answering
 # image. A MEASURE image (zephyr-tls-fit, the secure channel's fit) runs alone, with no router: it is
-# flashed, reset, and held to its own console verdict. COMPARE images (zephyr-client-heap, the client on
-# the heap profile, and zephyr-pico-queryable and -st, zenoh-pico answering the same two GETs with its
+# flashed, reset, and held to its own console verdict. COMPARE images (zephyr-pico-queryable and -st,
+# zenoh-pico answering the same two GETs with its
 # read and lease tasks and with the program stepping it) are run by
 # `compare` beside answering images (docs/upstream-parity.md M1): each boot in alternating order, the
 # session's datagrams captured at the host's wire, and scripts/lib/kit_compare.py's verdict per cell.
@@ -95,10 +96,7 @@ image_spec() {
         # COMPARE images (docs/upstream-parity.md M1): they answer the same two GETs with the same keys,
         # bodies and encoding as zephyr-client-fixed, and are run by `compare` beside it. They have no
         # stack gate row and no resource row: what a compare run reads of them is its own report.
-        zephyr-client-heap)
-            OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_heap.conf"
-            KIND=answer
-            ;;
+        #
         # zenoh-pico with the wz client's planes (docs/upstream-parity.md step M2), in its two arms:
         # its own read and lease tasks, and the program stepping the session.
         zephyr-pico-queryable)
@@ -131,6 +129,13 @@ image_spec() {
             OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_fixed.conf;overlays/t2g_client_batching.conf"
             KIND=answer
             ;;
+        # The same client on the heap profile of the storage (CONFIG_WZ_STORAGE_HEAP): the fixed
+        # client's code with the node's storage block taken from the kernel heap at start. It has the
+        # fixed client's stack, text and resource rows, and the compare run reads its heap.
+        zephyr-client-heap)
+            OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_heap.conf"
+            KIND=answer
+            ;;
         zephyr-client-fixed-get)
             OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_fixed.conf;overlays/t2g_client_get.conf"
             KIND=ask
@@ -145,12 +150,12 @@ image_spec() {
         *) return 1 ;;
     esac
 }
-IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get zephyr-client-fixed-tls)
+IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get zephyr-client-fixed-tls zephyr-client-heap)
 # The measure images: not the stack gate's (their stack is what they report) and not yet a resource
 # row's (the row is set from what they measure).
 MEASURE_IMAGES=(zephyr-tls-fit)
 # The compare images: run only by `compare`, beside the images above.
-COMPARE_IMAGES=(zephyr-client-heap zephyr-pico-queryable zephyr-pico-queryable-st)
+COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
 # The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).
 TLS_PORT=7448

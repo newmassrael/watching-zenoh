@@ -43,6 +43,19 @@ config WZ_TLS
 	  start, prints its certificate as PEM for the router's operator to pin, and takes the zid
 	  its key names. overlays/t2g_client_tls.conf states the Mbed TLS configuration it needs.
 
+config WZ_BATCH_BYTES
+	int "Largest batch the node's sessions negotiate, in bytes"
+	default 1472
+	range 512 1472
+	help
+	  The batch a session offers in its handshake; the router takes the smaller of its batch and
+	  this (zenoh 1.10.1, `io/zenoh-transport/src/unicast/establishment/accept.rs` @
+	  `.min(init_syn.batch_size)`), and no datagram of the session is longer. The node's receive
+	  buffer and its frame buffer are this long, so it is memory the node holds for as long as it
+	  runs. 1472 is the largest UDP payload one Ethernet frame carries whole (1500 - 20 - 8); a
+	  node whose messages are small states less: a message longer than the batch is fragmented,
+	  and the handshake's longest message is well under 512.
+
 config WZ_IDLE_WAIT_MS
 	int "Longest the client's link sleeps when its session has nothing due, in milliseconds"
 	default 0

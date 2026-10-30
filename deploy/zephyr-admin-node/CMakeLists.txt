@@ -30,7 +30,9 @@ target_sources(app PRIVATE src/main.c)
 include(${CMAKE_CURRENT_SOURCE_DIR}/wz_axes.cmake)
 set(backend_feature ${wz_axes_features})
 set(no_default_features ${wz_axes_no_default_features})
-set(backend_env "")
+# The batch the node's sessions negotiate (CONFIG_WZ_BATCH_BYTES), which sizes its receive and frame
+# buffers: the Rust side reads it when it compiles.
+set(backend_env WZ_BATCH_BYTES=${CONFIG_WZ_BATCH_BYTES})
 
 if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   # The POSIX socket layer the sockets seam calls (`zephyr_sys::socket`) and the
