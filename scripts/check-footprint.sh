@@ -1050,8 +1050,21 @@ declare -A BASELINE_MC_TEXT=(
     # spacing in each session, the received chain and the session bundle written in place) and
     # is not attributed to one commit; it is code this image reaches, not a leak. data is 4 and
     # bss 270120 on both. Old: 68712/68772.
-    ["thumbv7m-none-eabi"]=68952
-    ["thumbv7em-none-eabihf"]=69000
+    #
+    # 2026-10-30 -- thumbv7m 68952 -> 72852, thumbv7em-hf 69000 -> 72900 (+3900 / +3900), read by
+    # Layer Q on one build host (rustc 1.97.0 / gcc 13.2.1) at the SCE pin 6ba84c3f37, from the
+    # image built at the commit before the pin moves (68956 / 69000 there) and at the pins
+    # since: b1ede72108 read 76232 / 76248, fb038af604 read 73272 / 73280 and 6ba84c3f37 reads
+    # 72852 / 72900. All of it is the pins', none of it a change of this tree's own code: the
+    # generated encoders write
+    # through a `write_source` that is built once for each sink (a counting sink and the
+    # transmit sink) where `encode` was built once, the encode of a codec that may refuse is a
+    # `Result`, and the machines' engine code (`microstep`, `Turn`) is shared and not generic
+    # over the policy, which took about 4 KB out. The largest symbols that grew are
+    # `multicast_tx_emit` (2938 -> 3734 at the first pin) and the two `MsgPut::write_source`
+    # (782 and 608). data is 4 and bss 270120 on both. Old: 68952/69000.
+    ["thumbv7m-none-eabi"]=72852
+    ["thumbv7em-none-eabihf"]=72900
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
