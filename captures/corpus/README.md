@@ -49,6 +49,7 @@ The original captures are not kept anywhere.
 | `zenoh-v1-9-0-tcp-full.pcap`, `zenoh-v1-9-0-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.9.0 |
 | `zenoh-v1-8-0-tcp-full.pcap`, `zenoh-v1-8-0-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.8.0 |
 | `zenoh-v1-7-2-tcp-full.pcap`, `zenoh-v1-7-2-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.7.2 |
+| `zenoh-matched-1-7-2-tcp.pcap`, `zenoh-matched-1-7-2-udp.pcap`, and the same for 1.8.0 and 1.9.0 | zenoh | TCP, UDP unicast | the eclipse/zenoh router of that release with the `z_pub` and `z_sub` examples built from the same tag as clients, a minute on a link that loses nothing |
 | `zenoh-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients |
 | `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |
 | `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
@@ -84,7 +85,8 @@ The original captures are not kept anywhere.
 ## What it does not hold yet
 
 On the zenoh side versions other than
-1.10.1, 1.10.0, 1.9.0, 1.8.0, 1.7.2 and 1.5.0 (all with 1.10.1 clients) and
+1.10.1, 1.10.0, 1.9.0, 1.8.0, 1.7.2 and 1.5.0 (with 1.10.1 clients, and with
+clients of the router's own release for 1.9.0, 1.8.0 and 1.7.2) and
 links other than loopback, emulated ones that lose (1% to 20%), reorder or
 duplicate packets, and one office Wi-Fi link.
 Each is added the same way: captured from the real
