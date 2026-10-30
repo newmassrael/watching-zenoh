@@ -48,7 +48,12 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # always did gets what it always got; a firmware with no allocator turns the defaults off
 # and names `session-slot`.
 default = ["alloc"]
-alloc = ["wz-runtime-coop/alloc", "wz-session-core/alloc"]
+alloc = ["kernel-heap", "wz-runtime-coop/alloc", "wz-session-core/alloc"]
+# The kernel-heap allocator alone (`ZephyrAllocator`, `zephyr_image!`), with none of the heap
+# profile's owned forms: a firmware on the slot profile whose storage block is taken from the
+# kernel heap at start (`CONFIG_WZ_STORAGE_HEAP` on the client) names this and `session-slot`, and
+# its session code stays the slot profile's, with no allocator in what the session tier does.
+kernel-heap = []
 # Fixed-memory step S9c -- the per-session slot profile of the cooperative runtime, which
 # a firmware turns on (the facade forwards no selector). `ZephyrLinks` is the heap
 # `SessionLinks` seam over Zephyr's sockets, and the slot profile has no such seam (its

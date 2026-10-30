@@ -2600,7 +2600,7 @@ features = ["net-lwip-mac"]
 [[cargo_rule]]
 image = "zephyr-admin-node"
 when = ["WZ_ROLE_CLIENT", "WZ_STORAGE_HEAP"]
-features = ["client-node"]
+features = ["heap-storage"]
 defaults = "off"
 
 [[cargo_rule]]

@@ -82,6 +82,12 @@ client-node = [
     "wz-session-core/bounded-heapless",
     "wz-session-core/transport-tx-lend",
 ]
+# The HEAP storage of the client (`CONFIG_WZ_STORAGE_HEAP` with the client role): the fixed
+# client's session code, the slot profile's, with the node's storage block taken once from the
+# kernel heap at start and not declared as a static. The tables are bounded by the same limits;
+# the allocator is the image's alone (`wz-runtime-zephyr`'s `kernel-heap`), and no crate of the
+# session tier is built with `alloc`, so what the session does allocates nothing.
+heap-storage = ["fixed-client", "wz-runtime-zephyr/kernel-heap"]
 # The network stack the board's Kconfig chose (`CONFIG_WZ_NET_BACKEND_*`);
 # deploy/zephyr-admin-node/CMakeLists.txt turns exactly one on.
 net-zephyr-sockets = []

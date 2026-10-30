@@ -66,8 +66,10 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   if(CONFIG_WZ_ROLE_CLIENT)
     list(APPEND backend_env WZ_CLIENT_ENDPOINT=${CONFIG_WZ_CLIENT_ENDPOINT})
     # How long the link may sleep when nothing is due (0: the tick), and whether one send window is
-    # one datagram. Both only on the fixed-memory profile, the one that has the slot stack's link.
-    if(CONFIG_WZ_FIXED_MEMORY)
+    # one datagram. The client is the slot profile's whichever way its storage is given (a static
+    # of the image, or a block of the kernel heap: CONFIG_WZ_STORAGE_HEAP), and the slot stack's
+    # link is the one it has.
+    if(CONFIG_WZ_FIXED_MEMORY OR CONFIG_WZ_STORAGE_HEAP)
       list(APPEND backend_env WZ_IDLE_WAIT_MS=${CONFIG_WZ_IDLE_WAIT_MS})
       # The client subscribes (CONFIG_WZ_SUBSCRIBE): the declaration of a subscriber and the
       # registry that keeps the latest sample of each.

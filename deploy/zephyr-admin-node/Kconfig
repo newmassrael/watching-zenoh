@@ -34,7 +34,7 @@ config WZ_CLIENT_ENDPOINT
 
 config WZ_TLS
 	bool "The client dials its router over the secure channel"
-	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on WZ_ROLE_CLIENT && WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	depends on NET_TCP && MBEDTLS && PSA_CRYPTO
 	help
 	  The fixed-memory client dials `tls/`: TLS 1.3 with mutual authentication (decision D9 of
@@ -47,7 +47,7 @@ config WZ_IDLE_WAIT_MS
 	int "Longest the client's link sleeps when its session has nothing due, in milliseconds"
 	default 0
 	range 0 60000
-	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on WZ_ROLE_CLIENT && WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	help
 	  0 keeps the loop waking every millisecond to look at its timers. A value above it lets the
 	  socket's receive timeout be armed up to the session's next deadline (the handshake, the
@@ -58,7 +58,7 @@ config WZ_IDLE_WAIT_MS
 
 config WZ_TX_BATCHING
 	bool "Send the messages of one send window as one datagram"
-	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on WZ_ROLE_CLIENT && WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	help
 	  The session coalesces what it sends in one window into one datagram (zenoh-pico's
 	  Z_FEATURE_BATCHING): a reply and the final that ends its query leave together, which
@@ -67,7 +67,7 @@ config WZ_TX_BATCHING
 
 config WZ_SUBSCRIBE
 	bool "The client declares subscribers and keeps the latest sample of each"
-	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on WZ_ROLE_CLIENT && WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	default y
 	help
 	  The declaration of a subscriber to the router, which then forwards a PUT on the key to
@@ -79,7 +79,7 @@ config WZ_SUBSCRIBE
 
 config WZ_GET
 	bool "The client asks a query and says how it went"
-	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on WZ_ROLE_CLIENT && WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	help
 	  The client asks the query below over its session, as `z_get` with its default options
 	  does, once the session is established and until the count is reached, and says the round

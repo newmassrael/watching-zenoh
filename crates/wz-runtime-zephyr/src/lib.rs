@@ -90,7 +90,7 @@ pub use links::ZephyrLinks;
 /// ```ignore
 /// wz_runtime_zephyr::zephyr_image!();
 /// ```
-#[cfg(feature = "alloc")]
+#[cfg(feature = "kernel-heap")]
 #[macro_export]
 macro_rules! zephyr_image {
     () => {
@@ -137,15 +137,15 @@ macro_rules! zephyr_image_no_heap {
     };
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "kernel-heap")]
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "kernel-heap")]
 use core::mem::size_of;
 
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use zephyr_sys::sys_clock_tick_get;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "kernel-heap")]
 use zephyr_sys::{k_free, k_malloc};
 
 /// Monotonic [`ClockSource`] reading the Zephyr kernel tick counter.
@@ -508,7 +508,7 @@ impl wz_session_core::epoch::EpochSource for ZephyrEpoch {
 /// own timer-queue entries) takes the over-aligned branch below, which aligns
 /// up regardless of the `k_malloc` base alignment. Setting this to 8 would hand
 /// align-8 allocations a 4-aligned pointer on the default heap = UB.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "kernel-heap")]
 const HEAP_ALIGN: usize = 4;
 
 /// A [`GlobalAlloc`] bridging Rust's allocator to the Zephyr kernel heap
@@ -520,10 +520,10 @@ const HEAP_ALIGN: usize = 4;
 /// heap — the Zephyr heap IS the kernel's, so every Zephyr deploy routes Rust
 /// allocations through it. One audited bridge, shared. Identical over-alignment
 /// scheme to `wz_runtime_freertos::FreertosAllocator`.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "kernel-heap")]
 pub struct ZephyrAllocator;
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "kernel-heap")]
 unsafe impl GlobalAlloc for ZephyrAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.align() <= HEAP_ALIGN {

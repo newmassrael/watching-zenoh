@@ -96,7 +96,7 @@ image_spec() {
         # bodies and encoding as zephyr-client-fixed, and are run by `compare` beside it. They have no
         # stack gate row and no resource row: what a compare run reads of them is its own report.
         zephyr-client-heap)
-            OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf"
+            OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_heap.conf"
             KIND=answer
             ;;
         # zenoh-pico with the wz client's planes (docs/upstream-parity.md step M2), in its two arms:

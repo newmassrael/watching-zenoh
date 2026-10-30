@@ -25,7 +25,7 @@
 // S9e -- the heap profile's: the growable node, the Zephyr sockets' stack and the console
 // lines built on the heap. A build of the fixed-memory profile with the defaults off links
 // no `alloc` crate, and declares no allocator (`zephyr_image_no_heap!` below).
-#[cfg(any(feature = "heap", feature = "client-node"))]
+#[cfg(any(feature = "heap", feature = "client-node", feature = "heap-storage"))]
 extern crate alloc;
 
 // The growable node's imports (S9c: the `fixed-memory` profile runs `fixed_node`'s
@@ -113,11 +113,11 @@ mod spi_cyt4bf;
 mod zeth_exports;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
-#[cfg(any(feature = "heap", feature = "client-node"))]
+#[cfg(any(feature = "heap", feature = "client-node", feature = "heap-storage"))]
 wz::runtime_zephyr::zephyr_image!();
 // The same without the allocator: a build that allocates anywhere in its graph does not
 // link, which is what the no-allocator link gate takes as its proof.
-#[cfg(not(any(feature = "heap", feature = "client-node")))]
+#[cfg(not(any(feature = "heap", feature = "client-node", feature = "heap-storage")))]
 wz::runtime_zephyr::zephyr_image_no_heap!();
 
 /// How often the node reads its stack's high-water mark. The read walks the whole

@@ -213,7 +213,43 @@ const _: () = {
 type Storage =
     NodeStorage<Clock, Stack, ZephyrEntropy, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>;
 
+/// Where the storage block comes from. On the fixed profile it is a static the image declares. On
+/// the heap profile of the client (`CONFIG_WZ_STORAGE_HEAP`, feature `heap-storage`) it is the same
+/// block taken once from the kernel heap at start: the session code is the slot profile's in both,
+/// the tables are bounded by the same limits, and only where the bytes are differs. The block lives
+/// for the node's whole life and is never given back.
+#[cfg(not(feature = "heap-storage"))]
 static NODE: Storage = Storage::new();
+
+/// The storage block, taken from the kernel heap: `None` when the heap has no room for it.
+///
+/// The block is the value of `Storage::new()` because that value is ALL ZERO BYTES: it is the
+/// invariant that puts the static of the fixed profile in `.bss` and not in `.data` (see the
+/// comment on [`Storage`]; a non-zero byte anywhere would put eleven kilobytes in flash, which the
+/// text budget would show). The heap hands the block back zeroed. It is not written as a value: the
+/// value is 11 KB, more than the stack of the thread that would build it (the first form of this
+/// function wrote `Storage::new()` over the block, the compiler built it on the stack first, and
+/// the fill of it ran into the main thread's stack guard).
+#[cfg(feature = "heap-storage")]
+fn node_storage() -> Option<&'static Storage> {
+    use core::alloc::Layout;
+    let layout = Layout::new::<Storage>();
+    // SAFETY: the layout has a non-zero size; the pointer is checked for null before it is used.
+    let block = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<Storage>();
+    if block.is_null() {
+        return None;
+    }
+    // SAFETY: `block` is aligned for a `Storage`, holds as many zero bytes as one, and nothing else
+    // reaches it; zero bytes are the value of `Storage::new()` (above), so it is a live `Storage`,
+    // and the reference lasts for the program because the block is never freed.
+    Some(unsafe { &*block })
+}
+
+/// The storage the node places its tables in.
+#[cfg(not(feature = "heap-storage"))]
+fn node_storage() -> Option<&'static Storage> {
+    Some(&NODE)
+}
 
 /// The queryables the node declares on each session, in the order of their registrations.
 static DECLARED: Declared<DOCS> = Declared::new();
@@ -297,6 +333,10 @@ fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
         log(c"wz: FAIL - the board's entropy source could not fill the signing key");
         return Err(2);
     }
+    let Some(storage) = node_storage() else {
+        log(c"wz: FAIL - the kernel heap has no room for the node's storage");
+        return Err(3);
+    };
     let Some(address) = await_board_ipv4(ADDRESS_WAIT_MS) else {
         log(c"wz: FAIL - the board's interface never got an IPv4 address");
         return Err(1);
@@ -324,9 +364,9 @@ fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
     };
 
     #[cfg(not(feature = "tls"))]
-    let stack = Stack::new(address, &NODE.rx, &NODE.tx);
+    let stack = Stack::new(address, &storage.rx, &storage.tx);
     #[cfg(feature = "tls")]
-    let stack = crate::fixed_tls::stack(address, &NODE.rx, &NODE.tx, channel);
+    let stack = crate::fixed_tls::stack(address, &storage.rx, &storage.tx, channel);
     let stack = if IDLE_WAIT_MS > 0 {
         stack.with_idle_wait_ms(IDLE_WAIT_MS)
     } else {
@@ -341,7 +381,7 @@ fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
         (crate::fixed_get::layer(), crate::fixed_get::app())
     };
     let node = ClientNode {
-        storage: &NODE,
+        storage,
         declared: &DECLARED,
         clock: Clock::default(),
         stack,
