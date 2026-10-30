@@ -153,16 +153,23 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// the unicast bundle encodes from the borrowed parts straight into its batch frame, and
     /// a multicast group queues an owned item for its own pipeline.
     ///
-    /// Compiled only where the owned message is not read on the way out of EVERY session: the
-    /// stats class is taken from it and the namespace is applied to it. The egress policy is
-    /// judged on it too, but that is a fact about the session, not the build, so it is asked at
-    /// the call ([`Session::plain_put_lane_open`](super::Session::plain_put_lane_open)) and a
-    /// build that can enforce keeps this path for the sessions that have no policy.
-    #[cfg(all(
-        feature = "codec-push",
-        not(feature = "transport-stats"),
-        not(feature = "routing-namespace")
-    ))]
+    /// Whether this transport rewrites the key of each message the session originates on its way
+    /// out (a routing namespace), so that a send written from borrowed parts must leave the
+    /// message to the owned send. The unicast bundle answers from its own namespace; a group has
+    /// no plain send (`Self::send_plain_put_qos` answers `None` for it whatever this says), and
+    /// its namespace is applied by its drive loop to the owned items it queues.
+    fn rewrites_originated_keys(payload: &Self::Payload) -> bool {
+        let _ = payload;
+        false
+    }
+
+    /// Every build with a Push codec has it. What can stop it is a fact about the session: an
+    /// egress policy judges the owned message, which is asked at the call
+    /// ([`Session::plain_put_lane_open`](super::Session::plain_put_lane_open)), and a routing
+    /// namespace rewrites its key, which the unicast bundle answers with `None` too
+    /// (`SessionLinkActions::send_plain_put_qos`). The network counters count the plain Put as
+    /// its owned message.
+    #[cfg(feature = "codec-push")]
     #[allow(clippy::too_many_arguments)]
     fn send_plain_put_qos(
         payload: &Self::Payload,
@@ -442,13 +449,13 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
         }
     }
 
+    fn rewrites_originated_keys(payload: &Self::Payload) -> bool {
+        payload.rewrites_originated_keys()
+    }
+
     // The unicast bundle encodes a plain Put from the borrowed parts, into the frame its
-    // batch holds open.
-    #[cfg(all(
-        feature = "codec-push",
-        not(feature = "transport-stats"),
-        not(feature = "routing-namespace")
-    ))]
+    // batch holds open, or answers `None` when it rewrites what it originates.
+    #[cfg(feature = "codec-push")]
     fn send_plain_put_qos(
         payload: &Self::Payload,
         mapping_id: u64,
@@ -459,9 +466,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
         express: bool,
         priority: wz_session_core::qos::Priority,
     ) -> Option<Result<(), SendWireError>> {
-        Some(
-            payload.send_plain_put_qos(mapping_id, suffix, value, qos, reliable, express, priority),
-        )
+        payload.send_plain_put_qos(mapping_id, suffix, value, qos, reliable, express, priority)
     }
 }
 

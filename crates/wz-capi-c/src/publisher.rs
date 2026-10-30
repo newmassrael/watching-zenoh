@@ -372,7 +372,8 @@ pub(crate) struct PublisherState {
     /// timestamp or source of its own, which `base` has none of), worked out once from `base`:
     /// a put that brings no options of its own is then sent without cloning `base` and reading
     /// it again ([`wz_runtime_tokio::session::PublishOptions::plain_put_params`]). `None` when
-    /// `base` is not plain, or the build does not send plain Puts.
+    /// `base` is not plain, or the build has no Push codec; a session whose lane is closed is
+    /// asked when the put is sent.
     plain: Option<wz_runtime_tokio::session::PlainPutParams>,
 }
 

@@ -11836,15 +11836,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// batching window, the express flush and the fragmentation of an oversize payload are
     /// the owned message's. `qos` is what [`crate::declare_ext_qos::read_push_qos`] reads off
     /// the owned message's extension; a build without `pubsub-qos` writes none and reads the
-    /// DEFAULT, here too.
+    /// DEFAULT, here too. The network counters (`transport-stats`) count it as they count the
+    /// owned message of the same parts (`crate::network_message::plain_put_stats_class`).
     ///
-    /// Not compiled with `transport-stats`: the stats class of a message is read off its
-    /// owned form, and that is the build that keeps it.
-    #[cfg(all(
-        feature = "codec-push",
-        feature = "alloc",
-        not(feature = "transport-stats")
-    ))]
+    /// `None`, with nothing sent, when this session rewrites what it originates: a session with
+    /// a routing namespace prefixes the key of each message on its way out, which the caller's
+    /// owned send does ([`Self::rewrites_originated_keys`]), so the caller sends the owned
+    /// message. That is a fact about the session and not the build, as the receive side's
+    /// [`Self::plain_put_lane_open`] is: a build that can carry a namespace keeps this send for
+    /// every session that has none.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
     #[allow(clippy::too_many_arguments)]
     pub fn send_plain_put_qos(
         &self,
@@ -11855,7 +11856,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         express: bool,
         priority: Priority,
-    ) -> Result<(), SendWireError> {
+    ) -> Option<Result<(), SendWireError>> {
+        if self.rewrites_originated_keys() {
+            return None;
+        }
         #[cfg(feature = "pubsub-qos")]
         let qos = qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
         #[cfg(not(feature = "pubsub-qos"))]
@@ -11863,21 +11867,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = qos;
             crate::sample::QosLevel::DEFAULT
         };
-        self.dispatch_network_message(
+        #[cfg(feature = "transport-stats")]
+        let class =
+            crate::network_message::plain_put_stats_class(mapping_id, suffix, value.len(), |id| {
+                self.resolve_outbound_mapping(id)
+            });
+        #[cfg(not(feature = "transport-stats"))]
+        let class = crate::stats::NetworkStatsClass::unread();
+        let sent = self.dispatch_network_message(
             priority,
             reliable,
             qos,
             wz_codecs::push::Push::MAX_ENCODED_BYTES,
-            crate::stats::NetworkStatsClass::unread(),
+            class,
             |sink| crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos),
-        )?;
+        );
+        if let Err(error) = sent {
+            return Some(Err(error));
+        }
         #[cfg(feature = "transport-batching")]
         if express {
             self.flush_open_batch();
         }
         #[cfg(not(feature = "transport-batching"))]
         let _ = express;
-        Ok(())
+        Some(Ok(()))
     }
 
     /// R311y215 — the express (priority-carrying) twin of
@@ -11903,14 +11917,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the caller's own `&str` and `&[u8]` through the codec's BORROWED view,
         // straight into the lent slot: the owned `PushOwned` the form below builds
         // (a copy of the keyexpr and a copy of the payload) is a heap object whose
-        // only job is to be encoded and dropped. `transport-stats` classifies a
-        // message from its owned form, so a stats build keeps the owned build.
-        #[cfg(all(
-            feature = "codec-push",
-            feature = "tx-lend-only",
-            not(feature = "transport-stats")
-        ))]
+        // only job is to be encoded and dropped. The network counters
+        // (`transport-stats`) count it as the owned message of the same parts.
+        #[cfg(all(feature = "codec-push", feature = "tx-lend-only"))]
         {
+            #[cfg(feature = "transport-stats")]
+            let class = crate::network_message::plain_put_stats_class(
+                0,
+                Some(keyexpr_suffix),
+                value.len(),
+                |_| None,
+            );
+            #[cfg(not(feature = "transport-stats"))]
+            let class = crate::stats::NetworkStatsClass::unread();
             self.dispatch_network_message(
                 priority,
                 reliable,
@@ -11918,16 +11937,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // default QoS, which `read_push_qos` answers for the same message.
                 crate::sample::QosLevel::DEFAULT,
                 wz_codecs::push::Push::MAX_ENCODED_BYTES,
-                crate::stats::NetworkStatsClass::unread(),
+                class,
                 // The borrowed composition the multicast TX of a build with no
                 // allocator encodes too (`multicast_tx::MulticastTxPut`).
                 |sink| crate::lent_push::literal_put(keyexpr_suffix, value).encode(sink),
             )
         }
-        #[cfg(all(
-            feature = "codec-push",
-            not(all(feature = "tx-lend-only", not(feature = "transport-stats")))
-        ))]
+        #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
         {
             let push = build_push_literal(keyexpr_suffix, value)?;
             self.dispatch_push(priority, push, reliable)?;
@@ -14009,11 +14025,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             return false;
         }
+        !self.rewrites_originated_keys()
+    }
+
+    /// Whether this session rewrites the key of each message it originates on its way out: a
+    /// routing namespace prefixes it (`crate::namespace::apply_egress`), which is done to the
+    /// owned message. A send written from borrowed parts asks this and leaves the message to the
+    /// owned send when it is `true`; a build with no namespace answers `false`.
+    pub fn rewrites_originated_keys(&self) -> bool {
         #[cfg(feature = "routing-namespace")]
-        if R::with_mutex_mut(&self.namespace_egress, |slot| slot.is_some()) {
-            return false;
+        {
+            R::with_mutex_mut(&self.namespace_egress, |slot| slot.is_some())
         }
-        true
+        #[cfg(not(feature = "routing-namespace"))]
+        {
+            false
+        }
     }
 
     /// Install (or, with `None`, remove) the egress admission of this bundle's replies. Called by

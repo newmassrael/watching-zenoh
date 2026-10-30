@@ -1853,16 +1853,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // is reported; a face whose link is down is skipped, as a send over it would.
         let mut outcome = Ok(0);
         for actions in core.0.ups() {
-            // A plain Put is sent from the borrowed bytes, as the tokio engine sends it.
-            let sent = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
+            // A plain Put is sent from the borrowed bytes, as the tokio engine sends it, unless
+            // the session rewrites what it originates, which leaves it to the owned send below.
+            let plain = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
                 let (mapping_id, suffix) = if wire.is_literal() {
                     (0, Some(keyexpr))
                 } else {
                     (wire.mapping_id, suffix)
                 };
-                leg(actions.send_plain_put_qos(
+                actions.send_plain_put_qos(
                     mapping_id, suffix, payload, meta.qos, reliable, express, priority,
-                ))
+                )
+            } else {
+                None
+            };
+            let sent = if let Some(plain) = plain {
+                leg(plain)
             } else {
                 let push = match (opts.kind, wire.mapping_id) {
                     (SampleKind::Put, 0) => {
@@ -2648,18 +2654,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
         };
+        // Asked of every link before any is sent to, so the put goes plain to all of them or to
+        // none: a link that rewrites what it originates (a routing namespace) takes the general
+        // publish for the whole of it. Its namespace is installed before the session sends
+        // anything, so no link answers otherwise below.
+        if core
+            .0
+            .ups()
+            .any(|actions| actions.rewrites_originated_keys())
+        {
+            return FilteredPut::NotPlain;
+        }
         let suffix = (mapping_id == 0).then_some(keyexpr);
         let mut outcome = Ok(0);
         for actions in core.0.ups() {
-            let sent = leg(actions.send_plain_put_qos(
-                mapping_id,
-                suffix,
-                payload,
-                params.qos,
-                params.reliable,
-                params.express,
-                params.priority,
-            ));
+            let sent = leg(actions
+                .send_plain_put_qos(
+                    mapping_id,
+                    suffix,
+                    payload,
+                    params.qos,
+                    params.reliable,
+                    params.express,
+                    params.priority,
+                )
+                .unwrap_or(Err(SendWireError::FeatureDisabled)));
             if sent.is_err() {
                 outcome = sent;
             }

@@ -3833,9 +3833,10 @@ impl SharedSession {
     ///
     /// `None` when the put is not plain HERE, and nothing has been sent: this node's own
     /// subscriber wants it (the loopback leg then has work that only the general publish
-    /// does), or a face stamps what it sends (so the put would carry a timestamp). The caller
-    /// then takes [`Self::publish_declared_all`], which does both. `Some` is what that call
-    /// would have answered.
+    /// does), a face stamps what it sends (so the put would carry a timestamp), or a face's lane
+    /// is closed (a policy that judges it, a namespace that rewrites its key). The caller then
+    /// takes [`Self::publish_declared_all`], which does all of it. `Some` is what that call would
+    /// have answered.
     pub fn put_plain_declared(
         &self,
         keyexpr: &str,
@@ -3965,7 +3966,14 @@ impl SharedSession {
             return None;
         }
         if params.destination.allows_remote() {
-            if sessions.iter().any(|session| session.stamps_publishes()) {
+            // Asked of every face before any is sent to, so that a put is sent plain to all of
+            // them or to none: a face that stamps what it publishes, or whose lane is closed (a
+            // policy of its own, a namespace that rewrites the key), takes the general publish
+            // for the whole fan-out.
+            if sessions
+                .iter()
+                .any(|session| session.stamps_publishes() || !session.plain_put_lane_open())
+            {
                 return None;
             }
             for session in sessions.iter() {
@@ -5560,8 +5568,8 @@ mod matching_aggregate_tests {
 
     /// The plain-put parameters of `options` in a build that sends plain puts, and `None` in one
     /// that does not, after asserting that this is what the build says of itself
-    /// (`SENDS_PLAIN_PUTS`: a build that counts or rewrites the owned message, or has no Push
-    /// codec, has no plain lane). A test of the lane has nothing to run in the second kind of
+    /// (`SENDS_PLAIN_PUTS`: a build with no Push codec has no plain lane). A test of the lane has
+    /// nothing to run in the second kind of
     /// build, and what it holds there is this assertion: the build answers that it has none.
     fn plain_params(
         options: &PublishOptions,

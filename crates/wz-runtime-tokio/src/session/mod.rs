@@ -1892,12 +1892,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             let express = meta.is_express();
             // A plain Put (nothing but, at most, the QoS byte) is sent from the borrowed
             // text and bytes: the owned message below is a copy of each, a chain and a
-            // `Box`, built to be encoded once and dropped. A transport with no such path,
-            // or a build where the owned message is read on the way out, answers `None`
+            // `Box`, built to be encoded once and dropped. A transport with no such path, or a
+            // session that rewrites what it originates (a routing namespace), answers `None`
             // and takes the owned one. The egress policy reads the owned message, so a session
             // that holds one takes it too; a session that does not keeps this path in a build
             // that can enforce (`Self::egress_policy_active`).
-            #[cfg(all(not(feature = "transport-stats"), not(feature = "routing-namespace")))]
             let sent_plain = if opts.kind == SampleKind::Put
                 && meta.is_plain_apart_from_qos()
                 && !self.egress_policy_active()
@@ -1921,8 +1920,6 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             } else {
                 false
             };
-            #[cfg(any(feature = "transport-stats", feature = "routing-namespace"))]
-            let sent_plain = false;
             if !sent_plain {
                 // R311ms / R311nb — build the Put / Del as a `NetworkMessage::Push`
                 // (the transport-agnostic outbound currency) and route it through
@@ -2244,10 +2241,12 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         Ok(())
     }
 
-    /// Whether a Put on this session may be sent from borrowed bytes without being judged: the
-    /// question a caller of `publish_plain_declared` asks before it takes that road.
+    /// Whether a Put on this session may be sent from borrowed bytes: nothing judges it (an
+    /// egress policy reads the owned message) and nothing rewrites its key on the way out (a
+    /// routing namespace prefixes the owned message's). The question a caller of
+    /// `publish_plain_declared` asks before it takes that road.
     pub fn plain_put_lane_open(&self) -> bool {
-        !self.egress_policy_active()
+        !self.egress_policy_active() && !Tp::rewrites_originated_keys(&self.transport)
     }
 
     /// R2702 — whether the §5.16 egress chain admits `msg` from THIS session.
@@ -4771,14 +4770,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // `Self::publish`: with the key as a one-id alias, the message is the id, the
             // QoS byte and the payload, and building an owned copy of them to encode once is
             // most of what the send costs. Not for a session that holds an egress policy: it is
-            // judged on the owned message (`Self::egress_policy_active`).
-            #[cfg(all(not(feature = "transport-stats"), not(feature = "routing-namespace")))]
+            // judged on the owned message (`Self::egress_policy_active`); nor for one that
+            // rewrites what it originates, which the bundle answers with `None`.
             let sent_plain = if opts.kind == SampleKind::Put
                 && meta.is_plain_apart_from_qos()
                 && !self.egress_policy_active()
             {
                 // This body is the unicast session's, so the bundle is the send seam.
-                self.actions().send_plain_put_qos(
+                match self.actions().send_plain_put_qos(
                     mapping_id,
                     inline_suffix,
                     payload,
@@ -4786,13 +4785,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     reliable,
                     express,
                     opts.priority_band(),
-                )?;
-                true
+                ) {
+                    Some(sent) => {
+                        sent?;
+                        true
+                    }
+                    None => false,
+                }
             } else {
                 false
             };
-            #[cfg(any(feature = "transport-stats", feature = "routing-namespace"))]
-            let sent_plain = false;
             if !sent_plain {
                 let push = match opts.kind {
                     SampleKind::Put => wz_session_core::push_build::build_push_aliased_with_meta(
@@ -4913,28 +4915,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// publish.
     ///
     /// A build that does not send plain Puts from borrowed bytes never has the parameters to
-    /// call this with ([`PublishOptions::plain_put_params`] answers `None` there), so the
-    /// answer such a build gives is a refusal and not a send.
+    /// call this with ([`PublishOptions::plain_put_params`] answers `None` there), and a session
+    /// whose lane is closed ([`Self::plain_put_lane_open`]) is not asked; both answer with a
+    /// refusal and not a send.
     pub fn publish_plain_declared(
         &self,
         mapping_id: u64,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> Result<(), PublishError> {
-        // A session that holds an egress policy is refused here, as a build that has no such
-        // path is: this send never builds the message the policy reads, so letting it through
-        // would be sending around the policy. The caller (`Self::stamps_publishes`'s sibling
-        // in the C API) asks first and takes the general publish; this is the lock on the door.
+        // A session whose lane is closed is refused here, as a build that has no such path is:
+        // this send never builds the message an egress policy reads or a namespace rewrites, so
+        // letting it through would be sending around either. The caller (the C API's plain lane)
+        // asks `Self::plain_put_lane_open` first and takes the general publish; this is the lock
+        // on the door.
         if self.egress_policy_active() {
             return Err(PublishError::ExceedsCapacity);
         }
-        #[cfg(all(
-            feature = "codec-push",
-            not(feature = "transport-stats"),
-            not(feature = "routing-namespace")
-        ))]
+        #[cfg(feature = "codec-push")]
         {
-            self.actions().send_plain_put_qos(
+            match self.actions().send_plain_put_qos(
                 mapping_id,
                 None,
                 payload,
@@ -4942,14 +4942,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 params.reliable,
                 params.express,
                 params.priority,
-            )?;
-            Ok(())
+            ) {
+                Some(sent) => Ok(sent?),
+                None => Err(PublishError::ExceedsCapacity),
+            }
         }
-        #[cfg(not(all(
-            feature = "codec-push",
-            not(feature = "transport-stats"),
-            not(feature = "routing-namespace")
-        )))]
+        #[cfg(not(feature = "codec-push"))]
         {
             let _ = (mapping_id, payload, params);
             Err(PublishError::ExceedsCapacity)

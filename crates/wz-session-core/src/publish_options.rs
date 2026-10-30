@@ -454,18 +454,15 @@ impl PublishOptions {
     /// general publish derives from the options (`reliable_bool`, the express flag,
     /// `priority_band`), by the same code.
     ///
-    /// Also `None` in a build that does not send a plain Put from borrowed bytes (it counts or
-    /// rewrites the owned message, or has no Push codec): the build's one answer, so a caller
-    /// never asks which features are on. A build that can ENFORCE an egress policy is not one of
-    /// those: whether a put is judged is a fact about the session that sends it (the tokio
-    /// engine's `Session::plain_put_lane_open`), not about the build, and answering `None` here
-    /// for every such build made merely being able to enforce cost every session the fast send.
+    /// Also `None` in a build with no Push codec, which sends no Put at all ([`SENDS_PLAIN_PUTS`]).
+    /// Nothing else about the build decides it: what can stop a plain Put is a fact about the
+    /// session that sends it, asked where it is sent. A session that judges its puts (the tokio
+    /// engine's `Session::plain_put_lane_open`) or rewrites their keys (a routing namespace,
+    /// `SessionLinkActions::send_plain_put_qos` answering `None`) sends
+    /// the owned message; the network counters count a plain Put as its owned message, so a build
+    /// that keeps them sends it plain too.
     pub fn plain_put_params(&self) -> Option<PlainPutParams> {
-        #[cfg(all(
-            feature = "codec-push",
-            not(feature = "transport-stats"),
-            not(feature = "routing-namespace")
-        ))]
+        #[cfg(feature = "codec-push")]
         {
             if self.kind != SampleKind::Put {
                 return None;
@@ -482,11 +479,7 @@ impl PublishOptions {
                 priority: self.priority_band(),
             })
         }
-        #[cfg(not(all(
-            feature = "codec-push",
-            not(feature = "transport-stats"),
-            not(feature = "routing-namespace")
-        )))]
+        #[cfg(not(feature = "codec-push"))]
         {
             None
         }
@@ -495,14 +488,12 @@ impl PublishOptions {
 
 /// Whether this build sends a plain Put from borrowed bytes, which is the one answer
 /// [`PublishOptions::plain_put_params`] gives for a plain Put in it: `Some` when this is `true`,
-/// `None` when it is `false`. A holder of the answer in a crate that does not see this crate's
-/// features (the engine of the C ABIs, whose tests exercise the plain lane) reads the build from
-/// here and not from a `cfg` of its own, which would be a second copy of the condition.
-pub const SENDS_PLAIN_PUTS: bool = cfg!(all(
-    feature = "codec-push",
-    not(feature = "transport-stats"),
-    not(feature = "routing-namespace")
-));
+/// `None` when it is `false`. It is the build's Push codec and nothing more; a session that may
+/// not send a given Put plain says so when it is asked to send it. A holder of the answer in a
+/// crate that does not see this crate's features (the engine of the C ABIs, whose tests exercise
+/// the plain lane) reads the build from here and not from a `cfg` of its own, which would be a
+/// second copy of the condition.
+pub const SENDS_PLAIN_PUTS: bool = cfg!(feature = "codec-push");
 
 /// The facts a plain Put is sent from ([`PublishOptions::plain_put_params`]).
 #[derive(Debug, Clone, Copy)]

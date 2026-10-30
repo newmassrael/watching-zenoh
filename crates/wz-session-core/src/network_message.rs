@@ -2205,6 +2205,27 @@ where
         V::WireexprNonlocal(b) => (b.id, b.suffix.as_deref()),
         V::WireexprLocal(b) => (b.id, b.suffix.as_deref()),
     };
+    stats_space_of_key(id, suffix, resolve_alias)
+}
+
+/// [`stats_space_of`] for a key given as its parts, the mapping `id` and the `suffix`: the one
+/// rule both an owned Wireexpr and a key a sender holds as borrowed parts are classified by.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn stats_space_of_key<F>(
+    id: u64,
+    suffix: Option<&str>,
+    resolve_alias: &F,
+) -> crate::stats::StatSpace
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
     if id == 0 {
         // Fully literal: the suffix IS the whole expression.
         return crate::stats::StatSpace::of_keyexpr(suffix.unwrap_or_default());
@@ -2213,6 +2234,29 @@ where
         Some(prefix) => crate::stats::StatSpace::of_keyexpr(&prefix),
         None => crate::stats::StatSpace::User,
     }
+}
+
+/// [`push_stats_class`] for a plain `Put` a sender holds as borrowed parts (the key's mapping
+/// `id` and `suffix`, and a payload of `pl_bytes`), with no owned message to read: a plain Put
+/// has no attachment and no shared-memory marker, so its class is the one
+/// [`push_stats_class`] gives the owned message of the same parts.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+pub fn plain_put_stats_class<F>(
+    id: u64,
+    suffix: Option<&str>,
+    pl_bytes: usize,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
+    NetworkStatsClass::net(
+        MessageLabel::Put,
+        StatMessage::Put,
+        stats_space_of_key(id, suffix, &resolve_alias),
+        pl_bytes,
+    )
 }
 
 /// Fold a classified body into a class, selecting the `shm` medium when the
@@ -3485,6 +3529,39 @@ mod payload_size_tests {
         let class = push_stats_class(&push, |_| None);
         assert_eq!(class.kind, Some(crate::stats::MessageLabel::Put));
         assert_eq!(class.payload.map(|p| p.pl_bytes), Some(12 + 8));
+    }
+
+    /// A plain Put a sender holds as borrowed parts classifies as the owned message of the same
+    /// parts does: literal and aliased, user and admin space, an alias resolved or not.
+    #[test]
+    fn a_plain_put_classifies_as_its_owned_message_does() {
+        let resolve = |id: u64| match id {
+            7 => Some(alloc::string::String::from("@/router/abc")),
+            8 => Some(alloc::string::String::from("demo/declared")),
+            _ => None,
+        };
+        let cases: [(u64, Option<&str>); 6] = [
+            (0, Some("demo/plain")),
+            (0, Some("@/admin/key")),
+            (7, None),
+            (8, Some("/tail")),
+            (9, None),
+            (8, None),
+        ];
+        for (id, suffix) in cases {
+            let value = b"payload bytes";
+            let owned = if id == 0 {
+                crate::push_build::build_push_literal(suffix.unwrap_or_default(), value)
+            } else {
+                crate::push_build::build_push_aliased(id, suffix, value)
+            }
+            .expect("build a put");
+            assert_eq!(
+                plain_put_stats_class(id, suffix, value.len(), resolve),
+                push_stats_class(&owned, resolve),
+                "the key ({id}, {suffix:?})"
+            );
+        }
     }
 }
 

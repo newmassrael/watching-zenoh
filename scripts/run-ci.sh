@@ -7600,7 +7600,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2825 (open-debt item 820) — payload SIZE is upstream's `payload_size()`.
     # The classifier arms compile only with their codecs, so the features are
     # named rather than inherited from a default that does not have them.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core \
+    # 4 -> 5: `a_plain_put_classifies_as_its_owned_message_does`, the class a plain Put sent or
+    # read from borrowed parts is counted by, held equal to its owned message's.
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core \
         --features transport-stats,codec-push,codec-request --lib payload_size_tests --quiet \
         || return 1
     # R2825 — 2 -> 3: `a_publish_is_recorded_in_the_registry_on_its_link`.

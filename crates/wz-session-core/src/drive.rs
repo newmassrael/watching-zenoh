@@ -135,6 +135,35 @@ fn count_rx_network_messages<R: SessionRuntime, T: TimeSource>(
     messages
 }
 
+/// [`count_rx_network_messages`] for a frame read on the plain-Put lane, whose records are not
+/// decoded into owned messages: each is counted as the owned `Push` of the same parts would be,
+/// its class by `plain_put_stats_class` and its band by the `ext_qos` rule every reader maps the
+/// extension by, so the counters do not depend on which lane read the frame.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "pubsub-put",
+    not(feature = "bounded-heapless")
+))]
+fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    payload: &[u8],
+    puts: &[crate::plain_push::PlainPut],
+) {
+    let rx = crate::stats_registry::StatsDirection::Rx;
+    for put in puts {
+        let suffix = put.suffix.and_then(|(start, end)| {
+            core::str::from_utf8(payload.get(start as usize..end as usize)?).ok()
+        });
+        let pl_bytes = put.payload.1.saturating_sub(put.payload.0) as usize;
+        let class =
+            crate::network_message::plain_put_stats_class(put.id, suffix, pl_bytes, |_id| None);
+        actions.stats.inc_rx_network(&class);
+        let priority = crate::declare_ext_qos::qos_of_raw(put.qos.map(u64::from)).priority();
+        actions.observe_payload(rx, priority, &class);
+        actions.count_network_message(rx, &actions.link, priority, &class);
+    }
+}
+
 /// R2825 — count one received TRANSPORT message, on the JSON counters and on
 /// the receiving link's registry cell: one per message decoded out of a unit,
 /// as upstream's batch walk counts
@@ -1057,16 +1086,14 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     // Put is reported as where its records lie, and the generic decode
                     // below never runs for it. One record that is anything else sends the
                     // whole frame down the generic path, so this reads what the codec
-                    // reads or declines. Not under `transport-stats`, which counts the
-                    // owned messages, and not on the fixed backing, whose bounded keyexpr
-                    // buffer cannot hold every key a Put names.
-                    #[cfg(all(
-                        feature = "pubsub-put",
-                        not(feature = "transport-stats"),
-                        not(feature = "bounded-heapless")
-                    ))]
+                    // reads or declines. The network counters count each record as its
+                    // owned message (`count_rx_plain_puts`). Not on the fixed backing, whose
+                    // bounded keyexpr buffer cannot hold every key a Put names.
+                    #[cfg(all(feature = "pubsub-put", not(feature = "bounded-heapless")))]
                     if actions.plain_put_lane_open() {
                         if let Some(puts) = crate::plain_push::read_plain_puts(&payload) {
+                            #[cfg(feature = "transport-stats")]
+                            count_rx_plain_puts(actions, &payload, &puts);
                             return DriverLoopOutcome::FramePlainPuts {
                                 reliable,
                                 sn,
