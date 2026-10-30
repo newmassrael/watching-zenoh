@@ -46,7 +46,10 @@
 use std::ffi::c_void;
 
 use crate::abi::{z_moved_config_t, z_owned_config_t};
-use crate::config::{ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY};
+use crate::config::{
+    ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY,
+    Z_CONFIG_SESSION_ZID_KEY,
+};
 // The twelve TLS key constants are consumed ONLY by `resolve_tls_config`, which
 // exists only when a certificate has a backend that could consume it. Importing
 // them at module scope would make the no-backend build carry twelve unused
@@ -486,11 +489,19 @@ pub unsafe extern "C" fn z_open(
         let cfg = Box::from_raw(cfg_handle as *mut ConfigState);
         (*config)._this = z_owned_config_t::null_value();
 
+        let open = open_config(&cfg);
+        // The id the session opens on, refused here if the config names one pico's reader cannot
+        // take (see [`session_zid`]).
+        let zid = match session_zid(&open) {
+            Ok(zid) => zid,
+            Err(code) => return code,
+        };
         let OpenConfig {
             connect,
             listen,
             dial_whatami,
-        } = open_config(&cfg);
+            zid: _,
+        } = open;
         // R311y406 / R311y534 — the TLS material, RESOLVED here (path or inline
         // base64 -> PEM bytes) because the key numbers are this ABI's knowledge.
         // A malformed value fails the open rather than degrading to a plaintext
@@ -545,6 +556,7 @@ pub unsafe extern "C" fn z_open(
             connect,
             listen,
             dial_whatami,
+            zid,
             start_read_task,
             #[cfg(feature = "admin-space")]
             start_admin_space,
@@ -565,6 +577,112 @@ pub(crate) struct OpenConfig {
     pub(crate) connect: Option<String>,
     pub(crate) listen: Option<String>,
     pub(crate) dial_whatami: WhatAmI,
+    /// The text of `Z_CONFIG_SESSION_ZID_KEY`, if the config states one: the id the session opens
+    /// on. Read by [`session_zid`], which says whether pico's reader could take it.
+    pub(crate) zid: Option<String>,
+}
+
+/// The id the session opens on: the one `Z_CONFIG_SESSION_ZID_KEY` names, and `None` when the
+/// config states none, which is the session minting its own as pico's does
+/// (`vendor/zenoh-pico/src/api/api.c` @ `_z_session_generate_zid(&zid, Z_ZID_LENGTH);`).
+///
+/// The id is returned as the bytes an INIT carries (the sixteen of the UUID, up to the last
+/// non-zero one). A key whose text pico's reader (`_z_uuid_to_bytes`) cannot take is an `Err`:
+/// pico reads whatever its fixed indexes land on, so what it opens as is not an id the caller
+/// named, and a caller that stated an id and silently got another is worse off than one whose
+/// open failed, as with the TLS keys.
+pub(crate) fn session_zid(open: &OpenConfig) -> Result<Option<Vec<u8>>, ZResult> {
+    match open.zid.as_deref() {
+        None => Ok(None),
+        Some(text) => pico_uuid_wire(text)
+            .map(Some)
+            .ok_or(crate::result::Z_ERR_INVALID),
+    }
+}
+
+/// The wire form of the id zenoh-pico's `Z_CONFIG_SESSION_ZID_KEY` names, or `None` for text it
+/// cannot take.
+///
+/// pico reads the key with `_z_uuid_to_bytes` (`vendor/zenoh-pico/src/utils/uuid.c` @
+/// `void _z_uuid_to_bytes(`): a UUID, `8-4-4-4-12` hex digits, whose sixteen bytes become the id
+/// IN THE ORDER WRITTEN, and not the `u128` text zenoh's own `id` key and `z_id_to_string` use.
+/// Text of any other shape is read by pico as whatever its fixed indexes land on past the end of
+/// the string, so what it makes of it is not an id anyone named: this takes the one shape the
+/// reader was written for and refuses the rest, and an id of sixteen zero bytes, which zenoh
+/// refuses.
+fn pico_uuid_wire(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    if digits.len() != 36 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    let mut at = 0;
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        // The dashes come before the 5th, 7th, 9th and 11th byte (`i == 8, 12, 16, 18` over the
+        // hex digits in pico's loop).
+        if matches!(i, 4 | 6 | 8 | 10) {
+            if digits[at] != b'-' {
+                return None;
+            }
+            at += 1;
+        }
+        let hi = (digits[at] as char).to_digit(16)?;
+        let lo = (digits[at + 1] as char).to_digit(16)?;
+        *byte = ((hi << 4) | lo) as u8;
+        at += 2;
+    }
+    // Written up to the last non-zero byte, as zenoh writes an id.
+    let length = bytes.iter().rposition(|byte| *byte != 0)? + 1;
+    Some(bytes[..length].to_vec())
+}
+
+#[cfg(test)]
+mod zid_tests {
+    use super::pico_uuid_wire;
+
+    /// What zenoh-pico's `Z_CONFIG_SESSION_ZID_KEY` names: a UUID whose sixteen bytes are the id in
+    /// the order written (`_z_uuid_to_bytes`), the first byte first, so `ff...` is a HIGH id and
+    /// `01...` a low one, which `z_id_to_string` would print the other way round.
+    #[test]
+    fn a_uuid_names_the_id_in_the_order_written() {
+        let high = pico_uuid_wire("ff000000-0000-0000-0000-000000000001").expect("sixteen bytes");
+        assert_eq!(high[0], 0xff, "the first byte written is the first byte");
+        assert_eq!(
+            high.len(),
+            16,
+            "the last byte is not zero, so none is trimmed"
+        );
+        assert_eq!(
+            pico_uuid_wire("01020304-0506-0708-090a-0b0c0d0e0f10").expect("sixteen bytes"),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+        // Trailing zero bytes are trimmed from the wire form, as zenoh writes an id.
+        assert_eq!(
+            pico_uuid_wire("aabbccdd-eeff-0000-0000-000000000000").expect("six bytes and zeros"),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    /// Text that is not the UUID shape pico's reader indexes is refused, where pico reads whatever
+    /// its fixed indexes land on, and so is an id of zero bytes, which zenoh refuses.
+    #[test]
+    fn text_that_is_not_a_uuid_names_no_id() {
+        for text in [
+            "",
+            "ff000000000000000000000000000001",
+            "ff000000-0000-0000-0000-00000000000",
+            "ff000000-0000-0000-0000-0000000000011",
+            "ff000000_0000-0000-0000-000000000001",
+            "ff00000-00000-0000-0000-000000000001",
+            "gf000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            assert!(
+                pico_uuid_wire(text).is_none(),
+                "`{text}` is not an id pico's reader was written for"
+            );
+        }
+    }
 }
 
 /// Read [`OpenConfig`] off `cfg`. The dial role's whatami is config-driven, mirroring pico's
@@ -579,6 +697,7 @@ pub(crate) fn open_config(cfg: &ConfigState) -> OpenConfig {
             Some("peer") => WhatAmI::Peer,
             _ => WhatAmI::Client,
         },
+        zid: cfg.get(Z_CONFIG_SESSION_ZID_KEY).map(str::to_owned),
     }
 }
 
@@ -587,6 +706,9 @@ struct OpenRequest {
     connect: Vec<String>,
     listen: Option<String>,
     dial_whatami: WhatAmI,
+    /// The id the config names for the session, as the bytes an INIT carries, `None` for one the
+    /// engine mints.
+    zid: Option<Vec<u8>>,
     // The cooperative engine's single-threaded arm starts no read task: the program steps it.
     #[cfg_attr(
         all(not(feature = "engine-tokio"), not(feature = "multi-thread")),
@@ -609,6 +731,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         connect,
         listen,
         dial_whatami,
+        zid,
         start_read_task,
         #[cfg(feature = "admin-space")]
         start_admin_space,
@@ -699,10 +822,12 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
             // `z_result_t _z_init_encode(`), so a drop-in for it offers none.
             offer: wz_capi_core::runtime::session_open::SessionOffer::universal(),
-            // pico's `Z_CONFIG_SESSION_ZID_KEY` is not read by this open yet,
-            // so a pico session mints its own. The zenoh-c ABI reads its `id`
-            // key.
-            zid: None,
+            // The id pico's `Z_CONFIG_SESSION_ZID_KEY` names, or one the session mints
+            // (the zenoh-c ABI reads its `id` key into the same place). `pico_uuid_wire` built
+            // the bytes, so they are always an id.
+            zid: zid
+                .as_deref()
+                .and_then(wz_capi_core::drive::ConfiguredZid::from_wire),
             start_read_task,
             // pico has no `timestamping` config key, and its advanced publisher
             // never consults this session's clock (its own plane stamps from the
@@ -810,7 +935,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 /// What zenoh-pico's client advertises, as the tokio engine's open does: zenoh's default batch
 /// size (`transport/link/tx/batch_size`, 65535, which the link's own capacity caps), pico's lease
 /// (`Z_TRANSPORT_LEASE`, 10000 ms) and pico's transmit model ([`TxQueueConf::pico`]). The zid is
-/// minted, as this ABI's tokio open mints it: pico's `Z_CONFIG_SESSION_ZID_KEY` is not read yet.
+/// the one `Z_CONFIG_SESSION_ZID_KEY` names, and otherwise minted, as this ABI's tokio open does.
 ///
 /// A lost link is dialled again, and the session declares again over it what it holds, as
 /// zenoh-pico's client reopens by default (`Z_FEATURE_AUTO_RECONNECT`) and as this ABI's tokio
@@ -830,6 +955,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     }
     let dial_whatami = request.dial_whatami;
     let connect = request.connect;
+    // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
+    // carries.
+    let zid = request.zid;
     // pico's config carries ONE listen locator, so the set is that one or none.
     let listen: Vec<String> = request.listen.into_iter().collect();
     // The locator pico's one transport is opened on, which its admin space reports as the
@@ -846,7 +974,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         wz_capi_coop::CoopConfig {
             endpoints: connect,
             whatami: dial_whatami,
-            zid: None,
+            zid,
             // The numbers of pico's value build switches, as this build states them: the
             // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
             // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often

@@ -25,6 +25,10 @@ pub const Z_CONFIG_MODE_KEY: u8 = 0x40;
 pub const Z_CONFIG_CONNECT_KEY: u8 = 0x41;
 /// pico `Z_CONFIG_LISTEN_KEY` (config.h.in:103).
 pub const Z_CONFIG_LISTEN_KEY: u8 = 0x42;
+/// pico `Z_CONFIG_SESSION_ZID_KEY` (config.h.in:155) — the session zid as a UUID
+/// (`8-4-4-4-12` hex digits, read by `_z_uuid_to_bytes`). Scouting reads it for the zid it
+/// scouts with, and `z_open` for the zid the session opens on.
+pub const Z_CONFIG_SESSION_ZID_KEY: u8 = 0x49;
 /// pico `Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY` (config.h.in:168) — the private-key PEM
 /// FILE PATH a cert-bearing listener presents. R311y406: value mirrors zenoh-pico's
 /// native key. The name is zenoh's tls-block key, which zenoh reuses for quic;

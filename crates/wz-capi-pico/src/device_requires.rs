@@ -70,6 +70,7 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
         connect,
         listen,
         dial_whatami,
+        ..
     } = open_config(cfg);
     #[cfg(not(feature = "peer"))]
     if listen.is_some() || dial_whatami != WhatAmI::Client {

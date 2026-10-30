@@ -1094,8 +1094,8 @@ const ZID_LENGTH: usize = 16;
 ///
 /// The override is [`ConfiguredZid`]: a caller whose config states an id opens on
 /// that one and this is what it does NOT call. The zenoh-c ABI reads its `id`
-/// key; the zenoh-pico ABI's `Z_CONFIG_SESSION_ZID_KEY` still is follow-up
-/// surface, so pico's default path is this.
+/// key and the zenoh-pico ABI its `Z_CONFIG_SESSION_ZID_KEY`, so this is the path of a config
+/// that states neither.
 ///
 /// `None` on OS-entropy failure, which fails the open — the choice the session
 /// makes for every per-handshake value it draws: a source that fails leaves no
@@ -1178,6 +1178,20 @@ impl ConfiguredZid {
             return None;
         }
         Some(Self { wire })
+    }
+
+    /// The id whose INIT form is `wire`: one to sixteen bytes, the last of them not zero (zenoh
+    /// writes an id up to its last non-zero byte, and refuses one of no bytes), or `None`.
+    ///
+    /// For an ABI whose config names the id in a form of its own: zenoh-pico's key is a UUID
+    /// (`wz-capi-pico`), where [`Self::from_zenoh_text`] reads zenoh's `u128` text.
+    pub fn from_wire(wire: &[u8]) -> Option<Self> {
+        if wire.is_empty() || wire.len() > ZID_LENGTH || wire.last() == Some(&0) {
+            return None;
+        }
+        Some(Self {
+            wire: wire.to_vec(),
+        })
     }
 
     /// The form an INIT carries.
@@ -4708,6 +4722,24 @@ mod tests {
             assert!(
                 ConfiguredZid::from_zenoh_text(text).is_none(),
                 "zenoh refuses `{text}`, so no configured id can be built from it"
+            );
+        }
+    }
+
+    /// An id built from its wire bytes is the same value as one read from text, and a wire form
+    /// zenoh would not write (no bytes, more than sixteen, or a trailing zero) names no id.
+    #[test]
+    fn an_id_built_from_its_wire_bytes_is_the_one_zenoh_would_write() {
+        let wire = [0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1];
+        assert_eq!(
+            ConfiguredZid::from_wire(&wire),
+            ConfiguredZid::from_zenoh_text("c11e47c11e49")
+        );
+        assert!(ConfiguredZid::from_wire(&[0xff; 16]).is_some());
+        for refused in [&[][..], &[0u8][..], &[1, 0][..], &[1u8; 17][..]] {
+            assert!(
+                ConfiguredZid::from_wire(refused).is_none(),
+                "{refused:?} is not the wire form of an id"
             );
         }
     }

@@ -64,7 +64,7 @@ use wz_session_core::scouting_host::{
     SCOUTING_WHAT_DEFAULT,
 };
 
-use crate::config::ConfigState;
+use crate::config::{ConfigState, Z_CONFIG_SESSION_ZID_KEY};
 use crate::pubsub::z_closure_drop_callback_t;
 use crate::result::ZResult;
 use crate::string_array::{z_loaned_string_array_t, z_owned_string_array_t, StringArrayState};
@@ -80,12 +80,6 @@ pub const Z_CONFIG_SCOUTING_TIMEOUT_KEY: u8 = 0x47;
 /// pico `Z_CONFIG_SCOUTING_WHAT_KEY` (config.h.in:148) — the `z_what_t` bitmask,
 /// as a decimal string.
 pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
-/// pico `Z_CONFIG_SESSION_ZID_KEY` (config.h.in:155) — the session zid as a hex
-/// string. Declared HERE rather than in `config`: the session plane mints a
-/// fresh random zid per `z_open` and never reads this key, so scouting is its
-/// first consumer.
-pub const Z_CONFIG_SESSION_ZID_KEY: u8 = 0x49;
-
 // The defaults pico's config carries (`Z_CONFIG_MULTICAST_LOCATOR_DEFAULT`,
 // `Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT`, `Z_CONFIG_SCOUTING_WHAT_DEFAULT`), the locator grammar and the
 // window itself are the session's (`wz_session_core::scouting_host`): both C ABIs and both engines

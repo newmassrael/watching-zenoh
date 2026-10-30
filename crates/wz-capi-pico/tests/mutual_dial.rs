@@ -43,7 +43,7 @@ use wz_capi_pico::{
     z_session_loan_mut, z_session_move, z_string_data, z_string_len, z_subscriber_move,
     z_undeclare_subscriber, z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t,
     z_view_string_loan, z_view_string_t, zp_config_insert, Z_CONFIG_CONNECT_KEY,
-    Z_CONFIG_LISTEN_KEY, Z_OK,
+    Z_CONFIG_LISTEN_KEY, Z_CONFIG_SESSION_ZID_KEY, Z_ERR_INVALID, Z_OK,
 };
 use wz_runtime_tokio_test_support::free_port;
 
@@ -72,9 +72,19 @@ unsafe extern "C" fn on_drop_set(ctx: *mut c_void) {
 }
 
 /// A session that listens on `listen` and, when `connect` names a port, dials it.
-unsafe fn open(listen: u16, connect: Option<u16>) -> z_owned_session_t {
+/// A session that listens on `listen`, dials `connect` when given, and opens on `zid`: the id
+/// `Z_CONFIG_SESSION_ZID_KEY` names, as a UUID.
+unsafe fn open(listen: u16, connect: Option<u16>, zid: &CStr) -> z_owned_session_t {
     let mut cfg: z_owned_config_t = std::mem::zeroed();
     assert_eq!(z_config_default(&mut cfg), Z_OK);
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            Z_CONFIG_SESSION_ZID_KEY,
+            zid.as_ptr()
+        ),
+        Z_OK
+    );
     let ends = [
         (Z_CONFIG_LISTEN_KEY, Some(listen)),
         (Z_CONFIG_CONNECT_KEY, connect),
@@ -213,17 +223,35 @@ fn eventually(what: &str, mut holds: impl FnMut() -> bool) {
 /// restart is longer than the redial period (a second), so `a`'s redial has had its turn.
 #[test]
 fn a_restarted_peer_that_dials_back_while_its_old_dialler_redials_keeps_one_transport() {
-    // The zids are minted by each open, so which of the two is the lower one is the draw of the
-    // round: with eight rounds both orders are run, each engine deciding both ways, which is the
-    // rule's two arms (a link refused, a held link replaced).
+    // The zids are stated, so which of the two is the lower one is the round's and not a draw: the
+    // restarted node's is lower than `a`'s on the even rounds and higher on the odd ones, which
+    // is the rule's two arms (a link refused, a held link replaced) on each engine, four rounds
+    // each.
+    const A: &CStr = c"80000000-0000-0000-0000-000000000001";
+    const B: &CStr = c"40000000-0000-0000-0000-000000000002";
+    const B_AGAIN_LOWER: &CStr = c"10000000-0000-0000-0000-000000000003";
+    const B_AGAIN_HIGHER: &CStr = c"f0000000-0000-0000-0000-000000000003";
     for round in 0..8 {
         let (a_port, b_port) = (free_port(), free_port());
+        let b_again_text = if round % 2 == 0 {
+            B_AGAIN_LOWER
+        } else {
+            B_AGAIN_HIGHER
+        };
         // SAFETY: fresh configs and sessions, each closed before the round ends.
         unsafe {
-            let mut b = open(b_port, None);
-            let mut a = open(a_port, Some(b_port));
+            let mut b = open(b_port, None, B);
+            let mut a = open(a_port, Some(b_port), A);
             let a_zid = z_info_zid(z_session_loan(&a)).id;
             let b_zid = z_info_zid(z_session_loan(&b)).id;
+            assert_eq!(
+                a_zid[0], 0x80,
+                "the session opened on the id its config names"
+            );
+            assert_eq!(
+                b_zid[0], 0x40,
+                "the session opened on the id its config names"
+            );
             eventually("a to list the node it dialled", || {
                 transports(&a) == [b_zid]
             });
@@ -233,8 +261,13 @@ fn a_restarted_peer_that_dials_back_while_its_old_dialler_redials_keeps_one_tran
             eventually("a to see the node go", || transports(&a).is_empty());
 
             // A node of a new zid takes the port and dials `a` at once.
-            let mut b_again = open(b_port, Some(a_port));
+            let mut b_again = open(b_port, Some(a_port), b_again_text);
             let b_again_zid = z_info_zid(z_session_loan(&b_again)).id;
+            assert_eq!(
+                b_again_zid[0],
+                if round % 2 == 0 { 0x10 } else { 0xf0 },
+                "round {round}: the restarted node opened on the id its config names"
+            );
             assert_ne!(b_again_zid, b_zid, "round {round}: a restart is a new node");
             let (heard_by_a, mut a_sub) = hearing(&a);
             let (heard_by_b, mut b_sub) = hearing(&b_again);
@@ -269,6 +302,56 @@ fn a_restarted_peer_that_dials_back_while_its_old_dialler_redials_keeps_one_tran
             z_undeclare_subscriber(z_subscriber_move(&mut b_sub));
             close_session(&mut b_again);
             close_session(&mut a);
+        }
+    }
+}
+
+/// `Z_CONFIG_SESSION_ZID_KEY` is the id the session opens on, read as zenoh-pico's `z_open` reads
+/// it (a UUID, its sixteen bytes in the order written), and a text that reader was not written
+/// for fails the open and does not become an id nobody named.
+#[test]
+fn a_session_opens_on_the_zid_its_config_names_and_refuses_text_that_is_not_one() {
+    // SAFETY: fresh configs and sessions, each closed or never opened.
+    unsafe {
+        let mut session = open(free_port(), None, c"01020304-0506-0708-090a-0b0c0d0e0f10");
+        assert_eq!(
+            z_info_zid(z_session_loan(&session)).id,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            "the id is the UUID's bytes in the order written"
+        );
+        close_session(&mut session);
+
+        for text in [
+            c"not-a-uuid",
+            // Thirty-two digits and no dashes: pico's reader indexes past them.
+            c"01020304050607080910111213141516",
+            c"00000000-0000-0000-0000-000000000000",
+        ] {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_SESSION_ZID_KEY,
+                    text.as_ptr()
+                ),
+                Z_OK
+            );
+            let endpoint = CString::new(format!("tcp/127.0.0.1:{}", free_port())).unwrap();
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_LISTEN_KEY,
+                    endpoint.as_ptr()
+                ),
+                Z_OK
+            );
+            let mut refused: z_owned_session_t = std::mem::zeroed();
+            assert_eq!(
+                z_open(&mut refused, z_config_move(&mut cfg), std::ptr::null()),
+                Z_ERR_INVALID,
+                "{text:?} names no id, so the open fails"
+            );
         }
     }
 }

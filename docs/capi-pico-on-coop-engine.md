@@ -846,8 +846,11 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   listens on fails after one attempt, as pico's does), which is why the race is reached by a
   restart. With the cooperative engine's rule shut off the test fails on a doubled transport; the
   tokio engine's is not shut off in that way. The ABI cannot show whether the redial reached the new
-  node before the pause ended (a refused link leaves no event), and this ABI mints its zids, so
-  which node has the lower one is the draw of each round. Not done: a cooperative node against a
+  node before the pause ended (a refused link leaves no event). It reads pico's
+  `Z_CONFIG_SESSION_ZID_KEY` (a UUID, its bytes in the order written, read as `_z_uuid_to_bytes`
+  reads it; a text that is not one fails the open), so the test states the zids and the restarted
+  node's is lower on four rounds and higher on four, each engine deciding both ways, and the
+  refusal arm and the replace arm are not left to a draw. Not done: a cooperative node against a
   tokio peer that races it (the two keep different rules, and a race can close both links until the
   next redial).
 
