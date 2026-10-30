@@ -1052,6 +1052,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # tests (`interceptor::qos_overwrite::tests`, and the document compile of a `qos/network`
     # item) are built by that feature alone, and the census of the hosted run of 017e3c71 named
     # all fifteen unclaimed.
+    # `event-ring` joins for the snapshot service's test of the event log it is handed
+    # (`resource_snapshot_host::tests`), which asks for that feature beside `resource-snapshot`;
+    # the census of the hosted run of 549d294fa named it unclaimed.
     "wz-runtime-tokio|lane|\
         access-acl,\
         access-acl-multicast,\
@@ -1069,6 +1072,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         adminspace-router-linkstate,\
         adminspace-write,\
         config-mutate-runtime,\
+        event-ring,\
         ext-pubsub-advanced-cache,\
         ext-pubsub-advanced-history,\
         ext-pubsub-advanced-publisher,\
