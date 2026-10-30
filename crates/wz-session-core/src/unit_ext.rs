@@ -71,13 +71,7 @@ mod tests {
         let ext = encode_unit_ext(0x05);
         assert_eq!(ext.header, 0x05);
         assert_eq!(ext.ext_id(), 0x05);
-        assert_eq!(
-            ext.as_borrowed()
-                .encode_to_vec()
-                .expect("a unit ext is encodable")
-                .len(),
-            1
-        );
+        assert_eq!(ext.as_borrowed().encode_to_vec().len(), 1);
         assert!(chain_has_ext_eid(&[ext], 0x05));
         assert!(!chain_has_ext_eid(&[encode_unit_ext(0x06)], 0x05));
         assert!(!chain_has_ext_eid::<ExtEntryOwned>(&[], 0x05));

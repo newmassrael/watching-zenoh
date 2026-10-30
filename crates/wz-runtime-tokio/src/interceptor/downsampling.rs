@@ -636,7 +636,8 @@ mod tests {
         let PushOwnedVariant::CodecZenohMsgPut(body) = push.body else {
             panic!("build_push_literal is expected to produce the put arm");
         };
-        push.body = PushOwnedVariant::Default { tag: 7, body };
+        let tag = wz_codecs::push::PushUnknownTag::new(7).expect("7 is no arm's tag of Push");
+        push.body = PushOwnedVariant::Default { tag, body };
         NetworkMessage::Push(Box::new(push))
     }
 

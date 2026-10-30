@@ -31,6 +31,32 @@ use super::ext_entry::ExtEntryView;
 use super::msg_put::MsgPutView;
 use super::msg_del::MsgDelView;
 
+/// A tag `Reply` names no arm for, which its default arm holds: a
+/// value inside the 5 bits the tag is read from and outside
+/// every arm's tag (docs/adr/0065 §6 R3). A default arm is written with the tag
+/// it holds and read back as the default arm, so no tag it holds is refused.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReplyUnknownTag(u8);
+
+#[allow(dead_code)]
+impl ReplyUnknownTag {
+    /// `tag` as a tag no arm names, or `None` when it is past the tag's bits or
+    /// is an arm's.
+    pub const fn new(tag: u8) -> Option<Self> {
+        match tag {
+            1..=2 => None,
+            _ if tag > 31 => None,
+            _ => Some(Self(tag)),
+        }
+    }
+
+    /// The tag.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -41,7 +67,7 @@ pub enum ReplyVariant<'a> {
     CodecZenohMsgPut(MsgPut<'a>),
     CodecZenohMsgDel(MsgDel<'a>),
     Default {
-        tag: u8,
+        tag: ReplyUnknownTag,
         body: MsgPut<'a>,
     },
 }
@@ -188,7 +214,7 @@ impl<'a> Reply<'a> {
             }
             other => {
                 _out.body = ReplyVariant::Default {
-                    tag: other,
+                    tag: ReplyUnknownTag(other),
                     body: MsgPut::default(),
                 };
                 if let ReplyVariant::Default { body: _b, .. } = &mut _out.body {
@@ -287,7 +313,7 @@ impl<'a> Reply<'a> {
 pub enum ReplyVariantSource<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> {
     CodecZenohMsgPut(&'s A0),
     CodecZenohMsgDel(&'s A1),
-    Default { tag: u8, body: &'s D },
+    Default { tag: ReplyUnknownTag, body: &'s D },
 }
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
@@ -327,7 +353,7 @@ pub enum ReplyPartsBody<'a> {
     CodecZenohMsgPut(&'a super::msg_put::MsgPutParts<'a>),
     CodecZenohMsgDel(&'a super::msg_del::MsgDelParts<'a>),
     /// The tag the grammar could not name, and the body it holds.
-    Default { tag: u8, body: &'a super::msg_put::MsgPutParts<'a> },
+    Default { tag: ReplyUnknownTag, body: &'a super::msg_put::MsgPutParts<'a> },
 }
 
 /// A value of `Reply` held in the types a caller already has: a source
@@ -514,7 +540,7 @@ pub enum ReplyViewVariant<'a> {
     CodecZenohMsgPut(MsgPutView<'a>),
     CodecZenohMsgDel(MsgDelView<'a>),
     Default {
-        tag: u8,
+        tag: ReplyUnknownTag,
         body: MsgPutView<'a>,
     },
 }
@@ -644,7 +670,7 @@ impl<'a> ReplyView<'a> {
             }
             other => {
                 _out.body = ReplyViewVariant::Default {
-                    tag: other,
+                    tag: ReplyUnknownTag(other),
                     body: MsgPutView::default(),
                 };
                 if let ReplyViewVariant::Default { body: _b, .. } = &mut _out.body {
@@ -827,7 +853,7 @@ pub enum ReplyOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_f
     CodecZenohMsgPut(MsgPutOwned<S>),
     CodecZenohMsgDel(MsgDelOwned<S>),
     Default {
-        tag: u8,
+        tag: ReplyUnknownTag,
         body: MsgPutOwned<S>,
     },
 }

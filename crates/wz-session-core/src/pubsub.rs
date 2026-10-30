@@ -5706,7 +5706,9 @@ mod tests {
             (
                 "Default",
                 DeclareVariant::Default {
-                    tag: 0xFF,
+                    // A tag within Declare's five bits that no arm names.
+                    tag: wz_codecs::declare::DeclareUnknownTag::new(0x1F)
+                        .expect("0x1F is no arm's tag of Declare"),
                     body: DeclFinal::default(),
                 },
             ),

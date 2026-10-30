@@ -11098,10 +11098,7 @@ mod datagram_tests {
                 wz_codecs::ext_unit::ExtUnit::default(),
             ),
         };
-        entry
-            .as_borrowed()
-            .encode_to_vec()
-            .expect("a unit extension entry is encodable")
+        entry.as_borrowed().encode_to_vec()
     }
 
     /// One `T_MID_INIT` datagram trailing `ext_bytes` as its chain, through the
@@ -11485,10 +11482,7 @@ mod datagram_tests {
                 wz_codecs::ext_zint::ExtZint { value: level },
             ),
         };
-        entry
-            .as_borrowed()
-            .encode_to_vec()
-            .expect("a zint extension entry is encodable")
+        entry.as_borrowed().encode_to_vec()
     }
 
     /// R2211 (open-debt item 565) — a Fragment's own ext chain carrying the
@@ -11511,10 +11505,7 @@ mod datagram_tests {
         }
         let mut out = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
-            let mut bytes = entry
-                .as_borrowed()
-                .encode_to_vec()
-                .expect("a fragment marker extension entry is encodable");
+            let mut bytes = entry.as_borrowed().encode_to_vec();
             if i + 1 < entries.len() {
                 bytes[0] |= wz_session_core::ext_header::EXT_FLAG_Z;
             }

@@ -24,6 +24,32 @@ use super::ext_unit::ExtUnitView;
 use super::ext_zint::ExtZintView;
 use super::query_value_zbuf::QueryValueZbufView;
 
+/// A tag `QueryExtEntry` names no arm for, which its default arm holds: a
+/// value inside the 2 bits the tag is read from and outside
+/// every arm's tag (docs/adr/0065 §6 R3). A default arm is written with the tag
+/// it holds and read back as the default arm, so no tag it holds is refused.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryExtEntryUnknownTag(u8);
+
+#[allow(dead_code)]
+impl QueryExtEntryUnknownTag {
+    /// `tag` as a tag no arm names, or `None` when it is past the tag's bits or
+    /// is an arm's.
+    pub const fn new(tag: u8) -> Option<Self> {
+        match tag {
+            0..=2 => None,
+            _ if tag > 3 => None,
+            _ => Some(Self(tag)),
+        }
+    }
+
+    /// The tag.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -35,7 +61,7 @@ pub enum QueryExtEntryVariant<'a> {
     CodecZenohExtZint(ExtZint),
     CodecZenohQueryValueZbuf(QueryValueZbuf<'a>),
     Default {
-        tag: u8,
+        tag: QueryExtEntryUnknownTag,
         body: ExtUnit,
     },
 }
@@ -134,7 +160,7 @@ impl<'a> QueryExtEntry<'a> {
             }
             other => {
                 _out.body = QueryExtEntryVariant::Default {
-                    tag: other,
+                    tag: QueryExtEntryUnknownTag(other),
                     body: ExtUnit::default(),
                 };
                 if let QueryExtEntryVariant::Default { body: _b, .. } = &mut _out.body {
@@ -241,7 +267,7 @@ pub enum QueryExtEntryVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?
     CodecZenohExtUnit(&'s A0),
     CodecZenohExtZint(&'s A1),
     CodecZenohQueryValueZbuf(&'s A2),
-    Default { tag: u8, body: &'s D },
+    Default { tag: QueryExtEntryUnknownTag, body: &'s D },
 }
 
 /// Flags of `QueryExtEntry` a parent sets in place of the ones a value presents:
@@ -299,7 +325,7 @@ pub enum QueryExtEntryPartsBody<'a> {
     CodecZenohExtZint(&'a super::ext_zint::ExtZintParts),
     CodecZenohQueryValueZbuf(&'a super::query_value_zbuf::QueryValueZbufParts<'a>),
     /// The tag the grammar could not name, and the body it holds.
-    Default { tag: u8, body: &'a super::ext_unit::ExtUnitParts },
+    Default { tag: QueryExtEntryUnknownTag, body: &'a super::ext_unit::ExtUnitParts },
 }
 
 /// A value of `QueryExtEntry` held in the types a caller already has: a source
@@ -395,11 +421,8 @@ impl<'a> QueryExtEntry<'a> {
             QueryExtEntryVariantSource::CodecZenohExtUnit(_) => 0,
             QueryExtEntryVariantSource::CodecZenohExtZint(_) => 1,
             QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_) => 2,
-            QueryExtEntryVariantSource::Default { tag, .. } => tag,
+            QueryExtEntryVariantSource::Default { tag, .. } => tag.get(),
         };
-        if _d_header_enc > 0x3 {
-            return Err(CodecError::LengthOutOfRange);
-        }
         let mut _c_header: u8 = (src.header() & !0x60) | (_d_header_enc << 5);
         if let Some(_o) = over.header_m {
             _c_header = (_c_header & !0x10) | (u8::from(_o) << 4);
@@ -446,7 +469,7 @@ pub enum QueryExtEntryViewVariant<'a> {
     CodecZenohExtZint(ExtZintView),
     CodecZenohQueryValueZbuf(QueryValueZbufView<'a>),
     Default {
-        tag: u8,
+        tag: QueryExtEntryUnknownTag,
         body: ExtUnitView,
     },
 }
@@ -523,7 +546,7 @@ impl<'a> QueryExtEntryView<'a> {
             }
             other => {
                 _out.body = QueryExtEntryViewVariant::Default {
-                    tag: other,
+                    tag: QueryExtEntryUnknownTag(other),
                     body: ExtUnitView::default(),
                 };
                 if let QueryExtEntryViewVariant::Default { body: _b, .. } = &mut _out.body {
@@ -702,7 +725,7 @@ pub enum QueryExtEntryOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage =
     CodecZenohExtZint(ExtZint),
     CodecZenohQueryValueZbuf(QueryValueZbufOwned<S>),
     Default {
-        tag: u8,
+        tag: QueryExtEntryUnknownTag,
         body: ExtUnit,
     },
 }

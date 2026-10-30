@@ -1356,7 +1356,7 @@ fn push_whole(p: &wz_session_core::wire::PushOwned, valued: bool) -> String {
             del.timestamp.is_some(),
             body_extensions(del.extensions.as_deref())
         ),
-        PushOwnedVariant::Default { tag, .. } => format!(" unknown-body {tag:#04x}"),
+        PushOwnedVariant::Default { tag, .. } => format!(" unknown-body {:#04x}", tag.get()),
     };
     format!("{envelope}{body}")
 }
@@ -1447,7 +1447,7 @@ fn render(
                         // A final closes an interest reply; it names no keyexpr.
                         DeclareOwnedVariant::CodecZenohDeclFinal(_) => continue,
                         DeclareOwnedVariant::Default { tag, .. } => {
-                            format!("Declare(unknown tag {tag:#04x})")
+                            format!("Declare(unknown tag {:#04x})", tag.get())
                         }
                     };
                     lines.push(line);

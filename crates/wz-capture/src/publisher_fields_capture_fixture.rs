@@ -146,7 +146,6 @@ fn qos_offer() -> Vec<u8> {
     wz_session_core::extqos::encode_qos_ext()
         .as_borrowed()
         .encode_to_vec()
-        .expect("the QoS offer entry is encodable")
 }
 
 /// Rebuild the whole file from the encoders: the QoS handshake, the control, the

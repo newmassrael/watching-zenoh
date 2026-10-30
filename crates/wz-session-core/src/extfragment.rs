@@ -151,24 +151,10 @@ mod tests {
     fn marker_headers_match_the_zenoh_declarations() {
         let first = encode_fragment_first_ext();
         assert_eq!(first.header, 0x02, "UNIT enc (0b00) | id 0x2, M clear");
-        assert_eq!(
-            first
-                .as_borrowed()
-                .encode_to_vec()
-                .expect("a marker ext is encodable")
-                .len(),
-            1
-        );
+        assert_eq!(first.as_borrowed().encode_to_vec().len(), 1);
         let dropped = encode_fragment_drop_ext();
         assert_eq!(dropped.header, 0x03, "UNIT enc (0b00) | id 0x3, M clear");
-        assert_eq!(
-            dropped
-                .as_borrowed()
-                .encode_to_vec()
-                .expect("a marker ext is encodable")
-                .len(),
-            1
-        );
+        assert_eq!(dropped.as_borrowed().encode_to_vec().len(), 1);
     }
 
     /// Each marker projects independently, and a chain carrying both

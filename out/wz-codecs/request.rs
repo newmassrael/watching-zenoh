@@ -39,6 +39,32 @@ use super::msg_put::MsgPutView;
 use super::msg_del::MsgDelView;
 use super::query::QueryView;
 
+/// A tag `Request` names no arm for, which its default arm holds: a
+/// value inside the 5 bits the tag is read from and outside
+/// every arm's tag (docs/adr/0065 §6 R3). A default arm is written with the tag
+/// it holds and read back as the default arm, so no tag it holds is refused.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestUnknownTag(u8);
+
+#[allow(dead_code)]
+impl RequestUnknownTag {
+    /// `tag` as a tag no arm names, or `None` when it is past the tag's bits or
+    /// is an arm's.
+    pub const fn new(tag: u8) -> Option<Self> {
+        match tag {
+            1..=3 => None,
+            _ if tag > 31 => None,
+            _ => Some(Self(tag)),
+        }
+    }
+
+    /// The tag.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -52,7 +78,7 @@ pub enum RequestVariant<'a> {
     CodecZenohMsgDel(MsgDel<'a>),
     CodecZenohQuery(Query<'a>),
     Default {
-        tag: u8,
+        tag: RequestUnknownTag,
         body: Query<'a>,
     },
 }
@@ -210,7 +236,7 @@ impl<'a> Request<'a> {
             }
             other => {
                 _out.body = RequestVariant::Default {
-                    tag: other,
+                    tag: RequestUnknownTag(other),
                     body: Query::default(),
                 };
                 #[allow(irrefutable_let_patterns)]
@@ -325,7 +351,7 @@ pub enum RequestVariantSource<'s, #[cfg(feature = "request-put-del")] A0: ?Sized
     #[cfg(feature = "request-put-del")]
     CodecZenohMsgDel(&'s A1),
     CodecZenohQuery(&'s A2),
-    Default { tag: u8, body: &'s D },
+    Default { tag: RequestUnknownTag, body: &'s D },
 }
 
 /// Flags of `Request` a parent sets in place of the ones a value presents:
@@ -401,7 +427,7 @@ pub enum RequestPartsBody<'a> {
     CodecZenohMsgDel(&'a super::msg_del::MsgDelParts<'a>),
     CodecZenohQuery(&'a super::query::QueryParts<'a>),
     /// The tag the grammar could not name, and the body it holds.
-    Default { tag: u8, body: &'a super::query::QueryParts<'a> },
+    Default { tag: RequestUnknownTag, body: &'a super::query::QueryParts<'a> },
 }
 
 /// A value of `Request` held in the types a caller already has: a source
@@ -677,7 +703,7 @@ pub enum RequestViewVariant<'a> {
     CodecZenohMsgDel(MsgDelView<'a>),
     CodecZenohQuery(QueryView<'a>),
     Default {
-        tag: u8,
+        tag: RequestUnknownTag,
         body: QueryView<'a>,
     },
 }
@@ -818,7 +844,7 @@ impl<'a> RequestView<'a> {
             }
             other => {
                 _out.body = RequestViewVariant::Default {
-                    tag: other,
+                    tag: RequestUnknownTag(other),
                     body: QueryView::default(),
                 };
                 #[allow(irrefutable_let_patterns)]
@@ -1031,7 +1057,7 @@ pub enum RequestOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce
     CodecZenohMsgDel(MsgDelOwned<S>),
     CodecZenohQuery(QueryOwned<S>),
     Default {
-        tag: u8,
+        tag: RequestUnknownTag,
         body: QueryOwned<S>,
     },
 }

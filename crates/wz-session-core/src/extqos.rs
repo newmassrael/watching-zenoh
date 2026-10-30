@@ -473,14 +473,7 @@ mod tests {
     /// unit ext carries no body, the defining property of `zextunit!`.
     #[test]
     fn qos_ext_encodes_to_a_single_byte() {
-        assert_eq!(
-            encode_qos_ext()
-                .as_borrowed()
-                .encode_to_vec()
-                .expect("the qos ext is encodable")
-                .len(),
-            1
-        );
+        assert_eq!(encode_qos_ext().as_borrowed().encode_to_vec().len(), 1);
     }
 
     /// A chain carrying the unit QoS ext projects to `true`.
@@ -725,13 +718,7 @@ mod tests {
         fn the_emitted_form_follows_the_metadata() {
             let unit = encode_qos_ext_for(&state(None, None));
             assert_eq!(unit.header, 0x01);
-            assert_eq!(
-                unit.as_borrowed()
-                    .encode_to_vec()
-                    .expect("the qos ext is encodable")
-                    .len(),
-                1
-            );
+            assert_eq!(unit.as_borrowed().encode_to_vec().len(), 1);
 
             let link = encode_qos_ext_for(&state(
                 Some(band(Priority::RealTime, Priority::DataHigh)),
@@ -740,11 +727,7 @@ mod tests {
             assert_eq!(link.header, QOS_LINK_EXT_HEADER);
             assert_eq!(link.header, 0x21, "id 0x1 | ENC_Z64 0x20");
             assert!(
-                link.as_borrowed()
-                    .encode_to_vec()
-                    .expect("the qos ext is encodable")
-                    .len()
-                    > 1,
+                link.as_borrowed().encode_to_vec().len() > 1,
                 "z64 has a body"
             );
 

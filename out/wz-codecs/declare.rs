@@ -45,6 +45,32 @@ use super::undecl_subscriber::UndeclSubscriberView;
 use super::undecl_queryable::UndeclQueryableView;
 use super::undecl_token::UndeclTokenView;
 
+/// A tag `Declare` names no arm for, which its default arm holds: a
+/// value inside the 5 bits the tag is read from and outside
+/// every arm's tag (docs/adr/0065 §6 R3). A default arm is written with the tag
+/// it holds and read back as the default arm, so no tag it holds is refused.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeclareUnknownTag(u8);
+
+#[allow(dead_code)]
+impl DeclareUnknownTag {
+    /// `tag` as a tag no arm names, or `None` when it is past the tag's bits or
+    /// is an arm's.
+    pub const fn new(tag: u8) -> Option<Self> {
+        match tag {
+            0..=7 | 26 => None,
+            _ if tag > 31 => None,
+            _ => Some(Self(tag)),
+        }
+    }
+
+    /// The tag.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -62,7 +88,7 @@ pub enum DeclareVariant<'a> {
     CodecZenohUndeclToken(UndeclToken<'a>),
     CodecZenohDeclFinal(DeclFinal<'a>),
     Default {
-        tag: u8,
+        tag: DeclareUnknownTag,
         body: DeclFinal<'a>,
     },
 }
@@ -249,7 +275,7 @@ impl<'a> Declare<'a> {
             }
             other => {
                 _out.body = DeclareVariant::Default {
-                    tag: other,
+                    tag: DeclareUnknownTag(other),
                     body: DeclFinal::default(),
                 };
                 if let DeclareVariant::Default { body: _b, .. } = &mut _out.body {
@@ -355,7 +381,7 @@ pub enum DeclareVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, A3: ?Sized
     CodecZenohDeclToken(&'s A6),
     CodecZenohUndeclToken(&'s A7),
     CodecZenohDeclFinal(&'s A8),
-    Default { tag: u8, body: &'s D },
+    Default { tag: DeclareUnknownTag, body: &'s D },
 }
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
@@ -402,7 +428,7 @@ pub enum DeclarePartsBody<'a> {
     CodecZenohUndeclToken(&'a super::undecl_token::UndeclTokenParts<'a>),
     CodecZenohDeclFinal(&'a super::decl_final::DeclFinalParts<'a>),
     /// The tag the grammar could not name, and the body it holds.
-    Default { tag: u8, body: &'a super::decl_final::DeclFinalParts<'a> },
+    Default { tag: DeclareUnknownTag, body: &'a super::decl_final::DeclFinalParts<'a> },
 }
 
 /// A value of `Declare` held in the types a caller already has: a source
@@ -631,7 +657,7 @@ pub enum DeclareViewVariant<'a> {
     CodecZenohUndeclToken(UndeclTokenView<'a>),
     CodecZenohDeclFinal(DeclFinalView<'a>),
     Default {
-        tag: u8,
+        tag: DeclareUnknownTag,
         body: DeclFinalView<'a>,
     },
 }
@@ -801,7 +827,7 @@ impl<'a> DeclareView<'a> {
             }
             other => {
                 _out.body = DeclareViewVariant::Default {
-                    tag: other,
+                    tag: DeclareUnknownTag(other),
                     body: DeclFinalView::default(),
                 };
                 if let DeclareViewVariant::Default { body: _b, .. } = &mut _out.body {
@@ -1040,7 +1066,7 @@ pub enum DeclareOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce
     CodecZenohUndeclToken(UndeclTokenOwned<S>),
     CodecZenohDeclFinal(DeclFinalOwned<S>),
     Default {
-        tag: u8,
+        tag: DeclareUnknownTag,
         body: DeclFinalOwned<S>,
     },
 }

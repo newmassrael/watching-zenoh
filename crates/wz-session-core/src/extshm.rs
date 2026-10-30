@@ -1784,10 +1784,7 @@ mod tests {
         );
         assert_eq!(ext.ext_id(), SHM_BODY_EXT_ID);
         assert_eq!(
-            ext.as_borrowed()
-                .encode_to_vec()
-                .expect("a unit ext is encodable")
-                .len(),
+            ext.as_borrowed().encode_to_vec().len(),
             1,
             "a unit ext is one byte"
         );

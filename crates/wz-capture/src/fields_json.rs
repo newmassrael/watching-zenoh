@@ -8197,10 +8197,7 @@ mod tests {
                     wz_codecs::ext_unit::ExtUnit::default(),
                 ),
             };
-            let mut bytes = entry
-                .as_borrowed()
-                .encode_to_vec()
-                .expect("a unit extension entry is encodable");
+            let mut bytes = entry.as_borrowed().encode_to_vec();
             if i + 1 < ids.len() {
                 bytes[0] |= wz_session_core::ext_header::EXT_FLAG_Z;
             }
@@ -8604,10 +8601,7 @@ mod tests {
                             wz_codecs::ext_zint::ExtZint { value },
                         ),
                     };
-                entry
-                    .as_borrowed()
-                    .encode_to_vec()
-                    .expect("a zint extension entry is encodable")
+                entry.as_borrowed().encode_to_vec()
             }
         };
         init_datagram(is_ack, &chain)

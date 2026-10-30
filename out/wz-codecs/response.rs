@@ -33,6 +33,32 @@ use super::ext_entry::ExtEntryView;
 use super::reply::ReplyView;
 use super::err::ErrView;
 
+/// A tag `Response` names no arm for, which its default arm holds: a
+/// value inside the 5 bits the tag is read from and outside
+/// every arm's tag (docs/adr/0065 §6 R3). A default arm is written with the tag
+/// it holds and read back as the default arm, so no tag it holds is refused.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResponseUnknownTag(u8);
+
+#[allow(dead_code)]
+impl ResponseUnknownTag {
+    /// `tag` as a tag no arm names, or `None` when it is past the tag's bits or
+    /// is an arm's.
+    pub const fn new(tag: u8) -> Option<Self> {
+        match tag {
+            4..=5 => None,
+            _ if tag > 31 => None,
+            _ => Some(Self(tag)),
+        }
+    }
+
+    /// The tag.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -43,7 +69,7 @@ pub enum ResponseVariant<'a> {
     CodecZenohReply(Reply<'a>),
     CodecZenohErr(Err<'a>),
     Default {
-        tag: u8,
+        tag: ResponseUnknownTag,
         body: Reply<'a>,
     },
 }
@@ -186,7 +212,7 @@ impl<'a> Response<'a> {
             }
             other => {
                 _out.body = ResponseVariant::Default {
-                    tag: other,
+                    tag: ResponseUnknownTag(other),
                     body: Reply::default(),
                 };
                 if let ResponseVariant::Default { body: _b, .. } = &mut _out.body {
@@ -297,7 +323,7 @@ impl<'a> Response<'a> {
 pub enum ResponseVariantSource<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> {
     CodecZenohReply(&'s A0),
     CodecZenohErr(&'s A1),
-    Default { tag: u8, body: &'s D },
+    Default { tag: ResponseUnknownTag, body: &'s D },
 }
 
 /// Flags of `Response` a parent sets in place of the ones a value presents:
@@ -361,7 +387,7 @@ pub enum ResponsePartsBody<'a> {
     CodecZenohReply(&'a super::reply::ReplyParts<'a>),
     CodecZenohErr(&'a super::err::ErrParts<'a>),
     /// The tag the grammar could not name, and the body it holds.
-    Default { tag: u8, body: &'a super::reply::ReplyParts<'a> },
+    Default { tag: ResponseUnknownTag, body: &'a super::reply::ReplyParts<'a> },
 }
 
 /// A value of `Response` held in the types a caller already has: a source
@@ -571,7 +597,7 @@ pub enum ResponseViewVariant<'a> {
     CodecZenohReply(ReplyView<'a>),
     CodecZenohErr(ErrView<'a>),
     Default {
-        tag: u8,
+        tag: ResponseUnknownTag,
         body: ReplyView<'a>,
     },
 }
@@ -697,7 +723,7 @@ impl<'a> ResponseView<'a> {
             }
             other => {
                 _out.body = ResponseViewVariant::Default {
-                    tag: other,
+                    tag: ResponseUnknownTag(other),
                     body: ReplyView::default(),
                 };
                 if let ResponseViewVariant::Default { body: _b, .. } = &mut _out.body {
@@ -891,7 +917,7 @@ pub enum ResponseOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sc
     CodecZenohReply(ReplyOwned<S>),
     CodecZenohErr(ErrOwned<S>),
     Default {
-        tag: u8,
+        tag: ResponseUnknownTag,
         body: ReplyOwned<S>,
     },
 }

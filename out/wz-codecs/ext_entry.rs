@@ -24,6 +24,32 @@ use super::ext_unit::ExtUnitView;
 use super::ext_zint::ExtZintView;
 use super::ext_zbuf::ExtZbufView;
 
+/// A tag `ExtEntry` names no arm for, which its default arm holds: a
+/// value inside the 2 bits the tag is read from and outside
+/// every arm's tag (docs/adr/0065 §6 R3). A default arm is written with the tag
+/// it holds and read back as the default arm, so no tag it holds is refused.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExtEntryUnknownTag(u8);
+
+#[allow(dead_code)]
+impl ExtEntryUnknownTag {
+    /// `tag` as a tag no arm names, or `None` when it is past the tag's bits or
+    /// is an arm's.
+    pub const fn new(tag: u8) -> Option<Self> {
+        match tag {
+            0..=2 => None,
+            _ if tag > 3 => None,
+            _ => Some(Self(tag)),
+        }
+    }
+
+    /// The tag.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -35,7 +61,7 @@ pub enum ExtEntryVariant<'a> {
     CodecZenohExtZint(ExtZint),
     CodecZenohExtZbuf(ExtZbuf<'a>),
     Default {
-        tag: u8,
+        tag: ExtEntryUnknownTag,
         body: ExtUnit,
     },
 }
@@ -129,7 +155,7 @@ impl<'a> ExtEntry<'a> {
             }
             other => {
                 _out.body = ExtEntryVariant::Default {
-                    tag: other,
+                    tag: ExtEntryUnknownTag(other),
                     body: ExtUnit::default(),
                 };
                 if let ExtEntryVariant::Default { body: _b, .. } = &mut _out.body {
@@ -193,35 +219,32 @@ impl<'a> ExtEntry<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 42;
 
-    /// Encode `self` into the caller-owned sink. Returns the value's refusal
-    /// when the encoding cannot carry it (a length past its type, a list past
-    /// its bound, a gate that disagrees with a presence; the document declares
-    /// `sce:encode-may-fail`), or the sink's own error:
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
-    /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
         Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
-    /// `encode` refuses a value with: one the encoding cannot carry (a
-    /// length past its type, a list past its bound) or one a gate
-    /// disagrees with. Callers targeting zero-alloc hot paths should call
-    /// `encode` directly against a caller-owned sink.
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -236,7 +259,7 @@ pub enum ExtEntryVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized
     CodecZenohExtUnit(&'s A0),
     CodecZenohExtZint(&'s A1),
     CodecZenohExtZbuf(&'s A2),
-    Default { tag: u8, body: &'s D },
+    Default { tag: ExtEntryUnknownTag, body: &'s D },
 }
 
 /// Flags of `ExtEntry` a parent sets in place of the ones a value presents:
@@ -294,7 +317,7 @@ pub enum ExtEntryPartsBody<'a> {
     CodecZenohExtZint(&'a super::ext_zint::ExtZintParts),
     CodecZenohExtZbuf(&'a super::ext_zbuf::ExtZbufParts<'a>),
     /// The tag the grammar could not name, and the body it holds.
-    Default { tag: u8, body: &'a super::ext_unit::ExtUnitParts },
+    Default { tag: ExtEntryUnknownTag, body: &'a super::ext_unit::ExtUnitParts },
 }
 
 /// A value of `ExtEntry` held in the types a caller already has: a source
@@ -369,31 +392,28 @@ impl<'a> ExtEntry<'a> {
     /// Encode what `src` says into the caller-owned sink: the bytes
     /// [`Self::encode`] writes for the value it holds, read through
     /// [`ExtEntrySource`]. A length, a count or a gate flag is computed from what
-    /// `src` presents, and a value the encoding cannot carry is refused
-    /// before the first byte is written.
-    pub fn encode_source<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source(src, w)
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source_in(src, w, &ExtEntryOverrides::default())
     }
 
     /// [`Self::write_source`] with the flags a parent sets in place of the
     /// ones `src` presents.
     #[doc(hidden)]
-    pub fn write_source_in<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &ExtEntryOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source_in<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &ExtEntryOverrides) -> Result<(), K::Error> {
         let _d_header_enc: u8 = match src.body() {
             ExtEntryVariantSource::CodecZenohExtUnit(_) => 0,
             ExtEntryVariantSource::CodecZenohExtZint(_) => 1,
             ExtEntryVariantSource::CodecZenohExtZbuf(_) => 2,
-            ExtEntryVariantSource::Default { tag, .. } => tag,
+            ExtEntryVariantSource::Default { tag, .. } => tag.get(),
         };
-        if _d_header_enc > 0x3 {
-            return Err(CodecError::LengthOutOfRange);
-        }
         let mut _c_header: u8 = (src.header() & !0x60) | (_d_header_enc << 5);
         if let Some(_o) = over.header_m {
             _c_header = (_c_header & !0x10) | (u8::from(_o) << 4);
@@ -414,17 +434,17 @@ impl<'a> ExtEntry<'a> {
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: ExtEntrySource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+    pub fn count_source<S: ExtEntrySource + ?Sized>(src: &S) -> usize {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c)?;
-        Ok(_c.len())
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
     }
 }
 
 impl<'a, S: ExtEntrySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for ExtEntry<'a> {
-    type Error<E> = CodecError;
+    type Error<E> = E;
 
-    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
         Self::write_source(src, w)
     }
 }
@@ -432,10 +452,12 @@ impl<'a, S: ExtEntrySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> 
 #[allow(dead_code)]
 impl<'a> ExtEntry<'a> {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
-    /// with nothing written, or the refusal that encode would give. The result
-    /// writes the frame into a window of exactly that size and cannot fail.
-    pub fn measure<S: ExtEntrySource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
-        ::sce_forge_runtime::codec::measure(src)
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: ExtEntrySource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
     }
 
     /// Write `src` into `window` in one pass and return the bytes it is, for a
@@ -466,7 +488,7 @@ pub enum ExtEntryViewVariant<'a> {
     CodecZenohExtZint(ExtZintView),
     CodecZenohExtZbuf(ExtZbufView<'a>),
     Default {
-        tag: u8,
+        tag: ExtEntryUnknownTag,
         body: ExtUnitView,
     },
 }
@@ -538,7 +560,7 @@ impl<'a> ExtEntryView<'a> {
             }
             other => {
                 _out.body = ExtEntryViewVariant::Default {
-                    tag: other,
+                    tag: ExtEntryUnknownTag(other),
                     body: ExtUnitView::default(),
                 };
                 if let ExtEntryViewVariant::Default { body: _b, .. } = &mut _out.body {
@@ -604,18 +626,17 @@ impl<'a> ExtEntryView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
         ExtEntry::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
-    /// value it cannot carry.
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
+    /// value (docs/adr/0065).
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 
     pub fn ext_id(&self) -> u8 {
@@ -717,7 +738,7 @@ pub enum ExtEntryOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sc
     CodecZenohExtZint(ExtZint),
     CodecZenohExtZbuf(ExtZbufOwned<S>),
     Default {
-        tag: u8,
+        tag: ExtEntryUnknownTag,
         body: ExtUnit,
     },
 }
@@ -873,23 +894,19 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwned<S> {
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
     /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    /// Every value has a frame (docs/adr/0065), so the only error is the
+    /// sink's own.
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
         ExtEntry::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
+    /// value.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(ExtEntry::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 

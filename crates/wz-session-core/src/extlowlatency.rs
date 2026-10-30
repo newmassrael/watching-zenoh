@@ -89,13 +89,7 @@ mod tests {
     #[test]
     fn lowlatency_ext_encodes_to_a_single_byte() {
         let ext = encode_lowlatency_ext();
-        assert_eq!(
-            ext.as_borrowed()
-                .encode_to_vec()
-                .expect("a unit ext is encodable")
-                .len(),
-            1
-        );
+        assert_eq!(ext.as_borrowed().encode_to_vec().len(), 1);
     }
 
     /// A chain carrying the lowlatency ext projects to `true`; the offer / merge

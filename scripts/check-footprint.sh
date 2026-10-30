@@ -1069,8 +1069,18 @@ declare -A BASELINE_MC_TEXT=(
     # b2ff4da1cb (6ba84c3f37 before it). The fall is between those two readings and is not
     # separated further: the commits between them are the pin move and the kit's, and the kit's
     # code is not linked into this image. data is 4 and bss 270120 on both. Old: 72852/72900.
-    ["thumbv7m-none-eabi"]=71812
-    ["thumbv7em-none-eabihf"]=71828
+    #
+    # 2026-10-31 -- thumbv7m 71812 -> 71556, thumbv7em-hf 71828 -> 71592 (-256 / -236), read by
+    # Layer Q on one build host (rustc 1.97.0 / gcc 13.2.1) at the SCE pin 11e90bcd77 (98803c0bc8
+    # before it), the one the codec of an unknown tag moved: a default arm holds a tag type that
+    # admits only its own values (docs/adr/0065 section 6, R3), so a codec whose only refusal was
+    # that tag no longer counts before it writes. In this image `MsgPut::write_source` reads 770
+    # bytes for the counting sink (782 before) and 606 for the transmit sink (608), and
+    # `multicast_tx_emit` 3676 (3734 at an earlier pin). The codecs that hold a wireexpr or a
+    # chain keep their count until the list bounds and the gate normal form land in the SCE
+    # tree. data is 4 and bss 270120 on both. Old: 71812/71828.
+    ["thumbv7m-none-eabi"]=71556
+    ["thumbv7em-none-eabihf"]=71592
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
