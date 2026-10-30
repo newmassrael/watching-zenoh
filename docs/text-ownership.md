@@ -357,6 +357,15 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   163,428), `run_turn` is 148 bytes where it was 164, the bound of the fixed and batching images 3,588
   (3,604) and their main stack 4,800 bytes (4,864, 64 bytes of `.bss`). The chain (2,536) and the
   kit's peak (2,912) did not move.
+- TAKEN, measured 2026-10-30: `__aeabi_memclr4`, `__aeabi_memclr8` and `__aeabi_memset8` (and the two
+  `memset` variants this image does not call) answered by the libc `memset` in
+  `deploy/zephyr-common/wz_board_hooks.c`, as `__aeabi_memclr` already was. The compiler runtime's
+  copies were three loops of 174, 174 and 184 bytes; they are stubs of 8, 8 and 10 now. -504 bytes
+  on each of the three images (144,220; 147,412; 162,924), the stack and the other rows unmoved. It
+  is not a gain against zenoh-pico: the pico compare image links the same board hooks and calls the
+  same Arm EABI variants (GCC emits them for a cleared object), so its text fell by the same 504
+  bytes (145,364 to 144,860 in run 20261030T193533) and the ratio stayed 1.0031 (145,312 against
+  144,860). Both images are smaller; the gap, 452 bytes, is what it was.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

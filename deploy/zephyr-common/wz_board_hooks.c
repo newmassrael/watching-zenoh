@@ -68,14 +68,42 @@ void wz_yield_us(int us)
 }
 
 #if defined(__ARM_EABI__)
-/* The Arm EABI's zeroing call, which the Rust code generator emits for every cleared struct and
- * array, answered by the libc `memset` this image already links. Without it the link takes the
- * compiler runtime's `__aeabi_memclr`, a second 208-byte byte loop that does what `memset` does;
- * `__aeabi_memclr4` and `__aeabi_memclr8` stay the runtime's, as the C libraries' own are. The
- * compiler runtime defines its copy weak, so this definition is the one the link keeps. */
+/* The Arm EABI's zeroing and filling calls, which the Rust code generator emits for every cleared
+ * or filled struct and array, answered by the libc `memset` this image already links. Without them
+ * the link takes the compiler runtime's copies: `__aeabi_memclr` (208 bytes, a byte loop),
+ * `__aeabi_memclr4` and `__aeabi_memclr8` (174 each) and `__aeabi_memset8` (184), four more loops
+ * that do what `memset` does. The runtime defines its copies weak, so these definitions are the
+ * ones the link keeps. The variants that are not called in an image are not linked
+ * (function sections). Their alignment promise is one `memset` does not need: it takes any
+ * address. `__aeabi_memset` takes the length before the byte, the reverse of `memset`. */
 void __aeabi_memclr(void *dest, size_t n)
 {
 	(void)memset(dest, 0, n);
+}
+
+void __aeabi_memclr4(void *dest, size_t n)
+{
+	(void)memset(dest, 0, n);
+}
+
+void __aeabi_memclr8(void *dest, size_t n)
+{
+	(void)memset(dest, 0, n);
+}
+
+void __aeabi_memset(void *dest, size_t n, int c)
+{
+	(void)memset(dest, c, n);
+}
+
+void __aeabi_memset4(void *dest, size_t n, int c)
+{
+	(void)memset(dest, c, n);
+}
+
+void __aeabi_memset8(void *dest, size_t n, int c)
+{
+	(void)memset(dest, c, n);
 }
 #endif
 
