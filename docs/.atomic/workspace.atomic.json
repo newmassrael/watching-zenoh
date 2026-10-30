@@ -300544,6 +300544,34 @@
         "Open: an older client against a newer router and the reverse (the handshake negotiates down), releases other than 1.5.0 and 1.7.2 to 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. The old example builds are on the build host only (home directory, per release); a rebuild takes one cargo build per tag, and two builds at once collide on the pinned toolchain's install."
       ]
     },
+    "Round 3972": {
+      "decision_summary": "Rounds 3969, 3970 and 3971 each recorded a different SCE pin (b1ede72108, 6ba84c3f37, 6dbfa6a521): land.sh committed whatever `git diff --name-only` listed after the append, which includes a submodule whose checkout in the shared tree differs from the record. The record ended on the oldest of the three, which the kit and the hal timer probe no longer build against. Paid: the pin restored to 6ba84c3f37 (the pin 415c1592a took), land.sh files only the paths the append changed, and the Z8 job keeps its per-file logs on a red run.",
+      "changes_bullets": [
+        "vendor/sce pointer, scripts/land.sh, .github/workflows/ci.yml."
+      ],
+      "verification_bullets": [
+        "bash -n and shellcheck of land.sh pass; actionlint and the workflow-reading gates pass. The land.sh path is exercised by this push itself: its ledger commit must carry only the store."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Whether the other sessions' checkouts of vendor/sce in the shared tree will flip it again before their next push is open; the guard now keeps it out of the ledger commit but not out of a hand commit of the submodule."
+      ],
+      "publishable_decision_summary": "Rounds 3969, 3970 and 3971 each recorded a different SCE pin (b1ede72108, 6ba84c3f37, 6dbfa6a521): land.sh committed whatever `git diff --name-only` listed after the append, which includes a submodule whose checkout in the shared tree differs from the record. The record ended on the oldest of the three, which the kit and the hal timer probe no longer build against. Paid: the pin restored to 6ba84c3f37 (the pin 415c1592a took), land.sh files only the paths the append changed, and the Z8 job keeps its per-file logs on a red run.",
+      "publishable_changes_bullets": [
+        "vendor/sce pointer, scripts/land.sh, .github/workflows/ci.yml."
+      ],
+      "publishable_verification_bullets": [
+        "bash -n and shellcheck of land.sh pass; actionlint and the workflow-reading gates pass. The land.sh path is exercised by this push itself: its ledger commit must carry only the store."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Whether the other sessions' checkouts of vendor/sce in the shared tree will flip it again before their next push is open; the guard now keeps it out of the ledger commit but not out of a hand commit of the submodule."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
