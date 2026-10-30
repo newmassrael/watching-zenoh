@@ -23150,8 +23150,13 @@ _runci_build_capi_c_for_oracle() {
     else
         echo "  Layer $lane: oracle selects wz-capi-c default features (unstable, no shm)"
     fi
+    # The four instruments of the observation plane ride on every oracle build: they add doors
+    # under wz's own `wz_capi_c_` prefix and no type, so no arm's layout moves and the symbol
+    # census, which counts only upstream's four prefixes, does not see them, and the C consumer
+    # of the doors (`c_observation_plane_consumer.c`) links the very library the arm selected.
+    local plane="clock-source,event-ring,supervision,resource-snapshot"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-c $capi_c_args --quiet)
+    (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
 
 layer_c1cc_api_compat_c() {
@@ -23232,6 +23237,26 @@ layer_c1cc_api_compat_c() {
     grep -q '^c_e2e_sender_consumer: ok$' <<<"$c_e2e_out" || {
         echo "  C1cc FAIL: the e2e sender C consumer printed no verdict"
         echo "$c_e2e_out"; return 1; }
+    # The observation plane's doors, driven from C the same way: the clock a program registers,
+    # the event log, the supervisor and the snapshot, with the layout of the two structs a
+    # program reads and writes written out in the consumer and not taken from the library. The
+    # build above carries the four features (`_runci_build_capi_c_for_oracle`).
+    local c_obs_bin c_obs_out
+    c_obs_bin="$(mktemp -d)/c_observation_plane_consumer"
+    c_obs_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_observation_plane_consumer.c \
+        -L crates/target/debug -lwz_capi_c -o "$c_obs_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the observation plane C consumer did not compile or link"
+        echo "$c_obs_out"; return 1; }
+    c_obs_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_obs_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the observation plane C consumer failed"
+        echo "$c_obs_out"; rm -rf "$(dirname "$c_obs_bin")"; return 1; }
+    rm -rf "$(dirname "$c_obs_bin")"
+    grep -q '^c_observation_plane_consumer: ok$' <<<"$c_obs_out" || {
+        echo "  C1cc FAIL: the observation plane C consumer printed no verdict"
+        echo "$c_obs_out"; return 1; }
     # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
     # now that this lane has established an oracle is present. `--require`
     # rather than the bare form on purpose: past this point the checkout and
