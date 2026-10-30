@@ -203,7 +203,7 @@ fn frame_of(sn: u64, n: usize) -> (Vec<u8>, Vec<u8>) {
         let push = wz_session_core::push_build::build_push_literal(KEY, &payload_of(i))
             .expect("a literal Put");
         let view = push.try_as_borrowed().expect("a borrowed view");
-        payload.extend_from_slice(&view.encode_to_vec());
+        payload.extend_from_slice(&view.encode_to_vec().expect("an encoded Put"));
     }
     (frame_wire(sn, &[], &payload), payload)
 }
@@ -759,6 +759,7 @@ mod query_and_reply {
         .try_as_borrowed()
         .expect("a borrowed view")
         .encode_to_vec()
+        .expect("an encoded reply")
     }
 
     fn request(rid: u64) -> Vec<u8> {
@@ -768,6 +769,7 @@ mod query_and_reply {
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec()
+            .expect("an encoded query")
     }
 
     /// What the shared batch decoder reads out of a payload of Responses: each
@@ -999,7 +1001,8 @@ fn a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it() {
         id: 7,
         ..Default::default()
     }
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("an encoded Oam");
     pair.frame_exts.set(FrameExts::default());
     let chained = frame_wire(pair.next_sn(), &CHAIN, &oam);
     let (_, polls, _) = pair.turn(&chained);
