@@ -299280,6 +299280,44 @@
         "Read the hosted run of the current tree: the Layer Z legs were not run by any landing before this one on a built zenohd, so other legs outside the two files run here may hold the same kind of unchecked key. The Layer C1bzr failures of the last completed hosted run (build errors and unresolved doc links in several crates) are being fixed by the ci-red session and were not touched. Also open: stale LinkstateForwarder comments (about 70, many of them dead intra-doc links) and the linkstate_forward module name."
       ]
     },
+    "Round 3938": {
+      "decision_summary": "A peer that listens answered a linkstate query with the graph of every node its peer hat had learnt, a peer two links away included. The pin's peer hat answers with its Gossip object, the node and the nodes it holds a face to, while scouting/gossip/multihop is off. A listening peer is the router node at node mode Peer, and the reply of a router node was taken from the views of its routers and its peers whatever its mode. The forwarder now makes the regions itself: a router answers its routers and its peers as before; a peer answers its north region only, the whole graph under multihop or full linkstate, and the node with its faces otherwise. The tests of the top crate now open such a peer as the node, as a program that depends on the crate gets it; they passed before only because they did not.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: OnTables::linkstate_regions_text, the regions a node answers a linkstate query for and the text of each graph; a peer node gives the node and the faces of its north region unless multihop or full linkstate is on.",
+        "crates/wz-zenoh/src/api/session.rs: Engine::linkstate_regions of a router node asks the forwarder; RouterAdminViews no longer holds the peers view; two tests of upstream's gossip_regression_1, one in the shape of its text, open the peers as the node.",
+        "docs/z8-expected.tsv: the routing row to fail 7 with its one remaining cause.",
+        "scripts/lib/mcast_egress_callers_gate.py: the features of a package are read from cargo metadata and not from tomllib, which the python floor of the runners lacks."
+      ],
+      "verification_bullets": [
+        "Locally, on 3937: clippy with warnings denied passes for the runtime with all features and for the top crate with the default features and with unstable; the tests pass (the runtime's linkstate set 29, the top crate's 214). The text gates pass, the python floor lint after the gate that imported tomllib is repaired, with that gate's run and selftest. Upstream: routing finishes with eight passed, none failed and two ignored by upstream, gossip_regression_1 and _2 among them; as a plain integration test of the crate, the same text of gossip_regression_1 failed with four nodes in the graph of peer 3 before the change. Not run: the hosted run, the other upstream files, the four budgets on a hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, first: three_node_combination of upstream's routing file loses one recipe of its publishers and subscribers in about one run in four, a different one each time; it is not reproduced in process (480 recipes, none lost), so the row holds fail 7 until it is found.",
+        "Owed, from the router session: upstream's regions scenario 7 delivers a sample twice (both routers of one multicast group forward each peer put into the group); the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2, the four budgets re-measured on the hosted run."
+      ],
+      "publishable_decision_summary": "A peer that listens answered a linkstate query with the graph of every node its peer hat had learnt, a peer two links away included. The pin's peer hat answers with its Gossip object, the node and the nodes it holds a face to, while scouting/gossip/multihop is off. A listening peer is the router node at node mode Peer, and the reply of a router node was taken from the views of its routers and its peers whatever its mode. The forwarder now makes the regions itself: a router answers its routers and its peers as before; a peer answers its north region only, the whole graph under multihop or full linkstate, and the node with its faces otherwise. The tests of the top crate now open such a peer as the node, as a program that depends on the crate gets it; they passed before only because they did not.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: OnTables::linkstate_regions_text, the regions a node answers a linkstate query for and the text of each graph; a peer node gives the node and the faces of its north region unless multihop or full linkstate is on.",
+        "crates/wz-zenoh/src/api/session.rs: Engine::linkstate_regions of a router node asks the forwarder; RouterAdminViews no longer holds the peers view; two tests of upstream's gossip_regression_1, one in the shape of its text, open the peers as the node.",
+        "docs/z8-expected.tsv: the routing row to fail 7 with its one remaining cause.",
+        "scripts/lib/mcast_egress_callers_gate.py: the features of a package are read from cargo metadata and not from tomllib, which the python floor of the runners lacks."
+      ],
+      "publishable_verification_bullets": [
+        "Locally, on 3937: clippy with warnings denied passes for the runtime with all features and for the top crate with the default features and with unstable; the tests pass (the runtime's linkstate set 29, the top crate's 214). The text gates pass, the python floor lint after the gate that imported tomllib is repaired, with that gate's run and selftest. Upstream: routing finishes with eight passed, none failed and two ignored by upstream, gossip_regression_1 and _2 among them; as a plain integration test of the crate, the same text of gossip_regression_1 failed with four nodes in the graph of peer 3 before the change. Not run: the hosted run, the other upstream files, the four budgets on a hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, first: three_node_combination of upstream's routing file loses one recipe of its publishers and subscribers in about one run in four, a different one each time; it is not reproduced in process (480 recipes, none lost), so the row holds fail 7 until it is found.",
+        "Owed, from the router session: upstream's regions scenario 7 delivers a sample twice (both routers of one multicast group forward each peer put into the group); the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2, the four budgets re-measured on the hosted run."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
