@@ -26,7 +26,7 @@ open_time	empty	0	yes	its 6 tests are ignored upstream
 qos	pass	2	yes	all of it
 qos_overwrite	pass	10	yes	all of it
 queryable	pass	3	yes	all of it
-regions	fail	10	no	needs the client node and the group peer as nodes, and counts the steps of upstream's routing by tracing span; each failing test waits out a minute, so a person runs it
+regions	fail	41	no	scenario 1 needs the client node (its ten tests time out); most of the rest fail on a count of upstream's routing steps by tracing span (71 tests); three more time out: toksub of scenario 7 in two start orders, queque of scenario 6 in one; toksub of scenario 7 in two other orders passes in some runs and not in others; each failing test waits out a minute, so a person runs it
 routing	fail	7	yes	three_node_combination loses one recipe of its publishers and subscribers in about one run in four, a different one each time (the queries it lost are ended with their face since round 3935); it passes in the other runs, and then the row is `pass 8`
 scouting	pass	3	yes	all of it
 session	pass	5	yes	all of it

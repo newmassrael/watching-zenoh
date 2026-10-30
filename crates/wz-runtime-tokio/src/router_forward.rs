@@ -5035,6 +5035,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.mesh_hats()
     }
 
+    /// The mesh hats a current interest of the face `asker` is answered from: every one but the
+    /// hat of the region of `asker` when the pin's PEER hat serves that region. The pin's
+    /// dispatcher folds only the declarations of the OTHER regions
+    /// (`zenoh/src/net/routing/dispatcher/interests.rs` @ `.filter(|hat| hat.region() != region)`),
+    /// because the peers of one region are linked to one another and are told what each declares
+    /// there; an answer that carried a peer's declaration back to another peer of its region would
+    /// be a second source of it, which the withdrawal (it applies the same rule) never retracts.
+    /// A broker hat answers a client with the other clients of its region, and does not come
+    /// through here.
+    fn mesh_hats_answering(&self, asker: FaceId) -> impl Iterator<Item = &MeshHat> {
+        let own = self
+            .tables
+            .faces
+            .get(&asker)
+            .map(|face| face.tier)
+            .filter(|tier| is_peer_hat(*tier, self.tables.node_mode));
+        self.tables
+            .hats
+            .iter()
+            .filter(move |(region, _)| Some(*region) != own)
+            .filter_map(|(_, hat)| hat.mesh())
+    }
+
     /// The hat of `region` when it is a leaf region's BROKER hat (see [`Tables::broker_hat`]).
     fn broker_hat(&self, region: Region) -> Option<&BrokerHat> {
         self.tables.broker_hat(region)
@@ -6647,7 +6670,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `res.is_none_or`).
         let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, ()> = HashMap::new();
-        for table in self.mesh_hats().map(|hat| &hat.subs) {
+        for table in self.mesh_hats_answering(inbound).map(|hat| &hat.subs) {
             let hits = match target {
                 Some(target) => table.matching_entries(target, Some(self_zid)),
                 None => table.unrestricted_entries(Some(self_zid)),
@@ -6733,7 +6756,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // (`zenoh/src/net/routing/hat/peer/queries.rs` @ `res.is_none_or`).
         let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, QueryableInfo> = HashMap::new();
-        for table in self.mesh_hats().map(|hat| &hat.qabls) {
+        for table in self.mesh_hats_answering(inbound).map(|hat| &hat.qabls) {
             let hits = match target {
                 Some(target) => table.matching_entries(target, Some(self_zid)),
                 None => table.unrestricted_entries(Some(self_zid)),
@@ -6836,7 +6859,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let inbound_zid = self.tables.faces.get(&inbound).and_then(|s| s.peer_zid);
         let mut per_ke: HashMap<String, ()> = HashMap::new();
-        for table in self.mesh_hats().map(|hat| &hat.tokens) {
+        for table in self.mesh_hats_answering(inbound).map(|hat| &hat.tokens) {
             let hits = match target {
                 Some(target) => table.matching_entries(target, Some(self_zid)),
                 None => table.unrestricted_entries(Some(self_zid)),
@@ -21598,6 +21621,39 @@ mod tests {
         assert_eq!(sink_p.frame_count(), 1, "only the DeclareFinal");
         assert!(matches!(
             forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_peer_is_not_replayed_a_token_of_another_peer_of_its_region() {
+        // The pin's dispatcher answers a current interest from the declarations of the OTHER
+        // regions only (`zenoh/src/net/routing/dispatcher/interests.rs` @
+        // `.filter(|hat| hat.region() != region)`): the peers of one region are linked to one
+        // another and told what each declares. A copy of the first peer's token sent to the
+        // second would be a second source of it that its withdrawal, which applies the same
+        // rule, never retracts: the second peer would hold the token for ever. Upstream's
+        // `toksub` of its regions scenarios, between the peers of a group, waits for that.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sink_first) = face(zid(0xAA), WIRE_PEER);
+        let (second, sink_second) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/shared"));
+        sink_second.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/shared", true, false, false),
+        );
+        assert_eq!(
+            sink_second.frame_count(),
+            1,
+            "only the DeclareFinal: the first peer's token is not sent to a peer of its region"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_second.frame_bytes(0)).body,
             DeclareOwnedVariant::CodecZenohDeclFinal(_)
         ));
     }
