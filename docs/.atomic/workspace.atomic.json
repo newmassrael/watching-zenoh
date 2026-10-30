@@ -300306,6 +300306,36 @@
         "The kit's reading is 2,720 bytes on the fixed and batching images and the text of the answering client 144,172 bytes on the kit-lane build, 1,092 below the graded compare build's 145,264 (against the single-thread zenoh-pico image's 144,860: about 400 over, which the matrix has not measured on this tree). The stack_used cell reads about 6,020 against pico's 6,060 on this reading, to be measured by the matrix. The deepest path the run reaches is the receive of an Init (`read_unit_in` 452, `decode_unit_in` 320, `parse_init` 432, `decode_handshake_ext_chain_into` 304); the decoded-message slot is the largest of them and could live in the pump's storage instead of the frame, which trades stack for static memory. Then: run the matrix of 12 boots on this tree, and the text tail by line."
       ]
     },
+    "Round 3965": {
+      "decision_summary": "The regeneration of out/** is a bx action: bx.toml declares regen-codegen (run scripts/regen-codegen.sh, outputs out/**), and `bx --action regen-codegen --host <build machine>` runs it on a copy there and returns only the files it changed, judged here against the outputs before any is written. It could not run until bx kept each submodule's git state in the action's copy, which the generator's provenance check reads; the bx session did that on report. The local machine could not build the generator at all (bx's first reservation killed it three times, then the harness reaped it). The action ran once against SCE fb038af604 before another session took a newer pin to main, so that pin commit was dropped. The multicast-e2e text baseline moves to main's reading, 72,852 and 72,900 bytes (+3,900): Layer Q read 68,956 before the pins, then 76,232, 73,272 and 72,852, and the growth is the pins' (encoders written per sink, a refusing encode returning Result), not this tree's code.",
+      "changes_bullets": [
+        "`bx.toml`: the action `regen-codegen`, declared with inputs `**` and outputs `out/**`, and the comment that says what it needs from bx (the submodule's git state in the copy, bx bacfa62).",
+        "`scripts/check-footprint.sh`: multicast-e2e text baselines 68,952 and 69,000 to 72,852 and 72,900, with the attribution."
+      ],
+      "verification_bullets": [
+        "`bx --action regen-codegen --host pc2 --dry-run` and then without --dry-run ran on a build machine at SCE fb038af604 and returned eleven files, which were applied here (the run is 271 s, and the second and later runs reuse the shared build cache); the tree that resulted compiled and its tests passed (4,824, none failed) before that pin was dropped for main's newer one. Layer Q ran whole at main's tip on a build host: every qemu run passes, the two-session image's frame reads 16,208 against a budget of 16,384 and its qemu peak 17,792 of 32,768, and the multicast image's text was the one red (72,852 and 72,900 against 68,952 and 69,000); the baseline moved by that and the pre-push static array of 121 gates passes. Layer Q was not run again after the baseline moved, which changes one number in one script. Not run: the hosted layers, the kit's stack rows."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open: the action has run only for the whole of out/**; its inputs are everything tracked, so a cache (`cache = true`) is not claimed and each run builds the generator in the copy's shared cache; the first reservation of an unmeasured command is still half of what the host has free (bx's `peak_gb_per_task` is per repository, a per-command key is the owner's to decide); the two-session image holds three sessions' states by value in `spawn`; the host source on platforms without /proc; the C11 emit of the deadline documents; hosted CI per job."
+      ],
+      "publishable_decision_summary": "The regeneration of out/** is a bx action: bx.toml declares regen-codegen (run scripts/regen-codegen.sh, outputs out/**), and `bx --action regen-codegen --host <build machine>` runs it on a copy there and returns only the files it changed, judged here against the outputs before any is written. It could not run until bx kept each submodule's git state in the action's copy, which the generator's provenance check reads; the bx session did that on report. The local machine could not build the generator at all (bx's first reservation killed it three times, then the harness reaped it). The action ran once against SCE fb038af604 before another session took a newer pin to main, so that pin commit was dropped. The multicast-e2e text baseline moves to main's reading, 72,852 and 72,900 bytes (+3,900): Layer Q read 68,956 before the pins, then 76,232, 73,272 and 72,852, and the growth is the pins' (encoders written per sink, a refusing encode returning Result), not this tree's code.",
+      "publishable_changes_bullets": [
+        "`bx.toml`: the action `regen-codegen`, declared with inputs `**` and outputs `out/**`, and the comment that says what it needs from bx (the submodule's git state in the copy, bx bacfa62).",
+        "`scripts/check-footprint.sh`: multicast-e2e text baselines 68,952 and 69,000 to 72,852 and 72,900, with the attribution."
+      ],
+      "publishable_verification_bullets": [
+        "`bx --action regen-codegen --host pc2 --dry-run` and then without --dry-run ran on a build machine at SCE fb038af604 and returned eleven files, which were applied here (the run is 271 s, and the second and later runs reuse the shared build cache); the tree that resulted compiled and its tests passed (4,824, none failed) before that pin was dropped for main's newer one. Layer Q ran whole at main's tip on a build host: every qemu run passes, the two-session image's frame reads 16,208 against a budget of 16,384 and its qemu peak 17,792 of 32,768, and the multicast image's text was the one red (72,852 and 72,900 against 68,952 and 69,000); the baseline moved by that and the pre-push static array of 121 gates passes. Layer Q was not run again after the baseline moved, which changes one number in one script. Not run: the hosted layers, the kit's stack rows."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the action has run only for the whole of out/**; its inputs are everything tracked, so a cache (`cache = true`) is not claimed and each run builds the generator in the copy's shared cache; the first reservation of an unmeasured command is still half of what the host has free (bx's `peak_gb_per_task` is per repository, a per-command key is the owner's to decide); the two-session image holds three sessions' states by value in `spawn`; the host source on platforms without /proc; the C11 emit of the deadline documents; hosted CI per job."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
