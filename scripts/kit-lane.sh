@@ -304,6 +304,12 @@ build() {
         name="compare-$key"
         confs="${confs:+$confs;}$ROOT/deploy/zephyr-common/memory_report.conf"
     fi
+    # KIT_EXTRA_CONF names a conf file put after every overlay of the image: an experiment's, such as the
+    # smallest kernel heap pool an image runs in (CONFIG_HEAP_MEM_POOL_SIZE). What it builds is not the
+    # image a row describes, and a figure measured with it is not a row.
+    if [[ -n "${KIT_EXTRA_CONF:-}" ]]; then
+        confs="${confs:+$confs;}$KIT_EXTRA_CONF"
+    fi
     local dir="$LANE_HOME/build/$name" out="$LANE_HOME/out/$CLOCK_TAG-$name"
     mkdir -p "$out"
     local avail

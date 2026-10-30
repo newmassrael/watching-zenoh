@@ -331,6 +331,10 @@ IMAGES = (
     # is the handshake's parse now, the receive of an Init (`read_unit_in`, `decode_unit_in`,
     # `parse_init`), where it was the engine's answer to the message under a decoded-message slot
     # that nothing read any more.
+    #
+    # `peak` is 2,424 bytes at SCE pin 98803c0bc8 (ADR 0075), 8 more: the gate had held the 2,416
+    # inside its tolerance, and the figure follows the image now. Which frame grew was not
+    # attributed; the kit's reading, 2,720, did not move.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -338,7 +342,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2416,
+        peak=2424,
     ),
     # The fixed client with its storage block taken from the kernel heap at start
     # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
@@ -352,7 +356,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2416,
+        peak=2424,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -404,7 +408,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2416,
+        peak=2424,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
