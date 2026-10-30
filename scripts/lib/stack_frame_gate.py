@@ -324,6 +324,13 @@ IMAGES = (
     # the engine's constructor and exit walk out of line): the worst chain is 13 frames, the dial's
     # `build_in` is 80 bytes where it was 600, and `take_microstep` is 120 where it was 232. The
     # kit's reading is 2,912, 376 over.
+    #
+    # `peak` is 2,416 bytes once the connect manager's `reconcile` puts the rows in order by swaps
+    # of neighbours and not by `rotate_right(1)` (the library's rotation held a row and a buffer of
+    # its own in the frame: 448 bytes of frame, 328 now). The kit's reading is 2,720, 304 over: it
+    # is the handshake's parse now, the receive of an Init (`read_unit_in`, `decode_unit_in`,
+    # `parse_init`), where it was the engine's answer to the message under a decoded-message slot
+    # that nothing read any more.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -331,7 +338,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2536,
+        peak=2416,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -373,6 +380,9 @@ IMAGES = (
     #
     # 2,536 bytes at SCE pin f167223931 (see the fixed client's row): the same chain as the client
     # without batching.
+    #
+    # 2,416 bytes with `reconcile` ordering the rows by swaps (see the fixed client's row): the same
+    # chain as the client without batching.
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -380,7 +390,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2536,
+        peak=2416,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and

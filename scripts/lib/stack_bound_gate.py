@@ -250,6 +250,11 @@ class Result:
     sites: int = 0
     bound: int = 0
     chain: list[tuple[int, str]] = field(default_factory=list)
+    # The graph the bound was read from, for a reader that asks for another path than the worst (a
+    # function's deepest path, which the measured peak of a run may be on and the bound is not).
+    edges: dict[int, set[int]] = field(default_factory=dict)
+    cold: set[int] = field(default_factory=set)
+    root: int = 0
 
 
 def _match_rule(rules: list[dict], fn: Func, where: tuple[str, int | None] | None) -> dict | None:
@@ -374,6 +379,7 @@ def analyse(model: Model, contract: dict) -> Result:
         if model.funcs[root].frame + below_total > total:
             total, path = model.funcs[root].frame + below_total, (root, *below_path)
     res.bound = total
+    res.edges, res.cold, res.root = edges, cold, root
     res.chain = [(model.funcs[s].frame, model.funcs[s].norm) for s in path]
     res.cycles = sorted((model.funcs[a].norm, model.funcs[b].norm) for a, b in cycles)
     return res

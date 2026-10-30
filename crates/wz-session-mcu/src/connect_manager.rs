@@ -1880,9 +1880,12 @@ impl<D: Dialer> ConnectManager<D> {
         }
 
         // Keep the list's order, and the nodes after it in the order they were asked for: each
-        // entry's row is rotated to the front of the rows not yet placed, which leaves the rest in
+        // entry's row is moved to the front of the rows not yet placed, which leaves the rest in
         // the order they had. In place: taking the table out and building it again held two
-        // copies of it (a kilobyte each) in this frame, under every tick that reconciles.
+        // copies of it (a kilobyte each) in this frame, under every tick that reconciles. The
+        // row moves down by swaps of neighbours and not by `rotate_right(1)`: the library's
+        // rotation inlined here holds a row (152 bytes) and a buffer of its own in the frame, a
+        // swap holds neither.
         let mut placed = 0;
         for entry in list.iter().filter(|e| dialable(e)) {
             let rest = &mut self.rows[placed..];
@@ -1890,7 +1893,9 @@ impl<D: Dialer> ConnectManager<D> {
                 .iter()
                 .position(|row| row.endpoint() == Some(entry.endpoint.as_str()))
             {
-                rest[..=at].rotate_right(1);
+                for i in (0..at).rev() {
+                    rest.swap(i, i + 1);
+                }
                 placed += 1;
             }
         }

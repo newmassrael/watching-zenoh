@@ -96,22 +96,33 @@ impl core::fmt::Write for LineBuf {
 
 impl wz_session_core::text_out::TextOut for LineBuf {}
 
+impl LineBuf {
+    /// An empty line: zero-filled, so that whatever is written into it is nul-terminated.
+    const fn empty() -> Self {
+        Self {
+            bytes: [0; LOG_LINE_BYTES],
+            len: 0,
+        }
+    }
+}
+
 /// Write `parts` into a nul-terminated line of at most [`LOG_LINE_BYTES`] bytes.
+///
+/// The test's form: the printing functions fill their own buffer and do not take one back, since
+/// a buffer returned by value is a second one in the frame of the caller (the two together were
+/// 832 bytes of frame, the largest of the image and under every log line the node prints).
+#[cfg(test)]
 fn render_parts(parts: &[LogPart<'_>]) -> LineBuf {
-    let mut line = LineBuf {
-        bytes: [0; LOG_LINE_BYTES],
-        len: 0,
-    };
+    let mut line = LineBuf::empty();
     write_parts(&mut line, parts);
     line
 }
 
-/// Format `args` into a nul-terminated line of at most [`LOG_LINE_BYTES`] bytes.
+/// Format `args` into a nul-terminated line of at most [`LOG_LINE_BYTES`] bytes (the test's form,
+/// as [`render_parts`]).
+#[cfg(test)]
 fn render_line(args: core::fmt::Arguments<'_>) -> LineBuf {
-    let mut line = LineBuf {
-        bytes: [0; LOG_LINE_BYTES],
-        len: 0,
-    };
+    let mut line = LineBuf::empty();
     // `LineBuf::write_str` never fails, so neither does the formatting.
     let _ = core::fmt::write(&mut line, args);
     line
@@ -128,7 +139,9 @@ fn render_line(args: core::fmt::Arguments<'_>) -> LineBuf {
 /// its slots, and that frame sits under the node's deepest chain.
 #[inline(never)]
 pub fn log_args(args: core::fmt::Arguments<'_>) {
-    let line = render_line(args);
+    let mut line = LineBuf::empty();
+    // `LineBuf::write_str` never fails, so neither does the formatting.
+    let _ = core::fmt::write(&mut line, args);
     // SAFETY: the buffer is zero-filled past `len` and `len` leaves one byte, so it is
     // nul-terminated; it outlives the call and `wz_log` only reads it (printk %s).
     unsafe { wz_log(line.bytes.as_ptr() as *const c_char) };
@@ -142,7 +155,8 @@ pub fn log_args(args: core::fmt::Arguments<'_>) {
 /// the one call and not under every call of its caller.
 #[inline(never)]
 pub fn log_parts(parts: &[LogPart<'_>]) {
-    let line = render_parts(parts);
+    let mut line = LineBuf::empty();
+    write_parts(&mut line, parts);
     // SAFETY: the buffer is zero-filled past `len` and `len` leaves one byte, so it is
     // nul-terminated; it outlives the call and `wz_log` only reads it (printk %s).
     unsafe { wz_log(line.bytes.as_ptr() as *const c_char) };

@@ -376,6 +376,21 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   3,588 to 3,476 bytes and their main stack from 4,800 to 4,672 (128 bytes of `.bss`); the text, the
   chain and the kit's peak, which are what the image holds and runs, did not move. The SCE owner's
   own probe resolves each call by what its source can reach (`STACK_DYN` in its footprint budget).
+- TAKEN, measured 2026-10-30: three frames of the node, found by reading what the kit's stack reading
+  is made of. The console prints `stack: peak N` when the high-water mark rises, and the second
+  line of a run (after "session established") is the deepest path of the run: it was the
+  handshake's, not a query's, and no change to the answer path moved it (a deferral of the
+  reply send to the end of the datagram's receive took 628 bytes off that path, and was dropped:
+  the reading did not move and the text rose 300 bytes). What moved it: (1) the receive's reading
+  of a handshake message is `read_unit_in`, out of line from `dispatch_unit_in`, which gives the
+  engine the event of the admitted message once the 400-byte decoded-message slot is gone (the
+  engine's answer writes and sends the next message, and the slot was under it): the reading 2,928
+  to 2,720; (2) `reconcile` orders the rows by swaps of neighbours and not by `rotate_right(1)`
+  (the library's rotation held a row and a buffer in the frame): 448 bytes of frame to 328, the
+  reading at READY 2,608 to 2,488, the chain 2,536 to 2,416, the bound 3,476 to 3,356 and the main
+  stack 4,672 to 4,480 bytes; (3) `log_parts` and `log_args` fill one buffer and do not take one back
+  by value (832 bytes of frame, the largest of the image, to under 736). Text: -48 (fixed and
+  batching) and -64 (get) bytes; the kit's reading 2,896 to 2,720.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

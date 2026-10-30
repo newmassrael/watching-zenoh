@@ -383,9 +383,37 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     if let Some(outcome) = dispatch_lean_unit(bytes, shared, actions, engine) {
         return outcome;
     }
-    // The one slot the decoded message lives in: the decode writes it, the judgement reads it,
-    // and neither is handed a copy. Handed on by value, the 720 bytes were a slot in each frame
-    // between the parser and here, and the handshake's parse is the deepest path of the stack.
+    #[cfg(feature = "alloc")]
+    let (outcome, admitted) = read_unit_in(bytes, shared, actions, engine);
+    #[cfg(not(feature = "alloc"))]
+    let (outcome, admitted) = read_unit_in(bytes, consumed_out, actions, engine);
+    // The engine takes the event of an admitted handshake message here, once the frame of the
+    // reading is gone: its answer (the next handshake message, written and sent) is the deepest
+    // path the receive reaches, and the decoded message was a slot under it that nothing read.
+    if let Some(event) = admitted {
+        engine.process_event(event);
+    }
+    outcome
+}
+
+/// The reading half of [`dispatch_unit_in`]: the unit decoded and judged, and the event of an
+/// admitted handshake message handed back for the caller to give the engine.
+///
+/// The one slot the decoded message lives in is here: the decode writes it, the judgement reads
+/// it, and neither is handed a copy. Handed on by value, the 720 bytes were a slot in each frame
+/// between the parser and here, and the handshake's parse is the deepest path of the stack. Out
+/// of line so that the slot is not part of the frame that gives the engine the event.
+#[inline(never)]
+fn read_unit_in<R: SessionRuntime, T: TimeSource>(
+    bytes: &[u8],
+    #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
+    #[cfg(not(feature = "alloc"))] consumed_out: &mut usize,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> (
+    DriverLoopOutcome,
+    Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
+) {
     let mut frame = InboundFrame::Unknown { mid: 0 };
     #[cfg(feature = "alloc")]
     let parsed = decode_unit_in(bytes, shared, actions, &mut frame);
@@ -393,10 +421,7 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     let parsed = decode_unit_in(bytes, consumed_out, actions, &mut frame);
     let mut admitted = None;
     let outcome = decide_unit_in(parsed, &mut frame, &mut admitted, actions, engine);
-    if let Some(event) = admitted {
-        engine.process_event(event);
-    }
-    outcome
+    (outcome, admitted)
 }
 
 /// One transport message decoded off the front of a unit: where it ended (the message itself is
