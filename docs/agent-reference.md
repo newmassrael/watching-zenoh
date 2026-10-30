@@ -262,8 +262,10 @@ in-file SPDX headers.
 
 ## External references (detail)
 
-These are **reference sources, not dependencies** -- wz is a from-scratch
-reimplementation, so nothing below is a cargo dep of this workspace. Read them
+These are **reference sources, not dependencies** -- wz is written from scratch,
+so nothing below is a cargo dep of this workspace. Upstream zenoh, zenoh-c and
+zenoh-pico are presets of wz, not its boundary; these sources are what those
+presets are measured against. Read them
 directly whenever SCE / Zenoh state is in question; never infer from memory.
 
 **Machine-local absolute paths are deliberately NOT recorded in `CLAUDE.md`.**

@@ -41,8 +41,8 @@ not restated here (R311y316; they were "~140 / 19 / 6" and every one had
 drifted). Materializes
 the composable-framework north star (R267 ratify, R299+ refined) by
 naming the contract every future SCXML / Rust crate must conform to
-when emitting a per-cargo-feature subset of zenoh's full feature
-catalog.
+when emitting a per-cargo-feature composition of wz's feature
+catalog, which holds zenoh's full catalog and grows beyond it.
 
 **Scope.** This document defines the *names* and *3-test verdicts*
 for atomic features + the *named contracts* for presets. The actual
@@ -85,8 +85,11 @@ inspect-tool design — all deferred to R302+. This document is the
 
 The composable-framework north star (R267 ratify) defines wz's
 unique value over zenoh / zenoh-pico / zenoh-cpp as the ability to
-emit an *arbitrary user-selected subset* of zenoh's full feature
-catalog. zenoh ships one fixed binary; wz authors SCXML once and
+emit an *arbitrary user-selected composition* of wz's feature
+catalog. That catalog holds zenoh's full catalog and is not bounded
+by it: upstream zenoh, zenoh-c and zenoh-pico are presets of wz, and
+features beyond them are wz features like any other (owner,
+2026-10-30). zenoh ships one fixed binary; wz authors SCXML once and
 emits per-cargo-feature combinations à la Linux kconfig / Zephyr
 project config / Buildroot / NixOS USE flag.
 

@@ -169,8 +169,8 @@ timestamp, so the reject path allocates.
   milliseconds, a `uint32` counter and a `uint64` node id as three fields, where zenoh packs the
   counter into the low bits of an NTP64 word and carries a node id of up to 16 bytes. A node that
   stamped with SCE's record would need a conversion into the wire form that `uhlc` does not make,
-  and a stamp that differs from zenoh's for the same inputs is a divergence in a replacement
-  whose point is not to diverge. SCE's algorithms are used where they are the same thing:
+  and a stamp that differs from zenoh's for the same inputs is a divergence in the zenoh preset,
+  whose contract is not to diverge. SCE's algorithms are used where they are the same thing:
   `hlc_within_drift` is the forward-step check (`CLOCK_MAX_FORWARD_STEP_MS`), generated once for
   the Rust host and the C11 backend; and `hlc_send` / `hlc_receive` are a DIFFERENTIAL ORACLE,
   run against `uhlc` over random clock traces, to show that the order the two produce agrees.

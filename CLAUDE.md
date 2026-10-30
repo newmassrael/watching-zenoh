@@ -122,7 +122,9 @@ inherit `LICENSE`. `scripts/lib/relicense_spdx.py` requires an explicit mode
 
 ## External references
 
-Reference sources, not dependencies — wz is a from-scratch reimplementation.
+Reference sources, not dependencies — wz is written from scratch, and upstream
+zenoh / zenoh-c / zenoh-pico are presets of wz, not its boundary; these sources
+are what those presets are measured against.
 Read them directly whenever SCE / Zenoh state is in question; never infer from
 memory. **Machine-local absolute paths are NOT recorded here** (committed file;
 resolve per machine, keep in agent memory).

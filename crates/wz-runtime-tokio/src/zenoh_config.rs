@@ -4506,8 +4506,8 @@ pub const LIBRARY_DEFAULT_MODE: WhatAmI = WhatAmI::Peer;
 ///
 /// Neither reading is wrong. `wz-ap-demo` is a library node, so the library
 /// default is the correct comparand and R2092 decided it that way. What item
-/// 514 is about is the half that decision does not cover: the north star is a
-/// replacement for zenoh AND for zenohd, and an operator who swaps a zenohd out
+/// 514 is about is the half that decision does not cover: the zenoh preset owes
+/// drop-in behaviour for zenoh AND for zenohd, and an operator who swaps a zenohd out
 /// for wz with a mode-less file gets a PEER standing where a router used to be
 /// — silently, because nothing in the report mentions a key the file never
 /// named. This constant exists so the report can say it; the sentence is

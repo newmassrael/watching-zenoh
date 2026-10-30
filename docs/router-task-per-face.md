@@ -65,8 +65,9 @@ Three structures were weighed.
 | B. Epoch snapshots (RCU) | A control task owns the tables and publishes an immutable `Arc<Snapshot>`; faces read their snapshot with no lock at all | No reader ever waits; the lock-free read is the textbook form | A snapshot is rebuilt or patched per declaration, which has not been costed here; the memo needs a concurrent map keyed by epoch; a face sees its own declaration only once the epoch it caused is published (read-your-writes needs a wait) |
 | C. Shard by loop | N loops, each owning the faces hashed to it, with cross-loop messages for a destination on another | No shared tables | Every Push to a destination on another loop is a message; the tables are copied N times |
 
-**Recommended: A, with B held back for the day the lock is measured to cost.** The argument is the goal of this
-repository (a replacement of zenoh): A is the structure it replaces, and the behaviour a peer observes (a
+**Recommended: A, with B held back for the day the lock is measured to cost.** The argument is the contract of the
+zenoh preset (upstream is a preset of wz, and a peer of that preset must observe upstream's behaviour): A is
+upstream's structure, and the behaviour a peer observes (a
 declaration made before a Push is applied before it, across faces) is upstream's by construction, which B
 weakens to per-face read-your-writes. Whether A's read lock is a cost is a measurement and not an opinion, and
 the instrument is Step 6 of the plan, built in round 3607 as a count of heap allocations and bytes per forward

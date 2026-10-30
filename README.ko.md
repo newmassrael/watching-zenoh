@@ -7,21 +7,26 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 > Primary / English: README.md
 
-zenoh 와이어 프로토콜의 wire-spec 부분집합을 임베디드 (zenoh-pico) 와
-서버 (zenoh) 양면 interop 기준으로 재구현하는 6 backend codegen
-프로젝트. Source of truth 는 SCXML, Rust no_std / C11 / C++ /
-Kotlin / Go / Python 6 언어가 동일 author-side 파일에서 생성된다.
+MCU 에서 서버까지 쓰는 확장 가능한 네트워킹 프레임워크. Source of
+truth 는 SCXML 이고, SCE 가 같은 author-side 파일에서 Rust no_std /
+C11 / C++ / Kotlin / Go / Python 코드를 생성한다. 업스트림 zenoh,
+zenoh-c, zenoh-pico 는 wz 의 프리셋이다 (`configs/*_defconfig`,
+`deploy/wz-config.toml` 에서 생성). 각 프리셋은 원본의 와이어·API
+동작을 지키며, 그 parity 는 프리셋의 계약이지 wz 의 한계가 아니다.
+업스트림에 없는 기능도 wz 기능이며 다른 기능과 똑같이 Kconfig 와
+SCE 로 조합한다.
 
 ## 무엇인가
 
 이 저장소는 두 가지를 동시에 만든다.
 
-1. **와이어 호환성** — zenoh-pico 1.x 클라이언트와 zenoh 1.x
-   라우터 / 피어가 주고받는 wire format 부분집합. 범위는
-   docs/wire-spec-subset.md 에 명시: 스카우팅 계층, transport
-   session 계층, 네트워크 라우팅 계층, zenoh payload 계층,
-   extension chain mechanism. 부가 surface (compression, patch,
-   full liveliness) 는 후속 phase 로 미룬다.
+1. **업스트림 프리셋** — zenoh-pico 클라이언트와 zenoh 라우터 /
+   피어가 쓰는 zenoh 1.x 프로토콜과 각 원본의 API 를, 원본과
+   상호운용하는 프리셋으로 싣는다. 첫 마일스톤은
+   docs/wire-spec-subset.md 에 고정한 wire format 부분집합
+   (스카우팅, transport session, 네트워크 라우팅, zenoh payload,
+   extension chain) 이었고, 프리셋은 그 뒤 이를 넘어 자랐다.
+   원본과의 측정 비교는 docs/upstream-parity.md 에 있다.
 
 2. **단일 소스 6 backend codegen** — sources/ 하위 동일 SCXML 이
    Rust no_std (MCU) / C11 / C++ / Kotlin / Go / Python 으로

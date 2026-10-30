@@ -3990,6 +3990,13 @@ on a size-vs-speed attribute.
 Downstream consumers (watching-zenoh and similar) should document
 these boundaries plainly in their own READMEs.
 
+> **Superseded for watching-zenoh (2026-10-30).** The two lists below
+> are the scope this RFC was written against. watching-zenoh has since
+> put every item in scope (owner, 2026-06-17), and router mode and
+> the API compatibility layers have landed. Its current frame is `ARCHITECTURE.md` §1: an extensible
+> framework in which upstream zenoh, zenoh-c and zenoh-pico are
+> presets, not the boundary. The lists are kept as the RFC's record.
+
 ### What `watching-zenoh` WILL deliver when all phases land:
 
 - Zenoh protocol version **pinned** (e.g. Zenoh 1.x wire format).

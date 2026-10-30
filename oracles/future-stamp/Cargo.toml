@@ -21,8 +21,8 @@
 #
 # ⛔ NOT A WORKSPACE MEMBER, and not reachable from one. `crates/Cargo.toml` is
 # the workspace and this directory is outside it, so `zenoh` never enters wz's
-# own dependency graph -- "wz is a from-scratch reimplementation, nothing here is
-# a cargo dep of this workspace" stays literally true. This is a TEST ORACLE that
+# own dependency graph -- "wz is written from scratch, nothing here is a cargo
+# dep of this workspace" stays literally true. This is a TEST ORACLE that
 # happens to be written in Rust, exactly as the pico CLI is a test oracle that
 # happens to be written in C.
 #

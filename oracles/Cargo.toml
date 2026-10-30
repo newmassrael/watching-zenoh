@@ -20,9 +20,9 @@
 #
 # ⛔ NOT related to `crates/Cargo.toml`, which is wz's own workspace. These
 # members depend on the pinned UPSTREAM; keeping the two workspaces separate is
-# what keeps zenoh out of wz's dependency graph, so "wz is a from-scratch
-# reimplementation, nothing here is a cargo dep of this workspace" stays
-# literally true. This tree has no root `Cargo.toml`, so the two never meet.
+# what keeps zenoh out of wz's dependency graph, so "wz is written from
+# scratch, nothing here is a cargo dep of this workspace" stays literally
+# true. This tree has no root `Cargo.toml`, so the two never meet.
 #
 # ⚠ The root `rust-toolchain.toml` (1.97.0) still applies here, while
 # `scripts/build-zenohd.sh` builds upstream with the channel UPSTREAM pins

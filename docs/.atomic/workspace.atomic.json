@@ -1,14 +1,16 @@
 {
   "sections": {
     "1": {
-      "intent": "Synthesize Zenoh-compatible networking stack from SCXML + SCE Forge as single source of truth; two interoperable backends.",
+      "intent": "Extensible networking framework synthesized from SCXML + SCE Forge; upstream zenoh, zenoh-c and zenoh-pico are presets of it, and wz grows beyond them.",
       "outputs_bullets": [
         "AP backend: Rust, std, tokio runtime, Linux x86_64 / aarch64",
         "MCU backend: C11, no_std-equivalent, no heap; SoC TBD until deploy authoring",
-        "Wire-interoperability with upstream zenohd for the sec 2 documented subset"
+        "Upstream presets (zenoh, zenoh-c, zenoh-pico) interoperate on the wire; parity is their contract",
+        "Capabilities beyond upstream are wz features, composed by Kconfig and SCE like any other"
       ],
       "caveats_bullets": [
-        "Not a rewrite of zenoh/zenoh-pico; demonstration that SCE synthesizes industrial wire protocols."
+        "Not a rewrite of zenoh/zenoh-pico; demonstration that SCE synthesizes industrial wire protocols.",
+        "Owner 2026-10-30 supersedes the caveat above: wz is a framework, upstream is one preset"
       ],
       "impact_scope": [
         "2",
@@ -176,7 +178,7 @@
       ]
     },
     "2/2.0": {
-      "intent": "Long-term migration vision (every Zenoh feature eventually lands) + MVP criterion (full zenoh-pico parity, peer+client both backends).",
+      "intent": "Upstream zenoh, zenoh-c and zenoh-pico are presets of wz: parity is the contract of each preset, not the ceiling of wz, which grows beyond them. First milestone was full zenoh-pico parity.",
       "impact_scope": [
         "2/2.1",
         "2/2.2",
@@ -194,7 +196,7 @@
       ]
     },
     "2/2.2": {
-      "intent": "Phase D+ deferred items (router mode, BLE/Raweth, API shim, shared-mem, admin/scripting) each carries an explicit migration path; not permanently excluded.",
+      "intent": "Items once deferred to Phase D+ (router mode, BLE/Raweth, API shims, shared memory, admin, scripting) are in scope with no deferral; router, API shims, shm and admin space have landed.",
       "impact_scope": [
         "2/2.0",
         "2/2.3"
@@ -462,7 +464,7 @@
       "intent": "First-pass composable-framework feature catalog: 19 domains, ~140 atomic features, 6 semver presets. Naming + 3-test verdicts; emission mechanism deferred to R302+.",
       "rationale_bullets": [
         "Names + 3-test verdicts for atomic features; named contracts for presets; mechanism R302+ defer.",
-        "Materializes the R267 north star: arbitrary user-selected subset of zenoh's full feature catalog.",
+        "Materializes the north star: arbitrary composition; upstream catalogs are presets, not the bound.",
         "Cross-feature consistency anchor is zenoh-cpp public API shape; the first-milestone parity target.",
         "Linux kconfig / Zephyr / Buildroot / NixOS USE flag — same composable pattern in adjacent ecos."
       ],

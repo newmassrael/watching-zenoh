@@ -30,9 +30,15 @@ set produces two interoperable artifacts:
 Both backends interoperate on the wire with upstream `zenohd` for the
 subset documented in §2.
 
-The project is not a rewrite of zenoh/zenoh-pico. It is a
-**demonstration that SCE can synthesize industrial wire protocols**,
-with Zenoh as the first concrete target.
+**wz is an extensible framework, and upstream is one of its presets**
+(owner, 2026-10-30; supersedes the earlier "not a rewrite, a
+demonstration" framing of this section). zenoh, zenoh-c and
+zenoh-pico are presets of wz (`configs/*_defconfig`, generated from
+`deploy/wz-config.toml`). Each preset owes its original's wire and
+API behaviour, and that parity is the contract of the preset, not
+the ceiling of wz. Capabilities beyond upstream are wz features that
+compose with Kconfig and SCE like the rest; the measured comparison
+with the originals is `docs/upstream-parity.md`.
 
 ---
 
@@ -41,8 +47,9 @@ with Zenoh as the first concrete target.
 ### 2.0 Long-term vision and MVP criterion
 
 The long-term goal is that **every Zenoh feature eventually migrates
-into this synthesis framework**. Nothing in the design should close
-the door on a future feature. "Out of scope" is therefore split into
+into this synthesis framework**, and that the framework grows beyond
+Zenoh: upstream is a preset of wz, not its boundary (§1). Nothing in
+the design should close the door on a future feature. "Out of scope" is therefore split into
 two distinct categories with fundamentally different meanings:
 
 - **Deferred** (§2.2) — not in MVP, but structurally supportable; each
@@ -56,9 +63,9 @@ two distinct categories with fundamentally different meanings:
 MUST achieve **at least full zenoh-pico feature parity** on their
 target class. That is, anything zenoh-pico does in peer or client
 mode, this project does equivalently — with SCE synthesis replacing
-the hand-written C. MCU backend is a zenoh-pico replacement; AP
-backend is a peer/client-mode zenoh replacement. Both share one
-SCXML source set.
+the hand-written C. That criterion was the first milestone, and it
+is now the contract of the zenoh-pico and zenoh presets (§1), not a
+description of what wz is. Both backends share one SCXML source set.
 
 ### 2.1 MVP scope (zenoh-pico parity target)
 
@@ -86,6 +93,12 @@ less capable than zenoh-pico, failing the MVP criterion above.
 These are **not permanently excluded** — they are Phase D+ work items.
 Every entry has a migration path so the current design does not lock
 them out.
+
+**Status (2026-10-30).** Nothing here is deferred any more: the owner
+put every item in scope with no deferral on 2026-06-17. Router mode,
+the zenoh-c / zenoh-pico / Rust API compatibility layers, shared
+memory and the admin space have landed since (see the ledger); the
+table below is the original plan, kept for its migration paths.
 
 | Area | MVP reason | Migration path |
 |---|---|---|

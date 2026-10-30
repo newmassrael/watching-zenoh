@@ -443,8 +443,8 @@ declaration holds them together: `verified` exactly when the lane is not `none`.
 a row. A consumer that shows a person "not verified" for `none` is right in every case,
 and `support` is what tells that person whether anyone has tried.
 
-**T12. The vendored C zenoh-pico is not an artifact of the entry.** wz's replacement
-of pico is `wz-capi-pico`; the vendored C library is the interop counterpart, built
+**T12. The vendored C zenoh-pico is not an artifact of the entry.** wz's zenoh-pico
+preset is `wz-capi-pico`; the vendored C library is the interop counterpart, built
 on the hosts that can build it, and wire-level interop does not depend on the host
 that builds the counterpart. Repairs to its portability (Android's `pthread_cancel`,
 QNX's missing headers and rejected `-pipe`) go to the upstream project as changes

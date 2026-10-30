@@ -7,23 +7,28 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 > 한국어 / Korean translation: see README.ko.md
 
-A six-backend codegen implementation of a wire-spec subset of
-the zenoh protocol, targeting both embedded (zenoh-pico) and
-server (zenoh) interop. Source of truth lives in SCXML, generated
-into Rust no_std / C11 / C++ / Kotlin / Go / Python from the same
-author-side files.
+An extensible networking framework, from MCU to server, whose
+source of truth lives in SCXML and is generated into Rust no_std /
+C11 / C++ / Kotlin / Go / Python by SCE from the same author-side
+files. Upstream zenoh, zenoh-c and zenoh-pico are presets of wz
+(`configs/*_defconfig`, generated from `deploy/wz-config.toml`):
+each preset is held to its original's wire and API behaviour, and
+that parity is the contract of the preset, not the limit of wz.
+Capabilities beyond upstream are wz features, composed with
+Kconfig and SCE like any other.
 
 ## What it does
 
 This repo builds two things at once.
 
-1. **Wire compatibility** — a wire-format subset that zenoh-pico
-   1.x clients and zenoh 1.x routers / peers exchange.
-   The subset scope is pinned in docs/wire-spec-subset.md:
-   scouting layer, transport session layer, network routing
-   layer, zenoh payload layer, and extension chain mechanism.
-   Optional surfaces (compression, patch, full liveliness) are
-   deferred to later phases.
+1. **Upstream presets** — the zenoh 1.x protocol as zenoh-pico
+   clients and zenoh routers / peers speak it, and the API of
+   each original, carried as a preset that interoperates with
+   the original. The first milestone was the wire-format subset
+   pinned in docs/wire-spec-subset.md (scouting, transport
+   session, network routing, zenoh payload, extension chain);
+   the presets have grown past it since, and
+   docs/upstream-parity.md measures them against the originals.
 
 2. **Single-source six-backend codegen** — the same SCXML sources
    under sources/ generate to Rust no_std (MCU) / C11 / C++ /
