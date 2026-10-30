@@ -1042,12 +1042,17 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # tests would excuse hundreds of innocent ones, so the leg keeps every feature
     # and the two are named in SKIPS below -- the SET is pinned, not a count, and
     # each name carries what was measured about it.
+    # `access-qos-overwrite` joins with the `qos/network` interceptor (`d87febab`): its fifteen
+    # tests (`interceptor::qos_overwrite::tests`, and the document compile of a `qos/network`
+    # item) are built by that feature alone, and the census of the hosted run of 017e3c71 named
+    # all fifteen unclaimed.
     "wz-runtime-tokio|lane|\
         access-acl,\
         access-acl-multicast,\
         access-downsampling,\
         access-extauth-pubkey,\
         access-extauth-usrpwd,\
+        access-qos-overwrite,\
         access-quota,\
         adminspace-config-hotreload,\
         adminspace-core,\

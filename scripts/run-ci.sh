@@ -7691,7 +7691,8 @@ layer_c1ak_cargo_test_transport_stats() {
     # Round 3523 -- 50 -> 53 here and in every `--lib adminspace` guard below: the three tests of
     # the capacity report's answerer, which are ungated like the rest. Each count is what its
     # command PRINTED.
-    _runci_guarded_test C1ak 53 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    # 53 -> 54 with C1am's guard, for the snapshot answerer's test (`f04bb6ec`).
+    _runci_guarded_test C1ak 54 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -7942,7 +7943,9 @@ layer_c1am_cargo_test_adminspace() {
     # R2859's multicast-row test. PRINTED by running the command.
     # 49 -> 50: one more case selected by the filter since; the hosted run of
     # e7e31951d and a run of this tree both printed 50.
-    _runci_guarded_test "C1AM adminspace 53" 53 \
+    # 53 -> 54: the snapshot answerer's test (`f04bb6ec`, serve a hosted node's snapshot), which
+    # the filter selects; the hosted run of 017e3c71 printed 54.
+    _runci_guarded_test "C1AM adminspace 54" 54 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
@@ -11732,7 +11735,9 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 47 \
+    # 47 -> 48: the dial reader's test of empty fields, wide numbers and leading zeros
+    # (`45f821db`); the hosted run of 017e3c71 printed 48.
+    _runci_guarded_test "C1m mcu adminspace-write" 48 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 22 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
@@ -16794,6 +16799,11 @@ layer_e_ap_demo_round_trip() {
     # so the build is what that header states, each into its own target directory
     # because every build is `libwz_capi_pico.so`. The pairs are the ones
     # `PicoHeaderArm` in wz-integration-tests names.
+    # The pinned Kconfig interpreter `--original-features` resolves the defconfig on is provisioned
+    # here, as Layer C1st does (the script is idempotent and hash-pinned): it lives in the
+    # checkout's target/, so a checkout the lane runs in for the first time (a build machine's
+    # slot) has none, and the lane failed there before it built anything.
+    bash scripts/provision-kconfiglib.sh >/dev/null || return 1
     local arm arm_features
     for arm in st default local; do
         arm_features="$(python3 scripts/lib/wz_config.py --features pico \
@@ -17025,12 +17035,16 @@ layer_e_ap_demo_round_trip() {
     # `wz_dialer`, for the three tests of the other direction: the `dial_a_listener` example
     # dials upstream's z_sub, z_pub and z_queryable run as listeners. Layer C1co builds that
     # example for each engine and names it in WZ_PICO_DIALER_BIN; this job builds none.
+    # `netns`, for the tests that build a network namespace (`wz_scout_fanout_netns`,
+    # `wz_datagram_carrier_loss_netns`): Layer M runs them after probing that the host can build
+    # one. The sweep took them, and they panicked on a build machine without the capability while
+    # passing on hosted runners only because those happen to have it.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
         --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener \
-        --skip wz_dialer) || return 1
+        --skip wz_dialer --skip netns) || return 1
     # The same upstream C programs against the cooperative engine's library
     # (`docs/capi-pico-on-coop-engine.md`, the open item of step L4): one file, linked to a
     # build of wz-capi-pico of its own whose features are the reference arm's but for the
