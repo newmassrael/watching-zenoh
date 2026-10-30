@@ -619,14 +619,23 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) > 0
     });
-    let params = PublishOptions::put()
-        .plain_put_params()
-        .expect("a plain put");
-    assert_eq!(
-        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
-        FilteredPut::Suppressed,
-        "no subscriber yet: the put is held back"
+    // The filter's verdict, which every build has. The plain put below is a build's choice: the
+    // session sends none where a feature of the graph can rewrite or count what it sends
+    // (`PublishOptions::plain_put_params` with `routing-namespace` or `transport-stats`, which a
+    // workspace build turns on through `wz-capi-core`'s `router-node`), and then a put goes the
+    // general way, which reads this same verdict.
+    assert!(
+        engine.write_filter_holds_back(filter),
+        "no subscriber yet: a write is held back"
     );
+    let params = PublishOptions::put().plain_put_params();
+    if let Some(params) = &params {
+        assert_eq!(
+            engine.put_plain_filtered(filter, "demo/x", 0, b"v", params),
+            FilteredPut::Suppressed,
+            "no subscriber yet: the put is held back"
+        );
+    }
     for _ in 0..20 {
         let _ = SessionDrive::read(&*engine, false);
     }
@@ -640,13 +649,19 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     until(&engine, "the filter to open", || {
         !engine.write_filter_active(filter)
     });
-    assert_eq!(
-        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
-        FilteredPut::Sent(Ok(0)),
+    assert!(
+        !engine.write_filter_holds_back(filter),
+        "a subscriber is declared: a write goes out"
     );
-    until(&engine, "the router to receive the put", || {
-        router.seen(|s| s.pushes) == 1
-    });
+    if let Some(params) = &params {
+        assert_eq!(
+            engine.put_plain_filtered(filter, "demo/x", 0, b"v", params),
+            FilteredPut::Sent(Ok(0)),
+        );
+        until(&engine, "the router to receive the put", || {
+            router.seen(|s| s.pushes) == 1
+        });
+    }
 
     SessionDrive::close(&*engine);
     assert!(SessionDrive::is_closed(&*engine));

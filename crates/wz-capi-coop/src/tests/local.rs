@@ -148,9 +148,10 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
         "nothing matches yet"
     );
 
-    let params = PublishOptions::put()
-        .plain_put_params()
-        .expect("a plain put");
+    // A build whose graph can rewrite or count a put sends none plain (see
+    // `a_write_filter_suppresses_until_a_subscriber_is_declared`); the filters' verdicts below are
+    // every build's, and the plain put's give-way only the build that has it.
+    let params = PublishOptions::put().plain_put_params();
     let (id, _) = subscribe(&engine, "demo/l/**", Locality::Any);
     assert_eq!(
         heard(&counting),
@@ -166,11 +167,13 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
         engine.write_filter_active(blind_filter),
         "CONTROL: a filter that does not count it still suppresses"
     );
-    assert_eq!(
-        engine.put_plain_filtered(counting_filter, "demo/l/x", 0, b"v", &params),
-        FilteredPut::NotPlain,
-        "a put the session's own subscriber wants is the general publish's"
-    );
+    if let Some(params) = &params {
+        assert_eq!(
+            engine.put_plain_filtered(counting_filter, "demo/l/x", 0, b"v", params),
+            FilteredPut::NotPlain,
+            "a put the session's own subscriber wants is the general publish's"
+        );
+    }
 
     engine.undeclare_subscriber(id);
     assert_eq!(heard(&counting), [true, false]);
