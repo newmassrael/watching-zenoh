@@ -279,13 +279,13 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 7115 units; 0 framings lost in 312 directions held from
-  their start; 0 differing cookies in 316 echoes; 0 Init pairs of one kind in
-  318; 0 other versions in 636 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 8154 units; 0 framings lost in 324 directions held from
+  their start; 0 differing cookies in 328 echoes; 0 Init pairs of one kind in
+  330; 0 other versions in 660 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), 1.7.2, 1.8.0 and 1.9.0
-  routers with the clients built from the same release, zenoh-pico 1.10.1
-  clients,
+  routers with the clients built from the same release, 1.10.0 and 1.9.0
+  routers with older clients, zenoh-pico 1.10.1 clients,
   240 short sessions captured for their handshakes, links that drop 1%, 5%,
   10% and 20% of the packets each way (UDP; TCP at 1% and 5%), that reorder
   a quarter of them or duplicate 5% (TCP and UDP), and a real
@@ -299,17 +299,17 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +965 | +3545 | +2603 |
-| unit residual | -11214 | -9796 | -6745 |
-| unit undecoded | -11214 | -10326 | -7000 |
+| unit read whole | +966 | +3545 | +2603 |
+| unit residual | -11411 | -9992 | -6745 |
+| unit undecoded | -11411 | -10522 | -7000 |
 | stream framing held | +2832 | +6447 | (none) |
-| stream framing lost | -6709 | -6693 | (none) |
-| cookie matched (8 bytes) | +63986 | +63986 | +63999 |
-| cookie differing | -6728 | -6728 | -10000 |
-| Inits of opposite kinds | +986 | +986 | +999 |
-| Inits of one kind | -5737 | -5737 | -9000 |
+| stream framing lost | -6764 | -6747 | (none) |
+| cookie matched (8 bytes) | +63987 | +63987 | +63999 |
+| cookie differing | -6781 | -6781 | -10000 |
+| Inits of opposite kinds | +987 | +987 | +999 |
+| Inits of one kind | -5790 | -5790 | -9000 |
 | version of this reader | +7993 | +7993 | +8000 |
-| another version | -7728 | -7728 | (none) |
+| another version | -7781 | -7781 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
@@ -383,7 +383,7 @@ KeepAlives in a row missing before it, which fits the lease; the packets of
 that capture alone do not say it.
 
 A frame that repeats its SN never counts toward `yes`: a unit read whole
-(+965) and a broken step (-3994) sum to -3029. On the `no` sum the two largely
+(+966) and a broken step (-3994) sum to -3028. On the `no` sum the two largely
 cancel (+3545 and -3994: the null side reads a unit whole about one time in
 twelve and a step breaks nearly always, a zenoh flow breaks a step one time in
 sixteen), a frame that does both being 1.4 times as likely under the null as
@@ -397,7 +397,7 @@ first: a unit framed (held) or a desynchronisation this reader inferred
 capture holds from its SYN: a tap that joins a zenoh stream later lands inside
 a unit nearly always and loses the framing too, so there the observation says
 how the capture began and not what the bytes are. Held from the start, zenoh
-never lost it (0 in 312). The forty short MQTT connections lose it in both
+never lost it (0 in 324). The forty short MQTT connections lose it in both
 directions and read `undecided` still: twenty-odd bytes a direction are too
 few to say `no` at 2^-20, and that is the honest word.
 
@@ -409,11 +409,11 @@ crossing rested on the unit weight the real mDNS beats.
 
 Adding the six captures above (2100 units, 12 handshakes) moved the counts and
 with them the weights, and three null captures moved. A residual or undecoded
-unit now weighs -11214 on the `yes` sum (after the matched-release captures
-below), and on the `no` sum two undecoded units weigh -20652, past the
+unit now weighs -11411 on the `yes` sum (after the matched and mixed release
+captures below), and on the `no` sum two undecoded units weigh -21044, past the
 threshold: a flow of two units no codec of this reader decodes, and nothing
 else weighed, reads `no`, where it needed three. Two residual units weigh
--19592 and do not.
+-19984 and do not, 16 millibits short.
 `lan-dns` went from 2 `no` and 185 `undecided` to 159 `no` and 28 `undecided`,
 `stack-coap` from 5 `no` and 20 `undecided` to 25 `no`, `lan-ssdp` from 1 and
 1 to 2 `no`. No flow of another protocol read `yes`, and no zenoh flow read
@@ -426,15 +426,22 @@ pair was captured against the eclipse/zenoh image of the same release, over
 TCP and over UDP, on a link that loses nothing. All six captures read two
 `yes` flows, and none of their 686 SN steps broke (114 or 115 a capture). The
 counts grew by 1040 units, 12 handshakes and 12 framing directions, and the
-weights of the failures moved by up to 228 millibits (the table above is
-after them); those of the confirming outcomes moved by at most 1 (a held
-framing), and none of the outcomes the example sums of the session table and
-of the C header add up moved, so those sums did not either. The
-router and the clients are of one release here, and the handshake of a
-1.7.2 client against a 1.10.1 router, and the reverse, is not in the corpus.
+weights of the failures moved by up to 228 millibits.
+
+**Clients older than the router.** Six more pairs put a client and a router of
+different releases together, the same way: 1.7.2 clients against a 1.10.0
+router and against a 1.9.0 router, and 1.9.0 clients against a 1.10.0 router,
+over TCP and over UDP. (The reverse, a 1.10.1 client against an older router,
+was in the corpus already.) Every session opened, all six captures read two
+`yes` flows, and none of their 685 SN steps broke. They add 1039 units and 12
+handshakes: the weights of the failures moved by up to 197 millibits, and
+three confirming ones by one millibit each (the cookie's fidelity -14 to -13,
+the Init roles +986 to +987, a unit read whole +965 to +966), which moves the
+example sums of the session table, of the C header and of the C consumer by 1
+to 11 millibits. The table above is after both sets.
 
 Still open after model 2: zenoh releases other than 1.10.1, 1.10.0, 1.9.0,
-1.8.0, 1.7.2 and 1.5.0 (and clients of the router's release only for 1.9.0,
-1.8.0 and 1.7.2), links other than loopback, emulated links that lose, reorder
-or duplicate, and one Wi-Fi link, and the null side only on the protocols the
-corpus holds.
+1.8.0, 1.7.2 and 1.5.0 (and clients older than the router only for 1.7.2 and
+1.9.0, and of its own release only for 1.9.0, 1.8.0 and 1.7.2), links other
+than loopback, emulated links that lose, reorder or duplicate, and one Wi-Fi
+link, and the null side only on the protocols the corpus holds.
