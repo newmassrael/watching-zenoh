@@ -317,6 +317,16 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   one before; the board's overlay turns it on. A board whose driver feeds the loop from an interrupt
   through the runtime's cells leaves it off. The same cell types, the same borrows and the same
   `RefCell` flag checks remain, so a re-entrant borrow still stops the node as it did.
+- NOT AVOIDED, measured 2026-10-30: the pin `b1ede72108` that another session took (ADR 0065, the
+  codecs that may refuse an encode return a `Result`) holds ADR 0064's shared engine core below it,
+  so it carries what the measurement below read: against Round 3944's rows the fixed image's text
+  is +3,132 bytes (146,204 to 149,336), the batching's +3,108 and the get image's +4,764; the
+  stack chain 2,560 to 2,740, the bound 3,296 to 3,764 (over three quarters of the 4,480-byte stack,
+  so the fixed and batching overlays' stack is 5,056 now) and the kit's peak 2,672 to 3,000. The
+  rows, the contract (`engine-host` and `engine-behaviour`, one rule for the file of each of the
+  engine's two traits behind a reference, with the number of sites pinned for each image, and the
+  lines of `engine-clock` and the two `tx_buf.rs` rules moved with the pin) and the stack are moved
+  to those readings with the reason; the cost is SCE's to take out, and the rows follow it down.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

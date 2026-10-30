@@ -5,6 +5,8 @@
     "^core::str::slice_error_fail"
   ],
   "site_pins": {
+    "engine-host": {"zephyr-client-fixed": 21, "zephyr-client-fixed-batching": 21, "zephyr-client-fixed-get": 21},
+    "engine-behaviour": {"zephyr-client-fixed": 11, "zephyr-client-fixed-batching": 11, "zephyr-client-fixed-get": 11},
     "exec-drop": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
     "waker": {"zephyr-client-fixed": 8, "zephyr-client-fixed-batching": 8, "zephyr-client-fixed-get": 8},
     "planner-call": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
@@ -92,9 +94,21 @@
     },
     {
       "id": "engine-clock",
-      "where": {"file": "engine.rs", "line": 1386},
+      "where": {"file": "engine.rs", "line": 1369},
       "callees": "mac_cyt4bf::now_us$",
       "why": "the clock source the engine was given"
+    },
+    {
+      "id": "engine-host",
+      "where": {"file": "engine.rs"},
+      "callees": "engine::MainLoop>::",
+      "why": "the engine's one shared copy of Appendix D asks the machine it drives (its host, behind a reference to MainLoop) for its state, its queues and its invocations"
+    },
+    {
+      "id": "engine-behaviour",
+      "where": {"file": "microstep.rs"},
+      "callees": "microstep::Behaviour>::",
+      "why": "the engine's one shared copy of the microstep asks the machine it drives (behind a reference to Behaviour) for its store, its guards and its entry and exit content"
     },
     {
       "id": "entropy-make",
@@ -185,13 +199,13 @@
     },
     {
       "id": "txbuf-append-byte-sink",
-      "where": {"file": "tx_buf.rs", "line": 318},
+      "where": {"file": "tx_buf.rs", "line": 322},
       "callees": "TxBuf>::append_byte$",
       "why": "the codec's sink appends to the buffer it writes"
     },
     {
       "id": "txbuf-append",
-      "where": {"file": "tx_buf.rs", "line": 314},
+      "where": {"file": "tx_buf.rs", "line": 318},
       "callees": "TxBuf>::append$",
       "why": "the codec's sink appends a slice to the buffer it writes"
     },
