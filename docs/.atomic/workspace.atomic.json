@@ -300480,6 +300480,34 @@
         "The held-peer cases are run with fake dialers only; a hold over a real secure channel is run by no lane, and whether a two-node integration test of close and reset over TLS exists was not looked for. The atom session-close-ingress is still graded PARTIAL and its seven listed residuals were not recounted against the code. Read the hosted run of the current tree."
       ]
     },
+    "Round 3970": {
+      "decision_summary": "Hosted run 41064138536 (head 1d234b06b) was read per job. One clippy refusal, an all() around a single any() on the encoder cast in session_actions.rs, failed fifteen jobs (C1c-C1h, C1bn, C1cc, C1ad, E6h, the NEG, adminspace, routing and portability lanes, C1cf for three crates). Paid: that cfg; the hal timer probe, whose hand-written tables did not match SCE's packed rows, the EventQueue type and five new DocumentTables fields (also red Layer E and C1); four adminspace guard counts (C1AM 51 and 59, C1AN 46 and 51); the close-ingress pin of session_actions.rs, re-read against the OutOfBand clause it cites.",
+      "changes_bullets": [
+        "session_actions.rs: cfg on as_encoder. hal_timer_routing.rs: tables, queue type, new fields. run-ci.sh: four counts. reason-review-pins.md: one row."
+      ],
+      "verification_bullets": [
+        "On pc2: hal_timer_routing 6 passed, clippy of wz-session-core with codec-push and with no default features, clippy of wz-analyze, wz-capi-c and wz-capi-coop with no default features, adminspace counts 51, 46, 51, 59. The pin gate names the new blob. Hosted lanes judge the rest."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Layer Z8 session/shm/routing rows, C1cn and validate+verify+test logs of the previous runs, and the coop text budget attribution stay open. The windows and macos jobs failed on the same cfg and are expected green."
+      ],
+      "publishable_decision_summary": "Hosted run 41064138536 (head 1d234b06b) was read per job. One clippy refusal, an all() around a single any() on the encoder cast in session_actions.rs, failed fifteen jobs (C1c-C1h, C1bn, C1cc, C1ad, E6h, the NEG, adminspace, routing and portability lanes, C1cf for three crates). Paid: that cfg; the hal timer probe, whose hand-written tables did not match SCE's packed rows, the EventQueue type and five new DocumentTables fields (also red Layer E and C1); four adminspace guard counts (C1AM 51 and 59, C1AN 46 and 51); the close-ingress pin of session_actions.rs, re-read against the OutOfBand clause it cites.",
+      "publishable_changes_bullets": [
+        "session_actions.rs: cfg on as_encoder. hal_timer_routing.rs: tables, queue type, new fields. run-ci.sh: four counts. reason-review-pins.md: one row."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: hal_timer_routing 6 passed, clippy of wz-session-core with codec-push and with no default features, clippy of wz-analyze, wz-capi-c and wz-capi-coop with no default features, adminspace counts 51, 46, 51, 59. The pin gate names the new blob. Hosted lanes judge the rest."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer Z8 session/shm/routing rows, C1cn and validate+verify+test logs of the previous runs, and the coop text budget attribution stay open. The windows and macos jobs failed on the same cfg and are expected green."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
