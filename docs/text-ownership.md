@@ -302,6 +302,21 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   C-named symbols the graded wz image has and the graded pico image has not (13, 886 bytes: this one,
   `clock_settime` and `z_impl_k_usleep`, which are the board's wall clock and the finer tick,
   `bind` and `getsockname`, which are the link's local port, and the two address hooks).
+- TAKEN, text -1,352 bytes (147,556 to 146,204 on the fixed image; -2,280 on the batching image,
+  151,684 to 149,404, and -1,304 on the get image, 165,164 to 163,860), the stack chain 2,616 to
+  2,560, the bound 3,352 to 3,296 and the kit's peak 2,696 to 2,672: the runtime takes no interrupt
+  lock (`CONFIG_WZ_SINGLE_CONTEXT`, `wz-runtime-coop`'s `single-context`). The line table put the
+  largest line of the image's own code at `glue.rs` `irq_lock` and `irq_unlock`: 127 calls of
+  `wz_irq_lock` and 142 of `wz_irq_unlock` in the linked image, 33 in `SessionActionsBinding`, 20 in
+  `SessionLinkActions`, 14 in `decide_unit_in`, 12 in the dialler, 9 in the node's loop; each is a
+  borrow of a `critical_section::Mutex<RefCell<T>>` cell, a call to the kernel and back with the
+  `RefCell`'s flag around it. The guard is for an interrupt handler or another thread that reaches
+  the same cell; this image has none (its Rust has no interrupt handler, timer or thread, and the
+  Ethernet driver's threads call the MAC in `zeth_exports.rs` and nothing of the runtime), so the
+  borrow takes no lock. It is a contract the image states and not a default: off, the build is the
+  one before; the board's overlay turns it on. A board whose driver feeds the loop from an interrupt
+  through the runtime's cells leaves it off. The same cell types, the same borrows and the same
+  `RefCell` flag checks remain, so a re-entrant borrow still stops the node as it did.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

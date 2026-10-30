@@ -45,6 +45,11 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     list(APPEND backend_feature rx-in-place)
   endif()
 
+  # The runtime takes no interrupt lock (CONFIG_WZ_SINGLE_CONTEXT): only the node's thread calls into it.
+  if(CONFIG_WZ_SINGLE_CONTEXT)
+    list(APPEND backend_feature single-context)
+  endif()
+
   # The Open body's initial sequence number as a compact function of the two zids
   # (CONFIG_WZ_INITIAL_SN_COMPACT), without the Keccak permutation of zenoh's own derivation.
   if(CONFIG_WZ_INITIAL_SN_COMPACT)

@@ -258,6 +258,15 @@ switchboard = ["dep:wz-session-core", "wz-session-core/switchboard"]
 # which a host has and an MCU image does not, so no MCU build selects it.
 host-lock = []
 
+# The runtime's critical sections take no lock: `cs::with` hands out the token without masking
+# interrupts. An image selects it when it states, and holds to, the contract the lock exists for
+# the want of: no interrupt handler and no other thread calls into this runtime or into a
+# session of it, so the cells it guards are touched by the one context that runs its loop. The
+# lock is then the cost of a call to the platform's `irq_lock` and `irq_unlock` at each of the
+# image's borrows, with no other thread to keep out. Not with `host-lock`, which is the lock of
+# a program that has threads (src/cs.rs).
+single-context = []
+
 # R311y22b — no [build-dependencies]: the reassembly buffer-pool codegen moved
 # to the committed out/wz-runtime-coop/reassembly_pool_mcu.rs via the `xtask`
 # codegen SSOT, so this crate has no build script and pulls no sce-codegen.

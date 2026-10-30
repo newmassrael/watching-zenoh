@@ -183,6 +183,23 @@ config WZ_RX_IN_PLACE
 	  new path. Off by default until a lab records a run of it: the board's row is
 	  graded on the image without it.
 
+config WZ_SINGLE_CONTEXT
+	bool "Take no interrupt lock in the runtime: one context runs all of wz"
+	help
+	  The runtime guards its shared cells with a critical section, which masks interrupts
+	  (irq_lock) at each of the image's borrows, a call to the kernel and back at about a
+	  hundred places. The guard exists for an interrupt handler or another thread that
+	  reaches the same cells. This selects the build in which there is none: the one
+	  thread that runs the node's loop is the only code that calls into the runtime or into
+	  a session, so a borrow has nothing to keep out and takes no lock.
+
+	  Select it only for an image that holds to that. Anything that runs on another thread
+	  or in an interrupt (a driver's receive thread, a timer callback, a work item) must not
+	  call into the runtime, a session or a sink of the node; the Ethernet driver's threads
+	  of this repository call the MAC and nothing of the runtime. A board whose driver
+	  wakes or feeds the loop from an interrupt through the runtime's own cells leaves it
+	  off, which is the default: a race there is a corrupted cell and no message.
+
 config WZ_INITIAL_SN_COMPACT
 	bool "Derive the Open body's initial sequence number with a compact function"
 	help

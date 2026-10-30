@@ -35,9 +35,18 @@ pub fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
     {
         host::with(f)
     }
-    #[cfg(not(feature = "host-lock"))]
+    #[cfg(all(not(feature = "host-lock"), not(feature = "single-context")))]
     {
         critical_section::with(f)
+    }
+    #[cfg(all(not(feature = "host-lock"), feature = "single-context"))]
+    {
+        // SAFETY: the image that selects `single-context` states that no interrupt handler and
+        // no other thread calls into this runtime or a session of it (the feature's doc in
+        // Cargo.toml), so the one context that runs its loop is the only one that borrows a cell
+        // and a critical section against another has nothing to keep out. The token is a
+        // zero-sized proof, so it is made here and carries no state to restore.
+        f(unsafe { CriticalSection::new() })
     }
 }
 
@@ -186,6 +195,38 @@ mod host {
 
 #[cfg(feature = "host-lock")]
 pub use host::HostMutex;
+
+#[cfg(all(test, feature = "single-context", not(feature = "host-lock")))]
+mod single_context_tests {
+    use core::cell::RefCell;
+
+    use super::*;
+
+    /// With no lock a section still runs its closure once, returns its value, nests, and hands out
+    /// the cells' borrows: the guard the borrow rules give is the `RefCell`'s, and it stays.
+    #[test]
+    fn a_section_runs_nests_and_leaves_the_cells_borrow_rules() {
+        let cell = Mutex::new(RefCell::new(1u32));
+        let mut runs = 0;
+        let value = with(|outer| {
+            runs += 1;
+            *cell.borrow(outer).borrow_mut() += 1;
+            with(|inner| {
+                runs += 1;
+                *cell.borrow(inner).borrow()
+            })
+        });
+        assert_eq!((value, runs), (2, 2));
+        // A borrow held across a second section is a re-entrant borrow, refused as it is with a lock.
+        with(|cs| {
+            let held = cell.borrow(cs).borrow_mut();
+            let second = cell.borrow(cs).try_borrow_mut();
+            assert!(second.is_err());
+            drop(held);
+            assert!(cell.borrow(cs).try_borrow_mut().is_ok());
+        });
+    }
+}
 
 #[cfg(all(test, feature = "host-lock"))]
 mod tests {
