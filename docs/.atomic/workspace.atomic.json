@@ -301266,6 +301266,34 @@
         "The fixed client wins every cell against both pico arms; the heap client wins every cell but the turnaround against the single-threaded arm, where it reads a tie in this run and a win in the two before (one kit, twelve boots of each image). Next: decide the number of boots from the spread of the boots (about 0.012 ms for one image) and not from a verdict, state it in the method of the register, and run the matrix once at that number; if the heap client's turnaround is still a tie, find what separates it from the fixed client. Beside the MCU: the host matrix is not started (the pico ABI's round trip against pico is a tie at 10 to 11 microseconds, its throughput has no valid pico control), and zenoh-c and zenoh have no counterpart tool yet."
       ]
     },
+    "Round 3992": {
+      "decision_summary": "The pin moved to 1.10.2 while the namespace and scouting legs were being verified, and the build machine's oracles (zenohd, zenoh-c) were at 1.10.1. They were provisioned again at the pin: ensure_zenohd_at_pin.py rebuilt the four zenohd oracles (the first two attempts ended at bx's memory reservation, a verdict about the run and not the code, and the third passed), and the 1.10.1 headers, library and examples of the one install this session made were removed by exact path before install-zenoh-c.sh put 1.10.2 there. At the new pin Layers Z, M and C1cc pass with no skip. One cause was still open: the scout count leg read wz one reply short of the real library twice with an unchanged world. The USB adapter of the machine had flapped its carrier 4122 times (the kernel's carrier_changes, against 2 to 194 for the others), wz scouts only by up and running interfaces as upstream does, and the world the legs compared did not hold the running flag. host_addresses now keeps it.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: host_addresses lists the addresses of interfaces that are up and running, the rule both scouts use, so a carrier that dropped makes the window a different world."
+      ],
+      "verification_bullets": [
+        "At pin 1.10.2 on a build machine, with its oracles provisioned again: Layer Z passes (271 tests, none failed, no skip), Layer M passes (92 tests, no skip) and Layer C1cc passes (731 tests, 3499 s). The coop scout comparison passed alone after it had failed once, and its failure was one reply short with an unchanged world, which the carrier counter of the one flapping adapter explains; this was not shown by a repeated run of the same leg (the repeat ran on a second checkout slot whose reference build was stale, and measured nothing). A Layer Z run failed once in the upstream local subscriber test at a z_open after thirteen combinations and passed on the next run, unexplained. The 121 static gates pass on the rebased tree after the three submodules were moved to their pins."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The z_open failure in the upstream local subscriber test of Layer Z was seen once and not explained; a second failure of it is the evidence to read its output for. The scout count leg has no repeated measurement behind its explanation. The build machine has two checkout slots and a run lands on either, so the oracles and the references built by a lane exist in the slot the lane built in only; a measurement outside a whole lane needs its prerequisites built in the slot it lands on. The coop engine has no tls link, and a cooperative node against a tokio peer that races it is not run."
+      ],
+      "publishable_decision_summary": "The pin moved to 1.10.2 while the namespace and scouting legs were being verified, and the build machine's oracles (zenohd, zenoh-c) were at 1.10.1. They were provisioned again at the pin: ensure_zenohd_at_pin.py rebuilt the four zenohd oracles (the first two attempts ended at bx's memory reservation, a verdict about the run and not the code, and the third passed), and the 1.10.1 headers, library and examples of the one install this session made were removed by exact path before install-zenoh-c.sh put 1.10.2 there. At the new pin Layers Z, M and C1cc pass with no skip. One cause was still open: the scout count leg read wz one reply short of the real library twice with an unchanged world. The USB adapter of the machine had flapped its carrier 4122 times (the kernel's carrier_changes, against 2 to 194 for the others), wz scouts only by up and running interfaces as upstream does, and the world the legs compared did not hold the running flag. host_addresses now keeps it.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: host_addresses lists the addresses of interfaces that are up and running, the rule both scouts use, so a carrier that dropped makes the window a different world."
+      ],
+      "publishable_verification_bullets": [
+        "At pin 1.10.2 on a build machine, with its oracles provisioned again: Layer Z passes (271 tests, none failed, no skip), Layer M passes (92 tests, no skip) and Layer C1cc passes (731 tests, 3499 s). The coop scout comparison passed alone after it had failed once, and its failure was one reply short with an unchanged world, which the carrier counter of the one flapping adapter explains; this was not shown by a repeated run of the same leg (the repeat ran on a second checkout slot whose reference build was stale, and measured nothing). A Layer Z run failed once in the upstream local subscriber test at a z_open after thirteen combinations and passed on the next run, unexplained. The 121 static gates pass on the rebased tree after the three submodules were moved to their pins."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The z_open failure in the upstream local subscriber test of Layer Z was seen once and not explained; a second failure of it is the evidence to read its output for. The scout count leg has no repeated measurement behind its explanation. The build machine has two checkout slots and a run lands on either, so the oracles and the references built by a lane exist in the slot the lane built in only; a measurement outside a whole lane needs its prerequisites built in the slot it lands on. The coop engine has no tls link, and a cooperative node against a tokio peer that races it is not run."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
