@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether `timeout` ticks have passed since `last`, on a 32-bit tick counter that wraps.
+
+  A deadline and a sampling period are the same question, so the supervisor
+  (docs/observation-plane.md M3) and the resource sampler (M4) ask it through this one document.
+
+  `wrappingSub(now, last)` is the number of ticks that passed, modulo 2^32, provided fewer than
+  2^32 did (RFC 1982's serial-number premise): a wrap of the counter between the two readings is
+  the ordinary case. The predicate is a plain bool and cannot fail. The premise is why a timeout
+  is at most `wz_session_core::wrapping_ticks::MAX_TIMEOUT_TICKS`, half the range.
+
+  The same arithmetic as SCE's own fixture `algorithm_tick_elapsed` (SCE ADR 0063).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="tick_elapsed"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="now" type="uint32"/>
+    <sce:param name="last" type="uint32"/>
+    <sce:param name="timeout" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:return expr="wrappingSub(now, last) &gt;= timeout"/>
+  </sce:body>
+</scxml>

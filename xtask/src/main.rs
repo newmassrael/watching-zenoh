@@ -225,7 +225,8 @@ fn regen_codecs(root: &Path) {
 /// directory per consuming crate, mirroring each build.rs's emits:
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer,
-///                      peer_connection, clock_quality, supervision (statecharts)
+///                      peer_connection, clock_quality, supervision (statecharts);
+///                      tick_elapsed, tick_until_due (algorithms)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
@@ -263,6 +264,19 @@ fn regen_statecharts_and_pools(root: &Path) {
         "supervision",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
+    }
+
+    // wz-session-core algorithms: pure functions of their arguments, written as
+    // documents so the arithmetic they state (the wrapping and saturating
+    // primitives of SCE's ADR 0063) is the generator's and not hand-written twice.
+    let algorithms = repo_relative(root, &root.join("sources/algorithms"));
+    for stem in [
+        // docs/observation-plane.md M3, M4 — whether a span of ticks has passed.
+        "tick_elapsed",
+        // docs/observation-plane.md M4 — how long until a period is over.
+        "tick_until_due",
+    ] {
+        codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }
 
     // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
@@ -305,7 +319,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     }
 
     println!(
-        "xtask: regenerated 8 statecharts + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
+        "xtask: regenerated 8 statecharts + 2 algorithms + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
         pools.len()
     );
 }

@@ -372,8 +372,15 @@ reads it.
 1. **The `log` sink is dropped.** The `log` crate formats its arguments before any sink sees them,
    so a sink would store text, which the ring does not. A node that wants its `log` lines keeps
    them where they go today; the ring holds the events the node and the program write as numbers.
-2. **The deadline comparison and the sampler's countdown stay Rust until SCE has wrapping
-   arithmetic; then they are `algorithm` documents.** SCE's `sub` is checked, so `now - last` is an
+2. **The deadline comparison and the sampler's countdown are `algorithm` documents (done
+   2026-10-30, after SCE's ADR 0063 landed in the pin).** `sources/algorithms/tick_elapsed.scxml`
+   and `tick_until_due.scxml` state them with `wrappingSub` and `saturatingSub`;
+   `Codegen::emit_algorithm` writes them to `out/wz-session-core/`, and `wrapping_ticks::elapsed`
+   and `until_due` are those generated functions, which `Sampler::until_due_us` and the
+   supervisor call. They are no longer `const fn`, which the generator does not emit and nothing
+   needed. The wrap test stayed as the oracle, now over the edges of the range, so a generator
+   that changed what a wrapping or a saturating subtraction means would be seen. What follows is
+   the reasoning from before the primitive existed. SCE's `sub` is checked, so `now - last` is an
    error exactly when the counter wrapped, and the range analysis does not relate two values, so a
    branch written around it (`now >= last`) is not proven total and the function would be a
    `Result`. (An earlier version of this entry said a predicate that cannot fail would return a

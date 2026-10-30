@@ -7,7 +7,7 @@
 //! does: locate the vendored `sce-codegen` binary, and post-process its
 //! emit so the generated file can be `include!`'d into a module scope.
 //!
-//! Two emit kinds:
+//! Three emit kinds:
 //! - [`Codegen::emit_statechart`] — `sce:kind="statechart"` →
 //!   `$OUT_DIR/{stem}_sm.rs`; strips the file-head `#![...]` inner
 //!   attributes / `//!` inner doc comments (illegal mid-module; the
@@ -18,6 +18,11 @@
 //!   block (it constructs the pool inline — a multi-MiB stack allocation
 //!   at large dims — and exercises SCE's §5.E DMA-pool API the wz
 //!   dispatcher does not use; SCE's own CI covers those tests).
+//! - [`Codegen::emit_algorithm`] — `sce:kind="algorithm"` →
+//!   `$OUT_DIR/{stem}.rs`, the document's `name=` being its stem; strips
+//!   the inner attributes. The output is one free function named by the
+//!   document, so the consuming module re-exports it under the name its
+//!   callers use.
 //!
 //! The strip transforms are byte-identical to the per-build-script logic
 //! they replace, so regenerated emits are unchanged.
@@ -440,6 +445,14 @@ impl Codegen {
         let end = cut_generated_tests(&lines);
         let stripped = strip_inner_attrs(lines[..end].iter().copied());
         write(&emit_path, &stripped);
+    }
+
+    /// Codegen one `sce:kind="algorithm"` document into `$OUT_DIR/{stem}.rs`,
+    /// stripping inner attributes. The document's `name=` must be `stem`: the
+    /// emit's file and its function are both named by it.
+    pub fn emit_algorithm(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.run_generate(stem, resource_dir, out_dir);
+        strip_inner_attrs_file(&out_dir.join(format!("{stem}.rs")));
     }
 
     /// Allocator-free emit (`--no-std`): the buffer-pool / statechart

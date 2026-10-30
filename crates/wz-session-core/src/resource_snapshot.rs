@@ -63,7 +63,7 @@
 //! a newer buffer and skips the rest by the size in the header. The version and the size are pinned
 //! by a test, so a change to a field cannot pass without changing them.
 
-use crate::wrapping_ticks::{elapsed, MAX_TIMEOUT_TICKS};
+use crate::wrapping_ticks::{elapsed, until_due, MAX_TIMEOUT_TICKS};
 
 /// The layout version this code writes.
 pub const LAYOUT_VERSION: u16 = 1;
@@ -669,7 +669,7 @@ impl<const B: usize> Sampler<B> {
     pub fn until_due_us(&self, now_us: u32) -> u32 {
         match self.last_sample_us {
             None => 0,
-            Some(last) => self.period_us.saturating_sub(now_us.wrapping_sub(last)),
+            Some(last) => until_due(now_us, last, self.period_us),
         }
     }
 
