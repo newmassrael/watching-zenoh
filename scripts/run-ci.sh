@@ -17085,12 +17085,18 @@ layer_e_ap_demo_round_trip() {
     # `wz_datagram_carrier_loss_netns`): Layer M runs them after probing that the host can build
     # one. The sweep took them, and they panicked on a build machine without the capability while
     # passing on hosted runners only because those happen to have it.
+    # `resets_the_router_it_holds`, for the fourth leg of the fixed-memory secure channel's witness
+    # (`wz_fixed_memory_tls_zenohd_interop.rs`, the test named `an_image_closes_and_resets_the_router_it_holds
+    # _by_its_zid_over_mutual_tls`): it drives the `tls,control` build of `deploy/host-slot-node` against
+    # zenohd, both of which Layer Z builds and runs it with, and this job builds neither. The other three
+    # fns of that file begin with `zenohd` and were kept out by that token; this one does not, so the sweep
+    # took it. `layer_e_oracle_scope_gate.py` found it.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
         --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener \
-        --skip wz_dialer --skip netns) || return 1
+        --skip wz_dialer --skip netns --skip resets_the_router_it_holds) || return 1
     # The same upstream C programs against the cooperative engine's library
     # (`docs/capi-pico-on-coop-engine.md`, the open item of step L4): one file, linked to a
     # build of wz-capi-pico of its own whose features are the reference arm's but for the

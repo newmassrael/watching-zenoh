@@ -127,7 +127,7 @@
     },
     {
       "id": "entropy-make",
-      "where": {"file": "slot_node.rs", "line": 782},
+      "where": {"file": "slot_node.rs", "line": 855},
       "callees": "ZephyrEntropy|^trng_get_entropy$|fixed_client::run::\\{closure#1\\}",
       "why": "the function that makes the node's entropy source"
     },

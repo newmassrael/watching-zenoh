@@ -92,7 +92,7 @@ SRC_DIR = os.path.join(ROOT, "crates", "wz-capi-pico", "src")
 # each reason, so `check()` refuses until REASONS_READ_AT moves with them. The pin is read
 # from the tree's own pins, which needs no provisioned checkout.
 PICO_REPO = "https://github.com/eclipse-zenoh/zenoh-pico"
-REASONS_READ_AT = "1.10.1"
+REASONS_READ_AT = "1.10.2"
 
 # The floors. A parse that finds fewer has stopped reading the crate.
 MIN_STRUCTS = 25

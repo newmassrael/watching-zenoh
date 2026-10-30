@@ -48,6 +48,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import upstream_switch_map as usm  # noqa: E402  the one reader of where a pico release defines its switches
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PICO = ROOT / "vendor" / "zenoh-pico"
 DROP_IN = ROOT / "crates" / "wz-capi-pico" / "include" / "wz_capi_pico.h"
@@ -63,10 +66,15 @@ KEYWORDS = {"return", "sizeof", "if", "while", "for", "switch", "else", "do", "c
 DECL_RE = re.compile(r"(?:\b([A-Za-z_]\w*)\s*\**|\*)\s*\b([A-Za-z_]\w*)\s*\(")
 
 
-def cmake_defaults(cmakelists: str) -> dict[str, str]:
-    """`set(NAME value CACHE ...)`, the defaults a configure starts from."""
-    found = re.findall(r'^\s*set\((\w+)\s+("[^"]*"|[^\s)]+)\s+CACHE\b', cmakelists, re.M)
-    return {name: value.strip('"') for name, value in found}
+def cmake_defaults(cmake: str) -> dict[str, str]:
+    """`set(NAME value CACHE ...)`, the defaults a configure starts from: the FIRST definition of a
+    name, as a configure keeps it. `cmake` is the text `usm.pico_cmake_text` joins (up to 1.10.1 the
+    CMakeLists alone; from 1.10.2 `cmake/feature_config.cmake` too, where the definitions moved)."""
+    found = re.findall(r'^\s*set\((\w+)\s+("[^"]*"|[^\s)]+)\s+CACHE\b', cmake, re.M)
+    out: dict[str, str] = {}
+    for name, value in found:
+        out.setdefault(name, value.strip('"'))
+    return out
 
 
 def render_config(template: str, values: dict[str, str]) -> str:
@@ -126,7 +134,7 @@ def configurations(defaults: dict[str, str]) -> dict[str, dict[str, str]]:
 
 def upstream_functions(pico: pathlib.Path) -> tuple[set[str], list[str]]:
     """The union of the functions zenoh-pico's header declares, and findings."""
-    defaults = cmake_defaults((pico / "CMakeLists.txt").read_text(encoding="utf-8"))
+    defaults = cmake_defaults(usm.pico_cmake_text(pico))
     template = (pico / "include" / "zenoh-pico" / "config.h.in").read_text(encoding="utf-8")
     header = pico / "include" / "zenoh-pico.h"
     include = [pico / "include"]
