@@ -11,9 +11,8 @@
 //!
 //! A device often has a better clock than the system's, a disciplined hardware clock or a time
 //! master on its bus. A program registers it as a read callback, and `z_timestamp_new` then stamps
-//! with it. The rules for which source answers, and for a source that cannot say what time it is,
-//! are those of [`wz_node_time::clock_registry`]; this file is the C face of that registry and adds
-//! none.
+//! with it. What the registry does is [`wz_capi_port::observation::clock`]'s, which the zenoh-c
+//! ABI's doors act on too; this file is the pico ABI's names and result codes for it.
 //!
 //! The library cannot know whether the registered clock follows a reference. The program can, so it
 //! reports it (`wz_ext_clock_report`), and a build whose `clock-quality-stamping` policy is
@@ -21,8 +20,7 @@
 
 use std::ffi::c_void;
 
-use wz_node_time::clock_registry::{SourceId, GLOBAL};
-use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
+use wz_capi_port::observation::{clock, Refusal};
 
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
 
@@ -33,45 +31,24 @@ use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
 /// is (not set, not yet synchronised, its bus silent). It is called from whichever thread
 /// stamps, possibly several at once, and must be safe to call that way.
 #[allow(non_camel_case_types)]
-pub type wz_ext_clock_read_fn =
-    unsafe extern "C" fn(context: *mut c_void, secs: *mut u64, nanos: *mut u32) -> i8;
+pub type wz_ext_clock_read_fn = clock::ReadFn;
 
 /// The event `wz_ext_clock_report` carries.
 #[allow(non_camel_case_types)]
 pub type wz_ext_clock_event_t = u8;
 
 /// The clock follows a reference, for the first time or again after a loss.
-pub const WZ_EXT_CLOCK_SYNC_ACQUIRED: wz_ext_clock_event_t = 0;
+pub const WZ_EXT_CLOCK_SYNC_ACQUIRED: wz_ext_clock_event_t = clock::SYNC_ACQUIRED;
 /// The reference is gone.
-pub const WZ_EXT_CLOCK_SYNC_LOST: wz_ext_clock_event_t = 1;
+pub const WZ_EXT_CLOCK_SYNC_LOST: wz_ext_clock_event_t = clock::SYNC_LOST;
 /// The program's bound on running without a reference has passed.
-pub const WZ_EXT_CLOCK_HOLDOVER_EXPIRED: wz_ext_clock_event_t = 2;
+pub const WZ_EXT_CLOCK_HOLDOVER_EXPIRED: wz_ext_clock_event_t = clock::HOLDOVER_EXPIRED;
 
-/// A C read callback and the context it is called with.
-struct CallbackEpoch {
-    read: wz_ext_clock_read_fn,
-    context: *mut c_void,
-}
-
-// SAFETY: the registering program owns the callback's thread-safety and the context's lifetime;
-// both are the contract `wz_ext_clock_read_fn` states and `wz_ext.h` repeats. The context is
-// opaque to the library and only ever handed back to the callback.
-unsafe impl Send for CallbackEpoch {}
-unsafe impl Sync for CallbackEpoch {}
-
-impl EpochSource for CallbackEpoch {
-    fn try_since_epoch(&self) -> Result<SinceEpoch, EpochUnavailable> {
-        let (mut secs, mut nanos) = (0u64, 0u32);
-        // SAFETY: the pointers are to locals that outlive the call; the callback is the
-        // program's, under the contract above.
-        let code = unsafe { (self.read)(self.context, &mut secs, &mut nanos) };
-        // A callback that says it read a time but names a nanosecond past the second has not read
-        // one.
-        if code == 0 && nanos < 1_000_000_000 {
-            Ok(SinceEpoch { secs, nanos })
-        } else {
-            Err(EpochUnavailable)
-        }
+/// The pico code of a refusal of the clock doors.
+fn code(refusal: Refusal) -> ZResult {
+    match refusal {
+        Refusal::Full => Z_ERR_OVERFLOW,
+        Refusal::Invalid | Refusal::Unavailable => Z_ERR_INVALID,
     }
 }
 
@@ -94,14 +71,14 @@ pub unsafe extern "C" fn wz_ext_clock_source_register(
         let Some(read) = read else {
             return Z_ERR_NULL;
         };
-        match GLOBAL.register(Box::new(CallbackEpoch { read, context })) {
-            Ok(id) => {
+        match clock::register(read, context) {
+            Ok(handle) => {
                 if !out_handle.is_null() {
-                    *out_handle = id.into_raw();
+                    *out_handle = handle;
                 }
                 Z_OK
             }
-            Err(_) => Z_ERR_OVERFLOW,
+            Err(refusal) => code(refusal),
         }
     })
 }
@@ -112,12 +89,9 @@ pub unsafe extern "C" fn wz_ext_clock_source_register(
 /// context. A call already running on another thread may still be inside the callback.
 #[no_mangle]
 pub extern "C" fn wz_ext_clock_source_unregister(handle: u32) -> ZResult {
-    crate::ffi::guarded(|| {
-        if GLOBAL.unregister(SourceId::from_raw(handle)) {
-            Z_OK
-        } else {
-            Z_ERR_INVALID
-        }
+    crate::ffi::guarded(|| match clock::unregister(handle) {
+        Ok(()) => Z_OK,
+        Err(refusal) => code(refusal),
     })
 }
 
@@ -126,81 +100,15 @@ pub extern "C" fn wz_ext_clock_source_unregister(handle: u32) -> ZResult {
 /// `Z_ERR_INVALID` for another value. Reporting what is already so is not an error.
 #[no_mangle]
 pub extern "C" fn wz_ext_clock_report(event: wz_ext_clock_event_t) -> ZResult {
-    crate::ffi::guarded(|| {
-        let standing = GLOBAL.standing();
-        match event {
-            WZ_EXT_CLOCK_SYNC_ACQUIRED => {
-                standing.report_sync_acquired();
-            }
-            WZ_EXT_CLOCK_SYNC_LOST => {
-                standing.report_sync_lost();
-            }
-            WZ_EXT_CLOCK_HOLDOVER_EXPIRED => {
-                standing.report_holdover_expired();
-            }
-            _ => return Z_ERR_INVALID,
-        }
-        Z_OK
+    crate::ffi::guarded(|| match clock::report(event) {
+        Ok(()) => Z_OK,
+        Err(refusal) => code(refusal),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    /// A clock the test drives through its context: `*context` is the seconds it reads, and 0 is a
-    /// clock that is not set.
-    unsafe extern "C" fn read_from_context(
-        context: *mut c_void,
-        secs: *mut u64,
-        nanos: *mut u32,
-    ) -> i8 {
-        let at = (*(context as *const AtomicU64)).load(Ordering::Relaxed);
-        if at == 0 {
-            return -1;
-        }
-        *secs = at;
-        *nanos = 5;
-        0
-    }
-
-    unsafe extern "C" fn reads_a_bad_nanosecond(
-        _context: *mut c_void,
-        secs: *mut u64,
-        nanos: *mut u32,
-    ) -> i8 {
-        *secs = 1;
-        *nanos = 1_000_000_000;
-        0
-    }
-
-    #[test]
-    fn a_callback_that_reads_a_time_is_an_epoch_source() {
-        let at = AtomicU64::new(123);
-        let source = CallbackEpoch {
-            read: read_from_context,
-            context: &at as *const AtomicU64 as *mut c_void,
-        };
-        assert_eq!(
-            source.try_since_epoch(),
-            Ok(SinceEpoch {
-                secs: 123,
-                nanos: 5
-            })
-        );
-        at.store(0, Ordering::Relaxed);
-        assert_eq!(source.try_since_epoch(), Err(EpochUnavailable));
-    }
-
-    #[test]
-    fn a_callback_naming_a_nanosecond_past_the_second_has_not_read_a_time() {
-        let source = CallbackEpoch {
-            read: reads_a_bad_nanosecond,
-            context: std::ptr::null_mut(),
-        };
-        assert_eq!(source.try_since_epoch(), Err(EpochUnavailable));
-    }
 
     #[test]
     fn a_null_callback_is_refused_and_an_unknown_handle_and_event_are_invalid() {

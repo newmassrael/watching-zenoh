@@ -61,6 +61,15 @@ pub mod cancellation;
 mod drive;
 mod engine;
 pub mod listeners;
+// What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
+// for itself. Only the features of the instruments compile it.
+#[cfg(any(
+    feature = "clock-source",
+    feature = "event-ring",
+    feature = "supervision",
+    feature = "resource-snapshot"
+))]
+pub mod observation;
 pub mod os;
 mod query;
 pub mod sync;

@@ -20,67 +20,38 @@
 //! The hook runs on the thread that called `check`, with no lock of the library held, so it may
 //! call any of these doors. `wz_ext_supervision_stop` on the checkpoint whose hook is running is
 //! refused until the hook returns.
+//!
+//! What the supervisor does is [`wz_capi_port::observation::supervision`]'s, which the zenoh-c
+//! ABI's doors act on too; this file is the pico ABI's names and result codes for it.
 
 use std::ffi::c_void;
-use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::Instant;
 
-use wz_session_core::supervision::SupervisionState;
-use wz_session_core::supervisor::{BuildSupervisor, StartRefused, Stop};
+use wz_capi_port::observation::supervision as supervisor;
+use wz_capi_port::observation::Refusal;
 
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_OK};
 
 /// The program's expiry hook: called once for each checkpoint that missed its deadline.
 #[allow(non_camel_case_types)]
-pub type wz_ext_supervision_hook_fn = unsafe extern "C" fn(context: *mut c_void, checkpoint: u8);
+pub type wz_ext_supervision_hook_fn = supervisor::HookFn;
 
 /// A checkpoint that is not supervised.
-pub const WZ_EXT_SUPERVISION_DISARMED: u8 = 0;
+pub const WZ_EXT_SUPERVISION_DISARMED: u8 = supervisor::STATE_DISARMED;
 /// A checkpoint that is supervised and was fed in time.
-pub const WZ_EXT_SUPERVISION_ARMED: u8 = 1;
+pub const WZ_EXT_SUPERVISION_ARMED: u8 = supervisor::STATE_ARMED;
 /// A checkpoint whose expiry hook is running.
-pub const WZ_EXT_SUPERVISION_EXPIRING: u8 = 2;
+pub const WZ_EXT_SUPERVISION_EXPIRING: u8 = supervisor::STATE_EXPIRING;
 /// A checkpoint whose hook has run.
-pub const WZ_EXT_SUPERVISION_EXPIRED: u8 = 3;
+pub const WZ_EXT_SUPERVISION_EXPIRED: u8 = supervisor::STATE_EXPIRED;
 /// What `wz_ext_supervision_state` answers for a checkpoint there is none of.
-pub const WZ_EXT_SUPERVISION_NO_SUCH_CHECKPOINT: u8 = 255;
+pub const WZ_EXT_SUPERVISION_NO_SUCH_CHECKPOINT: u8 = supervisor::STATE_NO_SUCH_CHECKPOINT;
 
-#[derive(Clone, Copy)]
-struct Hook {
-    run: wz_ext_supervision_hook_fn,
-    context: *mut c_void,
-}
-
-// SAFETY: the program owns the hook's thread-safety and the context's lifetime; the context is
-// opaque here and only handed back to the hook.
-unsafe impl Send for Hook {}
-
-struct Doors {
-    supervisor: BuildSupervisor,
-    hook: Option<Hook>,
-    origin: Instant,
-}
-
-impl Doors {
-    /// Milliseconds since the first call, in the 32 bits the supervisor compares.
-    fn now(&self) -> u32 {
-        self.origin.elapsed().as_millis() as u32
+/// The pico code of a refusal of the supervision doors.
+fn code(refusal: Refusal) -> ZResult {
+    match refusal {
+        Refusal::Invalid => Z_ERR_INVALID,
+        Refusal::Full | Refusal::Unavailable => Z_ERR_GENERIC,
     }
-}
-
-fn doors() -> &'static Mutex<Doors> {
-    static DOORS: OnceLock<Mutex<Doors>> = OnceLock::new();
-    DOORS.get_or_init(|| {
-        Mutex::new(Doors {
-            supervisor: BuildSupervisor::for_build(),
-            hook: None,
-            origin: Instant::now(),
-        })
-    })
-}
-
-fn locked() -> std::sync::MutexGuard<'static, Doors> {
-    doors().lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Set the hook `wz_ext_supervision_check` calls for a checkpoint that missed its deadline, or
@@ -96,7 +67,7 @@ pub unsafe extern "C" fn wz_ext_supervision_set_hook(
     context: *mut c_void,
 ) -> ZResult {
     crate::ffi::guarded(|| {
-        locked().hook = hook.map(|run| Hook { run, context });
+        supervisor::set_hook(hook, context);
         Z_OK
     })
 }
@@ -106,16 +77,9 @@ pub unsafe extern "C" fn wz_ext_supervision_set_hook(
 /// timeout of 0 or past 2147483647 ms. A checkpoint that is already supervised is left as it is.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_start(checkpoint: u8, timeout_ms: u32) -> ZResult {
-    crate::ffi::guarded(|| {
-        let mut doors = locked();
-        let now = doors.now();
-        match doors
-            .supervisor
-            .start(usize::from(checkpoint), now, timeout_ms)
-        {
-            Ok(()) => Z_OK,
-            Err(StartRefused::NoSuchCheckpoint | StartRefused::TimeoutOutOfRange) => Z_ERR_INVALID,
-        }
+    crate::ffi::guarded(|| match supervisor::start(checkpoint, timeout_ms) {
+        Ok(()) => Z_OK,
+        Err(refusal) => code(refusal),
     })
 }
 
@@ -123,14 +87,9 @@ pub extern "C" fn wz_ext_supervision_start(checkpoint: u8, timeout_ms: u32) -> Z
 /// armed ignores it. `Z_ERR_INVALID` for a checkpoint the build does not have.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_feed(checkpoint: u8) -> ZResult {
-    crate::ffi::guarded(|| {
-        let mut doors = locked();
-        if usize::from(checkpoint) >= wz_session_core::caps::SUPERVISION_CHECKPOINTS {
-            return Z_ERR_INVALID;
-        }
-        let now = doors.now();
-        doors.supervisor.feed(usize::from(checkpoint), now);
-        Z_OK
+    crate::ffi::guarded(|| match supervisor::feed(checkpoint) {
+        Ok(()) => Z_OK,
+        Err(refusal) => code(refusal),
     })
 }
 
@@ -138,49 +97,19 @@ pub extern "C" fn wz_ext_supervision_feed(checkpoint: u8) -> ZResult {
 /// stop until the hook returns. `Z_ERR_INVALID` for a checkpoint the build does not have.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_stop(checkpoint: u8) -> ZResult {
-    crate::ffi::guarded(|| match locked().supervisor.stop(usize::from(checkpoint)) {
-        Stop::Stopped => Z_OK,
-        Stop::Refused => Z_ERR_GENERIC,
-        Stop::NoSuchCheckpoint => Z_ERR_INVALID,
+    crate::ffi::guarded(|| match supervisor::stop(checkpoint) {
+        Ok(()) => Z_OK,
+        Err(refusal) => code(refusal),
     })
 }
 
-/// Look at every supervised checkpoint now, and run the program's hook once for each whose
-/// deadline has passed. The hook is called with no lock of the library held.
+/// Compare the time with every deadline and run the program's hook once for each checkpoint that
+/// has missed it. The expiry is written to the node's event log first, in a build that has the
+/// log, so it is in the log whatever the hook does.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_check() -> ZResult {
     crate::ffi::guarded(|| {
-        let (check, hook) = {
-            let mut doors = locked();
-            let now = doors.now();
-            (doors.supervisor.check(now), doors.hook)
-        };
-        if check.is_clear() {
-            return Z_OK;
-        }
-        for index in 0..wz_session_core::caps::SUPERVISION_CHECKPOINTS {
-            if !check.hook(index) {
-                continue;
-            }
-            // The expiry is written to the node's event log before the program's hook runs, so
-            // it is in the log whatever the hook does, and once: the supervisor reports each
-            // expiry to exactly one check. A build without the log writes nothing.
-            #[cfg(feature = "event-ring")]
-            {
-                use wz_node_time::event_log::{global, library, process_clock};
-                global().emit_from(
-                    &process_clock(),
-                    library::LIBRARY_LEVEL,
-                    library::SUPERVISION_EXPIRED,
-                    &[index as u64],
-                );
-            }
-            if let Some(hook) = hook {
-                // SAFETY: the program's hook, under the contract of `set_hook`.
-                unsafe { (hook.run)(hook.context, index as u8) };
-            }
-            locked().supervisor.hook_done(index);
-        }
+        supervisor::check();
         Z_OK
     })
 }
@@ -190,18 +119,12 @@ pub extern "C" fn wz_ext_supervision_check() -> ZResult {
 /// is 1.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_healthy() -> u8 {
-    u8::from(locked().supervisor.is_healthy())
+    u8::from(supervisor::healthy())
 }
 
 /// The state of `checkpoint`: `WZ_EXT_SUPERVISION_DISARMED`, `_ARMED`, `_EXPIRING` or `_EXPIRED`,
 /// or `WZ_EXT_SUPERVISION_NO_SUCH_CHECKPOINT`.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_state(checkpoint: u8) -> u8 {
-    match locked().supervisor.state(usize::from(checkpoint)) {
-        Some(SupervisionState::Disarmed) => WZ_EXT_SUPERVISION_DISARMED,
-        Some(SupervisionState::Armed) => WZ_EXT_SUPERVISION_ARMED,
-        Some(SupervisionState::Expiring) => WZ_EXT_SUPERVISION_EXPIRING,
-        Some(SupervisionState::Expired) => WZ_EXT_SUPERVISION_EXPIRED,
-        None => WZ_EXT_SUPERVISION_NO_SUCH_CHECKPOINT,
-    }
+    supervisor::state(checkpoint)
 }

@@ -201,6 +201,7 @@ clock-source = [
     "unstable-api",
     "dep:wz-node-time",
     "wz-node-time/clock-source",
+    "wz-capi-port/clock-source",
     "wz-capi-core?/clock-source",
 ]
 # `event-ring`: the node's event log and the doors that write and read it (`wz_ext_event_emit`,
@@ -211,6 +212,7 @@ event-ring = [
     "unstable-api",
     "dep:wz-node-time",
     "wz-node-time/event-ring",
+    "wz-capi-port/event-ring",
     "wz-capi-core?/event-ring",
 ]
 # `supervision`: the node's supervisor and the doors that drive it (`wz_ext_supervision_*`).
@@ -219,6 +221,7 @@ event-ring = [
 supervision = [
     "unstable-api",
     "wz-session-core/supervision",
+    "wz-capi-port/supervision",
     "wz-capi-core?/supervision",
 ]
 # `resource-snapshot`: the node's resource snapshot and the doors that read it
@@ -228,6 +231,7 @@ supervision = [
 resource-snapshot = [
     "unstable-api",
     "wz-session-core/resource-snapshot",
+    "wz-capi-port/resource-snapshot",
     "wz-capi-core?/resource-snapshot",
 ]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /

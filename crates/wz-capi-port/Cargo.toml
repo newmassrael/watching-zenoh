@@ -43,6 +43,15 @@ std = []
 # (`Engine::publish_shm_on_wire_all`): the buffer's type is the session core's, behind its own
 # feature. An engine that has no shared memory answers the method with the bytes.
 transport-shm = ["wz-session-core/transport-shm"]
+# The four instruments of the observation plane (`docs/observation-plane.md`), which the doors of
+# every C ABI act on (`observation`): wz's own, so each is off by default as the reference builds
+# are. They are the node's and not a session's, so the cooperative engine hosts the same four. They
+# need the host (`std`) for their process-wide state; the clock and the ring are `wz-node-time`'s
+# and the supervisor and the snapshot are `wz-session-core`'s.
+clock-source = ["std", "dep:wz-node-time", "wz-node-time/clock-source"]
+event-ring = ["std", "dep:wz-node-time", "wz-node-time/event-ring"]
+supervision = ["std", "wz-session-core/supervision"]
+resource-snapshot = ["std", "wz-session-core/resource-snapshot"]
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does
@@ -60,6 +69,9 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "session-matching",
     "declare-interest",
 ] }
+# The node's clock registry and event ring, which the observation plane's doors act on. Optional:
+# only the `clock-source` and `event-ring` features name it.
+wz-node-time = { path = "../wz-node-time", optional = true }
 
 [lints]
 workspace = true

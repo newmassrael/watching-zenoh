@@ -18,9 +18,12 @@
 //! tells the reader how many events it missed before it hands it the oldest one left. Under
 //! `drop-newest` nothing is freed by reading; the program says how far it is done with
 //! (`wz_ext_event_release`), and that is what makes room.
+//!
+//! What the log does is [`wz_capi_port::observation::events`]'s, which the zenoh-c ABI's doors act
+//! on too; this file is the pico ABI's names and result codes for it.
 
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
-use wz_node_time::event_log::{global, process_clock, LogRead};
+use wz_capi_port::observation::events::{self, Read};
 
 /// What a read found: an event.
 pub const WZ_EXT_EVENT_RECORD: u8 = 0;
@@ -30,12 +33,11 @@ pub const WZ_EXT_EVENT_EMPTY: u8 = 1;
 pub const WZ_EXT_EVENT_LOST: u8 = 2;
 
 /// The level of every event the library writes (a program's own levels are its own).
-pub const WZ_EXT_EVENT_LEVEL_LIBRARY: u8 = wz_node_time::event_log::library::LIBRARY_LEVEL;
+pub const WZ_EXT_EVENT_LEVEL_LIBRARY: u8 = events::LEVEL_LIBRARY;
 /// The first source number the library uses; a program's sources are below it.
-pub const WZ_EXT_EVENT_SOURCE_LIBRARY: u16 = wz_node_time::event_log::library::LIBRARY_SOURCE_BASE;
+pub const WZ_EXT_EVENT_SOURCE_LIBRARY: u16 = events::SOURCE_LIBRARY;
 /// A supervised checkpoint missed its deadline. One integer: the checkpoint's number.
-pub const WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED: u16 =
-    wz_node_time::event_log::library::SUPERVISION_EXPIRED;
+pub const WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED: u16 = events::SOURCE_SUPERVISION_EXPIRED;
 
 /// One event, as `wz_ext_event_read` gives it.
 #[repr(C)]
@@ -84,9 +86,10 @@ pub unsafe extern "C" fn wz_ext_event_emit(
         } else {
             std::slice::from_raw_parts(args, arg_count)
         };
-        match global().emit_from(&process_clock(), level, source, args) {
-            wz_session_core::event_ring::Pushed::Stored(_) => Z_OK,
-            wz_session_core::event_ring::Pushed::Dropped => Z_ERR_OVERFLOW,
+        // The only refusal a write has is a full log.
+        match events::emit(level, source, args) {
+            Ok(()) => Z_OK,
+            Err(_) => Z_ERR_OVERFLOW,
         }
     })
 }
@@ -110,32 +113,32 @@ pub unsafe extern "C" fn wz_ext_event_read(
         if cursor.is_null() || out.is_null() || (args.is_null() && args_capacity > 0) {
             return Z_ERR_NULL;
         }
-        let mut reader = global().observer().reader_at(*cursor);
-        let read = reader.poll();
-        if let Some(next) = reader.cursor() {
-            *cursor = next;
-        }
-        *out = match read {
-            LogRead::Record(record) => {
-                let written = usize::from(record.arg_count).min(args_capacity);
-                for (index, value) in record.args.iter().take(written).enumerate() {
-                    *args.add(index) = *value;
-                }
-                wz_ext_event_t {
-                    kind: WZ_EXT_EVENT_RECORD,
-                    level: record.level,
-                    arg_count: record.arg_count,
-                    source: record.source,
-                    sequence: record.sequence,
-                    timestamp: record.timestamp,
-                    ..Default::default()
-                }
-            }
-            LogRead::Empty => wz_ext_event_t {
+        let args: &mut [u64] = if args_capacity == 0 {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(args, args_capacity)
+        };
+        *out = match events::read(&mut *cursor, args) {
+            Read::Record {
+                level,
+                arg_count,
+                source,
+                sequence,
+                timestamp,
+            } => wz_ext_event_t {
+                kind: WZ_EXT_EVENT_RECORD,
+                level,
+                arg_count,
+                source,
+                sequence,
+                timestamp,
+                ..Default::default()
+            },
+            Read::Empty => wz_ext_event_t {
                 kind: WZ_EXT_EVENT_EMPTY,
                 ..Default::default()
             },
-            LogRead::Lost { missed } => wz_ext_event_t {
+            Read::Lost { missed } => wz_ext_event_t {
                 kind: WZ_EXT_EVENT_LOST,
                 sequence: missed,
                 ..Default::default()
@@ -151,7 +154,7 @@ pub unsafe extern "C" fn wz_ext_event_read(
 #[no_mangle]
 pub extern "C" fn wz_ext_event_release(upto: u64) -> ZResult {
     crate::ffi::guarded(|| {
-        global().release_to(upto);
+        events::release(upto);
         Z_OK
     })
 }
@@ -159,5 +162,5 @@ pub extern "C" fn wz_ext_event_release(upto: u64) -> ZResult {
 /// How many events a full log refused under `drop-newest`. `0` under `overwrite-oldest`.
 #[no_mangle]
 pub extern "C" fn wz_ext_event_dropped() -> u32 {
-    global().dropped()
+    events::dropped()
 }
