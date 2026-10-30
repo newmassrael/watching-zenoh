@@ -8018,7 +8018,9 @@ layer_c1am_cargo_test_adminspace() {
     # and R2859's multicast-row test, both ungated in `adminspace::tests`.
     # PRINTED by running each command; `guarded_count_gate.py --range` did not
     # reach these guards, since the new tests' names do not carry the filter.
-    _runci_guarded_test "C1AM adminspace introspection 50" 50 \
+    # 50 -> 51: one more `adminspace` test joined this feature's lib (hosted C1AM printed
+    # `51 passed`); re-derived on the build host.
+    _runci_guarded_test "C1AM adminspace introspection 51" 51 \
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM adminspace 50" 50 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
@@ -9215,7 +9217,9 @@ layer_c1y_cargo_test_routing_peer() {
     # command PRINTED.
     # Hosted run 40482567212 -- 16 -> 18: two tests the accept path gained since the last
     # pin. Read off what the command PRINTED (`18 passed; 909 filtered out`).
-    _runci_guarded_test "C1y accept_loop" 18 \
+    # 18 -> 19: one more `accept_loop` test (hosted C1y printed `19 passed`); re-derived on the
+    # build host.
+    _runci_guarded_test "C1y accept_loop" 19 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
@@ -10914,7 +10918,8 @@ layer_z8_upstream_suite() {
     fi
     local names
     names="$(python3 scripts/lib/z8_expectation_gate.py --names)" || return 1
-    # shellcheck disable=SC2086 -- the names are words by construction (file stems)
+    # The names are words by construction (file stems), so they are left to split.
+    # shellcheck disable=SC2086
     python3 scripts/lib/z8_upstream_suite.py measure $names || return 1
     python3 scripts/lib/z8_expectation_gate.py --check "${Z8_OUT:-$PWD/target/z8-suite}/report.tsv" || return 1
 }
@@ -11032,10 +11037,16 @@ layer_c1co_pico_client_dials_a_listener() {
     # event log are the node's and not a session's (`wz-capi-port`'s `observation`), so the same
     # two door tests the default build runs run here, one test each, and a build that stopped
     # linking them without the tokio engine would fail to compile or to run them.
-    _runci_guarded_test "C1co observation plane engine-coop" 2 \
-        cargo test -p wz-capi-pico --no-default-features \
-        --features "engine-coop,link-udp,supervision,event-ring,clock-source,resource-snapshot" \
-        --test supervision_doors --test event_log_doors || return 1
+    # A guard reads one libtest summary, and each door test is its own binary with its own
+    # summary, so each is guarded on its own (the pair under one guard expected a summary of
+    # `2 passed` that neither binary prints).
+    local door
+    for door in supervision_doors event_log_doors; do
+        _runci_guarded_test "C1co observation plane engine-coop ${door}" 1 \
+            cargo test -p wz-capi-pico --no-default-features \
+            --features "engine-coop,link-udp,supervision,event-ring,clock-source,resource-snapshot" \
+            --test "$door" || return 1
+    done
 }
 
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
@@ -11616,7 +11627,9 @@ layer_c1q_multicast_glue() {
     # `wz-host-net`, and the two cases of this filter that exercised them went with them. PRINTED
     # by the command, not a diff count. (The moved cases run in `wz-host-net`'s row of the
     # non-default test gate; this leg holds what stayed.)
-    _runci_guarded_test C1q 12 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # 12 -> 13: one more `udp_multicast_config` test (hosted C1q printed `13 passed`); re-derived
+    # on the build host.
+    _runci_guarded_test C1q 13 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
     # Debt 873 side finding -- a scouting socket goes on past a refused IPv4 membership and
     # a multicast link does not. Its own leg because the one above builds no scouting
@@ -11765,7 +11778,9 @@ layer_c1m_session_lwip() {
         connect_manager --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 23 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 57 \
+    # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
+    # the build host.
+    _runci_guarded_test "C1m mcu adminspace read+write" 58 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
