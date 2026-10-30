@@ -327,6 +327,19 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   engine's two traits behind a reference, with the number of sites pinned for each image, and the
   lines of `engine-clock` and the two `tx_buf.rs` rules moved with the pin) and the stack are moved
   to those readings with the reason; the cost is SCE's to take out, and the rows follow it down.
+- TAKEN, measured 2026-10-30: the pin `f167223931` (SCE ADRs 0066 to 0071: packed table rows, the
+  engine taking events and states as numbers, its constructor and its exit walk out of line, the
+  workspace's buffers uninitialised until written), on the three images at the same wz tree. Against
+  `b1ede72108` the text is -3,124 (fixed, 146,212), -3,108 (batching, 149,404) and -3,100 (get,
+  165,524); against 49e40c9a72, before the shared core, +8, 0 and +1,664. `sce_rust_runtime` is
+  7,398 bytes (9,512 at `b1ede72108`, 7,908 for the two machines' copies). The stack chain of the
+  fixed and batching images is 2,536 (2,740; 2,560 before the shared core): the dial's `build_in`
+  is 80 bytes where it was 600 and `take_microstep` 120 where it was 232. The bound is 3,604
+  (3,764; 3,296 before) and the kit's peak 2,912 (3,000; 2,672), so their overlays' stack is 4,864.
+  The get image's chain and bound are what they were before the shared core, 3,372 and 4,564. The
+  `engine-host` and `engine-behaviour` rules now claim 42 and 17 sites. What is left of the cost is
+  the core's `enter_states` frame (200 bytes, copies of the entry set's handles) and the two
+  machines' own tables; SCE works on the first.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

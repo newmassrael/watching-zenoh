@@ -184,6 +184,15 @@ DEFERRED: dict[str, str] = {
         "--compare after; the build that change is pushed with is Layer "
         "Qzb's, which builds every row."
     ),
+    "image_top_report.py": (
+        "R3951 -- its subject is one BUILT ELF named on the command line, "
+        "and a push has none: the hook builds no Zephyr image. It reaches the "
+        "round only through its import of `stack_frame_gate.py`, whose frame "
+        "reader it runs over the disassembly. It is an instrument, run by hand "
+        "on the images of the tree before a change and the tree after "
+        "(`diff` or a join on the symbol name), and it grades nothing, so a "
+        "round that moves its subject loses no verdict by not running it."
+    ),
     "rocksdb_engine.py": (
         "R2806 -- verifies a provisioned native Linux engine. Measured "
         "--verify at 2.79s warm; an absent cache fails, while provisioning "

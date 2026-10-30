@@ -319,6 +319,11 @@ IMAGES = (
     # are frames of their own now (`Engine::run_main_event_loop` 188, the turn's 40, `take_event`
     # 16, `take_microstep` 232, `enter_states` 232), where the engine of each machine was five
     # frames of 288 bytes in all. The kit's reading is 3,000, 260 over.
+    #
+    # `peak` is 2,536 bytes at SCE pin f167223931 (packed rows, the engine taking events as numbers,
+    # the engine's constructor and exit walk out of line): the worst chain is 13 frames, the dial's
+    # `build_in` is 80 bytes where it was 600, and `take_microstep` is 120 where it was 232. The
+    # kit's reading is 2,912, 376 over.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -326,7 +331,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2740,
+        peak=2536,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -365,6 +370,9 @@ IMAGES = (
     #
     # 2,740 bytes with the engine's Appendix D linked once for the program (see the fixed client's
     # row): the same chain as the client without batching.
+    #
+    # 2,536 bytes at SCE pin f167223931 (see the fixed client's row): the same chain as the client
+    # without batching.
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -372,7 +380,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2740,
+        peak=2536,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and

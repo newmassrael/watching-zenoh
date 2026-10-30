@@ -5,8 +5,8 @@
     "^core::str::slice_error_fail"
   ],
   "site_pins": {
-    "engine-host": {"zephyr-client-fixed": 21, "zephyr-client-fixed-batching": 21, "zephyr-client-fixed-get": 21},
-    "engine-behaviour": {"zephyr-client-fixed": 11, "zephyr-client-fixed-batching": 11, "zephyr-client-fixed-get": 11},
+    "engine-host": {"zephyr-client-fixed": 42, "zephyr-client-fixed-batching": 42, "zephyr-client-fixed-get": 42},
+    "engine-behaviour": {"zephyr-client-fixed": 17, "zephyr-client-fixed-batching": 17, "zephyr-client-fixed-get": 17},
     "exec-drop": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
     "waker": {"zephyr-client-fixed": 8, "zephyr-client-fixed-batching": 8, "zephyr-client-fixed-get": 8},
     "planner-call": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},

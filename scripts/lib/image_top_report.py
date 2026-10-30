@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""The largest stack frames and the largest symbols of one built image, as lines a diff reads.
+"""R3951 (no register item) -- the largest stack frames and the largest symbols of one built image, as lines a diff reads.
 
 `stack_frame_gate.py` says which frame is the worst and whether it is over its budget; it does not
 say what the frames under it are, and `check-footprint.sh` says how many bytes of text an image
