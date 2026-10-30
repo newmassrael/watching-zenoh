@@ -2178,8 +2178,28 @@ jobs:
           save-if: "false"
           workspaces: crates -> target
 
+      # The `shm` file creates POSIX shared-memory segments, and on a hosted run the creation
+      # answered `OS error 12` seven times in a row where the build host answers none (the
+      # report's `shm.run.log`, run 41095349469). What the runner allows is read here, before
+      # and after, so the next red names the limit and not a guess: the tmpfs and its size, the
+      # overcommit policy, the memory the cgroup allows and the segments left behind.
+      - name: Machine facts for the shm file (before)
+        run: |
+          df -h /dev/shm
+          cat /proc/sys/vm/overcommit_memory
+          free -m
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+          ulimit -a
+
       - name: Layer Z8 — upstream's own tests against the patched graph
         run: bash scripts/run-ci.sh --layer Z8
+
+      - name: Machine facts for the shm file (after)
+        if: always()
+        run: |
+          df -h /dev/shm
+          find /dev/shm -mindepth 1 -maxdepth 1 | wc -l
+          free -m
 
       # The report names a file's outcome and, at most, its first failing line: a `timeout` or
       # an `Elapsed` says nothing of which test waited on what. The per-file logs are what
