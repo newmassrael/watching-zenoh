@@ -3586,6 +3586,8 @@ router_entry_points! { on_tables:
     fn routers_net_view(&self) -> LinkstateNetView;
     #[cfg(feature = "adminspace-router-linkstate")]
     fn peers_net_view(&self) -> LinkstateNetView;
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn linkstate_regions_text(&self) -> Vec<(String, String)>;
     fn pending_len(&self) -> usize;
     fn pending_timed_out(&self) -> usize;
 }
@@ -9636,6 +9638,61 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             tables: Arc::clone(&self.fwd.tables),
             region: NORTH_REGION,
         }))
+    }
+
+    /// The regions this node answers a `linkstate` query for, each with the text of its graph
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data`, which answers the region of
+    /// each of the node's hats with its `info`).
+    ///
+    /// A router answers its north region, the graph of its routers, and the region its peers
+    /// are in, the graph of its peers. A peer answers its north region only, and that is the peer
+    /// hat's: with `scouting/gossip/multihop` on the whole of what the node learnt, and without
+    /// it the pin's single-hop `Gossip` object, the node and the nodes it holds a link to. A
+    /// node it only hears of is used to dial and not kept
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `if zid == src {`); the graph here holds such
+    /// nodes, as the flood of the router carries them, so the faces say who is a neighbour.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    pub fn linkstate_regions_text(&self) -> Vec<(String, String)> {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+        let label = |zid: &Zid| zid_to_zenoh_hex(zid.as_slice());
+        let north = NORTH_REGION.to_string();
+        let net = self.tables.north_net();
+        if self.tables.node_mode != WhatAmI::Peer {
+            // The region of the peers is the one `peers_net_view` reads: the first the hat table
+            // serves with the peer hat, which is the default peer subregion on the `auto` preset.
+            let peers = self
+                .tables
+                .hats
+                .iter()
+                .find(|(region, hat)| {
+                    is_peer_hat(*region, self.tables.node_mode) && hat.mesh().is_some()
+                })
+                .map_or(Region::default_south(WhatAmI::Peer), |(region, _)| region);
+            return vec![
+                (north, self.routers_net_view().dot()),
+                (peers.to_string(), self.peers_net_view().dot()),
+            ];
+        }
+        if net.gossip_multihop() || net.full_linkstate() {
+            return vec![(north, net.dot_with(label))];
+        }
+        let mut nodes = vec![*net.self_zid()];
+        for state in self.tables.faces.values() {
+            if state.tier != NORTH_REGION {
+                continue;
+            }
+            if let Some(zid) = state.peer_zid {
+                if !nodes.contains(&zid) {
+                    nodes.push(zid);
+                }
+            }
+        }
+        let mut text = String::from("graph {\n");
+        for (index, zid) in nodes.iter().enumerate() {
+            text.push_str(&format!("    {index} [ label = \"{}\" ]\n", label(zid)));
+        }
+        text.push_str("}\n");
+        vec![(north, text)]
     }
 
     /// A read-only [`LinkstateNetView`] over the PEER-tier graph

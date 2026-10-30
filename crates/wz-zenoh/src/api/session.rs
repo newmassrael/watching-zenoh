@@ -375,9 +375,6 @@ pub(crate) struct RouterAdminViews {
     /// The graph of the north region: the routers.
     #[cfg(feature = "engine-tokio")]
     pub(crate) routers: wz_runtime_tokio::linkstate_forward::LinkstateNetView,
-    /// The graph of the south region of the peers.
-    #[cfg(feature = "engine-tokio")]
-    pub(crate) peers: wz_runtime_tokio::linkstate_forward::LinkstateNetView,
     /// Where the router's listeners can be reached.
     pub(crate) locators: Vec<String>,
 }
@@ -664,24 +661,7 @@ impl Engine {
     fn linkstate_regions(&self) -> Vec<(String, String)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().linkstate_regions(),
-            Engine::Router(_) => {
-                let Some(views) = self.router_admin_views() else {
-                    return Vec::new();
-                };
-                vec![
-                    (
-                        wz_session_core::extbound::Region::North.to_string(),
-                        views.routers.dot(),
-                    ),
-                    (
-                        wz_session_core::extbound::Region::default_south(
-                            wz_session_core::WhatAmI::Peer,
-                        )
-                        .to_string(),
-                        views.peers.dot(),
-                    ),
-                ]
-            }
+            Engine::Router(router) => router.node.forwarder().linkstate_regions_text(),
         }
     }
 
@@ -696,7 +676,6 @@ impl Engine {
                     sessions: forwarder.sessions_view(),
                     declarations: forwarder.declarations_view(),
                     routers: forwarder.routers_net_view(),
-                    peers: forwarder.peers_net_view(),
                     locators: router.node.listen_locators().to_vec(),
                 })
             }
@@ -12531,6 +12510,217 @@ mod tests {
                 !text3.contains("a1b2c2"),
                 "peer 3 never heard peer 1 was gone.\n--- peer 2 ---\n{text2}\n--- peer 3 \
                  ---\n{text3}"
+            );
+        }
+
+        /// Without `scouting/gossip/multihop`, the north graph of a peer that listens is the
+        /// pin's Gossip object: the peer and the nodes it holds a link to, and not a peer two links
+        /// away. It is upstream's `gossip_regression_1`: peer 3 dials peer 2, which dials the
+        /// router, which holds peer 1, and none of them dials another.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn without_multihop_a_peer_knows_no_peer_past_its_next_hop() {
+            use std::time::{Duration, Instant};
+
+            // The peers never dial one another, and the router and the admin space are as upstream
+            // leaves them: the router keeps its default gossip, and only peer 3 has an admin space.
+            let node = |id: &str, mode: &str, extra: &str, admin: bool| {
+                let mut config = Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "{mode}", {extra}
+                          scouting: {{ multicast: {{ enabled: false }} }},
+                          adminspace: {{ enabled: {admin} }} }}"#
+                ))
+                .expect("a configuration zenoh reads");
+                // Set as upstream's test sets it, by the typed setter and not by the document.
+                if mode == "peer" {
+                    config
+                        .scouting
+                        .gossip
+                        .set_autoconnect(Some(zenoh_config::ModeDependentValue::Unique(
+                            zenoh_config::WhatAmIMatcher::empty(),
+                        )))
+                        .expect("sets autoconnect");
+                }
+                // A peer that listens is the router node at node mode Peer, as it is for a
+                // program that depends on the crate.
+                with_the_node(|| open(config).wait().expect("a node opens"))
+            };
+            let router_port = unautoselected_port();
+            let peer_port = unautoselected_port();
+            let _router = node(
+                "f00e5ba570e8b806943daf3aac5ab403",
+                "router",
+                &format!(r#"listen: {{ endpoints: ["tcp/127.0.0.1:{router_port}"] }},"#),
+                false,
+            );
+            std::thread::sleep(Duration::from_secs(1));
+            let _peer1 = node(
+                "30097fa63d9da906d3d4b72410ed5f45",
+                "peer",
+                &format!(r#"connect: {{ endpoints: ["tcp/127.0.0.1:{router_port}"] }},"#),
+                false,
+            );
+            std::thread::sleep(Duration::from_secs(1));
+            let peer2 = node(
+                "c7245746d1fbc0650806fb77a953592e",
+                "peer",
+                &format!(
+                    r#"connect: {{ endpoints: ["tcp/127.0.0.1:{router_port}"] }},
+                       listen: {{ endpoints: ["tcp/127.0.0.1:{peer_port}"] }},"#
+                ),
+                false,
+            );
+            std::thread::sleep(Duration::from_secs(1));
+            let peer3 = node(
+                "d10fd1be306ac62b3bb95d34a672caea",
+                "peer",
+                &format!(r#"connect: {{ endpoints: ["tcp/127.0.0.1:{peer_port}"] }},"#),
+                true,
+            );
+            std::thread::sleep(Duration::from_secs(1));
+            let graph_of = |peer: &Session| -> String {
+                let replies = peer
+                    .get("@/*/peer/linkstate/north")
+                    .timeout(Duration::from_secs(2))
+                    .wait()
+                    .expect("asks");
+                replies
+                    .recv_timeout(Duration::from_secs(3))
+                    .ok()
+                    .flatten()
+                    .and_then(|reply| {
+                        reply
+                            .into_result()
+                            .ok()
+                            .map(|sample| sample.payload().try_to_string().unwrap().into_owned())
+                    })
+                    .unwrap_or_default()
+            };
+            // Sampled for the whole window and not until it first looks right: a node that is
+            // learnt late is a node that is learnt.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut text3 = String::new();
+            let mut leaked = None;
+            while Instant::now() < deadline {
+                text3 = graph_of(&peer3);
+                if leaked.is_none() && text3.contains("30097fa63d9da906d3d4b72410ed5f45") {
+                    leaked = Some(text3.clone());
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            eprintln!("--- peer 3 ---\n{text3}");
+            drop(peer2);
+            assert!(
+                text3.contains("c7245746d1fbc0650806fb77a953592e"),
+                "peer 3 does not hold peer 2.\n--- peer 3 ---\n{text3}"
+            );
+            assert!(
+                leaked.is_none(),
+                "peer 3 held peer 1, two links away.\n--- peer 3 ---\n{}",
+                leaked.unwrap_or_default()
+            );
+        }
+
+        /// Upstream's `gossip_regression_1`, as it is written: configurations from the default by
+        /// the typed setters, the nodes opened by `await` on a runtime of several threads, a second
+        /// between each, and the first reply to the wildcard query read. Its subject is the same as
+        /// that of the test above.
+        #[cfg(feature = "unstable")]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_peer_of_a_peer_of_a_router_knows_no_peer_as_upstream_asks() {
+            use std::time::Duration;
+
+            use zenoh_config::{ModeDependentValue, WhatAmI, WhatAmIMatcher};
+
+            // The open is the synchronous one: a program that depends on the crate opens a peer
+            // that listens as the node, which the tests of the crate ask for where they mean it.
+            let open = |config: Config| with_the_node(|| open(config).wait().unwrap());
+            let silent = |mut c: Config| {
+                c.scouting.multicast.set_enabled(Some(false)).unwrap();
+                c.scouting
+                    .gossip
+                    .set_autoconnect(Some(ModeDependentValue::Unique(WhatAmIMatcher::empty())))
+                    .unwrap();
+                c
+            };
+            let router = {
+                let mut c = Config::default();
+                c.listen
+                    .endpoints
+                    .set(vec!["tcp/127.0.0.1:0".parse().unwrap()])
+                    .unwrap();
+                c.scouting.multicast.set_enabled(Some(false)).unwrap();
+                let _ = c.set_mode(Some(WhatAmI::Router));
+                open(c)
+            };
+            let router_endpoint = router
+                .info()
+                .locators()
+                .await
+                .into_iter()
+                .find(|locator| locator.to_string().starts_with("tcp/"))
+                .expect("a tcp locator")
+                .to_string()
+                .parse::<zenoh_config::EndPoint>()
+                .expect("an endpoint");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let peer1 = {
+                let mut c = silent(Config::default());
+                c.connect
+                    .endpoints
+                    .set(vec![router_endpoint.clone().into()])
+                    .unwrap();
+                let _ = c.set_mode(Some(WhatAmI::Peer));
+                open(c)
+            };
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let peer2 = {
+                let mut c = silent(Config::default());
+                c.connect
+                    .endpoints
+                    .set(vec![router_endpoint.into()])
+                    .unwrap();
+                c.listen
+                    .endpoints
+                    .set(vec!["tcp/127.0.0.1:0".parse().unwrap()])
+                    .unwrap();
+                let _ = c.set_mode(Some(WhatAmI::Peer));
+                open(c)
+            };
+            let peer_endpoint = peer2
+                .info()
+                .locators()
+                .await
+                .into_iter()
+                .find(|locator| locator.to_string().starts_with("tcp/"))
+                .expect("a tcp locator")
+                .to_string()
+                .parse::<zenoh_config::EndPoint>()
+                .expect("an endpoint");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let peer3 = {
+                let mut c = silent(Config::default());
+                c.connect.endpoints.set(vec![peer_endpoint.into()]).unwrap();
+                c.adminspace.set_enabled(true).unwrap();
+                let _ = c.set_mode(Some(WhatAmI::Peer));
+                open(c)
+            };
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let replies = peer3.get("@/*/peer/linkstate/north").await.unwrap();
+            let reply = replies.recv_async().await.unwrap();
+            let payload = reply
+                .into_result()
+                .ok()
+                .unwrap()
+                .payload()
+                .try_to_string()
+                .unwrap()
+                .into_owned();
+            eprintln!("--- peer 3 ---\n{payload}");
+            assert!(
+                !payload.contains(&peer1.zid().to_string()),
+                "peer 3 holds peer 1, two links away.\n{payload}"
             );
         }
 
