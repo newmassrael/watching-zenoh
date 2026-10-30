@@ -299244,6 +299244,42 @@
         "ARCHITECTURE.md is still dated Round 116 in its header and other sections are stale beyond this frame (MCU target TBD, Phase C in flight); a refresh is owed."
       ]
     },
+    "Round 3937": {
+      "decision_summary": "A wz peer started with a gateway/south partition is witnessed against a stock zenohd, and the Layer Z stock-config legs are brought back to green on a built zenohd for the first time since several keys joined the honoured list. The peer legs start a zenohd PEER on the auto preset and dial it with wz --peer --gateway-south of one open subregion: zenohd places wz in its north with wz as gateway, as the pin's rule gives a remote that announced south, and the control without the flag is placed as a plain peer. The reference is a peer because the pin refuses a router in a peer node's subregion and wz refuses it the same way, which the first draft of the leg ran into. The stock-config legs were red on six keys added by other landings without a Layer Z decision: qos/network resolves to an empty list at a silent zenohd, and the mTLS pair, the two TLS booleans and the protocol whitelist resolve to null. All six are classed and the drop-in fixture names them.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_south_partition_region_zenohd_interop.rs: a peer-mode zenohd config, the oracle takes the reference node's own mode, and two legs (the claim and its control) for a wz peer with and without a partition.",
+        "scripts/run-ci.sh: the guarded count of that file moves from 6 to 8.",
+        "crates/wz-integration-tests/tests/wz_reads_a_stock_zenohd_config.rs: qos/network is compared as an empty list; the connect certificate, connect private key, the two TLS booleans and the protocol whitelist are classed as keys the tree answers null; the drop-in fixture names all six.",
+        "docs/peer-region-hats.md: the peer partition is recorded as witnessed, with the refusal the first draft met."
+      ],
+      "verification_bullets": [
+        "Run on a build host with a zenohd built from the pinned checkout and the demo built with the Layer Z feature set: all 8 legs of the partition file pass (6 existing and the 2 new ones), and all 13 legs of the stock-config file pass. Before the fixture change the stock-config file failed 4 of 13: two were the demo built with too few features for the wire and retry legs, and two were the six unclassed keys, which the leg's exhaustive check names. The first draft of the peer claim failed because the partition matched a router, which the pin refuses; the measurement of the two TLS booleans corrected a first guess that they resolve to their documented defaults. The config key fixture gate, the upstream citation gate and the store reason gate pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of the current tree: the Layer Z legs were not run by any landing before this one on a built zenohd, so other legs outside the two files run here may hold the same kind of unchecked key. The Layer C1bzr failures of the last completed hosted run (build errors and unresolved doc links in several crates) are being fixed by the ci-red session and were not touched. Also open: stale LinkstateForwarder comments (about 70, many of them dead intra-doc links) and the linkstate_forward module name."
+      ],
+      "publishable_decision_summary": "A wz peer started with a gateway/south partition is witnessed against a stock zenohd, and the Layer Z stock-config legs are brought back to green on a built zenohd for the first time since several keys joined the honoured list. The peer legs start a zenohd PEER on the auto preset and dial it with wz --peer --gateway-south of one open subregion: zenohd places wz in its north with wz as gateway, as the pin's rule gives a remote that announced south, and the control without the flag is placed as a plain peer. The reference is a peer because the pin refuses a router in a peer node's subregion and wz refuses it the same way, which the first draft of the leg ran into. The stock-config legs were red on six keys added by other landings without a Layer Z decision: qos/network resolves to an empty list at a silent zenohd, and the mTLS pair, the two TLS booleans and the protocol whitelist resolve to null. All six are classed and the drop-in fixture names them.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_south_partition_region_zenohd_interop.rs: a peer-mode zenohd config, the oracle takes the reference node's own mode, and two legs (the claim and its control) for a wz peer with and without a partition.",
+        "scripts/run-ci.sh: the guarded count of that file moves from 6 to 8.",
+        "crates/wz-integration-tests/tests/wz_reads_a_stock_zenohd_config.rs: qos/network is compared as an empty list; the connect certificate, connect private key, the two TLS booleans and the protocol whitelist are classed as keys the tree answers null; the drop-in fixture names all six.",
+        "docs/peer-region-hats.md: the peer partition is recorded as witnessed, with the refusal the first draft met."
+      ],
+      "publishable_verification_bullets": [
+        "Run on a build host with a zenohd built from the pinned checkout and the demo built with the Layer Z feature set: all 8 legs of the partition file pass (6 existing and the 2 new ones), and all 13 legs of the stock-config file pass. Before the fixture change the stock-config file failed 4 of 13: two were the demo built with too few features for the wire and retry legs, and two were the six unclassed keys, which the leg's exhaustive check names. The first draft of the peer claim failed because the partition matched a router, which the pin refuses; the measurement of the two TLS booleans corrected a first guess that they resolve to their documented defaults. The config key fixture gate, the upstream citation gate and the store reason gate pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of the current tree: the Layer Z legs were not run by any landing before this one on a built zenohd, so other legs outside the two files run here may hold the same kind of unchecked key. The Layer C1bzr failures of the last completed hosted run (build errors and unresolved doc links in several crates) are being fixed by the ci-red session and were not touched. Also open: stale LinkstateForwarder comments (about 70, many of them dead intra-doc links) and the linkstate_forward module name."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
