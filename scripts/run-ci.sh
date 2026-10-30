@@ -18979,7 +18979,27 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # CAP_NET_RAW; a host without non-interactive sudo SKIPs, FATAL under WZ_M_REQUIRE. The
     # drop-in is built from the raweth arm's config.h, the reference arm being built (with its
     # two library patches) by `scripts/build-zenoh-pico-cli.sh`. Count-guarded at 3.
+    #
+    # No sudo is not the end of it: the namespace sandbox of `netns-topology.sh` holds
+    # CAP_NET_RAW itself, and `lo` is its own, so the programs run as they are inside it
+    # (`netns_sandbox_probe`: 0 = it can be built, 2 = this host cannot, 4 = it broke).
+    local -a reth_wrap=()
+    local reth_can=0
     if sudo -n true 2>/dev/null; then
+        reth_can=1
+    else
+        local reth_sandbox_rc=0
+        # shellcheck source=scripts/lib/netns-topology.sh
+        (source scripts/lib/netns-topology.sh && netns_sandbox_probe) || reth_sandbox_rc=$?
+        if (( reth_sandbox_rc == 0 )); then
+            reth_wrap=(bash "$PWD/scripts/lib/netns-sandbox.sh")
+            reth_can=1
+        elif (( reth_sandbox_rc != 2 )); then
+            echo "  Layer M FAIL: the namespace sandbox broke (rc=$reth_sandbox_rc) for the raweth legs" >&2
+            return 1
+        fi
+    fi
+    if (( reth_can )); then
         local reth_features
         reth_features=$(python3 scripts/lib/wz_config.py --features pico \
             target/zenoh-pico-build-reth/zenohpico/include/zenoh-pico/config.h) || return 1
@@ -18988,13 +19008,13 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         (cd crates && cargo build -p wz-capi-pico --quiet "${reth_args[@]}" \
             --target-dir target/wz-capi-pico-reth) || return 1
         _runci_guarded_test "M pico raweth scenario on wz" 3 \
-            cargo test -p wz-integration-tests \
+            "${reth_wrap[@]}" cargo test -p wz-integration-tests \
             --test pico_raweth_on_wz_capi -- --ignored --test-threads=1 || return 1
     elif (( m_required )); then
         echo "  Layer M FAIL: no non-interactive sudo for the raweth legs, but WZ_M_REQUIRE=1" >&2
         return 1
     else
-        echo "Layer M SKIP pico raweth scenario on wz (no non-interactive sudo for CAP_NET_RAW)"
+        echo "Layer M SKIP pico raweth scenario on wz (neither non-interactive sudo nor a bwrap sandbox for CAP_NET_RAW)"
     fi
     # Open-debt item 913 — the zenoh-c ABI's group: a stock zenohd joins
     # `udp/224.0.0.226:7451#iface=lo`, and upstream's `z_info.c` (events) and its printers

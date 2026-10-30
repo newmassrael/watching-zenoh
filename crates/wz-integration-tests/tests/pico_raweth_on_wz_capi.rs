@@ -22,7 +22,9 @@
 //! Each program runs under `sudo -n`, as upstream's scenario runs it, and nothing else does:
 //! the harness itself stays unprivileged. A host without non-interactive sudo cannot run the
 //! legs, and each says so and returns; Layer M runs them only after probing for it, and fails
-//! instead under `WZ_M_REQUIRE`.
+//! instead under `WZ_M_REQUIRE`. Inside the namespace sandbox of `scripts/lib/netns-topology.sh`
+//! (`WZ_NETNS_SANDBOX=1`) the process holds `CAP_NET_RAW` itself, so the programs run as they
+//! are, and `lo` is the sandbox's own.
 //!
 //! ## The reference, and its two patches
 //!
@@ -47,8 +49,8 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
-    compile_pico_example_against_wz_capi_in, graceful_terminate, read_captured, wait_for_substring,
-    zenoh_pico_reth_cli_binary, ChildGuard, PicoHeaderArm,
+    compile_pico_example_against_wz_capi_in, graceful_terminate, netns_sandboxed, read_captured,
+    wait_for_substring, zenoh_pico_reth_cli_binary, ChildGuard, PicoHeaderArm,
 };
 
 /// The subscriber's endpoint in upstream's scenario: its own MAC on `lo`, hearing only the
@@ -71,8 +73,11 @@ fn received_line(i: usize) -> String {
 }
 
 /// Whether this process may run a program as root without a password, which the scenario
-/// needs and a host need not grant.
+/// needs and a host need not grant. In the namespace sandbox it holds `CAP_NET_RAW` itself.
 fn may_sudo() -> bool {
+    if netns_sandboxed() {
+        return true;
+    }
     Command::new("sudo")
         .args(["-n", "true"])
         .stdin(Stdio::null())
@@ -128,8 +133,15 @@ impl Drop for Privileged {
 /// `exe` run as root with `args`, as upstream's scenario runs it, its output captured.
 fn spawn_privileged(label: &str, exe: &Path, args: &[&str]) -> (Privileged, File) {
     let capture = tempfile::tempfile().expect("a capture file");
-    let child = Command::new("sudo")
-        .args(["-n", "timeout", "--kill-after=5", LIFETIME_BOUND])
+    let mut command = if netns_sandboxed() {
+        Command::new("timeout")
+    } else {
+        let mut sudo = Command::new("sudo");
+        sudo.args(["-n", "timeout"]);
+        sudo
+    };
+    let child = command
+        .args(["--kill-after=5", LIFETIME_BOUND])
         .args(["stdbuf", "-oL", "-eL"])
         .arg(exe)
         .args(args)
