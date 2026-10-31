@@ -52,7 +52,7 @@ cell without a same-condition measurement makes no claim.
 | MCU answer turnaround | fixed 0.203 ms, heap 0.210 ms | pico 0.213 ms | storage doc 5, 12 boots each |
 | MCU GET (wz node asking) | 76.0 us | pico 80.4, zenoh 99.9, zenoh-c 96.3 | storage doc 5.2, ranges overlap |
 | host no-drop rate, pico ABI, puts batched per 1 ms slot, 8 / 64 / 1024 B | at least 5.12 M / 4.48 M / 160 k msg/s | pico 4.48 M / 4.00 M / 310 k | `pico-compare.sh nodrop`, pc3, TCP loopback peer, median of 3, 2026-10-31 |
-| host no-drop rate, pico ABI, puts one by one, 8 / 64 / 1024 B | at least 5.12 M / 4.48 M / 190 k | pico 360 k / 360 k / 350 k | the same |
+| host no-drop rate, pico ABI, puts one by one, 8 / 64 / 1024 B | 4.96 M / 4.32 M / 310 k msg/s | pico 370 k / 380 k / 360 k | the same, with `write_bound`; 1 KiB was 190 k before it |
 
 **The no-drop rate** (`scripts/host-bench/`, RFC 2544): the publisher OFFERS a stated rate and the
 subscriber counts what it is delivered; a rate stands when every message arrived and the rate was
@@ -64,23 +64,33 @@ every trial was disturbed and the same search read values tens of times apart; o
 repetitions agree within 5 percent. The 8 B figure of wz is a lower bound (the search stops at its
 cap). The round trip of the same ABI against pico reads a tie at 10 to 11 microseconds.
 
-**A cell wz loses: 1 KiB puts, at about half of pico's rate.** With one `sendto` per put on both sides,
-wz adds about two `futex` calls per put (`strace -c`, 50,000 puts a second: 298,725 against pico's 14),
-and 84 percent of its `sendto` calls are made by the writer thread and not the thread that put
-(`strace -f`, 5,000 a second). Every frame landing in a lane wakes the writer (`frame_landed`), and the
-writer is asleep between two frames that are 20 microseconds apart; the sender-side flush that exists
-for a lone message (`flush_inline`, with its quiet-time and stream tests) is reached from the batch
-hook (`wake_for_flush`) and not from the put path.
+**A cell wz still loses, by less: 1 KiB puts.** One by one, wz read 190 k against pico's 360 k; after
+the change below it reads 310 k (wz to wz and wz to pico) against 360 k, the same writer pipeline.
+The reading, in the order it was made (pc3, 1 KiB at 150,000 a second):
 
-Attempted and measured, not kept: a frame that lands alone, or is 512 bytes or more, written by the
-thread that put it whenever the writer's role is free. It changed nothing at 1 KiB (155 k batched and
-190 k one by one, as before; 8 and 64 B unchanged), and per thread 3 of 158,857 `sendto` calls came
-from the putting thread. By reading `recv_wire_tagged_with`, the writer takes the role with a frame
-and keeps it until that frame is written, so at 190 k frames a second the role is almost never free
-to a sender. A sender that waited for the role would not be safe (the writer can be waiting on the
-socket for the runtime thread the sender may be). The loss therefore sits in the one-writer pipeline
-itself, and a fix has to shorten what the writer holds or take the hop out of the queue, not add a
-second writer.
+- The `futex` count that `strace` showed (298,725 calls against pico's 14) was in good part
+  `strace`'s own doing. Counted inside the library, the writer was parked for 2.4 percent of the
+  frames that landed, and the role was held by it for 98 percent of them.
+- The writer thread spent 91 percent of its CPU in the kernel (`/proc/<pid>/task/*/stat`): the
+  cost is the `sendto`, once per frame. It wrote exactly one frame per write, 1,037 bytes on
+  average, because the write was bounded by the link's batch (2,048 bytes for a pico peer) and two
+  frames are 2,074.
+- The batch bounds one frame; a stream carries frames back to back, so how many leave in one
+  `write` is invisible to the peer. A write is now bounded by the batch, or by four frames of the
+  first one's size up to 64 KiB, whichever is more (`write_bound`): small frames are bounded as they
+  were. At 250,000 a second the writer then carried 3.8 frames a write and kept up.
+
+Not the lever: a frame written by the thread that put it whenever the writer's role is free. It
+changed nothing (190 k), and the counters say why: 98.2 percent of the attempts found the role held,
+14,032 of 1,200,000 wrote. A sender that waited for the role would not be safe (the writer can be
+waiting on the socket for the runtime thread the sender may be).
+
+Two things that move the figure and are not the library: the default pinning gives a process one SMT
+pair, and wz's sender and writer are two busy threads on it where pico is one; with two physical
+cores the unchanged writer read 290 k. And the 64 B figure read 4.48 M in one session and 4.32 M in
+the next, with and without this change (the unmodified queue read 4.32 M too), so a difference of one
+step of the search (5 percent) between two sessions is the host's. What is left of the gap, 310 k
+against 360 k, has no reading yet. The batched row above is not re-measured with this change.
 
 - **Host to host, the same build's text differs.** The same pico-client build read
   1,794,606 bytes on the development host, 1,827,441 on the bench host and 1,833,173 on
