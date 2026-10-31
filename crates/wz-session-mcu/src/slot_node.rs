@@ -1583,13 +1583,18 @@ mod tests {
             DeclaredRefusal::Locator(2, DirectoryRefusal::LifetimeOfAnotherSource),
             DeclaredRefusal::Node(2, NodeRefusal::Unverifiable),
             DeclaredRefusal::Node(2, NodeRefusal::NoRoom),
-            DeclaredRefusal::Node(2, NodeRefusal::NoLocator),
-            DeclaredRefusal::Node(2, NodeRefusal::NoDialableLocator),
+            DeclaredRefusal::Undialable(2),
         ];
         for why in all {
             // `Locator(2, Full)` is the kind, the index and the refusal: the reason is the kind and
-            // the refusal, the index is its own number.
+            // the refusal, the index is its own number. `Undialable(2)` is a node that no hint
+            // could be dialled for, and its line is the one it had as a refusal of the node.
             let debug = alloc::format!("{why:?}");
+            if matches!(why, DeclaredRefusal::Undialable(_)) {
+                assert_eq!(why.reason(), "Node NoDialableLocator", "{debug}");
+                assert_eq!(why.index(), 2, "{debug}");
+                continue;
+            }
             let words = alloc::format!("{} {}", debug.split('(').next().unwrap(), {
                 let inner = debug.rsplit(", ").next().unwrap();
                 inner.trim_end_matches(')')

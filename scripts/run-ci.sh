@@ -11789,7 +11789,7 @@ layer_c1m_session_lwip() {
     # the manager does not carry its peers' machines (a size bound that the manager sits on the
     # stack and the store beside it does not). Decision D6 step 6.2b adds SIX more (18 -> 24,
     # 28 -> 34): the manager holds nodes by their zid beside the endpoints (a node with a hint is
-    # dialled for its zid, one nothing can be dialled for takes no row, a dialer that cannot
+    # dialled for its zid, one nothing can be dialled for waits for a hint (decision D15), a dialer that cannot
     # verify a node opens none, a node past the built capacity is refused, a session that names
     # another node is hung up, a close keeps the hints). A build states no node by default
     # (`MAX_PEER_NODES` is 0), so under these two legs those tests assert the refusal for want
@@ -11822,13 +11822,15 @@ layer_c1m_session_lwip() {
         --quiet || return 1
     # 47 -> 48: the dial reader's test of empty fields, wide numbers and leading zeros
     # (`45f821db`); the hosted run of 017e3c71 printed 48.
-    _runci_guarded_test "C1m mcu adminspace-write" 48 \
+    # 48 -> 49: an open for a node nothing can be dialled for takes a row and waits for a hint
+    # (decision D15), and a close removes it: the one test of the refusal it replaces became two.
+    _runci_guarded_test "C1m mcu adminspace-write" 49 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 22 \
+    _runci_guarded_test "C1m mcu peer nodes" 23 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu lifecycle verbs" 26 \
+    _runci_guarded_test "C1m mcu lifecycle verbs" 27 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
@@ -11837,7 +11839,8 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
     # the build host.
-    _runci_guarded_test "C1m mcu adminspace read+write" 58 \
+    # 58 -> 59: the same test D15 added (a close removes the row of a node with no locator).
+    _runci_guarded_test "C1m mcu adminspace read+write" 59 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

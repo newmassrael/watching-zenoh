@@ -186,11 +186,7 @@ mod tests {
     #[test]
     fn every_outcome_has_the_verdict_the_wire_gives_it() {
         for (outcome, reason) in [
-            (OpenOutcome::PeerUnknown, RefusedReason::PeerUnknown),
-            (
-                OpenOutcome::NoDialableLocator,
-                RefusedReason::NoDialableLocator,
-            ),
+            (OpenOutcome::NotAZid, RefusedReason::PeerNotAZid),
             (OpenOutcome::OpenerGone, RefusedReason::OpenerGone),
             (OpenOutcome::NoRoom, RefusedReason::NoRoom),
             (OpenOutcome::Unverifiable, RefusedReason::Unverifiable),

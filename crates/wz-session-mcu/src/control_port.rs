@@ -253,8 +253,7 @@ mod tests {
         // one `OpenVerdict` writes, byte for byte.
         for outcome in [
             OpenOutcome::Accepted,
-            OpenOutcome::PeerUnknown,
-            OpenOutcome::NoDialableLocator,
+            OpenOutcome::NotAZid,
             OpenOutcome::OpenerGone,
             OpenOutcome::NoRoom,
             OpenOutcome::Unverifiable,

@@ -29,11 +29,9 @@ pub enum OpenOutcome {
     /// The request reached the node's machines. Accepted, not completed: the dial
     /// is asynchronous, and the status query is how its end is read.
     Accepted,
-    /// The node knows no locator for the peer, so there is nothing to dial.
-    PeerUnknown,
-    /// The node knows the peer but none of the locators it has for it can be
-    /// dialled from here.
-    NoDialableLocator,
+    /// The zid the opener was handed does not read as a zid. A request that came by a
+    /// key never gets here, since the key's reader refuses it first.
+    NotAZid,
     /// The loop that holds the node's machines is gone.
     OpenerGone,
     /// The node holds as many peers by their zid as it was built for (a build states
@@ -63,10 +61,6 @@ pub enum RefusedReason {
     StatusNotPermitted,
     /// The node's authority does not admit opening the session this key names.
     OpenNotPermitted,
-    /// The node knows no locator for the peer an open names.
-    PeerUnknown,
-    /// None of the locators the node knows for the peer can be dialled from it.
-    NoDialableLocator,
     /// The loop that would hold the peer is gone, so the open reached nobody.
     OpenerGone,
     /// The node holds as many peers by their zid as it was built for.
@@ -78,15 +72,13 @@ pub enum RefusedReason {
 
 impl RefusedReason {
     /// Every reason, for the declared set to be held to.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 9] = [
         Self::NotPermitted,
         Self::PeerNotAZid,
         Self::ResetNotPermitted,
         Self::GenerationNotANumber,
         Self::StatusNotPermitted,
         Self::OpenNotPermitted,
-        Self::PeerUnknown,
-        Self::NoDialableLocator,
         Self::OpenerGone,
         Self::NoRoom,
         Self::Unverifiable,
@@ -106,8 +98,6 @@ impl RefusedReason {
                 "this node does not permit reading the status of the session with that peer"
             }
             Self::OpenNotPermitted => "this node does not permit opening a session with that peer",
-            Self::PeerUnknown => "this node knows no locator for that peer",
-            Self::NoDialableLocator => "this node cannot dial any locator it knows for that peer",
             Self::OpenerGone => "the loop that would hold that peer is gone",
             Self::NoRoom => "this node holds as many peers by their zid as it was built for",
             Self::Unverifiable => {
@@ -134,8 +124,7 @@ impl OpenVerdict {
     pub fn of(outcome: OpenOutcome) -> Self {
         match outcome {
             OpenOutcome::Accepted => Self::Opening,
-            OpenOutcome::PeerUnknown => Self::Refused(RefusedReason::PeerUnknown),
-            OpenOutcome::NoDialableLocator => Self::Refused(RefusedReason::NoDialableLocator),
+            OpenOutcome::NotAZid => Self::Refused(RefusedReason::PeerNotAZid),
             OpenOutcome::OpenerGone => Self::Refused(RefusedReason::OpenerGone),
             OpenOutcome::NoRoom => Self::Refused(RefusedReason::NoRoom),
             OpenOutcome::Unverifiable => Self::Refused(RefusedReason::Unverifiable),
@@ -738,8 +727,7 @@ mod tests {
     fn every_outcome_has_a_verdict_and_every_reason_a_clean_sentence() {
         for outcome in [
             OpenOutcome::Accepted,
-            OpenOutcome::PeerUnknown,
-            OpenOutcome::NoDialableLocator,
+            OpenOutcome::NotAZid,
             OpenOutcome::OpenerGone,
             OpenOutcome::NoRoom,
             OpenOutcome::Unverifiable,

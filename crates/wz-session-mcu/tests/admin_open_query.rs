@@ -219,11 +219,7 @@ fn an_open_is_answered_in_the_words_of_the_heap_profile_with_nothing_allocated()
     );
 
     for (outcome, reason) in [
-        (OpenOutcome::PeerUnknown, RefusedReason::PeerUnknown),
-        (
-            OpenOutcome::NoDialableLocator,
-            RefusedReason::NoDialableLocator,
-        ),
+        (OpenOutcome::NotAZid, RefusedReason::PeerNotAZid),
         (OpenOutcome::OpenerGone, RefusedReason::OpenerGone),
         (OpenOutcome::NoRoom, RefusedReason::NoRoom),
         (OpenOutcome::Unverifiable, RefusedReason::Unverifiable),

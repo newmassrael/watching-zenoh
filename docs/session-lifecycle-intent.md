@@ -744,24 +744,23 @@ Each step lands with its own done-when; sizes are not estimated here.
        intent and the machines. `LinkstateOpener` implements it and also the
        in-band `SessionOpener`, over one `ask`, so the Push and the query make
        one request (decision D7). The port answers with an outcome, not a bool,
-       so the reply says which refusal it was: the key is not a zid, the node
-       holds no locator for the peer (`peer_unknown`), it holds locators none of
-       which can be dialled (`no_dialable_locator`), or the loop is gone
-       (`opener_gone`).
+       so the reply says which refusal it was: the key is not a zid, or the
+       loop is gone (`opener_gone`). Round 3597 also had `peer_unknown` and
+       `no_dialable_locator` here; D15 moved both to the status read, where
+       the machine says `no_locator`.
      - A router keeps one graph per region, so the opener reads the routers
        region's graph and each peers region's (`NodeLocators`, minted by the
        forwarder), and asks for a node at the locators of every graph that
        holds it, each once. The peer host has no loop channel to ask through
        and passes `NoOpener`: it serves no open query and lists no `open` verb,
        since the capability document says what the node has bound.
-     - Decision: a peer the node has no locator for is refused at the opener
-       and does not enter the peer table, which is bounded and keeps a refused
-       peer until the next `open`; a run of opens for zids nobody advertised
-       would otherwise fill it. The cost is that a locator the loop's directory
-       learns later, from a `Hello`, is not found by an open the graphs could
-       not place. D5's `no_locator` refusal stays the machine's for a locator
-       that expires after the open. Whether an open should enter the table first
-       is open (section 5).
+     - Decision of Round 3597, replaced by D15 (section 5a): a peer the node
+       has no locator for was refused at the opener and did not enter the peer
+       table, which is bounded and kept a refused peer until the next `open`.
+       The cost was that a locator the loop's directory learned later, from a
+       `Hello`, was not found by an open the graphs could not place. The
+       opener now takes the peer in, the machine says `no_locator`, and a hint
+       learned later starts it.
      Witness: the open tests of `lifecycle_query` (each outcome its own word, a
      refused or pattern key asking the opener nothing, no opener serving
      nothing), `LinkstateOpener`'s query-form outcomes, its two-graph union and
@@ -890,9 +889,11 @@ Each step lands with its own done-when; sizes are not estimated here.
      is never asked to open a peer by its zid declares none of it. The
      directory is sized at two hints per node and lives in the same store, so
      it is under the one critical section the planner is. An open that cannot
-     be served takes no row, so a flood of opens for zids nobody advertised
-     does not fill the table: no room, no hint, or no hint this build can dial,
-     each by its own name (`NodeRefusal`). Tests that hold nodes run in a leg
+     be served takes no row: no room, or a dialer that cannot verify a node,
+     each by its own name (`NodeRefusal`). (Round 3629 also refused an open
+     with no hint, or none this build could dial, so that a flood of opens
+     for zids nobody advertised could not fill the table; D15 moved that to
+     the status read, and the room bounds the flood.) Tests that hold nodes run in a leg
      that states two (`C1m mcu peer nodes`); under the default they assert the
      refusal for want of room.
    - 6.2b-2 (landed): the request to hold a node by its zid, made where the
@@ -910,8 +911,9 @@ Each step lands with its own done-when; sizes are not estimated here.
      as many peers by their zid as it was built for) and `Unverifiable` (its
      links do not hold a session to the node a dial was made for), because
      each is a different thing an operator can do something about and neither
-     is a missing locator. `NodeRefusal::NoLocator` is `PeerUnknown` and
-     `NoDialableLocator` is itself. The mapping onto `OpenOutcome` is not in
+     is a missing locator. (D15 later removed `NodeRefusal::NoLocator` and
+     `NoDialableLocator`: a node nothing can be dialled for takes its row.)
+     The mapping onto `OpenOutcome` is not in
      this crate: `lifecycle_query` is compiled only with an allocator, and the
      fixed-memory profile has neither it nor the in-band switchboard
      (`drive`, same gate), so the verbs there need the query's wire written
@@ -1149,7 +1151,7 @@ Each step lands with its own done-when; sizes are not estimated here.
 - The memory and handshake time of D9's channel on the fixed-memory profile:
   measured on the kit at Round 3493 (section 3, D9).
 - Whether an `open` for a peer the link-state graphs do not hold enters the peer
-  table: ruled in D15, section 5a.
+  table: ruled in D15, section 5a, and built there.
 
 ### 5a. Rulings (owner, 2026-11-01)
 
@@ -1227,11 +1229,25 @@ second open. The table is bounded, so a flood of opens is refused by `NoRoom`
 and not by the opener's guess about reachability, and a `close` removes the
 row. This replaces the refusal at the opener of step 6c.
 
+Built (Round 4043). Both openers take the intent: `NodeOpener::open` and
+`ConnectManager::open_node` on the fixed profile, `LinkstateOpener::ask` on the
+AP, which sends the node with no locators when the graphs hold none. The open
+vocabulary lost `peer_unknown` and `no_dialable_locator`, which were facts about
+reachability and so about the status read, and gained `NotAZid` for a target
+that is no zid (it reads as the key's `PeerNotAZid`). The wake-up is the host's,
+since `Refused` leaves only on a start: the fixed manager starts a node waiting
+in `NoLocator` when `confirm_locator` gives it a hint, and the AP loop does the
+same when a discovery (a `Hello` or the flood) lands (`LoopPeers::locator_learned`).
+A peer a build declares with a locator it cannot dial is still refused at start
+(`DeclaredRefusal::Undialable`), since that is a defect of the build. The room
+is refused as `NoRoom` on the fixed profile; on the AP the table's refusal is
+the loop's and is logged, because the opener answers before the loop sees the
+request (carried).
+
 What the rulings leave to build, in order: D10 (the SCXML event and the intent's
 `passive` attribute, the key chunk, the control port's word, the status field and
 two cases in the contract's table); D12 (the commander in the permit port, the
-`commander` role, the image that binds the verbs); D15 (the opener enters the
-table, and its refusal cases move to the status read); D14 (the lane's step on
+`commander` role, the image that binds the verbs); D14 (the lane's step on
 the image). D11 and D13 change what the atom is graded against and need no code.
 
 What is measured of the one question left, upstream zenohd and D9's pinned

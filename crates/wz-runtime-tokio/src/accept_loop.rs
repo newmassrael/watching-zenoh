@@ -2440,24 +2440,36 @@ fn dial_decision(
     }
 }
 
-/// Take a discovery into `directory` and weigh it: [`learn_locators`] then
-/// [`dial_decision`], the two steps the `Step::Dial` arm takes.
+/// Take a discovery into `directory` and weigh it: [`learn_intent`] then
+/// [`dial_decision`], the two steps the `Step::Dial` arm takes (between them it wakes a node
+/// that waited for the hint).
+#[cfg(test)]
 fn learn_and_decide(
     faces: &BTreeMap<FaceId, Option<Vec<u8>>>,
     intent: &DialIntent,
     directory: &mut LoopDirectory,
     now_ms: u64,
 ) -> DialDecision {
-    if let Some(zid) = wz_session_core::credential_identity::zid_from_wire(&intent.zid) {
-        learn_locators(
-            directory,
-            &zid,
-            &intent.locators,
-            intent.origin.locator_source(),
-            now_ms,
-        );
-    }
+    learn_intent(directory, intent, now_ms);
     dial_decision(faces, intent, directory, now_ms)
+}
+
+/// Take a discovery's locators into `directory`, and say whose they are: the node a machine
+/// of the loop's peers may have been waiting for a hint of (decision D15).
+fn learn_intent(
+    directory: &mut LoopDirectory,
+    intent: &DialIntent,
+    now_ms: u64,
+) -> Option<DirectoryZid> {
+    let zid = wz_session_core::credential_identity::zid_from_wire(&intent.zid)?;
+    learn_locators(
+        directory,
+        &zid,
+        &intent.locators,
+        intent.origin.locator_source(),
+        now_ms,
+    );
+    Some(zid)
 }
 
 /// Where a face-drive node's faces come from: the inbound `listeners` it accepts
@@ -3959,7 +3971,18 @@ where
                 // no locator is TCP-dialable. A dialed face flows through the SAME
                 // `opening` -> `Step::Opened` path as a static dial, so it is
                 // registered + held + zid-tracked identically.
-                match learn_and_decide(&faces, &intent, &mut directory, clock.now_monotonic_ms()) {
+                let learned = learn_intent(&mut directory, &intent, clock.now_monotonic_ms());
+                // A node that was opened before any hint could be dialled for it waits
+                // in `NoLocator` (decision D15): this discovery is the hint it waited for.
+                #[cfg(feature = "session-close-ingress")]
+                if let Some(zid) = learned {
+                    let cx = peer_cx!();
+                    let actions = peers.locator_learned(zid, &cx, &mut next_id);
+                    take_peer_actions!(actions);
+                }
+                #[cfg(not(feature = "session-close-ingress"))]
+                let _ = learned;
+                match dial_decision(&faces, &intent, &directory, clock.now_monotonic_ms()) {
                     DialDecision::Dial(target) => {
                         let id = FaceId(next_id);
                         next_id += 1;

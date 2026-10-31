@@ -121,31 +121,31 @@ impl LinkstateOpener {
     /// one request both forms of the verb, the Push and the query, make (decision
     /// D7).
     ///
-    /// Each refusal below is a DIFFERENT fact and each says which, because the
-    /// only thing an operator sees from outside is that nothing happened: a
-    /// target that is not a zid at all, a zid this node has never heard of, a node
-    /// that advertised nothing dialable, and a face loop that is gone. A peer the
-    /// node does not know is refused here and does not take an entry of the
-    /// bounded peer table, which a flood of opens for zids nobody advertises
-    /// would otherwise fill.
+    /// A peer the graphs do not hold, or hold with nothing that can be dialled, is
+    /// asked for all the same (decision D15): an intent is recorded before it can be
+    /// satisfied, so the request carries no locators and the node's machine reports
+    /// that it has none until a Hello or the flood gives it one. What a flood of
+    /// opens for zids nobody advertises is held to is the bounded peer table, whose
+    /// refusal is the loop's and not this opener's guess about reachability. The
+    /// refusals left are the facts this opener can tell: a target that is not a zid
+    /// at all, and a face loop that is gone.
     fn ask(&self, peer_zid: &[u8]) -> OpenOutcome {
         let name = wz_session_core::zid_hex::zid_to_zenoh_hex(peer_zid);
         let Some(expected) = zid_from_wire(peer_zid) else {
             log::warn!(
                 "LinkstateOpener: `{name}` does not read as a sixteen-byte zid; refusing to open."
             );
-            return OpenOutcome::PeerUnknown;
+            return OpenOutcome::NotAZid;
         };
         let zid = Zid::from_slice(peer_zid);
 
-        let Some(advertised) = self.locators.of(&zid) else {
-            log::warn!(
-                "LinkstateOpener: no link-state entry advertises dial locators for \
-                 `{name}`; refusing to open a session to a node this one has never \
-                 heard announce itself."
+        let advertised = self.locators.of(&zid).unwrap_or_default();
+        if advertised.is_empty() {
+            log::info!(
+                "LinkstateOpener: no link-state entry advertises dial locators for `{name}`; \
+                 holding the open until a source gives it one."
             );
-            return OpenOutcome::PeerUnknown;
-        };
+        }
 
         // The locators as the node advertised them: the loop takes them into its
         // directory as link-state hints (decision D3), so the text is kept, and
@@ -163,14 +163,6 @@ impl LinkstateOpener {
                 }
             })
             .collect();
-        if planned.is_empty() {
-            log::warn!(
-                "LinkstateOpener: `{name}` is known but advertises nothing dialable; \
-                 refusing to open."
-            );
-            return OpenOutcome::NoDialableLocator;
-        }
-
         // ADD, never Replace: this verb asks for one more peer, and adopting its
         // locators as the WHOLE desired set would silently stop re-dialling every
         // endpoint the startup seed and earlier commands put there. And an add of
@@ -320,10 +312,11 @@ mod tests {
         }
     }
 
-    /// A zid this node has never heard announce itself is refused — the case
-    /// that makes the directory load-bearing rather than decorative.
+    /// A zid this node has never heard announce itself is asked for all the same
+    /// (decision D15), with no locators: the loop's machine for it has no
+    /// candidate, and says so in its status.
     #[test]
-    fn an_unknown_peer_is_refused_and_asks_for_no_dial() {
+    fn an_unknown_peer_is_asked_for_with_no_locator() {
         let net = seeded(&[ADVERTISED]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let opener = LinkstateOpener::new(net, tx);
@@ -331,14 +324,19 @@ mod tests {
         let raw = key_for(&zid_to_zenoh_hex(&[0xff, 0xff]));
         let key = LifecycleKey::parse(&raw).unwrap();
 
-        assert!(!opener.request_open(&key));
-        assert!(rx.try_recv().is_err(), "nothing was asked of the face loop");
+        assert!(opener.request_open(&key));
+        match rx.try_recv().expect("the node is asked of the face loop") {
+            ConnectReconcile::AddNode { zid, locators } => {
+                assert_eq!(Some(zid), zid_from_wire(&[0xff, 0xff]));
+                assert!(locators.is_empty(), "nothing is known to dial");
+            }
+            other => panic!("open must ADD the node to the connect set, got {other:?}"),
+        }
     }
 
-    /// Known, but advertising nothing dialable. Distinct from "unknown", and
-    /// the arm exists because both would otherwise read as the same silence.
+    /// Known, but advertising nothing: the same request as a node nobody has heard of.
     #[test]
-    fn a_known_peer_advertising_nothing_is_refused() {
+    fn a_known_peer_advertising_nothing_is_asked_for_with_no_locator() {
         let net = seeded(&[]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let opener = LinkstateOpener::new(net, tx);
@@ -346,13 +344,17 @@ mod tests {
         let raw = key_for(&zid_to_zenoh_hex(PEER_ZID));
         let key = LifecycleKey::parse(&raw).unwrap();
 
-        assert!(!opener.request_open(&key));
-        assert!(rx.try_recv().is_err());
+        assert!(opener.request_open(&key));
+        match rx.try_recv().expect("the node is asked of the face loop") {
+            ConnectReconcile::AddNode { locators, .. } => assert!(locators.is_empty()),
+            other => panic!("open must ADD the node to the connect set, got {other:?}"),
+        }
     }
 
     /// Decision D6 / D7 — the query form of the verb makes the same request as the
-    /// Push form, and each way it can end is its own outcome: taken, a zid nobody
-    /// advertised, a node with nothing dialable, a face loop that is gone.
+    /// Push form, and each way it can end is its own outcome: taken (a zid nobody
+    /// advertised and locators none of which parse are taken too, with no locator to
+    /// dial, decision D15), a target that is no zid, a face loop that is gone.
     #[test]
     fn the_query_form_asks_the_same_loop_and_names_each_outcome() {
         use wz_session_core::lifecycle_query::{OpenOutcome, PeerOpener};
@@ -369,28 +371,34 @@ mod tests {
         }
         assert_eq!(
             opener.open(&[0xff, 0xff]),
-            OpenOutcome::PeerUnknown,
-            "a zid nobody advertised"
+            OpenOutcome::Accepted,
+            "a zid nobody advertised is asked for with no locator"
         );
-        assert!(rx.try_recv().is_err(), "and nothing was asked of the loop");
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let silent = LinkstateOpener::new(seeded(&[]), tx);
-        assert_eq!(
-            silent.open(PEER_ZID),
-            OpenOutcome::PeerUnknown,
-            "a node that advertises nothing is, to the graph, a node it holds no locator for"
-        );
-        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ConnectReconcile::AddNode { locators, .. }) if locators.is_empty()
+        ));
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let garbled = LinkstateOpener::new(seeded(&["no-such-scheme/1.2.3.4:5"]), tx);
         assert_eq!(
             garbled.open(PEER_ZID),
-            OpenOutcome::NoDialableLocator,
-            "locators the node advertised, none of which parses"
+            OpenOutcome::Accepted,
+            "locators the node advertised, none of which parses, are none to dial"
         );
-        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ConnectReconcile::AddNode { locators, .. }) if locators.is_empty()
+        ));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let opener = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
+        assert_eq!(
+            opener.open(&[0u8; 17]),
+            OpenOutcome::NotAZid,
+            "more bytes than a zid has"
+        );
+        assert!(rx.try_recv().is_err(), "and nothing was asked of the loop");
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let orphaned = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
@@ -544,10 +552,20 @@ mod tests {
 
         let wrong = key_for(&wire_order);
         let key = LifecycleKey::parse(&wrong).unwrap();
-        assert!(
-            !opener.request_open(&key),
-            "the wire-order rendering names no node in the directory"
-        );
-        assert!(rx.try_recv().is_err());
+        assert!(opener.request_open(&key), "an open is asked for (D15)");
+        match rx.try_recv().expect("the node is asked of the face loop") {
+            ConnectReconcile::AddNode { zid, locators } => {
+                assert_ne!(
+                    Some(zid),
+                    zid_from_wire(PEER_ZID),
+                    "the wire-order rendering names another node"
+                );
+                assert!(
+                    locators.is_empty(),
+                    "and the directory holds nothing for it, so it is none the advertised one"
+                );
+            }
+            other => panic!("open must ADD the node to the connect set, got {other:?}"),
+        }
     }
 }

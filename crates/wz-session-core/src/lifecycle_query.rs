@@ -1041,11 +1041,7 @@ mod tests {
         assert_eq!(*taking.opener.asked.borrow(), vec![a.clone(), a]);
 
         for (outcome, reason) in [
-            (OpenOutcome::PeerUnknown, RefusedReason::PeerUnknown),
-            (
-                OpenOutcome::NoDialableLocator,
-                RefusedReason::NoDialableLocator,
-            ),
+            (OpenOutcome::NotAZid, RefusedReason::PeerNotAZid),
             (OpenOutcome::OpenerGone, RefusedReason::OpenerGone),
             (OpenOutcome::NoRoom, RefusedReason::NoRoom),
             (OpenOutcome::Unverifiable, RefusedReason::Unverifiable),
@@ -1497,7 +1493,7 @@ mod tests {
         assert_eq!(words, StatusVerdict::WORDS);
         let all = [
             OpenVerdict::Opening,
-            OpenVerdict::Refused(RefusedReason::PeerUnknown),
+            OpenVerdict::Refused(RefusedReason::NoRoom),
         ];
         let words: Vec<&str> = all.iter().map(OpenVerdict::word).collect();
         assert_eq!(words, OpenVerdict::WORDS);

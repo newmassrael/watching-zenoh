@@ -155,6 +155,23 @@ impl LoopPeers {
         self.open(PeerKey::Node(zid), cx, next_id)
     }
 
+    /// A source gave the directory a hint for the node `zid`. A node that was opened before
+    /// anything could be dialled for it waits in `NoLocator`, which only a start leaves
+    /// (decision D15), so it starts again here with no second `open`. A node in any other
+    /// state, and one this loop was never asked to hold, is left as it is.
+    pub fn locator_learned(
+        &mut self,
+        zid: DirectoryZid,
+        cx: &PeerContext<'_>,
+        next_id: &mut u64,
+    ) -> Vec<PeerAction> {
+        let key = PeerKey::Node(zid);
+        if self.state(&key) != Some(PeerConnectionState::NoLocator) {
+            return Vec::new();
+        }
+        self.open(key, cx, next_id)
+    }
+
     /// The configured connect endpoints change: `targets` join them, and with
     /// `replace` they are the whole of them. An endpoint a replace leaves out is
     /// forgotten: it is not dialled again when it drops, and a live session to
@@ -520,6 +537,45 @@ mod tests {
             assert!(!keep && actions.is_empty(), "a refusal arms no retry");
             assert_eq!(peers.state(&NODE), Some(cause));
         }
+    }
+
+    /// A node opened before anything could be dialled for it starts when a hint is learned, with
+    /// no second open (decision D15); one that is being reached, and one never asked for, do not.
+    #[test]
+    fn a_node_with_no_locator_starts_when_one_is_learned() {
+        let empty = directory_with(&[]);
+        let cx = PeerContext {
+            directory: &empty,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy::constant(1000));
+        let mut next_id = 0;
+        assert!(peers.open_node(A, &cx, &mut next_id).is_empty());
+        assert!(
+            peers.locator_learned(A, &cx, &mut next_id).is_empty(),
+            "a hint that is not there starts nothing"
+        );
+        assert_eq!(peers.state(&NODE), Some(S::NoLocator));
+
+        let directory = directory_with(&["tcp/127.0.0.1:7204"]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let (_, target) = the_dial(&peers.locator_learned(A, &cx, &mut next_id));
+        assert_eq!(target.expected_zid, Some(A), "dialled for the node (D4)");
+        assert!(
+            peers.locator_learned(A, &cx, &mut next_id).is_empty(),
+            "a node that is being reached is not started again"
+        );
+
+        let mut other = LoopPeers::new(RetryPolicy::constant(1000));
+        assert!(other.locator_learned(A, &cx, &mut next_id).is_empty());
+        assert_eq!(
+            other.state(&NODE),
+            None,
+            "a node nobody asked for is not held"
+        );
     }
 
     #[test]

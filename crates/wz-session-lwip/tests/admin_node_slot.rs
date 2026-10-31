@@ -558,13 +558,21 @@ fn a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported() {
     }
     assert_eq!(
         b.node.open_node(a_zid, 0),
-        Err(NodeRefusal::NoLocator),
-        "a node nobody advertised takes no row"
+        Ok(()),
+        "a node nobody advertised is asked for all the same (decision D15)"
     );
+    let mut waiting = Vec::new();
+    b.node
+        .for_each_node(|zid, state| waiting.push((*zid, state)));
+    assert_eq!(waiting, vec![(a_zid, NodeState::NoHint)]);
     b.node
         .declare_node(a_zid, "udp/127.0.0.1:7611", 0)
         .expect("the directory has room for a hint");
-    assert_eq!(b.node.open_node(a_zid, 0), Ok(()));
+    assert_eq!(
+        b.node.open_node(a_zid, 0),
+        Ok(()),
+        "the open after the hint is the same open"
+    );
 
     run(&mut a, &mut b, "B's session to A establishes", |a, b| {
         a.established() == (1, 0) && b.established_nodes() == 1

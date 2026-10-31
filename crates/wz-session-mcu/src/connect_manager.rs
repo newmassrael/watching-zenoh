@@ -273,11 +273,6 @@ pub enum NodeRefusal {
     /// The node holds as many nodes as it was built for ([`MAX_PEER_NODES`]), which is none
     /// unless the image states more.
     NoRoom,
-    /// The directory holds no live hint for the node, so there is nothing to dial. The node is
-    /// not taken into a table that a flood of opens for zids nobody advertised would fill.
-    NoLocator,
-    /// The directory holds hints for the node, none of which this build can dial.
-    NoDialableLocator,
 }
 
 /// A peer a build declares: the node it holds by its zid, and the locator it may be found at.
@@ -301,13 +296,19 @@ pub enum DeclaredRefusal {
     Locator(usize, DirectoryRefusal),
     /// The peer could not be held as a node ([`NodeRefusal`]).
     Node(usize, NodeRefusal),
+    /// The peer's locator is one this build cannot dial. An open asked for at run time takes
+    /// such a peer into the table, where its machine says it has no locator (decision D15); a
+    /// peer the build itself declares is a defect of the build, and the list stops at it.
+    Undialable(usize),
 }
 
 impl DeclaredRefusal {
     /// Which declared peer, by its index in the list.
     pub const fn index(&self) -> usize {
         match *self {
-            DeclaredRefusal::Locator(index, _) | DeclaredRefusal::Node(index, _) => index,
+            DeclaredRefusal::Locator(index, _)
+            | DeclaredRefusal::Node(index, _)
+            | DeclaredRefusal::Undialable(index) => index,
         }
     }
 
@@ -324,8 +325,7 @@ impl DeclaredRefusal {
             }
             DeclaredRefusal::Node(_, NodeRefusal::Unverifiable) => "Node Unverifiable",
             DeclaredRefusal::Node(_, NodeRefusal::NoRoom) => "Node NoRoom",
-            DeclaredRefusal::Node(_, NodeRefusal::NoLocator) => "Node NoLocator",
-            DeclaredRefusal::Node(_, NodeRefusal::NoDialableLocator) => "Node NoDialableLocator",
+            DeclaredRefusal::Undialable(_) => "Node NoDialableLocator",
         }
     }
 }
@@ -334,10 +334,11 @@ impl DeclaredRefusal {
 /// manager is not: a query a node answers is served beside its loop and not inside it.
 ///
 /// It answers at once with everything the node knows without the loop: whether this dialer can
-/// hold a session to the node it dials for, whether the node has room for one more, whether the
-/// directory has a live hint for it and whether this build can dial one. A request that passes is
-/// kept for the manager's next tick, which holds the node. Accepted and not completed, as the
-/// port's contract says: how the dial ends is read in [`ConnectManager::node_states`].
+/// hold a session to the node it dials for, and whether the node has room for one more. A request
+/// that passes is kept for the manager's next tick, which holds the node, whether or not the
+/// directory has a hint for it yet (decision D15): an intent is recorded before it can be
+/// satisfied, and the machine of a node nothing can be dialled for says so in
+/// [`ConnectManager::node_states`]. Accepted and not completed, as the port's contract says.
 ///
 /// It holds no dialer, which the manager owns, and is not typed by one: what the dialer can do
 /// (whether it holds a session to the node it dials for, which locators it can dial) is written
@@ -375,13 +376,6 @@ impl NodeOpener {
             // is on its way out already has its place.
             if !t.knows(zid) && MAX_PEER_NODES.saturating_sub(t.nodes()) == 0 {
                 return Err(NodeRefusal::NoRoom);
-            }
-            if t.directory.candidates(zid, t.now_ms).next().is_none() {
-                return Err(NodeRefusal::NoLocator);
-            }
-            let classify = t.classify.unwrap_or(|_| Ok(()));
-            if first_dialable(&t.directory, zid, t.now_ms, classify).is_none() {
-                return Err(NodeRefusal::NoDialableLocator);
             }
             #[cfg(feature = "lifecycle-verbs")]
             if leaving {
@@ -625,15 +619,12 @@ impl<P: LifecyclePermits> LifecycleNode for StoreNode<P> {
 }
 
 /// The word a lifecycle open is answered with for a refusal: the same list the heap profile's
-/// opener answers in (`wz_session_core::lifecycle_wire`). A node that knows no hint for the peer
-/// is one that knows no locator for it.
+/// opener answers in (`wz_session_core::lifecycle_wire`).
 impl From<NodeRefusal> for OpenOutcome {
     fn from(refusal: NodeRefusal) -> Self {
         match refusal {
             NodeRefusal::Unverifiable => Self::Unverifiable,
             NodeRefusal::NoRoom => Self::NoRoom,
-            NodeRefusal::NoLocator => Self::PeerUnknown,
-            NodeRefusal::NoDialableLocator => Self::NoDialableLocator,
         }
     }
 }
@@ -755,13 +746,6 @@ struct Tables {
     /// ([`Dialer::VERIFIES_NODES`]), written when the manager is made. `false` before: a store
     /// nobody dials from holds no node.
     verifies_nodes: bool,
-    /// What the manager's dialer can dial ([`Dialer::classify`]), written when the manager is
-    /// made, so an opener answers it without the dialer's type. `None` before: nothing is
-    /// dialled from the store, so anything is dialable. An `Option` and not a function pointer
-    /// from the start because a store whose initial value is all zero bytes lives in `.bss`, and
-    /// one non-zero byte (a function's address is one) moves the whole of the image's tables
-    /// into `.data`, and a copy of them into flash.
-    classify: Option<Classify>,
 }
 
 /// What a build can dial, as a dialer answers it ([`Dialer::classify`]).
@@ -919,7 +903,6 @@ impl PeerStore {
                 #[cfg(feature = "lifecycle-reset")]
                 generations: FixedVec::new(),
                 verifies_nodes: false,
-                classify: None,
             })),
         }
     }
@@ -1177,10 +1160,7 @@ impl<D: Dialer> ConnectManager<D> {
         policy: RetryPolicy,
     ) -> Self {
         // What this dialer can do is the store's to say to an opener, which has no dialer.
-        store.get().with(|t| {
-            t.verifies_nodes = D::VERIFIES_NODES;
-            t.classify = Some(D::classify);
-        });
+        store.get().with(|t| t.verifies_nodes = D::VERIFIES_NODES);
         Self {
             control,
             dialer,
@@ -1299,7 +1279,21 @@ impl<D: Dialer> ConnectManager<D> {
         self.store.get().with(|t| {
             t.now_ms = t.now_ms.max(now_ms);
             t.directory.confirm(zid, locator, source, now_ms, lifetime)
-        })
+        })?;
+        // A node that was opened before anything could be dialled for it waits in `NoLocator`,
+        // which only a start leaves: the hint is what it waited for, so it starts again with no
+        // second `open` (decision D15). Any other state is a node that is held or being reached,
+        // and is left as it is.
+        let key = Key::Node(zid);
+        if self.rows.iter().any(|row| row.key == key)
+            && self.store.get().with(|t| t.planner.state(&key))
+                == Some(PeerConnectionState::NoLocator)
+        {
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
+                let _ = planner.open(key, ports, next_id, emit);
+            });
+        }
+        Ok(())
     }
 
     /// The opener of this manager's nodes, for the code that serves a request to hold a peer by
@@ -1415,9 +1409,10 @@ impl<D: Dialer> ConnectManager<D> {
 
     /// Hold a session with the node `zid`, dialled at what the directory knows of it (decision D6:
     /// a lifecycle `open`). A node already held is unchanged, and one that had no hint to dial
-    /// resolves again. The node is refused, and takes no row, when its dial could not be told from
-    /// one to another node, when the node holds as many as it was built for, or when the directory
-    /// has nothing it can dial.
+    /// resolves again. A node nothing can be dialled for yet takes its row all the same, and its
+    /// machine says it has no locator until a source confirms one (decision D15). The node is
+    /// refused, and takes no row, when its dial could not be told from one to another node, or
+    /// when the node holds as many as it was built for.
     pub fn open_node(&mut self, zid: DirectoryZid, now_ms: u64) -> Result<(), NodeRefusal> {
         if !D::VERIFIES_NODES {
             return Err(NodeRefusal::Unverifiable);
@@ -1432,20 +1427,6 @@ impl<D: Dialer> ConnectManager<D> {
             // Written so that it holds for any value of the limit, none included.
             if MAX_PEER_NODES.saturating_sub(held) == 0 {
                 return Err(NodeRefusal::NoRoom);
-            }
-            let known = self
-                .store
-                .get()
-                .with(|t| t.directory.candidates(&zid, now_ms).next().is_some());
-            if !known {
-                return Err(NodeRefusal::NoLocator);
-            }
-            let dialable = self
-                .store
-                .get()
-                .with(|t| first_dialable(&t.directory, &zid, now_ms, D::classify).is_some());
-            if !dialable {
-                return Err(NodeRefusal::NoDialableLocator);
             }
             // Fewer than `MAX_PEER_NODES` nodes are held and the endpoints fit their rows, so
             // the row fits; one that did not could only be a defect.
@@ -1479,6 +1460,13 @@ impl<D: Dialer> ConnectManager<D> {
                 Lifetime::Permanent,
             )
             .map_err(|why| DeclaredRefusal::Locator(index, why))?;
+            let dialable = self
+                .store
+                .get()
+                .with(|t| first_dialable(&t.directory, &peer.zid, now_ms, D::classify).is_some());
+            if !dialable {
+                return Err(DeclaredRefusal::Undialable(index));
+            }
             self.open_node(peer.zid, now_ms)
                 .map_err(|why| DeclaredRefusal::Node(index, why))?;
         }
@@ -2410,27 +2398,60 @@ mod tests {
         // Held again is unchanged, and a peer nothing can dial is refused by its place.
         std::assert_eq!(
             m.hold_declared(&peers, 1),
-            Err(DeclaredRefusal::Node(1, NodeRefusal::NoDialableLocator))
+            Err(DeclaredRefusal::Undialable(1))
         );
         std::assert_eq!(m.node_states().count(), 1);
     }
 
-    /// An open for a node that is not held takes no row until there is something to dial: a zid
-    /// nobody advertised, and a node whose hints this build cannot dial, are each refused by name,
-    /// and a flood of opens does not fill the table.
+    /// An open for a node nothing can be dialled for takes its row (decision D15): the machine
+    /// says it has no locator, a hint this build cannot dial changes nothing, and the first it
+    /// can dial starts the node with no second open. A close removes the row.
     #[test]
-    fn a_node_nothing_can_be_dialled_for_is_refused_and_takes_no_row() {
+    fn a_node_nothing_can_be_dialled_for_is_held_until_a_hint_is_confirmed() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
         static STORE: PeerStore = PeerStore::new();
         let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         if !nodes_asked_for() {
             return;
         }
-        std::assert_eq!(m.open_node(NODE_A, 0), Err(NodeRefusal::NoLocator));
-        declare(&mut m, NODE_B, "serial//dev/ttyS0");
-        std::assert_eq!(m.open_node(NODE_B, 0), Err(NodeRefusal::NoDialableLocator));
-        std::assert_eq!(m.node_states().count(), 0);
+        std::assert_eq!(m.open_node(NODE_A, 0), Ok(()));
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::NoHint);
         std::assert!(m.dialer().dials_for.borrow().is_empty());
+
+        declare(&mut m, NODE_A, "serial//dev/ttyS0");
+        std::assert_eq!(
+            m.node_states().next().unwrap().1,
+            NodeState::NoHint,
+            "a hint this build cannot dial is not one"
+        );
+        std::assert!(m.dialer().dials_for.borrow().is_empty());
+
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        let made: Vec<(String, DirectoryZid)> =
+            m.dialer().dials_for.borrow_mut().drain(..).collect();
+        std::assert_eq!(made, [(String::from("udp/10.0.0.9:7447"), NODE_A)]);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+    }
+
+    /// The row an open took for a node with no locator is removed by a close, so a node asked
+    /// for and then given up does not hold a place of the bounded table.
+    #[test]
+    fn a_close_removes_the_row_of_a_node_that_had_no_locator() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        std::assert_eq!(m.open_node(NODE_A, 0), Ok(()));
+        std::assert_eq!(m.node_states().count(), 1);
+        m.close_node(&NODE_A, 1);
+        std::assert_eq!(m.node_states().count(), 0);
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        std::assert!(
+            m.dialer().dials_for.borrow().is_empty(),
+            "a node that was closed is not started by a hint"
+        );
     }
 
     /// A dialer that does not hold a session to the node it was made for is not asked to dial one:
@@ -2490,7 +2511,6 @@ mod tests {
             return;
         }
         m.tick(0);
-        std::assert_eq!(opener.open(&NODE_A), Err(NodeRefusal::NoLocator));
         declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
         std::assert_eq!(opener.open(&NODE_A), Ok(()));
         std::assert_eq!(
@@ -2525,8 +2545,9 @@ mod tests {
         std::assert_eq!(m.node_states().count(), 1);
     }
 
-    /// Each refusal the opener gives is the one `open_node` gives, and a refused open leaves
-    /// nothing to take.
+    /// An opener takes a node whether or not anything can be dialled for it (decision D15), and a
+    /// flood of opens for zids nobody advertised is refused by the room and not by a guess about
+    /// what is reachable. A refused open leaves nothing to take.
     #[test]
     fn the_opener_refuses_what_the_node_cannot_hold() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
@@ -2536,15 +2557,11 @@ mod tests {
         if !nodes_asked_for() {
             return;
         }
-        declare(&mut m, NODE_B, "serial//dev/ttyS0");
-        std::assert_eq!(opener.open(&NODE_B), Err(NodeRefusal::NoDialableLocator));
         for at in (1u8..).take(MAX_PEER_NODES) {
             let zid = [at; CREDENTIAL_ZID_BYTES];
-            declare(&mut m, zid, "udp/10.0.0.9:7447");
             std::assert_eq!(opener.open(&zid), Ok(()));
         }
         let over = [0xee; CREDENTIAL_ZID_BYTES];
-        declare(&mut m, over, "udp/10.0.0.9:7447");
         std::assert_eq!(
             opener.open(&over),
             Err(NodeRefusal::NoRoom),
@@ -2556,17 +2573,12 @@ mod tests {
     }
 
     /// Each refusal of a node is one word of the lifecycle's open vocabulary, and no two share
-    /// one: a node with no hint is a node the opener knows no locator for.
+    /// one.
     #[test]
     fn a_refusal_of_a_node_is_one_word_of_the_open_vocabulary() {
         let words = [
             (NodeRefusal::Unverifiable, OpenOutcome::Unverifiable),
             (NodeRefusal::NoRoom, OpenOutcome::NoRoom),
-            (NodeRefusal::NoLocator, OpenOutcome::PeerUnknown),
-            (
-                NodeRefusal::NoDialableLocator,
-                OpenOutcome::NoDialableLocator,
-            ),
         ];
         for (refusal, outcome) in words {
             std::assert_eq!(OpenOutcome::from(refusal), outcome);
@@ -2587,7 +2599,6 @@ mod tests {
             std::assert_eq!(OPENER.open(&NODE_A), Err(NodeRefusal::NoRoom));
             return;
         }
-        std::assert_eq!(OPENER.open(&NODE_A), Err(NodeRefusal::NoLocator));
         declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
         std::assert_eq!(OPENER.open(&NODE_A), Ok(()));
         m.tick(1);

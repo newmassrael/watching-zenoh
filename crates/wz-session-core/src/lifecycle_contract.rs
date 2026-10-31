@@ -96,9 +96,6 @@ const OPENING: &str = "{\"verdict\":\"opening\"}";
 const NOT_PERMITTED: &str = "{\"verdict\":\"refused\",\"reason\":\"this node does not permit opening a session with that peer\"}";
 const NOT_A_ZID: &str =
     "{\"verdict\":\"refused\",\"reason\":\"the last chunk of the key is not a zid\"}";
-const PEER_UNKNOWN: &str =
-    "{\"verdict\":\"refused\",\"reason\":\"this node knows no locator for that peer\"}";
-const NO_DIALABLE: &str = "{\"verdict\":\"refused\",\"reason\":\"this node cannot dial any locator it knows for that peer\"}";
 const OPENER_GONE: &str =
     "{\"verdict\":\"refused\",\"reason\":\"the loop that would hold that peer is gone\"}";
 const NO_ROOM: &str = "{\"verdict\":\"refused\",\"reason\":\"this node holds as many peers by their zid as it was built for\"}";
@@ -157,20 +154,6 @@ pub const CASES: &[Case] = &[
             z[1] = 0x0a;
             z
         }),
-    ),
-    bound(
-        "a peer the node knows no locator for is refused by name",
-        OpenOutcome::PeerUnknown,
-        "1f",
-        PEER_UNKNOWN,
-        Some(zid(0x1f)),
-    ),
-    bound(
-        "a peer with no dialable locator is refused by name",
-        OpenOutcome::NoDialableLocator,
-        "1f",
-        NO_DIALABLE,
-        Some(zid(0x1f)),
     ),
     bound(
         "a loop that is gone is refused by name",
@@ -614,8 +597,6 @@ mod tests {
         for reason in [
             RefusedReason::OpenNotPermitted,
             RefusedReason::PeerNotAZid,
-            RefusedReason::PeerUnknown,
-            RefusedReason::NoDialableLocator,
             RefusedReason::OpenerGone,
             RefusedReason::NoRoom,
             RefusedReason::Unverifiable,
