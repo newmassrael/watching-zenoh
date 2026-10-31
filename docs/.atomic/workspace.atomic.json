@@ -301994,6 +301994,34 @@
         "Whether the SCE tree's list bounds and gate normal form, which the pin note says are due, give the 12,184 bytes back is open; the next pin that touches the codecs re-measures it."
       ]
     },
+    "Round 4008": {
+      "decision_summary": "Layer C0's reason-review-pins gate was red on main: wz-routing-graph/src/lib.rs changed (033da584d1, a node's role restated on a newer link state) under a row of the close-ingress atom. The clause that cites it names node_locators as the retained zid-to-locator directory the flood populates; the function is as that clause says. The row moves to the new blob.",
+      "changes_bullets": [
+        "docs/reason-review-pins.md: one row."
+      ],
+      "verification_bullets": [
+        "The atom's clause was read against the file; the pin gate passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "None."
+      ],
+      "publishable_decision_summary": "Layer C0's reason-review-pins gate was red on main: wz-routing-graph/src/lib.rs changed (033da584d1, a node's role restated on a newer link state) under a row of the close-ingress atom. The clause that cites it names node_locators as the retained zid-to-locator directory the flood populates; the function is as that clause says. The row moves to the new blob.",
+      "publishable_changes_bullets": [
+        "docs/reason-review-pins.md: one row."
+      ],
+      "publishable_verification_bullets": [
+        "The atom's clause was read against the file; the pin gate passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "None."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
