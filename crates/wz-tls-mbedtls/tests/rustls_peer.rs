@@ -147,7 +147,7 @@ fn a_device_dials_a_router_that_pins_its_certificate_and_each_names_the_others_k
         .expect("the channel opens");
     assert_eq!(
         stream.peer_zid(),
-        router.zid(),
+        Some(router.zid()),
         "the device names the router by the key the router proved"
     );
     assert_eq!(stream.suite(), Some("TLS1-3-AES-128-GCM-SHA256"));

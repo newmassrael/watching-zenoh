@@ -171,6 +171,26 @@ pub trait StreamListen {
     }
 }
 
+/// A boxed listener is a listener, so a provider that wraps the one a [`StreamDial::listen`] hands
+/// back (a secure channel's handshake runs between the accept and the link) names it by trait and
+/// not by the platform's own type.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<L: StreamListen + ?Sized> StreamListen for alloc::boxed::Box<L> {
+    type Stream = L::Stream;
+
+    fn local(&self) -> ([u8; 4], u16) {
+        (**self).local()
+    }
+
+    fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError> {
+        (**self).accept()
+    }
+
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        (**self).readiness()
+    }
+}
+
 /// The dial of a stream protocol a stack does not carry: an image with no secure channel names
 /// it for `tls/`, and every dial is [`LinkOpenError::Unsupported`].
 #[derive(Debug, Clone, Copy, Default)]

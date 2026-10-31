@@ -854,7 +854,7 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   tokio peer that races it (the two keep different rules, and a race can close both links until the
   next redial).
 
-- **L6. `tls/`, both roles. Designed; T1 built.** pico's `tls/` and zenohd's are TLS with a CA
+- **L6. `tls/`, both roles. Designed; T1 and T2 built.** pico's `tls/` and zenohd's are TLS with a CA
   chain, and the cooperative engine has no such link; a build with `tls/` selects the tokio
   engine (rustls) by its own feature. What stands in the way is not a missing composition, which
   the first reading of the tree suggests (`wz-tls-mbedtls` already is a `StreamSocket` and a
@@ -920,6 +920,26 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     certificates, not by a guess. The Zephyr images compile the same `wz_tls.c`; their Kconfig
     selects the key reader through the X.509 core, and they have no PEM reader, so a PEM that
     reaches them is refused, not misread.
+  - T2, built (`wz-tls-mbedtls/src/stream.rs`, `tests/stream_policy.rs`, 9 tests; 25 in the
+    crate). `TlsDial::chain(inner, ChainTrust { identity, roots, mutual, verify_name })` is the
+    chain dial beside `TlsDial::new` (pinned), and the same value listens once it has an
+    `AcceptBudget`: `StreamDial::listen` wraps the platform's listener in a `TlsListener`
+    (`TlsDial::listener` does the same for the slot profile, which has no box). Decisions the
+    code states: (1) a chain stream offers NO credential zid (`peer_credential_zid` is `None`,
+    `peer_zid` is only the key's name), because a router's zid is its own and the session must
+    take the zid the peer states, the chain having been the proof; a pinned stream is unchanged.
+    (2) The name a stream dial has is the address, so `verify_name` matches the dialled address
+    against the certificate's IP SAN; a hostname locator is the engine's to resolve in T3 and
+    T4, not guessed here. (3) A mutual policy missing its identity or its roots is
+    `Unsupported` and never connects, not a plain TLS end. (4) The listener's accept never blocks
+    on the network: one inbound handshake runs at a time (the arena holds one inbound session,
+    and a connection behind it waits in the platform's queue), each accept advances it, and a
+    handshake that outlasts the deploy's clock budget, fails, or comes from a peer that is not
+    TLS or not trusted is dropped without being the listener's failure. Proved against rustls
+    on a thread of its own for each role, because the arena has no lock and cannot serve two
+    threads; the two ends of the channel meeting on one thread is the engine's test (T3). The
+    coop crate gained one blanket impl (`StreamListen for Box<L>`) so a provider can wrap the
+    listener a dial hands back.
   - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: zenohd's
     rustls speaks it, but the real zenoh-pico's own Mbed TLS may offer 1.2 only, and then the
     channel needs 1.2 as well (read from the negotiated version of the two TLS programs in T4,
@@ -950,4 +970,4 @@ dial role's face stands by when its node is held.
 Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
 history is when two faces hold the same token key (L2 hands it every face's tokens, and each
 face's loss deletes its own); UDP faces by source address; `tls/` on the cooperative engine
-(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 is built).
+(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 and T2 are built).

@@ -16,8 +16,9 @@
 //!   read from PEM), the [`channel::Trust`] roots, and a [`channel::Session`] over any byte
 //!   [`channel::Transport`].
 //! - [`stream`] -- the channel as the cooperative runtime's stream: [`stream::TlsStream`] is a
-//!   `StreamSocket` over another one and [`stream::TlsDial`] the `StreamDial` that opens it, so
-//!   the stream link runs over the channel unchanged.
+//!   `StreamSocket` over another one, [`stream::TlsDial`] the `StreamDial` that opens it and
+//!   [`stream::TlsListener`] the `StreamListen` that accepts it, so the stream link runs over the
+//!   channel unchanged, in either role and under either policy.
 //!
 //! The Mbed TLS this links is the one revision the Zephyr workspace pins (4.1.0, with
 //! TF-PSA-Crypto 1.1.0). With the `vendored` feature `build.rs` builds that revision from
@@ -25,6 +26,9 @@
 //! compiles the C side of the channel (`csrc/wz_tls.c`) beside it; without it, the image's own
 //! build compiles `csrc/wz_tls.c` against the Mbed TLS the platform carries.
 #![no_std]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 #[cfg(test)]
 extern crate std;
