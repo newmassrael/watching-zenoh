@@ -303416,6 +303416,38 @@
         "Phases 5 (room reservation) and 6 (async conduit lock) are next; phase 6 must keep the shm relay pass out of any await"
       ]
     },
+    "Round 4047": {
+      "decision_summary": "Layer C0mut could not run on a build host, and the carry that called it a bx environment issue named the symptom and not the cause. The sweep starts its cargo child with `subprocess.run`, which closes every descriptor above 2, while the host's environment tells that child about a jobserver on descriptors 3 and 4 (MAKEFLAGS), so the child found nothing there; and the host puts sccache in front of rustc (RUSTC_WRAPPER) while the sweep builds incrementally on purpose (round 3140), which sccache refuses outright, so the baseline could not run `rustc -vV` and the sweep said the unmutated tree was not green. The sweep now builds its cargo child from `sweep_env`: no jobserver variables the child cannot reach, no compiler-cache wrapper it cannot use (a cache serves a crate compiled once from a clean tree, and this sweep recompiles one crate after a one-line edit a hundred times, which incremental state serves). Everything else of the caller's environment is kept. A selftest drives both directions: the variables are removed and nothing else is.",
+      "changes_bullets": [
+        "scripts/lib/verdict_leg_mutation.py: JOBSERVER_ENV, COMPILER_CACHE_ENV, without_jobserver and sweep_env; the cargo child of the sweep gets sweep_env; the selftest holds the environment in both directions."
+      ],
+      "verification_bullets": [
+        "Two failed runs on a build host, each read to its message: the first `failed to connect to jobserver ... cannot open file descriptor 3`, the second after the jobserver fix `sccache: incremental compilation is prohibited`.",
+        "After both changes, on the same host: Layer C0mut passed in 757 s, `27 leg(s) x 3 operator(s) = 105 mutant(s) asked, 9 not applicable, every one killed by at least 1 test(s)`; the selftest passes locally and on the host.",
+        "Not run: the hosted run of this tip (hosted CI sets no jobserver for this step, so the change should be inert there; that is not measured)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried: O4 (h) timestamp ZID bound (the SCE owner's); the kit hardware measurement and the mold 2.30.0 link abort, which need the owner's hardware and linker; the hosted verdict of the tips after round 4029, which concurrent pushes keep cancelling."
+      ],
+      "publishable_decision_summary": "Layer C0mut could not run on a build host, and the carry that called it a bx environment issue named the symptom and not the cause. The sweep starts its cargo child with `subprocess.run`, which closes every descriptor above 2, while the host's environment tells that child about a jobserver on descriptors 3 and 4 (MAKEFLAGS), so the child found nothing there; and the host puts sccache in front of rustc (RUSTC_WRAPPER) while the sweep builds incrementally on purpose (round 3140), which sccache refuses outright, so the baseline could not run `rustc -vV` and the sweep said the unmutated tree was not green. The sweep now builds its cargo child from `sweep_env`: no jobserver variables the child cannot reach, no compiler-cache wrapper it cannot use (a cache serves a crate compiled once from a clean tree, and this sweep recompiles one crate after a one-line edit a hundred times, which incremental state serves). Everything else of the caller's environment is kept. A selftest drives both directions: the variables are removed and nothing else is.",
+      "publishable_changes_bullets": [
+        "scripts/lib/verdict_leg_mutation.py: JOBSERVER_ENV, COMPILER_CACHE_ENV, without_jobserver and sweep_env; the cargo child of the sweep gets sweep_env; the selftest holds the environment in both directions."
+      ],
+      "publishable_verification_bullets": [
+        "Two failed runs on a build host, each read to its message: the first `failed to connect to jobserver ... cannot open file descriptor 3`, the second after the jobserver fix `sccache: incremental compilation is prohibited`.",
+        "After both changes, on the same host: Layer C0mut passed in 757 s, `27 leg(s) x 3 operator(s) = 105 mutant(s) asked, 9 not applicable, every one killed by at least 1 test(s)`; the selftest passes locally and on the host.",
+        "Not run: the hosted run of this tip (hosted CI sets no jobserver for this step, so the change should be inert there; that is not measured)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried: O4 (h) timestamp ZID bound (the SCE owner's); the kit hardware measurement and the mold 2.30.0 link abort, which need the owner's hardware and linker; the hosted verdict of the tips after round 4029, which concurrent pushes keep cancelling."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
