@@ -301896,6 +301896,40 @@
         "Open: no wz test pins the tag of a generic default-armed entry across the conversion to a Query entry (the proof is the compile-time one); SCE's R2 and R4 are what remove the MsgPut counting copy; hosted CI per job is unread."
       ]
     },
+    "Round 4005": {
+      "decision_summary": "The router_forward counts of Layer C1ay are re-read after the commit that made the forwarder hold a link-state message that finds no room, and the build error that commit left is closed. That commit added tests without moving the nine guarded counts: every arm gains 5, the arms with transport-qos one more, read off one run of each arm (268, 271, 293, 276, 279, 320, 268, 270, 278). One of its tests uses the is_qos field, which exists only with transport-qos, so every build without that feature failed to compile its tests; the test and the one helper that only it calls are gated on that feature. The joined-link module goes back to transport-multilink alone: another session widened the fixture it reads to the same feature in the meantime, so the narrower gate this stream added earlier is redundant and would drop the module's tests from a multilink build. The whole layer passes on the build host (33 of 33 legs), and the multilink-only clippy combination passes.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: the nine router_forward guarded counts, with the cause above the first.",
+        "crates/wz-runtime-tokio/src/router_forward/egress_tests.rs: the QoS test and its helper open_control_lane are gated on transport-qos.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: joined_link_tests is gated on transport-multilink alone again."
+      ],
+      "verification_bullets": [
+        "The whole layer C1ay was run on a build host (bash scripts/run-ci.sh --layer C1ay): all 33 guarded legs pass and run-ci reports all required layers pass. Each router_forward count was read from a run of its own feature set; four runs ended at their memory reservation when too many were started together and were repeated alone. The multilink-only combination (routing-router-hat, transport-link-tcp, transport-multilink) passes clippy with -D warnings on all targets. The earlier fix by another session that C1bf needed (the oracle entry's bytes) was already on main. Not looked at in this round: the wz-capture kind table test, C1bnl, C1g, C0mut, E17, Q and the C1bzr docs ledger."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The same pattern keeps recurring on this layer: a commit adds forwarder tests and does not move the guarded counts, and the layer then stops at its first stale leg, so each fix shows the next. Reading the layer on the build host after a change is the instrument. Still red from the last completed hosted run and not yet looked at here: the wz-capture transport kind table test (a run of it with the default features selected no test, since the module needs the dissect feature, so it was not reproduced), C1bnl, C1g, C0mut, E17, Q and the C1bzr docs ledger."
+      ],
+      "publishable_decision_summary": "The router_forward counts of Layer C1ay are re-read after the commit that made the forwarder hold a link-state message that finds no room, and the build error that commit left is closed. That commit added tests without moving the nine guarded counts: every arm gains 5, the arms with transport-qos one more, read off one run of each arm (268, 271, 293, 276, 279, 320, 268, 270, 278). One of its tests uses the is_qos field, which exists only with transport-qos, so every build without that feature failed to compile its tests; the test and the one helper that only it calls are gated on that feature. The joined-link module goes back to transport-multilink alone: another session widened the fixture it reads to the same feature in the meantime, so the narrower gate this stream added earlier is redundant and would drop the module's tests from a multilink build. The whole layer passes on the build host (33 of 33 legs), and the multilink-only clippy combination passes.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: the nine router_forward guarded counts, with the cause above the first.",
+        "crates/wz-runtime-tokio/src/router_forward/egress_tests.rs: the QoS test and its helper open_control_lane are gated on transport-qos.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: joined_link_tests is gated on transport-multilink alone again."
+      ],
+      "publishable_verification_bullets": [
+        "The whole layer C1ay was run on a build host (bash scripts/run-ci.sh --layer C1ay): all 33 guarded legs pass and run-ci reports all required layers pass. Each router_forward count was read from a run of its own feature set; four runs ended at their memory reservation when too many were started together and were repeated alone. The multilink-only combination (routing-router-hat, transport-link-tcp, transport-multilink) passes clippy with -D warnings on all targets. The earlier fix by another session that C1bf needed (the oracle entry's bytes) was already on main. Not looked at in this round: the wz-capture kind table test, C1bnl, C1g, C0mut, E17, Q and the C1bzr docs ledger."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The same pattern keeps recurring on this layer: a commit adds forwarder tests and does not move the guarded counts, and the layer then stops at its first stale leg, so each fix shows the next. Reading the layer on the build host after a change is the instrument. Still red from the last completed hosted run and not yet looked at here: the wz-capture transport kind table test (a run of it with the default features selected no test, since the module needs the dissect feature, so it was not reproduced), C1bnl, C1g, C0mut, E17, Q and the C1bzr docs ledger."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
