@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -404,6 +405,37 @@ DEFAULT_FEATURES = "unstable,shared-memory,transport_tcp,transport_udp,transport
 #: table: they need `zenoh::internal::runtime`, which this crate does not carry.
 FILE_FEATURES = {"regions": ("internal",)}
 
+#: Files whose tests each run in a process of their own, as upstream's CI runs them (nextest starts
+#: one process per test). Every scenario module of `regions` installs its capture subscriber with
+#: `tracing::subscriber::set_global_default(..).ok()`, which a process takes once: in a run of the
+#: whole file only the first module (scenario 1) records anything, and the span counts of the
+#: others read 0 whatever the node does. One `cargo test` over the file measures the harness.
+ISOLATED_FILES = {"regions"}
+
+
+def isolated_run(base: list[str], out: pathlib.Path, log: pathlib.Path, bound: int) -> int | None:
+    """Run each test of a file in its own process; the logs are joined, the status is the worst.
+
+    `bound` is for the whole file. `None` when it ran out."""
+    listing = subprocess.run([*base, "--", "--list", "--format", "terse"], cwd=out, capture_output=True, text=True)
+    tests = re.findall(r"^(\S+): test$", listing.stdout, re.M)
+    deadline = time.monotonic() + bound
+    status: int | None = 0
+    with log.open("w", encoding="utf-8") as fh:
+        for test in tests:
+            left = int(deadline - time.monotonic())
+            if left <= 0:
+                return None
+            one = log.with_name(log.name + ".one")
+            rc = run([*base, "--", "--exact", test, "--test-threads=1"], out, one, left)
+            fh.write(one.read_text(encoding="utf-8", errors="replace"))
+            one.unlink()
+            if rc is None:
+                return None
+            if rc != 0:
+                status = rc
+    return status
+
 
 def measure(names: list[str], out: pathlib.Path) -> int:
     report = out / "report"
@@ -418,7 +450,10 @@ def measure(names: list[str], out: pathlib.Path) -> int:
         if rc != 0:
             rows.append(f"{name}\tno-compile\t{' | '.join(first_errors(clog))}")
             continue
-        rc = run(["cargo", "test", "--test", name, *flags, "--", "--test-threads=1"], out, rlog, RUN_BOUND_S)
+        if name in ISOLATED_FILES:
+            rc = isolated_run(["cargo", "test", "--test", name, *flags], out, rlog, RUN_BOUND_S)
+        else:
+            rc = run(["cargo", "test", "--test", name, *flags, "--", "--test-threads=1"], out, rlog, RUN_BOUND_S)
         passed, failed, ignored = counts(rlog.read_text(encoding="utf-8", errors="replace"))
         ran = f"ran={passed + failed} passed={passed} ignored={ignored}"
         if rc is None:
