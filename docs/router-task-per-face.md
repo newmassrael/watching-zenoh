@@ -480,10 +480,22 @@ beside.
   without a reader, and a face could not leave (the test's first form, with the churn waiting for the fan-out,
   timed out at sixty seconds with the publishers still routing). Every writer of the tables waits the same way:
   a face coming up, a declaration, a topology list. The top of `forward_frame`, where a face's thread holds no
-  guard of the tables, now takes them behind a waiting writer (`PlainRwLock::read_behind_writers`, parking_lot's
-  fair `read`); everything under it keeps the recursive read, which it needs. A guard of the fair kind must
-  not be taken by a thread that holds one already, and the only callers of `forward_frame` are the two face
-  drives of the accept loop, which hold none. With the recursive read put back the test times out again.
+  guard of the tables, now takes them with `PlainRwLock::read_behind_a_writer_waiting`: the recursive read,
+  unless a writer has waited `TABLES_WRITER_FIRST_AFTER` (10 ms) already, when the frame queues behind it
+  (parking_lot's fair `read`). Everything under it keeps the recursive read, which it needs. A guard of the
+  fair kind must not be taken by a thread that holds one already, and the only callers of `forward_frame` are
+  the two face drives of the accept loop, which hold none. With the recursive read put back the test times
+  out again, and so does the lock's own test (eight readers holding a millisecond each, a writer that must
+  get in twenty times).
+  Why the bound and not the fair read at once: Layer E7s on pc2, alternating, the starved router (one shared
+  core) forwarded 8215, 8383 and 8445 messages a second with the recursive read; 3846, 4715, 7586 and 7959
+  with the fair read, which queued every frame behind every waiting writer and so put every face's thread to
+  sleep until a writer starved of the core was given it; 7512 and 7816 with the bound. The bound costs that
+  test about eight per cent against the recursive read and none of the collapses, and in return no write of
+  the tables waited 250 ms there (the recursive read let one wait 325 ms and one 501 ms). In the share tests
+  (32 and 64 hogs) the writers wait 1.7 to 3.4 s under all three: the core, and not the readers, is what they
+  wait for there. The probe that reads those waits stays in E7s: each line now ends with how many waits of
+  250 ms or more the router logged in the window and the longest. 10 ms is a choice, not a measured optimum.
   The first form of the test passed by not testing: its churn ran two hundred rounds in a millisecond, before
   the publishers had sent anything, so no face ever left a fan-out. It now waits, every round, until the fan-out
   has written to the face before the face leaves.

@@ -209,12 +209,37 @@ impl<T: Copy> core::fmt::Debug for PlainCell<T> {
 /// on every message and written on a miss: a read guard is one atomic add to take and one to release,
 /// where `std`'s also reads the process's panic count on both. A holder that panics leaves the value
 /// as it was, which is what every caller of the `std` lock here recovered to.
-pub struct PlainRwLock<T>(parking_lot::RwLock<T>);
+///
+/// A writer that cannot take the lock at once records when it began to wait, so that a reader can
+/// let a writer that has waited too long in ahead of it ([`Self::read_behind_a_writer_waiting`]);
+/// a writer that takes the lock at once pays one try and records nothing.
+pub struct PlainRwLock<T> {
+    lock: parking_lot::RwLock<T>,
+    /// When the writer that has waited longest began to wait, in nanoseconds of [`wait_clock`],
+    /// or 0 when no writer waits. Read by readers without a lock; written under `waiting`.
+    oldest_writer_since: core::sync::atomic::AtomicU64,
+    /// When each writer that waits now began to wait (the slow path of [`Self::write`] only).
+    waiting: parking_lot::Mutex<Vec<u64>>,
+}
+
+/// Nanoseconds since the first time a writer of any [`PlainRwLock`] had to wait, never 0: the
+/// clock the waits are stamped and compared on.
+fn wait_clock() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
+    u64::try_from(epoch.elapsed().as_nanos())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
 
 impl<T> PlainRwLock<T> {
     /// A lock over `value`.
     pub const fn new(value: T) -> Self {
-        Self(parking_lot::const_rwlock(value))
+        Self {
+            lock: parking_lot::const_rwlock(value),
+            oldest_writer_since: core::sync::atomic::AtomicU64::new(0),
+            waiting: parking_lot::const_mutex(Vec::new()),
+        }
     }
 
     /// The value for reading, waiting for a writer to finish. Any number of readers hold it at once.
@@ -224,30 +249,68 @@ impl<T> PlainRwLock<T> {
     /// that reads the same table): the recursive form, which does not queue behind a writer that is
     /// waiting for the first guard, so the pair cannot deadlock. The price is that a steady stream
     /// of readers can keep a writer waiting for as long as the stream lasts, which is what
-    /// [`Self::read_behind_writers`] is for.
+    /// [`Self::read_behind_a_writer_waiting`] is for.
     pub fn read(&self) -> PlainReadGuard<'_, T> {
-        self.0.read_recursive()
+        self.lock.read_recursive()
     }
 
-    /// The value for reading, queued behind a writer that is waiting: a writer is let in before
-    /// the readers that came after it.
+    /// The value for reading, as [`Self::read`] takes it, unless a writer has waited `longer_than`
+    /// already: then this reader queues behind it, and the writer is let in before the readers
+    /// that came after it.
     ///
     /// For a thread that takes the lock over and over and holds no guard of it when it does, such
     /// as each of a router's faces taking its tables once per message. Several such threads, each
     /// with a guard taken before the last one let go, never leave the lock without a reader, and
-    /// with [`Self::read`] a writer (a face coming up, a declaration, a face leaving) would wait
+    /// with [`Self::read`] alone a writer (a face coming up, a declaration, a face leaving) waits
     /// for as long as they read, which under load is for ever (measured: eight faces' threads
-    /// routing without pause kept a face from leaving for a minute). This form lets it in.
+    /// routing without pause kept a face from leaving for a minute). Queueing behind every waiting
+    /// writer at once is the other extreme: on a core the threads share with others, the readers
+    /// that queue all sleep until the writer is given the core, and the router forwarded 3 846 to
+    /// 7 959 messages a second where the recursive read forwarded 7 916 to 8 951 (Layer E7s, the
+    /// starved router, ten runs). Waiting `longer_than` first keeps the readers running while a
+    /// writer is about to get in anyway, and bounds what a writer waits for to that and the reads
+    /// already under way.
     ///
     /// It must not be taken by a thread that already holds a guard of this lock: a writer waiting
     /// for that guard would be ahead of this one, and the two would wait on each other.
-    pub fn read_behind_writers(&self) -> PlainReadGuard<'_, T> {
-        self.0.read()
+    pub fn read_behind_a_writer_waiting(
+        &self,
+        longer_than: std::time::Duration,
+    ) -> PlainReadGuard<'_, T> {
+        let since = self
+            .oldest_writer_since
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let bound = u64::try_from(longer_than.as_nanos()).unwrap_or(u64::MAX);
+        if since != 0 && wait_clock().saturating_sub(since) >= bound {
+            self.lock.read()
+        } else {
+            self.lock.read_recursive()
+        }
     }
 
     /// The value for writing, waiting for every reader and writer to finish.
     pub fn write(&self) -> PlainWriteGuard<'_, T> {
-        self.0.write()
+        if let Some(guard) = self.lock.try_write() {
+            return guard;
+        }
+        let stamp = wait_clock();
+        self.note_waiting(|waiting| waiting.push(stamp));
+        let guard = self.lock.write();
+        self.note_waiting(|waiting| {
+            if let Some(at) = waiting.iter().position(|&s| s == stamp) {
+                waiting.swap_remove(at);
+            }
+        });
+        guard
+    }
+
+    /// Change the writers that wait, and publish when the one that has waited longest began to.
+    fn note_waiting(&self, change: impl FnOnce(&mut Vec<u64>)) {
+        let mut waiting = self.waiting.lock();
+        change(&mut waiting);
+        let oldest = waiting.iter().copied().min().unwrap_or(0);
+        self.oldest_writer_since
+            .store(oldest, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -266,5 +329,83 @@ impl<T: Default> Default for PlainRwLock<T> {
 impl<T> core::fmt::Debug for PlainRwLock<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("PlainRwLock")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Readers on eight threads, each holding the lock for a millisecond and taking it again at
+    /// once, never leave it unread together, so with the recursive read alone a writer waits for as
+    /// long as they read. With [`PlainRwLock::read_behind_a_writer_waiting`] a writer gets in about
+    /// when it has waited the bound and the reads under way have ended: twenty writes, each far under
+    /// a second. A writer that does not get in fails the test at ten seconds and does not hang it.
+    #[test]
+    fn a_writer_gets_in_past_readers_that_never_leave_the_lock_unread() {
+        const BOUND: Duration = Duration::from_millis(10);
+        let lock = Arc::new(PlainRwLock::new(0u64));
+        let reading = Arc::new(AtomicBool::new(true));
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                let (lock, reading) = (Arc::clone(&lock), Arc::clone(&reading));
+                std::thread::spawn(move || {
+                    while reading.load(Ordering::Acquire) {
+                        let guard = lock.read_behind_a_writer_waiting(BOUND);
+                        std::thread::sleep(Duration::from_millis(1));
+                        std::hint::black_box(*guard);
+                    }
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(20));
+        let (done, finished) = std::sync::mpsc::channel();
+        let writer = {
+            let lock = Arc::clone(&lock);
+            std::thread::spawn(move || {
+                let mut longest = Duration::ZERO;
+                for round in 0..20u64 {
+                    let began = Instant::now();
+                    *lock.write() = round;
+                    longest = longest.max(began.elapsed());
+                }
+                let _ = done.send(longest);
+            })
+        };
+        let longest = finished.recv_timeout(Duration::from_secs(10));
+        reading.store(false, Ordering::Release);
+        let longest = longest.expect("the writer got in twenty times within ten seconds");
+        writer.join().expect("the writer finishes");
+        for reader in readers {
+            reader.join().expect("a reader finishes");
+        }
+        assert!(
+            longest < Duration::from_secs(1),
+            "a writer waited {longest:?} for readers that never left the lock unread"
+        );
+        assert_eq!(*lock.read(), 19, "every write got in");
+    }
+
+    /// A writer that waited leaves no record behind it, so that once no writer waits a reader takes
+    /// the recursive read again and does not queue behind a writer that has gone.
+    #[test]
+    fn a_writer_that_waited_is_forgotten_once_it_got_in() {
+        let lock = Arc::new(PlainRwLock::new(0u64));
+        let held = lock.read();
+        let writer = {
+            let lock = Arc::clone(&lock);
+            std::thread::spawn(move || *lock.write() = 1)
+        };
+        while lock.oldest_writer_since.load(Ordering::Relaxed) == 0 {
+            std::thread::yield_now();
+        }
+        drop(held);
+        writer.join().expect("the writer finishes");
+        assert_eq!(lock.oldest_writer_since.load(Ordering::Relaxed), 0);
+        assert!(lock.waiting.lock().is_empty());
+        assert_eq!(*lock.read_behind_a_writer_waiting(Duration::ZERO), 1);
     }
 }

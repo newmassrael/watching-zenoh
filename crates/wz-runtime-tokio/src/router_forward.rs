@@ -3050,6 +3050,13 @@ const SELF_ECHO_QUEUE_CAP: usize = 256;
 /// waited for a link's room inside them (measured, `docs/router-task-per-face.md`).
 const SLOW_TABLES_WAIT: Duration = Duration::from_millis(250);
 
+/// How long a writer of the routing tables waits before the faces' frames queue behind it
+/// ([`RouterForwarder::on_tables_for_a_frame`]). A route holds the tables for microseconds, so a
+/// writer that has waited this long is being kept out by reads that overlap without end, and not
+/// by one read; a writer that gets in sooner costs the faces nothing. It bounds what a face coming
+/// up, a declaration or the tick waits for, under any load, to about this and the reads in flight.
+const TABLES_WRITER_FIRST_AFTER: Duration = Duration::from_millis(10);
+
 /// How a log line names the remote node of a face: its zid as zenoh prints it, or `-` for a face
 /// whose peer has not told one (a client that never surfaced an id).
 fn peer_label(zid: Option<Zid>) -> String {
@@ -3424,16 +3431,18 @@ impl RouterForwarder {
         }
     }
 
-    /// [`Self::on_tables`] for a face's own frame, taken behind any writer that waits
-    /// ([`PlainRwLock::read_behind_writers`]): every face's thread takes the tables once per
-    /// message, and with the recursive read their guards overlap without end, so that a face
-    /// coming up, a declaration or a face leaving waits for as long as the faces route. Only where
-    /// the thread holds no guard of the tables, which is the top of [`Self::forward_frame`]: a
-    /// face's drive calls it with nothing held.
+    /// [`Self::on_tables`] for a face's own frame, taken behind a writer that has waited
+    /// [`TABLES_WRITER_FIRST_AFTER`] ([`PlainRwLock::read_behind_a_writer_waiting`]): every face's
+    /// thread takes the tables once per message, and with the recursive read alone their guards
+    /// overlap without end, so that a face coming up, a declaration or a face leaving waits for as
+    /// long as the faces route. Only where the thread holds no guard of the tables, which is the
+    /// top of [`Self::forward_frame`]: a face's drive calls it with nothing held.
     fn on_tables_for_a_frame(&self) -> OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>> {
         OnTables {
             fwd: self,
-            tables: self.tables.read_behind_writers(),
+            tables: self
+                .tables
+                .read_behind_a_writer_waiting(TABLES_WRITER_FIRST_AFTER),
         }
     }
 
