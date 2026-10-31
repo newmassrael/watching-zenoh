@@ -301810,6 +301810,34 @@
         "Read the hosted result of the tip once at the next round start. Carried unchanged: docs/zenoh-api-on-the-engine.md O4 (a) to (h), the pico comparison image measured on the kit at 1.10.2, and the mold 2.30.0 link abort on a machine whose global cargo config selects it (GNU ld links the test)."
       ]
     },
+    "Round 4002": {
+      "decision_summary": "Round 3958 moved nine cooperative text budgets to a hosted reading and wrote that pc2 and hosted had drifted 10,000 bytes apart. Re-measured, they had not: hosted run 41140796607 (c27afce98) reads pico-client-coop at 940,723 where pc2 read 940,971, the C reference is the same 404,694 on both days, and a GNU-ld build reads 933,813. The 951,015 was one commit's size, which later work removed. Four cases read under their old budgets and have them back; five grew for good (unstable, connectivity, admin-space, query, local-queryable) and are fitted to that run's reading plus 3,500. The note in capability_cost_gate.py says so.",
+      "changes_bullets": [
+        "capability_cost_gate.py: nine budgets and the note above them."
+      ],
+      "verification_bullets": [
+        "Hosted C1cs reading of run 41140796607 read from its log for all nine cases; two pc2 builds of one case (mold and GNU ld) and one with the default linker driver; the gate selftest and the pin gate pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Which commits grew the five cases is not attributed. Connectivity is 850 bytes over its old budget and gets 3,500 of room by the file's convention."
+      ],
+      "publishable_decision_summary": "Round 3958 moved nine cooperative text budgets to a hosted reading and wrote that pc2 and hosted had drifted 10,000 bytes apart. Re-measured, they had not: hosted run 41140796607 (c27afce98) reads pico-client-coop at 940,723 where pc2 read 940,971, the C reference is the same 404,694 on both days, and a GNU-ld build reads 933,813. The 951,015 was one commit's size, which later work removed. Four cases read under their old budgets and have them back; five grew for good (unstable, connectivity, admin-space, query, local-queryable) and are fitted to that run's reading plus 3,500. The note in capability_cost_gate.py says so.",
+      "publishable_changes_bullets": [
+        "capability_cost_gate.py: nine budgets and the note above them."
+      ],
+      "publishable_verification_bullets": [
+        "Hosted C1cs reading of run 41140796607 read from its log for all nine cases; two pc2 builds of one case (mold and GNU ld) and one with the default linker driver; the gate selftest and the pin gate pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Which commits grew the five cases is not attributed. Connectivity is 850 bytes over its old budget and gets 3,500 of room by the file's convention."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
