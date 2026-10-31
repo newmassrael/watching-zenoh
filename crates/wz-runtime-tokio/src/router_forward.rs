@@ -2487,6 +2487,13 @@ pub(crate) struct Tables {
     /// linkless early-return (OBLIGATION 1), like `client_subs`. SUBS plane only
     /// (the QABL future-push is the value-aware [`future_qabls`](Self#structfield.future_qabls)).
     future_subs: FutureSubStore,
+    /// The publishers and queriers of the node's own session, `(id, keyexpr, queryables)`, as
+    /// they asked for subscribers (or queryables) of their key: a PEER node sends each as an
+    /// interest to the routers it is linked to, and again to one that comes up later, as
+    /// upstream's peer hat repropagates its interests on a new face
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn repropagate_interests`). A router has
+    /// no router to ask and keeps them for the admin legs alone.
+    own_interests: Vec<(u64, String, bool)>,
     /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
     /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
     /// ([`declare_queryable`](RouterForwarder::declare_queryable)) is proactively
@@ -4194,6 +4201,7 @@ impl RouterForwarder {
                 #[cfg(feature = "routing-token-tables")]
                 advertised_tokens: PlainMutex::new(HashMap::new()),
                 future_subs: FutureSubStore::new(),
+                own_interests: Vec::new(),
                 future_qabls: FutureQablStore::new(),
                 #[cfg(feature = "routing-token-tables")]
                 future_tokens: FutureSubStore::new(),
@@ -7047,6 +7055,46 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .is_some_and(|s| is_leaf(s.tier, self.tables.node_mode))
     }
 
+    /// The faces a PEER node asks for what it publishes or queries: those whose remote is a
+    /// router, which treats the node as a peer south of it. Upstream sends the future interest of
+    /// a publisher to the faces whose remote is south-bound
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
+    /// and a router has no router to ask.
+    fn router_faces(&self) -> Vec<FaceId> {
+        if self.tables.node_mode != WhatAmI::Peer {
+            return Vec::new();
+        }
+        let mut faces: Vec<FaceId> = self
+            .tables
+            .faces
+            .iter()
+            .filter(|(_, state)| peer_whatami_routing(&state.actions) == WhatAmI::Router)
+            .map(|(id, _)| *id)
+            .collect();
+        faces.sort_unstable();
+        faces
+    }
+
+    /// Send `face` the interest of the node's own publisher (`queryables` false) or querier
+    /// (true) `id` on `keyexpr`: current and future, for the subscribers or the queryables of
+    /// the key.
+    fn send_own_interest(&self, face: FaceId, id: u64, keyexpr: &str, queryables: bool) {
+        use wz_session_core::interest_build::{
+            build_interest_queryables, build_interest_subscribers,
+        };
+        let built = if queryables {
+            build_interest_queryables(id, true, true, 0, Some(keyexpr))
+        } else {
+            build_interest_subscribers(id, true, true, 0, Some(keyexpr))
+        };
+        match built {
+            Ok(interest) => self.send_one_to_face(face, NetworkMessage::Interest(interest)),
+            Err(e) => log::warn!(
+                "router forward: own interest {id} on {keyexpr:?} could not be built: {e:?}"
+            ),
+        }
+    }
+
     /// Whether `face` is a face of a south region the peer hat serves, which is told the
     /// declarations of the other regions that match what it asked for and no others
     /// ([`Tables::serves_asking_peers`]).
@@ -9536,11 +9584,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// does: it is read by the admin `publisher` and `querier` legs and by nothing else, since
     /// the node's own matching is worked out from the tables. `id` is the session's number for
     /// the entity, the one [`undeclare_local_interest`](Self::undeclare_local_interest) takes.
+    ///
+    /// A PEER node also asks the routers it is linked to, with the interest a publisher or a
+    /// querier of upstream sends them (current and future, for the subscribers or the queryables
+    /// of the key): the router's peer hat tells a peer below it a declaration only for an
+    /// interest it holds ([`Tables::serves_asking_peers`]), so a publisher that asked for nothing
+    /// would never learn that a subscriber exists beyond its router.
     pub fn declare_local_interest(&mut self, id: u64, keyexpr: &str, queryables: bool)
     where
         T: std::ops::DerefMut,
     {
         let keyexpr = self.fwd.wire_key(keyexpr);
+        self.tables
+            .own_interests
+            .retain(|(held, _, plane)| !(*held == id && *plane == queryables));
+        self.tables
+            .own_interests
+            .push((id, keyexpr.to_string(), queryables));
+        for face in self.router_faces() {
+            self.send_own_interest(face, id, &keyexpr, queryables);
+        }
         #[cfg(feature = "adminspace-introspection-handlers")]
         if queryables {
             self.tables.future_qabls.store_reporting_only_interest(
@@ -9567,6 +9630,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
+        let before = self.tables.own_interests.len();
+        self.tables
+            .own_interests
+            .retain(|(held, _, plane)| !(*held == id && *plane == queryables));
+        if self.tables.own_interests.len() != before {
+            for face in self.router_faces() {
+                self.send_one_to_face(
+                    face,
+                    NetworkMessage::Interest(
+                        wz_session_core::interest_build::build_interest_final(id),
+                    ),
+                );
+            }
+        }
         #[cfg(feature = "adminspace-introspection-handlers")]
         if queryables {
             self.tables.future_qabls.remove_interest(LOCAL_FACE, id);
@@ -12146,6 +12223,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let flood_done = Instant::now();
         self.replay_declarations_to_new_face(id, tier);
         self.end_initial_declarations(id, tier);
+        // The publishers and queriers the node already has ask the router that comes up now, as
+        // they asked the ones that were there.
+        if self.router_faces().contains(&id) {
+            let own = self.tables.own_interests.clone();
+            for (interest_id, keyexpr, queryables) in own {
+                self.send_own_interest(id, interest_id, &keyexpr, queryables);
+            }
+        }
         // A node being dialled is connected: it is a face now, and the face is what is waited on.
         if let Some(zid) = peer_zid_routing(actions) {
             self.pending_dials.guard().remove(&zid);
@@ -14099,6 +14184,87 @@ mod tests {
             0,
             "its face is up, and the face is what is waited on from here"
         );
+    }
+
+    /// The ids of the interests `sink` was sent, in order: the first message of each frame that
+    /// is an `Interest`, whatever the build.
+    fn interest_ids_sent(sink: &RecordingLinkDriver) -> Vec<u64> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        (0..sink.frame_count())
+            .filter_map(|i| {
+                let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&sink.frame_bytes(i))
+                else {
+                    return None;
+                };
+                match parse_frame_payload(&payload).ok()?.into_iter().next() {
+                    Some(NetworkMessage::Interest(interest)) => Some(interest.interest_id),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// A PEER node's publisher asks the routers it is linked to for the subscribers of its key:
+    /// the router's peer hat tells a peer below it a declaration only for an interest it holds
+    /// ([`Tables::serves_asking_peers`]), and upstream's `declare_publisher` sends that interest.
+    /// A peer beside it is not asked, and the interest is withdrawn with the publisher.
+    #[test]
+    fn a_peer_nodes_publisher_asks_its_routers_and_is_withdrawn_with_them() {
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let (router, sink_router) = face(zid(0xAA), WIRE_ROUTER);
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        sink_router.reset();
+        sink_peer.reset();
+
+        fwd.declare_local_interest(7, "demo/data", false);
+        assert_eq!(
+            interest_ids_sent(&sink_router),
+            vec![7],
+            "the router is asked"
+        );
+        assert!(
+            interest_ids_sent(&sink_peer).is_empty(),
+            "a peer beside the node is not"
+        );
+
+        fwd.undeclare_local_interest(7, false);
+        assert_eq!(
+            interest_ids_sent(&sink_router),
+            vec![7, 7],
+            "the withdrawal is a Final under the same id"
+        );
+    }
+
+    /// A router that comes up after the publisher was declared is asked as the ones that were
+    /// there were: upstream's peer hat repropagates its interests on a new face
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn repropagate_interests`).
+    #[test]
+    fn a_router_that_comes_up_later_is_asked_what_the_node_publishes() {
+        let fwd = RouterForwarder::peer(zid(0x05));
+        fwd.declare_local_interest(7, "demo/data", false);
+        fwd.declare_local_interest(8, "demo/q", true);
+
+        let (router, sink_router) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &router);
+        assert_eq!(
+            interest_ids_sent(&sink_router),
+            vec![7, 8],
+            "a publisher's and a querier's, as they were declared"
+        );
+    }
+
+    /// A router has no router to ask: the publisher of its own session keeps its interest for
+    /// the admin legs and sends none.
+    #[test]
+    fn a_routers_own_publisher_asks_nobody() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (other, sink_other) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &other);
+        sink_other.reset();
+        fwd.declare_local_interest(7, "demo/data", false);
+        assert!(interest_ids_sent(&sink_other).is_empty());
     }
 
     #[test]

@@ -4614,6 +4614,15 @@ async fn run_peer_until(
     // mode of the north peer hat (`set_peer_region_full_linkstate`), which is
     // wz's link-state peer extension as a flag of that hat.
     forwarder.set_peer_region_full_linkstate(opts.full_linkstate);
+    // A publisher of upstream asks for the subscribers of its key (`declare_publisher` sends the
+    // interest), and the router's peer hat tells a peer below it a declaration only for an
+    // interest it holds: this peer's `--publish` is such a publisher, and says so before any
+    // face registers, so that the interest goes to each router it links to as the face comes up.
+    if let Some(key) = publish_key {
+        // The number of that interest: one per publisher.
+        const PUBLISH_INTEREST_ID: u64 = 1;
+        forwarder.declare_local_interest(PUBLISH_INTEREST_ID, key, false);
+    }
     // R311y512 — `--interest-timeout <ms>` (zenoh `routing.interests.timeout`): how long an
     // interest this node BROKERS to a gateway waits for that gateway's final before the sweep
     // finalizes the client anyway. The broker is the region-hat forwarder's own
