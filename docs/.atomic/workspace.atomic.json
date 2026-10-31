@@ -303118,6 +303118,50 @@
         "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's, the SCE owner's). The locator loss is explained from source and not replayed with a zenohd log."
       ]
     },
+    "Round 4039": {
+      "decision_summary": "Nineteen zenoh captures close what the last round left open, and three reds that other sessions' commits left in the static gates are repaired so the push could go. Captures: six patch releases (1.3.1, 1.3.2, 1.3.3, 1.6.0, 1.7.0, 1.7.1) with router and clients built from the tags, a 1.10.2 client against the 1.9.0, 1.8.0 and 1.7.2 routers, and the tunnelled UDP session again with a paced 150 Mbit/s load over the tunnel. The path took that load with 0.065% loss in ten seconds and lost 1.84% of it over two minutes (500 pings lost 1.6%); the sessions stayed up and 332 of 3331 SN steps broke (10.0%), against 7.8% unloaded, all 21 flows reading yes. The load was capped at 150 Mbit/s on purpose. The other 18 captures read two yes flows each and none of 2055 steps broke. Counts: units 44624, framing 532, cookies 557, Init pairs 559, versions 1118; residual and undecoded units weigh -13863 on the yes sum. No null capture changed word. The reds: a released port, a pin, a check.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-3-1|1-3-2|1-3-3|1-6-0|1-7-0|1-7-1-tcp|udp`, `zenoh-mixed-c1-10-2-r1-9-0|r1-8-0|r1-7-2-tcp|udp`, `zenoh-tunnel-loaded-udp-20pub` (anonymised, 132 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie fidelity -8 and differing -7543, Init roles +992 and one kind -6548, another version -8540, residual -13863 / -12444, undecoded -13863 / -12974, framing held +2838 / +6453 and lost -7476 / -7460 (version header +7996 and unit read whole +966 / +3546 unchanged).",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: rows for the nineteen captures; no null row moved.",
+        "Pinned sums moved with the Init roles: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs` and `wz_dissect.h`; the C consumer's opening did not move.",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, the patch releases and newer clients, the loaded path, and what is still open.",
+        "`crates/wz-runtime-tokio/src/accept_loop.rs`: the test of the gossip re-dial held its dead port by binding and letting go; it holds a refusing port (Linux only, as that port's doc says).",
+        "`docs/reason-review-pins.md`: the close-ingress row of `accept_loop.rs` moved to the blob and round R4037, the reason's claims (ConnectReconcile, the face loop's peer table) re-read against the file.",
+        "`crates/wz-integration-tests/tests/wz_shm_establishment_zenohd_interop.rs`: the freshness check where the namespace legs resolve the demo; the carried count is 214 again."
+      ],
+      "verification_bullets": [
+        "On a build host, on the tree rebased onto main with its submodules at their pins: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, its C consumer built against the release cdylib and read the tree, the re-dial test of accept_loop.rs ran (1 test) and passed, and the SHM interop test file compiles (it is an ignored end-to-end test and was not run). The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The pre-push static gate array ran whole, alone: 123 of 123 pass, after the three repairs (it had released_port_gate, reason_review_pin_gate and binary_freshness_lint red on main). The corpus verifier: 132 files are fixed points. The load was run only after a ramp found the path's behaviour, and capped at 150 Mbit/s. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: the patch releases not named in the verdict doc's section on them, a client newer than its router by more than four releases, a path that loses more than 1.8% (the load was capped; going past it presses a network other people use), and 1.0.0 puts about 220 units into a minute where the others put 173, not looked into. The close-ingress pin of accept_loop.rs moves with every edit of that file; this round moved it after re-reading the reason against the file, and another session's autoconnect and gated-face changes had moved it before. The old release binaries are on the build host only; build one tag at a time."
+      ],
+      "publishable_decision_summary": "Nineteen zenoh captures close what the last round left open, and three reds that other sessions' commits left in the static gates are repaired so the push could go. Captures: six patch releases (1.3.1, 1.3.2, 1.3.3, 1.6.0, 1.7.0, 1.7.1) with router and clients built from the tags, a 1.10.2 client against the 1.9.0, 1.8.0 and 1.7.2 routers, and the tunnelled UDP session again with a paced 150 Mbit/s load over the tunnel. The path took that load with 0.065% loss in ten seconds and lost 1.84% of it over two minutes (500 pings lost 1.6%); the sessions stayed up and 332 of 3331 SN steps broke (10.0%), against 7.8% unloaded, all 21 flows reading yes. The load was capped at 150 Mbit/s on purpose. The other 18 captures read two yes flows each and none of 2055 steps broke. Counts: units 44624, framing 532, cookies 557, Init pairs 559, versions 1118; residual and undecoded units weigh -13863 on the yes sum. No null capture changed word. The reds: a released port, a pin, a check.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-3-1|1-3-2|1-3-3|1-6-0|1-7-0|1-7-1-tcp|udp`, `zenoh-mixed-c1-10-2-r1-9-0|r1-8-0|r1-7-2-tcp|udp`, `zenoh-tunnel-loaded-udp-20pub` (anonymised, 132 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie fidelity -8 and differing -7543, Init roles +992 and one kind -6548, another version -8540, residual -13863 / -12444, undecoded -13863 / -12974, framing held +2838 / +6453 and lost -7476 / -7460 (version header +7996 and unit read whole +966 / +3546 unchanged).",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: rows for the nineteen captures; no null row moved.",
+        "Pinned sums moved with the Init roles: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs` and `wz_dissect.h`; the C consumer's opening did not move.",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, the patch releases and newer clients, the loaded path, and what is still open.",
+        "`crates/wz-runtime-tokio/src/accept_loop.rs`: the test of the gossip re-dial held its dead port by binding and letting go; it holds a refusing port (Linux only, as that port's doc says).",
+        "`docs/reason-review-pins.md`: the close-ingress row of `accept_loop.rs` moved to the blob and round R4037, the reason's claims (ConnectReconcile, the face loop's peer table) re-read against the file.",
+        "`crates/wz-integration-tests/tests/wz_shm_establishment_zenohd_interop.rs`: the freshness check where the namespace legs resolve the demo; the carried count is 214 again."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, on the tree rebased onto main with its submodules at their pins: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, its C consumer built against the release cdylib and read the tree, the re-dial test of accept_loop.rs ran (1 test) and passed, and the SHM interop test file compiles (it is an ignored end-to-end test and was not run). The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The pre-push static gate array ran whole, alone: 123 of 123 pass, after the three repairs (it had released_port_gate, reason_review_pin_gate and binary_freshness_lint red on main). The corpus verifier: 132 files are fixed points. The load was run only after a ramp found the path's behaviour, and capped at 150 Mbit/s. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the patch releases not named in the verdict doc's section on them, a client newer than its router by more than four releases, a path that loses more than 1.8% (the load was capped; going past it presses a network other people use), and 1.0.0 puts about 220 units into a minute where the others put 173, not looked into. The close-ingress pin of accept_loop.rs moves with every edit of that file; this round moved it after re-reading the reason against the file, and another session's autoconnect and gated-face changes had moved it before. The old release binaries are on the build host only; build one tag at a time."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
