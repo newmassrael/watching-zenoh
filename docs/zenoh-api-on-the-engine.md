@@ -1058,8 +1058,19 @@ Each lands whole with its surface lines, tests and faults in one round.
   configuration key moved. Upstream's own suite measured at 1.10.2: `shm` 10 of 10,
   `liveliness` 46 of 46, and the new `interest_undeclare` 1 of 1. Carried, each read in the
   1.10.2 source and none built: (a) the QUIC control stream is opened when the first frame is
-  written and not at the open (the wire is the same; wz opens it at once); (b) a multicast group
-  honours `transport/multicast/compression/enabled` (wz lists the key as not read); (c) a
+  written and not at the open (the wire is the same, which is what was measured, and wz opens
+  it at once; the item changes no byte a peer reads, so wz is left as it is); (b) a multicast
+  group honours `transport/multicast/compression/enabled` (taken: a compressing group's
+  datagrams are batches, the one-byte `BatchHeader` in front and the payload lz4-compressed when
+  that is smaller, the JOIN beacon and each fragment of a chain included, as the unicast
+  session's are; `MulticastParams::compression`, `frame_budget` takes the header from the
+  batch a frame may fill, `enqueue_wire` on the way out and `unwrap_batch` on the way in. Multicast
+  has no handshake to switch it on, so a group's members state the same, and a build without
+  `transport_compression` refuses the open of a node that joins a group with the key set,
+  `OpenRefusal::MulticastCompressionNotInBuild`; the profile with no allocator does not compress.
+  The key is read by the C ABI session and its router node, `C_ABI_SESSION_HONOURED_KEYS`, and
+  the demo's groups state no such switch. Measured over a real UDP group by
+  `compressing_group_delivers_a_compressed_publish`); (c) a
   companion link of a mixed-reliability pair takes the transport's batch size as its limit
   (measured in round R4015: wz has no such pair, its QUIC offers neither the mixed-reliability
   nor the multi-stream protocols, `quic_plaintext.rs`, so the item has no subject until the link
