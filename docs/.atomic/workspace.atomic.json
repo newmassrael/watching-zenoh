@@ -303520,6 +303520,36 @@
         "Not witnessed: a peer that connects in over a real secure channel and is held under a passive intent, which needs a verified inbound session on the host image and a Layer Z leg for it. On AP the table-full refusal of D15 is still only logged. Remaining rulings in order: D12, D14. Hosted CI for the tip is unread."
       ]
     },
+    "Round 4050": {
+      "decision_summary": "test_liveliness_regression_3 was a real race, not a fidelity gap of the Local face. A peer that meets a peer is sent, after the replay of the node's declarations, a DeclareFinal with interest id 0, and upstream's open.return_conditions.declares holds the open until every such final is in. wz sent no final and did not wait, so a dialled peer's token could reach the node after the subscriber was declared and read as new. The forwarder now sends the final per face (only a mutually north-bound peer pair, as the pin does), records the one it receives, and the C ABI dial phase waits on both the owed finals and the pending autoconnects. open/return_conditions/declares moves from the unhonoured keys to the honoured ones.",
+      "changes_bullets": [
+        "router_forward: end_initial_declarations, the initial_final flag, pending_dials, initial_declares_pending and autoconnects_pending, four tests, 24 lines of the gossip scene. wz-capi-core: DialPhase.wait_declares and the peer wait loop. zenoh_config: open_declares read, named and emitted; key ledgers moved. run-ci.sh C1ay guards +9. z8-expected liveliness is pass 46."
+      ],
+      "verification_bullets": [
+        "test_liveliness_regression_3 passed 16 of 16 on one core, where it failed about 40 percent before. C1ay passed on the build host with every router_forward count measured per command (282 to 334). open_plan, zenoh_config and linkstate tests passed; the guarded-count gate judged 27 of 27 reached guards."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The Local face still learns every token the forwarder learns instead of answering a per-subscriber token interest as upstream does; it is a fidelity gap and not the cause of this race. Read the next hosted run per job to confirm Z8 liveliness."
+      ],
+      "publishable_decision_summary": "test_liveliness_regression_3 was a real race, not a fidelity gap of the Local face. A peer that meets a peer is sent, after the replay of the node's declarations, a DeclareFinal with interest id 0, and upstream's open.return_conditions.declares holds the open until every such final is in. wz sent no final and did not wait, so a dialled peer's token could reach the node after the subscriber was declared and read as new. The forwarder now sends the final per face (only a mutually north-bound peer pair, as the pin does), records the one it receives, and the C ABI dial phase waits on both the owed finals and the pending autoconnects. open/return_conditions/declares moves from the unhonoured keys to the honoured ones.",
+      "publishable_changes_bullets": [
+        "router_forward: end_initial_declarations, the initial_final flag, pending_dials, initial_declares_pending and autoconnects_pending, four tests, 24 lines of the gossip scene. wz-capi-core: DialPhase.wait_declares and the peer wait loop. zenoh_config: open_declares read, named and emitted; key ledgers moved. run-ci.sh C1ay guards +9. z8-expected liveliness is pass 46."
+      ],
+      "publishable_verification_bullets": [
+        "test_liveliness_regression_3 passed 16 of 16 on one core, where it failed about 40 percent before. C1ay passed on the build host with every router_forward count measured per command (282 to 334). open_plan, zenoh_config and linkstate tests passed; the guarded-count gate judged 27 of 27 reached guards."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The Local face still learns every token the forwarder learns instead of answering a per-subscriber token interest as upstream does; it is a fidelity gap and not the cause of this race. Read the next hosted run per job to confirm Z8 liveliness."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
