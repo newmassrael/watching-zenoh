@@ -302268,6 +302268,34 @@
         "Carried in docs/zenoh-api-on-the-engine.md O4: (a) QUIC control stream opened on first write, (b) multicast compression key, (e) the transport deleted without a Close frame (the statechart's tx.congestion.exhaust arm goes through Closing and sends one), (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the new refusals against a zenohd."
       ]
     },
+    "Round 4016": {
+      "decision_summary": "The stack-frame gate commits a worst chain of 4,012 bytes for the two-session image (frt2), which it had reported without a figure since the group session was spawned from a seed. The figure is the chain of direct calls the gate follows, 8 frames from wz_task through the client's send to the borrow of the Put, with 15 calls through a register not followed, so it is what a change to the code moves and not a bound on a run; the qemu run of the image reads a stack peak of 8,968 of 32,768 bytes. Before the seed the image's chain was 17,820 and its worst frame TwoSessions::spawn at 16,208.",
+      "changes_bullets": [
+        "`scripts/lib/stack_frame_gate.py`: the frt2 row carries `peak=4012`, with the reading, what it follows and what it does not."
+      ],
+      "verification_bullets": [
+        "On a build host at main's 0f6d34d992: the frt2 image was built and `stack_frame_gate.py --check frt2` reads \"worst chain 4012 bytes over 8 frame(s) against a 32768-byte stack, committed 4012\", with the largest frame 3,960 (parse_batch) under its budget of 16,384. Not run: the hosted layers, and the frt image's own chain (7,664 bytes, also without a committed figure), which this round does not touch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open: the frt image's chain (7,664 bytes) has no committed figure either; hosted CI per job is unread."
+      ],
+      "publishable_decision_summary": "The stack-frame gate commits a worst chain of 4,012 bytes for the two-session image (frt2), which it had reported without a figure since the group session was spawned from a seed. The figure is the chain of direct calls the gate follows, 8 frames from wz_task through the client's send to the borrow of the Put, with 15 calls through a register not followed, so it is what a change to the code moves and not a bound on a run; the qemu run of the image reads a stack peak of 8,968 of 32,768 bytes. Before the seed the image's chain was 17,820 and its worst frame TwoSessions::spawn at 16,208.",
+      "publishable_changes_bullets": [
+        "`scripts/lib/stack_frame_gate.py`: the frt2 row carries `peak=4012`, with the reading, what it follows and what it does not."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host at main's 0f6d34d992: the frt2 image was built and `stack_frame_gate.py --check frt2` reads \"worst chain 4012 bytes over 8 frame(s) against a 32768-byte stack, committed 4012\", with the largest frame 3,960 (parse_batch) under its budget of 16,384. Not run: the hosted layers, and the frt image's own chain (7,664 bytes, also without a committed figure), which this round does not touch."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the frt image's chain (7,664 bytes) has no committed figure either; hosted CI per job is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
