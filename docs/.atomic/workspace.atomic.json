@@ -301966,6 +301966,34 @@
         "Carried in docs/zenoh-api-on-the-engine.md O4: (a) QUIC control stream opened on first write, (b) multicast compression key, (c) mixed-reliability companion batch limit, (d) stricter shared-memory negotiation, (e) unresponsive-peer close, (g) synchronous peer start conditions, (h) timestamp ZID bound (the generator's). The gossip arm of the link-state update still fills a role only while unknown, as the pin's singlehop gossip arm never writes it."
       ]
     },
+    "Round 4007": {
+      "decision_summary": "The five cooperative images that grew (unstable, connectivity, admin-space, query, local-queryable) were left unattributed in round 4002. Bisected on pc2 over 104 commits with the query image as witness: 1,225,064 at 62c3339c18 and 1,248,756 at 69bc0b0e0b, the SCE pin b1ede72108 that declares which codecs may refuse to encode (+23,692), then 1,239,572 at the head after later pins. The note in capability_cost_gate.py names the commit; budgets are unchanged.",
+      "changes_bullets": [
+        "capability_cost_gate.py: the note above the coop cases."
+      ],
+      "verification_bullets": [
+        "Nine pc2 builds of one case at nine commits, read from their size output; the selftest and the pin gate pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Whether the SCE tree's list bounds and gate normal form, which the pin note says are due, give the 12,184 bytes back is open; the next pin that touches the codecs re-measures it."
+      ],
+      "publishable_decision_summary": "The five cooperative images that grew (unstable, connectivity, admin-space, query, local-queryable) were left unattributed in round 4002. Bisected on pc2 over 104 commits with the query image as witness: 1,225,064 at 62c3339c18 and 1,248,756 at 69bc0b0e0b, the SCE pin b1ede72108 that declares which codecs may refuse to encode (+23,692), then 1,239,572 at the head after later pins. The note in capability_cost_gate.py names the commit; budgets are unchanged.",
+      "publishable_changes_bullets": [
+        "capability_cost_gate.py: the note above the coop cases."
+      ],
+      "publishable_verification_bullets": [
+        "Nine pc2 builds of one case at nine commits, read from their size output; the selftest and the pin gate pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Whether the SCE tree's list bounds and gate normal form, which the pin note says are due, give the 12,184 bytes back is open; the next pin that touches the codecs re-measures it."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
