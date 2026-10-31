@@ -1,4 +1,4 @@
-# zenoh-stats 1.10.1 with prometheus-client 0.24.1: the documents oracles/zenoh-stats-golden makes the pinned registry write.
+# zenoh-stats 1.10.2 with prometheus-client 0.24.1: the documents oracles/zenoh-stats-golden makes the pinned registry write.
 # Regenerate with `python3 scripts/lib/zenoh_stats_golden.py --write`; never edit by hand.
 ===== S1 empty per_transport=true per_link=true disconnected=false per_key=true
 # HELP zenoh_build Zenoh build version.
