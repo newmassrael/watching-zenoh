@@ -81,6 +81,7 @@ fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         req_id_res: 0x02,
         batch_size,
         is_qos,
+        compression: false,
         tx_queue: TxQueueConf::default(),
         link_rx: LinkRxConf::default(),
     }

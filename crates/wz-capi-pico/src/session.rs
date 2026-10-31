@@ -177,6 +177,7 @@ const fn pico_group(
         req_id_res: 0x02,
         batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
         is_qos: false,
+        compression: false,
     }
 }
 

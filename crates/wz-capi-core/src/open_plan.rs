@@ -198,6 +198,11 @@ pub enum OpenRefusal {
     RoleNotInBuild,
     /// The document enables a clock for this role, in a build without `timestamping`.
     TimestampingNotInBuild,
+    /// The document enables `transport/multicast/compression/enabled` for a node that joins a
+    /// group, in a build without `transport_compression`. A group whose other members compress
+    /// reads this node's uncompressed datagrams as noise, and the reverse; there is no handshake
+    /// to settle it, so the open does not run as the uncompressed member it was not asked to be.
+    MulticastCompressionNotInBuild,
     /// The gossip target for this role names `client`, which upstream refuses at open
     /// (`"client" is not allowed as gossip target`).
     GossipTarget,
@@ -235,6 +240,7 @@ impl OpenRefusal {
             Self::Scouting => "scouting/multicast",
             Self::RoleNotInBuild => "mode, listen/endpoints",
             Self::TimestampingNotInBuild => "timestamping/enabled",
+            Self::MulticastCompressionNotInBuild => "transport/multicast/compression/enabled",
             Self::GossipTarget => "scouting/gossip/target",
             Self::UnsupportedProtocol => "transport/link/protocols",
             Self::NothingToDial => "connect/endpoints, scouting/multicast/enabled",
@@ -383,8 +389,9 @@ const ZENOH_MULTICAST_BATCH: u16 = 8_192;
 /// `transport/multicast/join_interval`, the default resolution of both sequence numbers and
 /// request ids (32 bits; the build's `sn-resolution` policy states another width of the
 /// sequence number), the session's batch size held to the multicast cap (the UDP link's own
-/// MTU is above it on every target zenoh names), and per-priority conduits when
-/// `transport/multicast/qos/enabled` asks for them.
+/// MTU is above it on every target zenoh names), per-priority conduits when
+/// `transport/multicast/qos/enabled` asks for them, and batch compression when
+/// `transport/multicast/compression/enabled` does.
 fn zenoh_group_profile(
     node: &ZenohNodeConfig,
     batch_size: u16,
@@ -399,6 +406,7 @@ fn zenoh_group_profile(
         req_id_res: BITS_32,
         batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
         is_qos: node.multicast_qos,
+        compression: node.multicast_compression,
     }
 }
 
@@ -846,6 +854,14 @@ impl OpenPlan {
         let (listen, group_endpoints): (Vec<String>, Vec<String>) = listen
             .into_iter()
             .partition(|endpoint| !names_a_group(endpoint));
+        // The key governs a multicast transport, so a node that joins no group has nothing to
+        // compress; one that joins a group in a build without the lz4 wrap is refused.
+        #[cfg(not(feature = "transport_compression"))]
+        if !group_endpoints.is_empty()
+            && node.as_ref().is_some_and(|node| node.multicast_compression)
+        {
+            return Err(OpenRefusal::MulticastCompressionNotInBuild);
+        }
         let connect = if connect.iter().any(|endpoint| names_a_group(endpoint)) {
             if role != WhatAmI::Client {
                 return Err(OpenRefusal::GroupInConnect);
@@ -1669,6 +1685,42 @@ mod tests {
         assert_eq!(client.connect, ["tcp/127.0.0.1:1"]);
     }
 
+    /// `transport/multicast/compression/enabled` on a node that joins a group reaches the group's
+    /// profile in a build with the lz4 wrap, and fails the open in one without it: a group's
+    /// members cannot settle the wrap by handshake, so a node that dropped the switch would be a
+    /// member the others cannot read. A node that joins no group has nothing to compress and opens
+    /// either way.
+    #[test]
+    fn a_compressing_group_is_carried_or_refused_by_the_build() {
+        let group = "udp/224.0.0.224:7446#iface=lo";
+        let stated = |mode: &str| {
+            format!(
+                r#"{{ mode: "{mode}", transport: {{ multicast: {{ compression: {{ enabled: true }} }} }} }}"#
+            )
+        };
+        let router = stated("router");
+        #[cfg(feature = "transport_compression")]
+        {
+            let plan = plan_of(WhatAmI::Router, &[], &[group], &router).expect("opens");
+            assert!(
+                plan.describe().contains("compression: true } shm="),
+                "{}",
+                plan.describe()
+            );
+        }
+        #[cfg(not(feature = "transport_compression"))]
+        assert_eq!(
+            refusal_of(WhatAmI::Router, &[], &[group], &router),
+            OpenRefusal::MulticastCompressionNotInBuild
+        );
+        assert_eq!(
+            OpenRefusal::MulticastCompressionNotInBuild.key(),
+            "transport/multicast/compression/enabled"
+        );
+        // No group is joined, so the key governs nothing.
+        assert!(plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:7447"], &router).is_ok());
+    }
+
     /// What three documents decide, held whole as goldens: the reading's one observable record.
     /// A field added to the plan, or a default that moves, shows here first, and the change is
     /// then looked at and not just accepted. Only the default build has the capabilities these
@@ -1762,7 +1814,7 @@ mod tests {
                 "role: Router\nconnect: []\nlisten: [\"tcp/127.0.0.1:7447\"]\n\
                  groups: [\"udp/224.0.0.224:7446#iface=lo GroupProfile { lease_ms: 10000, \
                  join_interval_ms: 2500, seq_num_res: 2, req_id_res: 2, batch_size: 8192, \
-                 is_qos: false } shm=true Subscribers\"]",
+                 is_qos: false, compression: false } shm=true Subscribers\"]",
                 "-1",
                 false,
                 0,

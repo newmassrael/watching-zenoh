@@ -634,6 +634,7 @@ fn group_params(
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: false,
+        compression: false,
         tx_queue: Default::default(),
         link_rx: Default::default(),
     }

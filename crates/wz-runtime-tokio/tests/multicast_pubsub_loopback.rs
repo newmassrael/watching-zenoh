@@ -84,6 +84,7 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
     wz_runtime_tokio::multicast_glue::RouterGroupProfile {
         zid,
         qos: false,
+        compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     }
@@ -109,6 +110,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: false,
+        compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     }
@@ -201,6 +203,106 @@ async fn publisher_push_reaches_group_subscriber() {
         dispatcher_b.active_peers(),
         1,
         "B admitted A from its JOIN beacon"
+    );
+}
+
+/// `transport/multicast/compression/enabled` — the composed real-UDP path with the group
+/// compressing: BOTH nodes carry their datagrams as batches (`MulticastParams.compression`),
+/// A's JOIN beacon and its frame leave behind a `BatchHeader`, the frame lz4-compressed (the
+/// payload is a long run, so it shrinks), and B reads them through the same header and delivers
+/// the whole payload. Multicast has no handshake to switch the wrap on, so this is the group's
+/// agreement made by configuration, and the delivery is the proof that the two ends read one
+/// wire.
+#[cfg(feature = "transport-compression")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn compressing_group_delivers_a_compressed_publish() {
+    // Distinct group port from every other loopback test, so the --ignored lane never contends
+    // on the same multicast bind.
+    const COMPRESSION_PORT: u16 = 7464;
+    let compressing = |zid_byte: u8| MulticastParams {
+        compression: true,
+        ..mc_params(zid_byte)
+    };
+    let payload = vec![b'z'; 1_200];
+
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, COMPRESSION_PORT, loopback_on()));
+    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_b = compressing(0xBB);
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let fired = fired.clone();
+        let expected = payload.clone();
+        observer.subscribers.register(KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), KEYEXPR);
+            assert_eq!(sample.payload(), &expected[..]);
+            fired.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    let mut link_a = MulticastLink::new(|| bind_publisher(COMPRESSION_PORT));
+    let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_a = compressing(0xAA);
+
+    let producer_a = MulticastTxProducer::new();
+    let producer_b = MulticastTxProducer::new();
+
+    let clock = TokioTime::new();
+    let drive_b = drive_multicast_session(
+        &mut dispatcher_b,
+        MulticastDriveConfig {
+            params: &params_b,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut link_b,
+        &clock,
+        |event| observer.dispatch_event(event),
+        &producer_b,
+    );
+    let drive_a = drive_multicast_session(
+        &mut dispatcher_a,
+        MulticastDriveConfig {
+            params: &params_a,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut link_a,
+        &clock,
+        |_| {},
+        &producer_a,
+    );
+
+    let fired_probe = fired.clone();
+    let pusher_a = producer_a.clone();
+    let scenario = async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        pusher_a
+            .push(multicast_put_literal(KEYEXPR, &payload).expect("put item"))
+            .expect("A's loop has attached its pipeline");
+        for _ in 0..100 {
+            if fired_probe.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("subscriber did not fire within the 3s budget");
+    };
+
+    tokio::select! {
+        _ = drive_b => panic!("subscriber drive loop ended unexpectedly"),
+        _ = drive_a => panic!("publisher drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "exactly one delivery");
+    assert_eq!(
+        dispatcher_b.active_peers(),
+        1,
+        "B admitted A from its compressed JOIN beacon"
     );
 }
 

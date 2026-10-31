@@ -310,6 +310,7 @@ where
             req_id_res: GROUP_SN_RESOLUTION,
             batch_size: GROUP_BATCH_BYTES,
             is_qos: false,
+            compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: LinkRxConf::default(),
         }

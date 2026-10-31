@@ -1203,6 +1203,13 @@ pub struct ZenohNodeConfig {
     /// joins ([`C_ABI_SESSION_HONOURED_KEYS`]); upstream's default is 2500
     /// (`DEFAULT_CONFIG.json5` @ `join_interval: 2500,`).
     pub multicast_join_interval_ms: u64,
+    /// `transport/multicast/compression/enabled`: whether a multicast transport sends its data
+    /// as batches with the one-byte `BatchHeader`, lz4-compressed when that is smaller. Read by
+    /// the zenoh-c session for the groups it joins ([`C_ABI_SESSION_HONOURED_KEYS`]); multicast
+    /// has no handshake, so a group's members must state the same. Upstream's default is `false`
+    /// (`DEFAULT_CONFIG.json5` @ `compression: {`, under `multicast`), and 1.10.1 never read the
+    /// key.
+    pub multicast_compression: bool,
     /// `transport/shared_memory/enabled`. wz's `--shm`.
     ///
     /// A real zenohd resolves this to **`true`** — measured — while the demo's
@@ -1555,6 +1562,7 @@ impl Default for ZenohNodeConfig {
             open_connect_scouted: None,
             multicast_qos: false,
             multicast_join_interval_ms: 2_500,
+            multicast_compression: false,
             shared_memory: true,
             // Upstream's defaults (`DEFAULT_CONFIG.json5` @ `pool_size: 16777216,`).
             shm_transport_optimization: true,
@@ -2004,8 +2012,9 @@ impl ZenohNodeConfig {
         // and silently drops everything the first carried.
         let _ = writeln!(
             out,
-            "    }},\n    \"multicast\": {{ \"qos\": {{ \"enabled\": {} }} }},",
-            self.multicast_qos
+            "    }},\n    \"multicast\": {{ \"qos\": {{ \"enabled\": {} }}, \
+             \"compression\": {{ \"enabled\": {} }} }},",
+            self.multicast_qos, self.multicast_compression
         );
         let _ = writeln!(
             out,
@@ -2718,7 +2727,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
     "transport/link/unixpipe/file_access_mask",
-    "transport/multicast/compression/enabled",
+    // `transport/multicast/compression/enabled` LEFT this list for
+    // [`C_ABI_SESSION_HONOURED_KEYS`]: a group the zenoh-c session joins wraps its datagrams in
+    // batches, as upstream's multicast manager does from 1.10.2.
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT this list for
     // [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's groups beacon at it.
     "transport/multicast/max_sessions",
@@ -2937,7 +2948,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // exact failure mode [`UNHONOURED_CITATION_LEDGER`]'s own doc names, and
     // this is the first time it has been caught by an instrument rather than
     // by re-reading a group sentence.
-    "transport/multicast/compression/enabled",
+    // `transport/multicast/compression/enabled` LEFT here too, for
+    // [`C_ABI_SESSION_HONOURED_KEYS`].
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT here, and its group
     // below: the zenoh-c session reads it ([`C_ABI_SESSION_HONOURED_KEYS`]).
     "transport/multicast/max_sessions",
@@ -3141,7 +3153,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "a configurable session table",
         "TransportUnicastConf",
         &[
-            "transport/multicast/compression/enabled",
+            // `transport/multicast/compression/enabled` LEFT this group: a multicast batch is
+            // wrapped by the same `compression` module a unicast session's is.
             // Open-debt item 913 — `transport/multicast/join_interval` LEFT this group:
             // a group's beacon interval is a profile wz's multicast transport holds.
             "transport/multicast/max_sessions",
@@ -3723,6 +3736,10 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// zenoh-c session joins sends its JOIN. The demo's groups take their interval from its command
 /// line, so it is the C ABI session's alone.
 ///
+/// And `transport/multicast/compression/enabled`, whether each group the zenoh-c session joins
+/// carries its datagrams as batches with the one-byte `BatchHeader`, lz4-compressed when that is
+/// smaller. The demo's groups take no such switch, so it is the C ABI session's alone.
+///
 /// Open-debt item 926 -- and `transport/link/tx/keep_alive`, the keepalives a session sends in
 /// one of its own leases. The demo and the router keep the cadence their capacity model was
 /// calibrated on (the adopted lease in three), so it is the C ABI session's alone until that
@@ -3744,6 +3761,7 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "scouting/gossip/multihop",
     "scouting/gossip/target",
     "transport/link/tx/keep_alive",
+    "transport/multicast/compression/enabled",
     "transport/multicast/join_interval",
     "transport/shared_memory/transport_optimization/enabled",
     "transport/shared_memory/transport_optimization/pool_size",
@@ -7438,6 +7456,10 @@ impl ZenohNodeConfig {
             out.multicast_join_interval_ms = v;
             named.push("transport/multicast/join_interval");
         }
+        if let Some(v) = want_bool(&doc, "transport/multicast/compression/enabled")? {
+            out.multicast_compression = v;
+            named.push("transport/multicast/compression/enabled");
+        }
         if let Some(v) = want_bool(&doc, "transport/shared_memory/enabled")? {
             out.shared_memory = v;
             named.push("transport/shared_memory/enabled");
@@ -7653,6 +7675,31 @@ mod tests {
         assert_eq!(again.config.gateway_south, read.config.gateway_south);
         // A document the reader refuses is refused whole, not read as the preset.
         assert!(ZenohNodeConfig::from_json5(r#"{ gateway: { south: 7 } }"#).is_err());
+    }
+
+    /// `transport/multicast/compression/enabled` reaches the config's field, is named and not
+    /// ignored, is a key the C ABI session honours, and survives the emitter; a silent file
+    /// leaves upstream's `false`.
+    #[test]
+    fn multicast_compression_is_read_named_and_survives_the_emitter() {
+        const KEY: &str = "transport/multicast/compression/enabled";
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        assert!(!silent.config.multicast_compression);
+        assert!(!silent.named.contains(&KEY));
+
+        let source = r#"{ transport: { multicast: { compression: { enabled: true } } } }"#;
+        let read = ZenohNodeConfig::from_json5(source).expect("the key reads");
+        assert!(read.config.multicast_compression);
+        assert!(read.named.contains(&KEY), "{:?}", read.named);
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        assert!(C_ABI_SESSION_HONOURED_KEYS.contains(&KEY));
+        assert!(!UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&KEY));
+
+        let again = ZenohNodeConfig::from_json5(&read.config.to_json5()).expect("it round-trips");
+        assert!(again.config.multicast_compression);
+        assert!(again.named.contains(&KEY));
+        // The sibling `qos` the same table carries is not lost by writing the new key beside it.
+        assert_eq!(again.config.multicast_qos, read.config.multicast_qos);
     }
 
     /// Item 751 — a list of subregions, each filter field read into the value

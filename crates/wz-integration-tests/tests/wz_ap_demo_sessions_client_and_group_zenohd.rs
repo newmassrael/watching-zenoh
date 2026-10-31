@@ -141,6 +141,7 @@ fn group_member(zid_byte: u8) -> (impl std::future::Future<Output = ()>, Multica
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
+            compression: false,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         };

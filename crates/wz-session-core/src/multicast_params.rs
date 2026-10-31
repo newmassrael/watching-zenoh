@@ -168,6 +168,17 @@ pub struct MulticastParams {
     /// conduit is elided, so the seam forces `false` and the wire stays the
     /// pico-faithful 2-channel default.
     pub is_qos: bool,
+    /// `transport/multicast/compression/enabled` — whether this group's datagrams are batches
+    /// with the one-byte `BatchHeader` and, when it pays, an lz4-compressed payload (zenoh
+    /// 1.10.2 reads the key into the multicast manager,
+    /// `io/zenoh-transport/src/multicast/manager.rs` @ `self = self.compression(*config.transport().multicast().compression().enabled());`;
+    /// 1.10.1 never did). The same wrap as the unicast session's
+    /// ([`crate::compression`]), but with no negotiation to switch it on: multicast has no
+    /// handshake, so every member of a group must run the same setting, as for `batch_size`
+    /// and `is_qos`, and a peer that does not reads the header byte as the start of a
+    /// message. A plain bool, inert without the `transport-compression` feature (the key is
+    /// then refused where the configuration is read, not carried here).
+    pub compression: bool,
     /// R2929 — the group link's transmission queue: per-priority sizes and the
     /// congestion waits. Upstream builds a multicast link's pipeline from the
     /// same manager configuration a unicast link's comes from
@@ -186,6 +197,23 @@ pub struct MulticastParams {
 }
 
 impl MulticastParams {
+    /// What a batch of a compressing group gives to its `BatchHeader`: counted inside the
+    /// group's batch size, as upstream writes the header into the same mtu-sized buffer
+    /// (`io/zenoh-transport/src/common/batch.rs` @ `let _ = writer.write_u8(h.as_u8());`).
+    pub const BATCH_HEADER_BYTES: usize = 1;
+
+    /// The bytes of a message batch this group's frames may fill: [`Self::batch_size`] less the
+    /// `BatchHeader` when the group compresses, so that a frame whose batch just fits is not
+    /// sent one byte over the budget the peers read it against.
+    pub fn frame_budget(&self) -> usize {
+        let header = if self.compression {
+            Self::BATCH_HEADER_BYTES
+        } else {
+            0
+        };
+        (self.batch_size as usize).saturating_sub(header)
+    }
+
     /// R311kq — whether this node's JOIN must carry the S-flag optionals
     /// (`sn_res` cbyte + `batch_size`): exactly when any of them departs
     /// from the protocol defaults, so an omitted optional stays an honest

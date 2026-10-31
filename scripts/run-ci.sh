@@ -11546,7 +11546,10 @@ layer_c1p_multicast() {
     # 76 -> 77, the version JOIN (8a458be76, printed); then 77 -> 78, session
     # duties made causal, the same ungated case as the arm above (printed 77
     # on its own run before the version JOIN landed). The sum is derived.
-    _runci_guarded_test C1p 78 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # 78 -> 79, the printed number: the compressing multicast group's frame budget,
+    # `a_compressing_group_frames_one_byte_under_its_batch`, is ungated; its four
+    # siblings need `transport-compression`, which no arm here selects.
+    _runci_guarded_test C1p 79 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -18758,6 +18761,14 @@ PY
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
+    # `transport/multicast/compression/enabled` — a group whose members both carry
+    # their datagrams as batches: the beacon admits, a compressible publish is read
+    # back whole. The case is `transport-compression`-gated, which the build above
+    # does not select, so it has a line of its own; 1 = the number to be printed.
+    _runci_guarded_test "M compressing group" 1 \
+        cargo test -p wz-runtime-tokio \
+        --features transport-multicast,transport-compression \
+        --test multicast_pubsub_loopback compressing_group -- --ignored --quiet || return 1
     # R2850 (open-debt item 821) — a router's GROUP face is one member: its
     # beacons and forwarded frames leave from one source address, its send
     # socket, and the same face reads what a member publishes. The face is

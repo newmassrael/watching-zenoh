@@ -205,12 +205,73 @@ where
 }
 
 /// The walk behind [`dispatch_multicast_inbound`] and
-/// [`dispatch_multicast_inbound_in`]. `origin`, when there is one, is the
+/// [`dispatch_multicast_inbound_in`]: the datagram's batch, un-wrapped first when the group
+/// compresses ([`unwrap_batch`]), then walked message by message
+/// ([`walk_multicast_batch`]).
+#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin
+fn walk_multicast_inbound<F, R, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    params: &MulticastParams,
+    bytes: &[u8],
+    #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+    stats: &R,
+) -> MulticastRxNext
+where
+    F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
+{
+    #[cfg(feature = "transport-compression")]
+    if params.compression {
+        // The messages are ranges of the batch the header was taken off, or of the buffer it
+        // was decompressed into, and not of the datagram: a compressing group's samples are
+        // not shared with the buffer the link read.
+        let Some(batch) = unwrap_batch(params, bytes) else {
+            return MulticastRxNext::Done;
+        };
+        return walk_multicast_batch(
+            dispatcher,
+            params,
+            &batch,
+            #[cfg(feature = "alloc")]
+            None,
+            src,
+            now_ms,
+            on_event,
+            stats,
+        );
+    }
+    walk_multicast_batch(
+        dispatcher,
+        params,
+        bytes,
+        #[cfg(feature = "alloc")]
+        origin,
+        src,
+        now_ms,
+        on_event,
+        stats,
+    )
+}
+
+/// The batch a compressing group's datagram carries: the `BatchHeader` read, and the payload
+/// decompressed when its bit says it is compressed, into a buffer bounded by the group's batch
+/// size ([`crate::compression::decompress_batch`]). `None` for a datagram that is empty or whose
+/// payload does not decompress, which the group drops, as upstream's receive does for a batch
+/// it cannot read (`io/zenoh-transport/src/common/batch.rs` @ `decompress_into`).
+#[cfg(feature = "transport-compression")]
+fn unwrap_batch(params: &MulticastParams, datagram: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    crate::compression::decompress_batch(datagram, usize::from(params.batch_size))
+}
+
+/// The walk over one batch of transport messages. `origin`, when there is one, is the
 /// [`RxBytes`] that `bytes` was taken from; each message of the batch is handed
 /// to [`dispatch_multicast_message`] with the range of it that starts at that
 /// message.
 #[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin
-fn walk_multicast_inbound<F, R, const MAX_PEERS: usize>(
+fn walk_multicast_batch<F, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -715,10 +776,69 @@ pub fn dispatch_multicast_inbound_reassembling_in<
     )
 }
 
-/// The walk behind [`dispatch_multicast_inbound_reassembling`] and its `_in` twin.
+/// The walk behind [`dispatch_multicast_inbound_reassembling`] and its `_in` twin: the
+/// datagram's batch, un-wrapped first when the group compresses, as
+/// [`walk_multicast_inbound`] does, then walked ([`walk_multicast_batch_reassembling`]).
 #[cfg(feature = "reassembly")]
 #[allow(clippy::too_many_arguments)] // the entry point's eight plus the origin
 fn walk_multicast_inbound_reassembling<
+    F,
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+    S,
+    R,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    params: &MulticastParams,
+    bytes: &[u8],
+    #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+    stats: &R,
+) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
+{
+    #[cfg(feature = "transport-compression")]
+    if params.compression {
+        let Some(batch) = unwrap_batch(params, bytes) else {
+            return;
+        };
+        return walk_multicast_batch_reassembling(
+            dispatcher,
+            reasm,
+            params,
+            &batch,
+            #[cfg(feature = "alloc")]
+            None,
+            src,
+            now_ms,
+            on_event,
+            stats,
+        );
+    }
+    walk_multicast_batch_reassembling(
+        dispatcher,
+        reasm,
+        params,
+        bytes,
+        #[cfg(feature = "alloc")]
+        origin,
+        src,
+        now_ms,
+        on_event,
+        stats,
+    )
+}
+
+/// The walk over one batch, with the reassembly tail run per message.
+#[cfg(feature = "reassembly")]
+#[allow(clippy::too_many_arguments)] // the entry point's eight plus the origin
+fn walk_multicast_batch_reassembling<
     F,
     const MAX_PEERS: usize,
     const SLOTS: usize,
@@ -937,6 +1057,7 @@ mod batch_walk_tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
+            compression: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
         }
@@ -1023,6 +1144,69 @@ mod batch_walk_tests {
             "the frame BEHIND the beacon must be fanned: a walk that stopped \
              at the JOIN reports zero"
         );
+    }
+
+    /// A compressing group's datagram is a batch: read through its `BatchHeader`, and
+    /// decompressed when the header says so, before the walk. A beacon that leaves with a frame in
+    /// one datagram delivers both, as in a plain group; the beacon of a compressing member, as
+    /// `encode_join` writes it, admits that member on its own; and a datagram a plain member sent
+    /// (no header in front) is dropped and admits nobody.
+    #[cfg(feature = "transport-compression")]
+    #[test]
+    fn a_compressing_group_reads_its_datagrams_as_batches() {
+        let local = MulticastParams {
+            compression: true,
+            ..params(&[0x11; 4])
+        };
+        let polls = |datagram: &[u8]| {
+            let mut d = running::<4>();
+            let mut polls = 0usize;
+            let next = dispatch_multicast_inbound(
+                &mut d,
+                &local,
+                datagram,
+                PEER,
+                1_000,
+                &mut |event| {
+                    if matches!(event, IterationEvent::Poll(_)) {
+                        polls += 1;
+                    }
+                },
+                &(),
+            );
+            assert!(matches!(next, MulticastRxNext::Done), "got {next:?}");
+            (polls, d.peer_index_by_src(PEER).is_some())
+        };
+
+        let mut unit = peer_join(&[0x22; 4]);
+        unit.extend_from_slice(&frame_sn0());
+        assert_eq!(
+            polls(&crate::compression::compress_batch(&unit)),
+            (1, true),
+            "the beacon and the frame behind it, in a batch"
+        );
+
+        let member = MulticastParams {
+            compression: true,
+            ..params(&[0x22; 4])
+        };
+        let beacon = encode_join(
+            &member,
+            &MulticastTxConduits::new(sn::mask_from_res(member.seq_num_res)),
+        );
+        assert_eq!(
+            beacon[0] & crate::compression::BATCH_HEADER_COMPRESSION,
+            0,
+            "a beacon this small is sent raw, behind a clear header"
+        );
+        assert_eq!(polls(&beacon), (0, true), "the beacon admits its member");
+
+        assert_eq!(
+            polls(&unit),
+            (0, false),
+            "a datagram with no header in front is not a batch of this group"
+        );
+        assert_eq!(polls(&[]), (0, false), "an empty datagram is dropped");
     }
 
     /// A group member's data frame whose message holds an extension the message

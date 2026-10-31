@@ -3642,6 +3642,7 @@ impl ResolvedGroup {
             req_id_res,
             batch_size,
             is_qos,
+            compression,
         } = join.profile;
         Some(Self {
             endpoint: join.endpoint.clone(),
@@ -3657,6 +3658,7 @@ impl ResolvedGroup {
                 req_id_res,
                 batch_size,
                 is_qos,
+                compression,
                 tx_queue,
                 link_rx,
             },
@@ -4183,6 +4185,10 @@ pub struct GroupProfile {
     pub batch_size: u16,
     /// Whether the session offers the group per-priority conduits.
     pub is_qos: bool,
+    /// Whether the group's datagrams are batches with the one-byte `BatchHeader`, compressed
+    /// when that pays: `transport/multicast/compression/enabled`. Multicast has no handshake
+    /// to switch it on, so every member of the group must state the same.
+    pub compression: bool,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -5716,6 +5722,7 @@ mod multicast_face_tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
+            compression: false,
             tx_queue: Default::default(),
             link_rx: Default::default(),
         }

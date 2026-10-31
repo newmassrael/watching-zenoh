@@ -324,6 +324,7 @@ async fn join_group(
         wz_runtime_tokio::multicast_glue::RouterGroupProfile {
             zid: zid.to_vec(),
             qos: join.profile.is_qos,
+            compression: join.profile.compression,
             tx_queue: link_conf.tx.queue,
             link_rx: link_conf.rx,
         },

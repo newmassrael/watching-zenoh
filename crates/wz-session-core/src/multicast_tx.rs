@@ -888,10 +888,14 @@ where
         return PushOutcome::Congested;
     }
     let sn = tx_sn.mint(priority, reliable);
-    let mtu = params.batch_size as usize;
+    // The group's batch less the `BatchHeader` of a compressing group, so that a datagram, header
+    // included, is within the batch size every member of the group reads it against.
+    let mtu = params.frame_budget();
     let flags = crate::frame_encode::frame_flags(reliable);
+    // A compressing group does not lend: a lent frame is written once, into the slot the link
+    // sends, and the batch around it is built from the frame's bytes.
     #[cfg(feature = "transport-tx-lend")]
-    {
+    if !params.compression {
         // A frame sent whole is at most one batch (past it, it is fragmented),
         // so that is the most a lent slot must hold. NOT the codec's
         // `MAX_ENCODED_BYTES`, which sizes a vector's first reservation and is
@@ -921,12 +925,16 @@ where
                     let marker =
                         crate::frame_encode::build_fragment_drop_wire(this_sn, reliable, ext_qos);
                     tx_sn.mint(priority, reliable);
-                    queue.enqueue(MulticastTxDatagram {
-                        priority,
-                        reliable,
-                        sn: this_sn,
-                        bytes: marker,
-                    });
+                    enqueue_wire(
+                        queue,
+                        params,
+                        MulticastTxDatagram {
+                            priority,
+                            reliable,
+                            sn: this_sn,
+                            bytes: marker,
+                        },
+                    );
                     return PushOutcome::Congested;
                 }
                 tx_sn.mint(priority, reliable);
@@ -936,12 +944,16 @@ where
                 // predicate negated, so this arm is unreachable.
                 break;
             };
-            queue.enqueue(MulticastTxDatagram {
-                priority,
-                reliable,
-                sn: this_sn,
-                bytes: fragment,
-            });
+            enqueue_wire(
+                queue,
+                params,
+                MulticastTxDatagram {
+                    priority,
+                    reliable,
+                    sn: this_sn,
+                    bytes: fragment,
+                },
+            );
             emitted += 1;
             deadline.next_fragment();
         }
@@ -949,13 +961,47 @@ where
     }
     #[cfg(not(feature = "transport-fragmentation"))]
     let _ = (ext_qos, mtu);
-    queue.enqueue(MulticastTxDatagram {
-        priority,
-        reliable,
-        sn,
-        bytes: frame,
-    });
+    enqueue_wire(
+        queue,
+        params,
+        MulticastTxDatagram {
+            priority,
+            reliable,
+            sn,
+            bytes: frame,
+        },
+    );
     PushOutcome::Pushed
+}
+
+/// Put one datagram on the queue as the group's wire carries it: when the group compresses
+/// (`transport/multicast/compression/enabled`), the frame becomes a batch, the one-byte
+/// `BatchHeader` in front of its payload, which is lz4-compressed when that is smaller
+/// ([`crate::compression::compress_batch`]), as upstream's batch writes it for a link whose
+/// config says `is_compression`. Every datagram the group's links send takes this one way
+/// in: a frame, each fragment of a chain, and the marker that stops a chain.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+fn enqueue_wire<Q: MulticastTxQueue + ?Sized>(
+    queue: &mut Q,
+    params: &crate::multicast_params::MulticastParams,
+    #[cfg_attr(not(feature = "transport-compression"), allow(unused_mut))]
+    mut datagram: MulticastTxDatagram,
+) {
+    #[cfg(feature = "transport-compression")]
+    if params.compression {
+        datagram.bytes = crate::compression::compress_batch(&datagram.bytes);
+    }
+    #[cfg(not(feature = "transport-compression"))]
+    let _ = params;
+    queue.enqueue(datagram);
 }
 
 /// Convenience builder: a literal-keyexpr Put as a queued [`MulticastTxItem`]
@@ -1388,6 +1434,7 @@ mod qos_emit_tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos,
+            compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
         }
@@ -1481,6 +1528,7 @@ mod push_tests {
             req_id_res: 0x02,
             batch_size,
             is_qos: false,
+            compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
         }
@@ -1625,6 +1673,134 @@ mod push_tests {
         );
     }
 
+    /// A compressing group frames one byte under its batch, for the `BatchHeader` that is
+    /// counted inside it; a plain group frames to the whole batch.
+    #[test]
+    fn a_compressing_group_frames_one_byte_under_its_batch() {
+        assert_eq!(params(2_048).frame_budget(), 2_048);
+        let squeezing = |batch_size| MulticastParams {
+            compression: true,
+            ..params(batch_size)
+        };
+        assert_eq!(squeezing(2_048).frame_budget(), 2_047);
+        assert_eq!(squeezing(0).frame_budget(), 0);
+        #[cfg(feature = "transport-compression")]
+        assert_eq!(
+            MulticastParams::BATCH_HEADER_BYTES,
+            crate::compression::BATCH_HEADER_BYTES
+        );
+    }
+
+    /// A compressing group's frame is a batch: the `BatchHeader` in front, the payload lz4-compressed
+    /// when that is smaller. What the header and the payload give back is the frame the plain group
+    /// sends, on the same sequence number; a frame that does not shrink is sent raw behind a clear
+    /// header, one byte longer.
+    #[cfg(feature = "transport-compression")]
+    #[test]
+    fn a_compressing_group_sends_its_frame_as_a_batch() {
+        let plain = params(2_048);
+        let squeezing = MulticastParams {
+            compression: true,
+            ..params(2_048)
+        };
+        let conf = TxQueueConf::default();
+        for (payload, shrinks) in [(&[0x5a; 600][..], true), (&b"v"[..], false)] {
+            let mut plain_tx = MulticastTxConduits::new(mask_from_res(plain.seq_num_res));
+            let mut plain_queue = Scripted::default();
+            multicast_tx_push(
+                put(true, payload),
+                &mut plain_tx,
+                &plain,
+                &conf,
+                &mut plain_queue,
+            );
+            let mut tx = MulticastTxConduits::new(mask_from_res(squeezing.seq_num_res));
+            let mut queue = Scripted::default();
+            let outcome =
+                multicast_tx_push(put(true, payload), &mut tx, &squeezing, &conf, &mut queue);
+            assert_eq!(outcome, PushOutcome::Pushed);
+            assert_eq!(queue.enqueued.len(), 1);
+            assert_eq!(queue.sns, plain_queue.sns);
+            let wire = &queue.enqueued[0];
+            let frame = &plain_queue.enqueued[0];
+            assert_eq!(
+                crate::compression::decompress_batch(wire, 2_048).as_deref(),
+                Some(&frame[..])
+            );
+            let compressed = wire[0] & crate::compression::BATCH_HEADER_COMPRESSION != 0;
+            assert_eq!(compressed, shrinks, "payload of {} bytes", payload.len());
+            if shrinks {
+                assert!(wire.len() < frame.len());
+            } else {
+                assert_eq!(wire.len(), frame.len() + 1);
+            }
+            assert_eq!(
+                tx.advertise_default().next_reliable,
+                plain_tx.advertise_default().next_reliable
+            );
+        }
+    }
+
+    /// A message that fragments does so against the budget a compressing group's header leaves,
+    /// so no datagram is past the batch size, header included: the chain is the one a plain group
+    /// at that budget sends, each fragment in its batch. A frame that would fit the whole batch
+    /// exactly is past the budget and is fragmented too.
+    #[cfg(all(feature = "transport-compression", feature = "transport-fragmentation"))]
+    #[test]
+    fn a_compressing_groups_fragments_fit_the_batch_with_their_header() {
+        let squeezing = MulticastParams {
+            compression: true,
+            ..params(128)
+        };
+        let conf = TxQueueConf::default();
+        // Bytes lz4 cannot shrink, so that a datagram is its header and its fragment.
+        let noise = |len: usize| -> Vec<u8> {
+            (0..len as u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+                .collect()
+        };
+        let plain_at_budget = params(127);
+        let mut payload = noise(1_000);
+        let mut plain_tx = MulticastTxConduits::new(mask_from_res(plain_at_budget.seq_num_res));
+        let chain = multicast_tx_emit(put(true, &payload), &mut plain_tx, &plain_at_budget);
+        assert!(chain.datagrams.len() > 2, "the message fragments");
+
+        let mut tx = MulticastTxConduits::new(mask_from_res(squeezing.seq_num_res));
+        let mut queue = Scripted::default();
+        let outcome =
+            multicast_tx_push(put(true, &payload), &mut tx, &squeezing, &conf, &mut queue);
+        assert_eq!(outcome, PushOutcome::Pushed);
+        assert_eq!(queue.enqueued.len(), chain.datagrams.len());
+        for (wire, fragment) in queue.enqueued.iter().zip(&chain.datagrams) {
+            assert!(wire.len() <= 128, "a datagram of {} bytes", wire.len());
+            assert_eq!(
+                crate::compression::decompress_batch(wire, 128).as_deref(),
+                Some(&fragment[..])
+            );
+        }
+
+        // The payload whose frame is exactly the batch: sent whole by a plain group, and
+        // fragmented by a compressing one, which leaves a byte for the header.
+        let plain = params(128);
+        let exact = (1..127)
+            .find(|&len| {
+                payload = noise(len);
+                let mut tx = MulticastTxConduits::new(mask_from_res(plain.seq_num_res));
+                let sent = multicast_tx_emit(put(true, &payload), &mut tx, &plain);
+                sent.datagrams.len() == 1 && sent.datagrams[0].len() == 128
+            })
+            .expect("a payload whose frame is exactly the batch");
+        assert_eq!(payload.len(), exact);
+        let mut tx = MulticastTxConduits::new(mask_from_res(squeezing.seq_num_res));
+        let mut queue = Scripted::default();
+        multicast_tx_push(put(true, &payload), &mut tx, &squeezing, &conf, &mut queue);
+        assert!(
+            queue.enqueued.len() > 1,
+            "the whole frame is past the budget"
+        );
+        assert!(queue.enqueued.iter().all(|wire| wire.len() <= 128));
+    }
+
     /// A chain that finds no room part-way is stopped: the fragments already
     /// out, then a drop marker on the next SN, which it spends. Each further
     /// ask carries the extended deadline, doubling per fragment.
@@ -1743,6 +1919,7 @@ mod lend_tests {
             req_id_res: 0x02,
             batch_size,
             is_qos,
+            compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
         }
@@ -1948,6 +2125,7 @@ mod lent_emit_tests {
             req_id_res: 0x02,
             batch_size,
             is_qos,
+            compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
         }

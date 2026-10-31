@@ -6746,6 +6746,7 @@ async fn run_router_hat_until(
             wz::runtime_tokio::multicast_glue::RouterGroupProfile {
                 zid: params.zid.clone(),
                 qos: multicast_qos,
+                compression: false,
                 tx_queue: params.tx_queue,
                 link_rx: params.link_rx,
             },

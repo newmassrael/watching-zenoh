@@ -930,6 +930,7 @@ mod tests {
             req_id_res: 0x02,
             batch_size: 64,
             is_qos,
+            compression: false,
             tx_queue: TxQueueConf {
                 // One batch per lane: a few frames fill it.
                 sizes: [1; Priority::NUM],

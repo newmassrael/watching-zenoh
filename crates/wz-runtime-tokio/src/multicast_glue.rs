@@ -1483,6 +1483,7 @@ fn router_group_params(
     let RouterGroupProfile {
         zid,
         qos,
+        compression,
         tx_queue,
         link_rx,
     } = profile;
@@ -1495,6 +1496,7 @@ fn router_group_params(
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: qos,
+        compression,
         tx_queue,
         link_rx,
     }
@@ -1517,6 +1519,9 @@ pub struct RouterGroupProfile {
     pub zid: Vec<u8>,
     /// Whether the group offers per-priority conduits.
     pub qos: bool,
+    /// Whether the group's datagrams are batches with the one-byte `BatchHeader`, compressed
+    /// when that pays (`transport/multicast/compression/enabled`). Group-agreed.
+    pub compression: bool,
     /// The node's transmission queue: lane sizes and congestion waits.
     pub tx_queue: wz_session_core::session_init_params::TxQueueConf,
     /// The node's `transport/link/rx`: the largest message the group rejoins
@@ -2626,6 +2631,7 @@ mod tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
+            compression: false,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         }
@@ -2821,11 +2827,13 @@ mod tests {
         let group = router_group_params(RouterGroupProfile {
             zid: vec![0x0A],
             qos: true,
+            compression: true,
             tx_queue: operator,
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);
+        assert!(group.compression);
         assert_eq!(group.zid, [0x0A]);
     }
 

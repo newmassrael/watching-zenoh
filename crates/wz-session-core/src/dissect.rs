@@ -8671,6 +8671,7 @@ mod tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
+            compression: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
         };

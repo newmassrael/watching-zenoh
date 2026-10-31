@@ -104,6 +104,14 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
     let mut dgram = Vec::with_capacity(Join::MAX_ENCODED_BYTES + 1);
     encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram))
         .expect("VecSink is growable, so the JOIN never overflows it");
+    // A group that compresses (`transport/multicast/compression/enabled`) carries its beacon as
+    // every other datagram, a batch with the `BatchHeader` in front: upstream's link writes the
+    // JOIN through the same batch as any transport message. The sink forms below write the bare
+    // JOIN; a build with no allocator does not compress.
+    #[cfg(feature = "transport-compression")]
+    if params.compression {
+        return crate::compression::compress_batch(&dgram);
+    }
     dgram
 }
 
@@ -120,6 +128,10 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
 /// refusal, from a sink too small for the datagram; nothing is truncated and
 /// nothing falls back to a heap. [`JOIN_MAX_BYTES`] is a bound that fits every
 /// datagram this function writes whatever the zid, QoS and patch settings.
+///
+/// It writes the bare JOIN whatever [`MulticastParams::compression`] says: the batch a
+/// compressing group beacons in is built by [`encode_join`], on a heap. A loop that holds no
+/// allocator has no compressing group to join.
 pub fn encode_join_into<S: SceSink>(
     params: &MulticastParams,
     tx_sn: &MulticastTxConduits,
@@ -500,6 +512,7 @@ mod tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
+            compression: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
         }
@@ -595,6 +608,27 @@ mod tests {
         assert!(
             widest <= JOIN_MAX_BYTES,
             "the bound fits the widest datagram written ({widest})"
+        );
+    }
+
+    /// A compressing group's beacon is a batch of the one JOIN: the `BatchHeader` in front, and
+    /// what it gives back is the datagram a plain group sends.
+    #[cfg(feature = "transport-compression")]
+    #[test]
+    fn a_compressing_groups_beacon_is_the_plain_beacon_as_a_batch() {
+        let plain = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let squeezing = MulticastParams {
+            compression: true,
+            ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
+        };
+        let tx = MulticastTxConduits::new(sn::mask_from_res(plain.seq_num_res));
+        let bare = encode_join(&plain, &tx);
+        let wrapped = encode_join(&squeezing, &tx);
+        assert_eq!(wrapped, crate::compression::compress_batch(&bare));
+        assert_eq!(
+            crate::compression::decompress_batch(&wrapped, usize::from(squeezing.batch_size))
+                .as_deref(),
+            Some(&bare[..])
         );
     }
 
