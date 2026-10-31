@@ -5298,6 +5298,39 @@ mod link_congestion_tests {
         assert!(!actions.take_congestion_close(), "and taken once");
     }
 
+    /// zenoh 1.10.2 disables the transport's pipelines at the moment it decides to close an
+    /// unresponsive transport, so that the next push fails at once and does not wait another
+    /// `wait_before_close`. Here the decision is the staged congestion close, and the next send
+    /// is refused before it asks the link for room: the loop that raises the close may be
+    /// seconds away, and each message sent until then would wait the whole deadline.
+    #[test]
+    fn once_the_congestion_close_is_ordered_the_next_send_is_refused_without_waiting() {
+        use wz_session_core::send_declare_error::SendDeclareError;
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        link.set_room(LinkRoom::Congested);
+        assert!(!actions.congestion_close_ordered());
+        actions
+            .send_declare_keyexpr(1, "home/k")
+            .expect("the first declare waits out its deadline");
+        assert!(actions.congestion_close_ordered(), "and orders the close");
+        let asked = link.last_asked();
+        // The loop has not run: the request is still standing.
+        let refused = actions.send_declare_keyexpr(2, "home/j");
+        assert!(
+            matches!(refused, Err(SendDeclareError::TransportUnavailable)),
+            "the next send is refused at once"
+        );
+        assert_eq!(
+            link.last_asked(),
+            asked,
+            "the link was not asked for room again"
+        );
+        // The loop takes the request; the order stays, as the session is on its way out.
+        assert!(actions.take_congestion_close());
+        assert!(actions.congestion_close_ordered(), "sticky");
+    }
+
     /// A blocking push, the unicast sender's other caller of the expiry decision.
     fn blocking_push(
         actions: &super::SessionLinkActions,

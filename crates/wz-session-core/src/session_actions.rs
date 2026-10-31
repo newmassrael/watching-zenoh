@@ -519,6 +519,13 @@ pub struct OutOfBandState {
     /// (`tx.congestion.exhaust`), as zenoh's `handle_push_result` closes its
     /// transport with `UNRESPONSIVE`.
     pub tx_congested: bool,
+    /// A close for congestion has been ORDERED of this session, ever: the sticky half of
+    /// `tx_congested`, which the drive loop clears when it raises the event. zenoh 1.10.2 marks
+    /// the transport's pipelines disabled at the moment it decides to close an unresponsive
+    /// transport, so that every later push fails at once instead of waiting another
+    /// `wait_before_close` (`io/zenoh-transport/src/unicast/universal/tx.rs` @
+    /// `tl.pipeline.mark_disabled();`); this is what the send gate reads for it.
+    pub congestion_close_ordered: bool,
     /// The run of blocking messages that found no room, one after another: what the
     /// `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session` counts. It is state of this
     /// lock and not a request, so it wakes no one and `Self::any` does not read it.
@@ -9165,7 +9172,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `wait_before_close`. Staged, not raised, for the reason
     /// `request_close` gives: the sender is not the loop.
     pub fn request_congestion_close(&self) {
-        self.core.out_of_band.raise(|s| s.tx_congested = true);
+        self.core.out_of_band.raise(|s| {
+            s.tx_congested = true;
+            s.congestion_close_ordered = true;
+        });
+    }
+
+    /// Whether a close for congestion has been ordered of this session: from that moment a send
+    /// to it is refused at once ([`SendWireError::TransportUnavailable`]), where it would have
+    /// waited out `wait_before_close` again on a link already known not to take it.
+    pub fn congestion_close_ordered(&self) -> bool {
+        self.core.out_of_band.take(|s| s.congestion_close_ordered)
     }
 
     /// A blocking message found no room in its deadline: settle what that costs, by the
@@ -9596,7 +9613,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // one), so a per-link death must not reject a send the surviving links can
         // still carry. A single-link session (and every non-feature build) gates
         // on `self.link` exactly as before.
-        if !self.session_send_available() {
+        //
+        // A session a congestion close was ordered of is not available either: the message
+        // would wait another `wait_before_close` for a link that has just been found not to
+        // take one (zenoh 1.10.2 disables the pipelines when it decides the close).
+        if self.congestion_close_ordered() || !self.session_send_available() {
             // R2825 — no link can take it: upstream's `no-link` drop.
             #[cfg(feature = "transport-stats")]
             self.drop_for_no_link(message_priority, &_stats_class);
