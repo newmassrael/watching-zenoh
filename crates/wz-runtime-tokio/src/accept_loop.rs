@@ -4015,14 +4015,22 @@ where
                 // registered + held + zid-tracked identically.
                 let learned = learn_intent(&mut directory, &intent, clock.now_monotonic_ms());
                 // A node that was opened before any hint could be dialled for it waits
-                // in `NoLocator` (decision D15): this discovery is the hint it waited for.
-                #[cfg(feature = "session-close-ingress")]
+                // in `NoLocator` (decision D15): this discovery is the hint it waited for. The
+                // machines are the loop's peers, which exist with `router-connect-reconcile`, as
+                // the macros above do; `session-close-ingress` alone does not give the loop any.
+                #[cfg(all(
+                    feature = "router-connect-reconcile",
+                    feature = "session-close-ingress"
+                ))]
                 if let Some(zid) = learned {
                     let cx = peer_cx!();
                     let actions = peers.locator_learned(zid, &cx, &mut next_id);
                     take_peer_actions!(actions);
                 }
-                #[cfg(not(feature = "session-close-ingress"))]
+                #[cfg(not(all(
+                    feature = "router-connect-reconcile",
+                    feature = "session-close-ingress"
+                )))]
                 let _ = learned;
                 match dial_decision(&faces, &intent, &directory, clock.now_monotonic_ms()) {
                     DialDecision::Dial(target) => {
