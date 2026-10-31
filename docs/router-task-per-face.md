@@ -375,6 +375,31 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    (`down <= shed`). Both held in all six runs. The count of DOWN lines in the window is how many of the router's
    own 963 closes its drives logged before the window ended, and it moved from 0 to 83 under `one-task` as well,
    so it is a property of the host's load and not of the value.
+
+   **4b, a gated face is woken by the pass that releases it.** The step as first written ("the closure
+   watcher becomes the wake list of a destination") was taken one step further, because a list per
+   destination still wakes a face that another destination holds. What 4a left: one `Notify` for every
+   gated face, raised by any link's room (`notify_waiters`), and each face woken asked
+   `read_gate`, which drained every destination and swept them itself. One face's task did that once; a
+   task per face did it once per gated face on every notice, each pass under the queues' locks. Now:
+   - a link's room wakes the loop only (`room_waker`), and the loop's `woken` makes the one pass;
+   - each face has its own `Notify` (`RouterFaceState::gate_wake`), and `release_gates` wakes, with a
+     permit, exactly the faces whose last gate it took away; a face still gated on another destination
+     or on the pool is not woken;
+   - `read_gate` only reads the gate. The drain is the loop's (on a notice and at the tick, 100 ms) and
+     every frame's (`forward` drains first), and the release goes with it; `READ_GATE_BACKSTOP` stays as
+     the bound on a forwarder that never wakes.
+   It also closes a hole 4a opened. A gate is asserted from what the queue held when it was let go, and
+   with a task per face another face's thread can drain that queue in between: its pass released the
+   gates it found, this one was not there yet, and a router that then held nothing ran no pass at all
+   (`drain_egress` and `sweep_egress` return when nothing is held), so the face stayed gated for ever.
+   One task could not interleave there. The face that asserts a gate now reads its destinations once
+   more after (`hold_and_recheck`): either the draining pass came after the gate and released it, or
+   this reading sees what was drained. A test puts the drain in that window through a test-only hook
+   (`between_hold_and_gate`); without the recheck it leaves the face gated (measured: `left: 1`), and a
+   stress test of eight filling threads and one draining thread did not catch it in ten runs, so it was
+   not kept. When a destination leaves, its gates go through the same release (`forget_egress_and_release`),
+   so the faces it held and the faces the returned pool frees are woken by that one pass.
 5. **The reservation.** A face task awaits `poll_reserve` for the destination's lane and sends under the
    conduit's lock with the permit (7.6), which is the first consumer of the session core's opaque permit; the
    thread park (`ParkBudget`, `wait_for_room`) leaves the router's path.

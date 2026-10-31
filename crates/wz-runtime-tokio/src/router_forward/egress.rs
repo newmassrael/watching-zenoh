@@ -302,27 +302,32 @@ pub(super) struct Credit {
     abandoned: Counter,
     /// Destinations closed for not taking a held message within `wait_before_close`.
     closed: Counter,
-    /// Told when a destination took messages, so that a gated face asks again at once.
-    wake: Arc<tokio::sync::Notify>,
     /// Told, with a stored permit, when a link the router holds messages for has room, so that
     /// the loop sends them then and not at its next tick ([`FaceForwarder::wake_signal`]).
     loop_wake: Arc<tokio::sync::Notify>,
     /// What a link calls when it makes room, set on a destination while it holds messages and
-    /// cleared when it holds none: it wakes the loop, and every face gated on a destination.
-    /// Runs on the link's writer thread, so it does no more than wake tasks.
+    /// cleared when it holds none: it wakes the loop, which offers what is held the room and
+    /// releases the faces whose destinations drained ([`OnTables::release_gates`]). A gated face
+    /// is not woken here: it is woken once, by the pass that releases it, and only then.
+    /// Runs on the link's writer thread, so it does no more than wake a task.
     room_waker: Arc<dyn Fn() + Send + Sync>,
+    /// A test's stand-in for another face's thread, run once in the window between a hold letting
+    /// its queue go and the gate it asserts ([`OnTables::hold_and_recheck`]): a single thread
+    /// cannot otherwise put a drain there.
+    #[cfg(test)]
+    between_hold_and_gate: BetweenHoldAndGate,
 }
+
+/// What [`Credit::between_hold_and_gate`] holds.
+#[cfg(test)]
+type BetweenHoldAndGate = PlainMutex<Option<Box<dyn FnOnce(&RouterForwarder) + Send>>>;
 
 impl Default for Credit {
     fn default() -> Self {
-        let wake = Arc::new(tokio::sync::Notify::new());
         let loop_wake = Arc::new(tokio::sync::Notify::new());
         let room_waker: Arc<dyn Fn() + Send + Sync> = {
-            let (wake, loop_wake) = (Arc::clone(&wake), Arc::clone(&loop_wake));
-            Arc::new(move || {
-                loop_wake.notify_one();
-                wake.notify_waiters();
-            })
+            let loop_wake = Arc::clone(&loop_wake);
+            Arc::new(move || loop_wake.notify_one())
         };
         Self {
             gated: PlainMutex::default(),
@@ -333,9 +338,10 @@ impl Default for Credit {
             released: Counter::new(),
             abandoned: Counter::new(),
             closed: Counter::new(),
-            wake,
             loop_wake,
             room_waker,
+            #[cfg(test)]
+            between_hold_and_gate: PlainMutex::default(),
         }
     }
 }
@@ -468,7 +474,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // now: a message that went past its predecessors would put one source's messages out of
         // order.
         if !state.held.lane(Lane::of(&msg)).guard().is_empty() {
-            self.hold(dest, state, msg, reliable, express, priority);
+            self.hold_and_recheck(dest, state, msg, reliable, express, priority);
             return Credited::Held;
         }
         match state
@@ -477,7 +483,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         {
             Ok(()) => Credited::Sent,
             Err(Unsent::NoRoom(msg)) => {
-                self.hold(dest, state, msg, reliable, express, priority);
+                self.hold_and_recheck(dest, state, msg, reliable, express, priority);
                 Credited::Held
             }
             // A chain of fragments cannot be sent without waiting for room between its
@@ -493,10 +499,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Err(Unsent::Failed(_)) => Credited::Refused,
         }
     }
-}
 
-impl RouterForwarder {
-    fn hold(
+    /// [`RouterForwarder::hold`], and a gate it asserted read against the destination again.
+    ///
+    /// A gate is asserted from what the queue held when it was let go, and with a task per face
+    /// another face's thread may drain that queue in between: its pass releases the gates it
+    /// finds, and this one was not there yet. Nothing would release it afterwards, because a
+    /// router that holds nothing skips its passes, and the face would wait for ever. So the face
+    /// that asserted a gate reads the destinations once more after: either the draining pass came
+    /// after the gate and released it, or this reading sees what it drained and releases it.
+    fn hold_and_recheck(
         &self,
         dest: FaceId,
         state: &RouterFaceState,
@@ -505,6 +517,25 @@ impl RouterForwarder {
         express: bool,
         priority: Priority,
     ) {
+        if self.hold(dest, state, msg, reliable, express, priority) {
+            self.release_gates();
+        }
+    }
+}
+
+impl RouterForwarder {
+    /// Hold `msg` for `dest`, and gate the face being routed when that fills a budget. Whether a
+    /// gate was asserted that was not there before, which the caller must check against the
+    /// destination again ([`OnTables::credited_send`]).
+    fn hold(
+        &self,
+        dest: FaceId,
+        state: &RouterFaceState,
+        msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
         let cost = message_cost(&msg);
         let lane = Lane::of(&msg);
         let (destination_bytes, pool_bytes) = {
@@ -548,17 +579,25 @@ impl RouterForwarder {
         // oldest message closes a destination that does not take it (see
         // [`Self::sweep_egress`]), which is what bounds it.
         if lane == Lane::Control {
-            return;
+            return false;
         }
         // The face whose message this is waits on what is full, so that what it had already read
         // is all the router holds past a budget for it. A face is not gated on itself.
         let Some(source) = self.credit.source() else {
-            return;
+            return false;
         };
+        #[cfg(test)]
+        {
+            let between = self.credit.between_hold_and_gate.guard().take();
+            if let Some(between) = between {
+                between(self);
+            }
+        }
         // After the queue is let go: `gated` is never held while a queue is taken (see
         // [`Credit`]), and what the queue held a moment ago is what the gate is asserted from.
         let budget = self.credit.budget;
         let mut gated = self.credit.gated.guard();
+        let mut asserted = false;
         if source != dest
             && destination_bytes >= budget.per_destination_bytes
             && gated
@@ -566,6 +605,7 @@ impl RouterForwarder {
                 .or_default()
                 .insert(GateOn::Destination(dest))
         {
+            asserted = true;
             log::debug!(
                 "router: node={} face={} is not read until destination={} drains: it holds \
                  {destination_bytes} of {} bytes",
@@ -577,6 +617,7 @@ impl RouterForwarder {
         }
         if pool_bytes >= budget.pool_bytes && gated.entry(source).or_default().insert(GateOn::Pool)
         {
+            asserted = true;
             log::warn!(
                 "router: node={} face={} is not read: the messages held for all destinations \
                  reached {pool_bytes} of {} bytes",
@@ -585,6 +626,7 @@ impl RouterForwarder {
                 budget.pool_bytes
             );
         }
+        asserted
     }
 }
 
@@ -622,9 +664,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 state.actions.watch_link_room(None);
             }
         }
-        self.release_gates();
+        // Only a pass that moved something can have brought a destination under its threshold.
         if took {
-            self.credit.wake.notify_waiters();
+            self.release_gates();
         }
     }
 
@@ -743,12 +785,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         if closed_any {
             self.release_gates();
-            self.credit.wake.notify_waiters();
         }
     }
 
     /// Release every gated face whose destinations are down to half their budget or gone, and,
-    /// when the pool is down to half, the faces gated on it.
+    /// when the pool is down to half, the faces gated on it; and wake each face released, once.
+    ///
+    /// The wake is the face's own ([`RouterFaceState::gate_wake`]) and carries a permit, so a face
+    /// whose drive has not started to wait yet finds it when it does. A face still gated is not
+    /// woken: a notice that a destination it does not wait on drained, or that a link made room the
+    /// loop has not offered yet, would only have it ask again and wait again.
     fn release_gates(&self) {
         let faces = &self.tables.faces;
         let budget = self.credit.budget;
@@ -780,7 +826,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 (dest, bytes)
             })
             .collect();
-        self.credit.gated.guard().retain(|_, on| {
+        let mut released = Vec::new();
+        self.credit.gated.guard().retain(|face, on| {
             on.retain(|on| match on {
                 GateOn::Destination(dest) => match held.get(dest) {
                     Some(bytes) => {
@@ -790,34 +837,64 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 },
                 GateOn::Pool => pool_full,
             });
+            if on.is_empty() {
+                released.push(*face);
+            }
             !on.is_empty()
         });
+        self.wake_released(&released);
+    }
+
+    /// Wake each of `released`, faces whose last gate was just taken away.
+    fn wake_released(&self, released: &[FaceId]) {
+        for face in released {
+            if let Some(state) = self.tables.faces.get(face) {
+                state.gate_wake.notify_one();
+            }
+        }
     }
 
     /// The answer to [`FaceForwarder::read_gate`](crate::accept_loop::FaceForwarder::read_gate):
-    /// whether face `id` must wait, after the destinations it waits on were offered room.
+    /// whether face `id` must wait, and on what. It only reads: offering the destinations room is
+    /// the loop's, once per notice from a link ([`FaceForwarder::woken`]) and once per tick, and
+    /// the pass that releases a face wakes it. A face that drained them itself here, as every
+    /// gated face did when one task drove them all, would repeat that pass once for each gated face
+    /// on every notice, each under the queues' locks.
     pub(super) fn gate_of(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
         if !self.credit.gated.guard().contains_key(&id) {
             return None;
         }
-        self.drain_egress();
-        self.sweep_egress();
-        if self.credit.gated.guard().contains_key(&id) {
-            Some(Arc::clone(&self.credit.wake))
-        } else {
-            None
-        }
+        self.tables
+            .faces
+            .get(&id)
+            .map(|state| Arc::clone(&state.gate_wake))
+    }
+
+    /// Face `id`, already taken out of the table, left: drop what it held, and release and wake
+    /// the faces that waited on it and the ones the pool it gave back lets go.
+    pub(super) fn forget_egress_and_release(&self, id: FaceId, state: &RouterFaceState) {
+        self.forget_egress_of(id, state);
+        self.release_gates();
     }
 }
 
 impl RouterForwarder {
+    /// Run `between` once, in the window of the next hold of a face's data message, after its queue
+    /// is let go and before its gate is asserted (see [`Credit::between_hold_and_gate`]).
+    #[cfg(test)]
+    pub(super) fn between_hold_and_gate(&self, between: Box<dyn FnOnce(&RouterForwarder) + Send>) {
+        *self.credit.between_hold_and_gate.guard() = Some(between);
+    }
+
     /// The signal a link's room raises on the loop ([`FaceForwarder::wake_signal`]).
     pub(super) fn wake_signal_of(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.credit.loop_wake)
     }
 
-    /// A face left: what it held is gone with it, and no face waits on it or for it.
-    pub(super) fn forget_egress_of(&self, id: FaceId, state: &RouterFaceState) {
+    /// A face left: what it held is gone with it, and it waits on nothing. The faces that waited on
+    /// it are released by the caller's next [`OnTables::release_gates`], which reads a destination
+    /// no longer in the table as gone ([`OnTables::forget_egress_and_release`]).
+    fn forget_egress_of(&self, id: FaceId, state: &RouterFaceState) {
         let (data_dropped, data_bytes) = state.held.data.guard().clear();
         let (control_dropped, control_bytes) = state.held.control.guard().clear();
         let (dropped, bytes) = (data_dropped + control_dropped, data_bytes + control_bytes);
@@ -834,15 +911,7 @@ impl RouterForwarder {
             self.credit.abandoned.add(dropped);
         }
         self.credit.holding.guard().remove(&id);
-        {
-            let mut gated = self.credit.gated.guard();
-            gated.remove(&id);
-            gated.retain(|_, on| {
-                on.remove(&GateOn::Destination(id));
-                !on.is_empty()
-            });
-        }
-        self.credit.wake.notify_waiters();
+        self.credit.gated.guard().remove(&id);
     }
 
     /// Where this router's faces are gated, in bytes held for a destination and in all

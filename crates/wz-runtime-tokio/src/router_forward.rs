@@ -1654,6 +1654,10 @@ struct RouterFaceState {
     /// has room, so that a face that stopped reading costs the faces that do not feed it
     /// nothing (see [`egress`]).
     held: egress::Queues,
+    /// What this face, as a SOURCE, waits on while it is gated ([`FaceForwarder::read_gate`]): the
+    /// pass that takes its last gate away wakes it, once, with a stored permit, and no other
+    /// face's release or link's room does.
+    gate_wake: Arc<tokio::sync::Notify>,
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -11642,6 +11646,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
                 held: egress::Queues::default(),
+                gate_wake: Arc::new(tokio::sync::Notify::new()),
             },
         );
         self.shed_registry.add(id, actions.clone());
@@ -11857,7 +11862,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .receive_ledger
             .retire(&state.actions.message_reading());
         // What it held for its link goes with it, and no face waits on it or for it.
-        self.forget_egress_of(id, &state);
+        self.forget_egress_and_release(id, &state);
         let tier = state.tier;
         let Some(link) = state.link else {
             // A held-without-identity face (Client, or no routing zid) changed

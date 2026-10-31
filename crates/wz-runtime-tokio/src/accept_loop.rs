@@ -1877,9 +1877,9 @@ async fn drive_face<F: FaceForwarder + ?Sized>(
     (face, outcome)
 }
 
-/// The longest a gated face waits for a notice that a destination has room before it asks the
-/// forwarder again. The notice is what ends the wait (`BoxedLinkDriver::watch_room`); this is
-/// for the link that never gives one, and is not the cadence of a healthy gate.
+/// The longest a gated face waits for its notice before it asks the forwarder again. The notice is
+/// what ends the wait (the router's pass that releases the face wakes it, once, with a permit);
+/// this is a bound on a forwarder that never gives one, and is not the cadence of a healthy gate.
 const READ_GATE_BACKSTOP: Duration = Duration::from_millis(25);
 
 /// R311y205 (transport-multilink) — drive an AGGREGATED secondary link to

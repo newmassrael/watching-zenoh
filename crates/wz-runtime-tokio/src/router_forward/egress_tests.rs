@@ -430,6 +430,12 @@ fn a_destination_at_its_budget_gates_the_face_that_fed_it_and_no_other() {
 
     rig.link.set_full(false);
     assert!(
+        rig.fwd.read_gate(SOURCE).is_some(),
+        "asking does not drain: the face waits for the pass that offers the destination its room"
+    );
+    // The loop's answer to the link's notice of room.
+    rig.fwd.woken();
+    assert!(
         rig.fwd.read_gate(SOURCE).is_none(),
         "the face is read again once the destination has taken what it held"
     );
@@ -1079,11 +1085,12 @@ fn a_destination_asks_its_link_for_room_while_it_holds_and_not_after() {
     );
 }
 
-/// The notice a link gives when it makes room reaches both who waits for it: a face gated on the
-/// destination, which is told at once and asks again, and the loop, which is woken (with a
-/// permit, so that a notice raised while it is busy is not lost) and sends what is held.
+/// The notice a link gives when it makes room wakes the loop (with a permit, so that a notice
+/// raised while it is busy is not lost), and only the loop: the gated face is woken by the pass of
+/// the loop that sends what is held and releases it, once, and not by the link before anything
+/// left (`docs/router-task-per-face.md`, phase 4b).
 #[tokio::test(flavor = "current_thread")]
-async fn a_links_room_wakes_the_gated_face_and_the_loop_and_what_is_held_leaves() {
+async fn a_links_room_wakes_the_loop_whose_pass_releases_and_wakes_the_gated_face() {
     let rig = Rig::filling(true);
     forward_frame(&rig.fwd, SOURCE, a_destinations_worth());
     let gate = rig.fwd.read_gate(SOURCE).expect("the face is gated");
@@ -1106,15 +1113,20 @@ async fn a_links_room_wakes_the_gated_face_and_the_loop_and_what_is_held_leaves(
     tokio::pin!(notified);
     notified.as_mut().enable();
     rig.link.make_room();
-    tokio::time::timeout(Duration::from_secs(1), notified)
-        .await
-        .expect("the gated face was told, and did not have to wait for a timer");
-
     tokio::time::timeout(Duration::from_secs(1), loop_wake.notified())
         .await
         .expect("the loop was woken by the link, and the permit was kept for it");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), notified.as_mut())
+            .await
+            .is_err(),
+        "the face is not woken by the link: nothing has left yet, so it would only ask again"
+    );
 
     rig.fwd.woken();
+    tokio::time::timeout(Duration::from_secs(1), notified)
+        .await
+        .expect("the loop's pass released the face and woke it, without a timer");
     assert_eq!(rig.fwd.egress_held(), 0, "what was held left");
     assert_eq!(rig.link.sent(), rig.baseline + FILL);
     assert!(
@@ -1176,6 +1188,7 @@ fn a_message_larger_than_a_destinations_whole_budget_is_held_alone_and_gates_its
     assert!(rig.fwd.read_gate(SOURCE).is_some());
 
     rig.link.set_full(false);
+    rig.fwd.woken();
     assert!(
         rig.fwd.read_gate(SOURCE).is_none(),
         "when the destination has room the message leaves and the face is read"
@@ -1228,6 +1241,7 @@ fn the_pool_gates_faces_when_destinations_are_each_under_their_budget() {
 
     rig.link.set_full(false);
     second.set_full(false);
+    rig.fwd.woken();
     assert!(
         rig.fwd.read_gate(SOURCE).is_none(),
         "released once the pool is given back"
@@ -1236,6 +1250,74 @@ fn the_pool_gates_faces_when_destinations_are_each_under_their_budget() {
     assert_eq!(rig.fwd.egress_held(), 0);
     assert_eq!(rig.fwd.egress_held_bytes(), 0);
     assert_eq!(rig.fwd.egress_gated_faces(), 0);
+}
+
+/// A face gated on two destinations is woken by the pass that takes its last gate away, and not by
+/// one before: a pass that drains one of them leaves it gated, and waking it would only have it ask
+/// again and wait again (`docs/router-task-per-face.md`, phase 4b).
+#[tokio::test(flavor = "current_thread")]
+async fn a_face_is_woken_by_the_pass_that_takes_its_last_gate_and_not_by_one_before() {
+    let rig = Rig::filling(true);
+    let second = rig.add_destination(FaceId(4), zid(0xCD), true);
+    forward_frame(&rig.fwd, SOURCE, a_destinations_worth());
+    let gate = rig.fwd.read_gate(SOURCE).expect("the face is gated");
+    let notified = gate.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+
+    rig.link.set_full(false);
+    rig.fwd.woken();
+    assert!(
+        rig.fwd.read_gate(SOURCE).is_some(),
+        "the second destination still holds its budget"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), notified.as_mut())
+            .await
+            .is_err(),
+        "and the face was not woken to ask for nothing"
+    );
+
+    second.set_full(false);
+    rig.fwd.woken();
+    tokio::time::timeout(Duration::from_secs(1), notified)
+        .await
+        .expect("the pass that took its last gate woke it");
+    assert!(rig.fwd.read_gate(SOURCE).is_none());
+}
+
+/// A gate asserted after another face's thread drained the destination it is asserted on is
+/// released at once (phase 4b). The gate is asserted from what the queue held when it was let go;
+/// a pass that drained the queue in between found no gate to release, and a router that then holds
+/// nothing runs no pass that could release it later, so the face would wait for ever. The drain is
+/// put in that window here, as a face's thread on another core puts it there by chance.
+#[test]
+fn a_gate_asserted_after_its_destination_was_drained_is_released_at_once() {
+    let rig = Rig::filling(true);
+    forward_frame(&rig.fwd, SOURCE, (0..FILL - 1).map(filler).collect());
+    assert_eq!(
+        rig.fwd.egress_gated_faces(),
+        0,
+        "one message short of the budget"
+    );
+
+    let link = Arc::clone(&rig.link);
+    rig.fwd.between_hold_and_gate(Box::new(move |fwd| {
+        link.set_full(false);
+        fwd.woken();
+    }));
+    forward_frame(&rig.fwd, SOURCE, vec![filler(FILL)]);
+    assert_eq!(
+        rig.fwd.egress_held(),
+        0,
+        "the drain in the window took everything, the message that filled the budget too"
+    );
+    assert_eq!(
+        rig.fwd.egress_gated_faces(),
+        0,
+        "and the gate asserted after it was released by the face that asserted it"
+    );
+    assert!(rig.fwd.read_gate(SOURCE).is_none());
 }
 
 /// The credit stage is what many faces' tasks reach at once (`docs/router-task-per-face.md`,
