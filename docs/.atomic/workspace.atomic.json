@@ -302970,6 +302970,38 @@
         "Carried: the Layer Z8 liveliness expectation and the C1bzr unresolved doc link in wz-tls-mbedtls from run 41192748568 are read next; O4 (h) is the SCE owner's."
       ]
     },
+    "Round 4035": {
+      "decision_summary": "Layer C1bzr redded on one rustdoc link of the secure channel's dial: its document pointed at StreamDial::listen, which the slot profile (session-slot) and a build without alloc do not have, because the trait declares listen under that cfg, so the link did not resolve in the one reduced configuration the lane documents. The link is plain code text now and the sentence says when the method is absent. The same link in wz-runtime-coop sits on an item under the same cfg as the method and was left. No code changed.",
+      "changes_bullets": [
+        "crates/wz-tls-mbedtls/src/stream.rs: the doc of TlsDial names StreamDial::listen as code, not as a link, and says which builds lack it."
+      ],
+      "verification_bullets": [
+        "Read from the job log of hosted run 41192748568 (C1bzr shard 0): `unresolved link to StreamDial::listen: the trait StreamDial has no associated item named listen` at wz-tls-mbedtls/src/stream.rs 317:31.",
+        "On a build host after the edit: cargo doc -p wz-tls-mbedtls --no-deps --no-default-features --features=session-slot,session-close-ingress under RUSTDOCFLAGS=-Dwarnings exit 0. The first attempt, with no features at all, is a configuration the crate does not build (wz-runtime-coop needs a task pool form) and says nothing about the link.",
+        "Not run: the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried: Layer Z8 liveliness (test_liveliness_regression_3, `sub.try_recv().unwrap().is_none()` failed once in run 41192748568, 45 of 46) is measured next to say whether it is timing or a router change; O4 (h) is the SCE owner's."
+      ],
+      "publishable_decision_summary": "Layer C1bzr redded on one rustdoc link of the secure channel's dial: its document pointed at StreamDial::listen, which the slot profile (session-slot) and a build without alloc do not have, because the trait declares listen under that cfg, so the link did not resolve in the one reduced configuration the lane documents. The link is plain code text now and the sentence says when the method is absent. The same link in wz-runtime-coop sits on an item under the same cfg as the method and was left. No code changed.",
+      "publishable_changes_bullets": [
+        "crates/wz-tls-mbedtls/src/stream.rs: the doc of TlsDial names StreamDial::listen as code, not as a link, and says which builds lack it."
+      ],
+      "publishable_verification_bullets": [
+        "Read from the job log of hosted run 41192748568 (C1bzr shard 0): `unresolved link to StreamDial::listen: the trait StreamDial has no associated item named listen` at wz-tls-mbedtls/src/stream.rs 317:31.",
+        "On a build host after the edit: cargo doc -p wz-tls-mbedtls --no-deps --no-default-features --features=session-slot,session-close-ingress under RUSTDOCFLAGS=-Dwarnings exit 0. The first attempt, with no features at all, is a configuration the crate does not build (wz-runtime-coop needs a task pool form) and says nothing about the link.",
+        "Not run: the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried: Layer Z8 liveliness (test_liveliness_regression_3, `sub.try_recv().unwrap().is_none()` failed once in run 41192748568, 45 of 46) is measured next to say whether it is timing or a router change; O4 (h) is the SCE owner's."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
