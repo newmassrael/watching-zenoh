@@ -6442,7 +6442,10 @@ layer_c1ay_cargo_test_router_hat() {
     # a region with no complete queryable carries no feature gate.
     # Item 751 step 7d -- EVERY arm moves by +2: the two tests of a partitioned peer's default
     # send to a gateway (a Put and a Query from a subregion's peer) carry no feature gate.
-    _runci_guarded_test "C1AY router_forward 249" 249 \
+    # 249 -> 263: the router forwarder's tests since the node's declarations moved into the Local
+    # hat and a put waits for room outside the tables (hosted C1ay printed `263 passed`);
+    # re-derived on the build host.
+    _runci_guarded_test "C1AY router_forward 263" 263 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY router_forward qos 251" 251 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
