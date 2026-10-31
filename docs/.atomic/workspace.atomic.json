@@ -301410,6 +301410,38 @@
         "None."
       ]
     },
+    "Round 3997": {
+      "decision_summary": "Layer C1ay of the last completed hosted run is brought back to green, and the cause of it was found by running the layer, not by reading the first red. The layer stops at its first failing leg, so a stale count hid the next. Nine router_forward arms (one per feature set) were pinned before tests landed from several sessions: every arm moves by 14 (one of them the unrestricted subscriber and queryable interest test), the access-acl arms by 2 more and the token arm by 4 more. The retry_period count goes from 8 to 10, two tests added by the integer-arithmetic retry wait. Behind them a build error: the joined-link test module is compiled with transport-multilink alone, while the fixture it uses exists only with multilink, qos and the push and close codecs or with session-extshm, so a multilink-only clippy leg failed to compile. The module is now gated like its fixture. All 33 legs pass on the build host. Counts were measured one arm at a time, not derived.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: the nine router_forward guarded counts and the retry_period count, each with the date and cause.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: joined_link_tests is gated on the predicate of the fixture it reads."
+      ],
+      "verification_bullets": [
+        "The whole layer C1ay was run on a build host (bash scripts/run-ci.sh --layer C1ay): all 33 guarded legs pass, run-ci reports all required layers pass. Each router_forward count was read from a run of its own feature set (263, 265, 288, 271, 274, 315, 263, 265, 273), with two runs ended at their memory reservation by the build host and repeated. The multilink-only clippy combination that failed to compile passes with -D warnings. The other failed jobs of that hosted run (the session-core test compile in C1bf, a wz-capture test, C1bnl, C1g, C0mut, Z8, E17, Q and the C1bzr ledger) were not touched here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The same hosted run had 19 failed jobs; this round clears Layer C1ay. Not looked at in this round: C1bf (wz-session-core test tx_lend_only_encode does not compile, expect on a Vec), C1 (wz-capture transport_build_tests kind table), C1bnl, C1g, C0mut, Z8, E17, Q and the C1bzr docs ledger, which the ci-red session is working on."
+      ],
+      "publishable_decision_summary": "Layer C1ay of the last completed hosted run is brought back to green, and the cause of it was found by running the layer, not by reading the first red. The layer stops at its first failing leg, so a stale count hid the next. Nine router_forward arms (one per feature set) were pinned before tests landed from several sessions: every arm moves by 14 (one of them the unrestricted subscriber and queryable interest test), the access-acl arms by 2 more and the token arm by 4 more. The retry_period count goes from 8 to 10, two tests added by the integer-arithmetic retry wait. Behind them a build error: the joined-link test module is compiled with transport-multilink alone, while the fixture it uses exists only with multilink, qos and the push and close codecs or with session-extshm, so a multilink-only clippy leg failed to compile. The module is now gated like its fixture. All 33 legs pass on the build host. Counts were measured one arm at a time, not derived.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: the nine router_forward guarded counts and the retry_period count, each with the date and cause.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: joined_link_tests is gated on the predicate of the fixture it reads."
+      ],
+      "publishable_verification_bullets": [
+        "The whole layer C1ay was run on a build host (bash scripts/run-ci.sh --layer C1ay): all 33 guarded legs pass, run-ci reports all required layers pass. Each router_forward count was read from a run of its own feature set (263, 265, 288, 271, 274, 315, 263, 265, 273), with two runs ended at their memory reservation by the build host and repeated. The multilink-only clippy combination that failed to compile passes with -D warnings. The other failed jobs of that hosted run (the session-core test compile in C1bf, a wz-capture test, C1bnl, C1g, C0mut, Z8, E17, Q and the C1bzr ledger) were not touched here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The same hosted run had 19 failed jobs; this round clears Layer C1ay. Not looked at in this round: C1bf (wz-session-core test tx_lend_only_encode does not compile, expect on a Vec), C1 (wz-capture transport_build_tests kind table), C1bnl, C1g, C0mut, Z8, E17, Q and the C1bzr docs ledger, which the ci-red session is working on."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
