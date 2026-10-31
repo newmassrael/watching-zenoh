@@ -1065,7 +1065,7 @@ Each lands whole with its surface lines, tests and faults in one round.
   ran without it; (e) an unresponsive peer's pipelines are disabled at once and its transport is
   deleted and not closed with a frame; (f) a newer link state restates the role of its node
   (`crates/wz-routing-graph/src/lib.rs` fills it only while unknown), and an interest that goes
-  away clears the finalised flags of its face (both taken in round R4003: a newer link state
+  away clears the finalised flags of its face (both taken in round R4006: a newer link state
   now restates the role of its node whether or not it was known, and an end of interest takes
   the flags its `DeclareFinal` set off the gateway); (g) the start conditions of a peer are released
   by a synchronous call. Taken in the same round: the key `segmentation_offload` of a QUIC

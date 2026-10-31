@@ -6589,7 +6589,10 @@ layer_c1ay_cargo_test_router_hat() {
     # for each plane). Gated on `routing-interest-pending-gc` through their fixture, so this
     # is the one arm that moves.
     # Item 751 step 7d -- 257 -> 259, the two ungated tests every arm gained.
-    _runci_guarded_test "C1AY router_forward interest broker 278" 278 \
+    # R4006 -- 278 -> 280: the finalised flag's two tests (a key withheld is sent again when the
+    # interest that finalized it ends; an interest that never finalized clears nothing), gated
+    # on this feature through the same fixture. PRINTED by the command.
+    _runci_guarded_test "C1AY router_forward interest broker 280" 280 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
