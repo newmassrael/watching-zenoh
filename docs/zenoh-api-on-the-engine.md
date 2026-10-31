@@ -1127,4 +1127,12 @@ Each lands whole with its surface lines, tests and faults in one round.
   `sources/codecs/timestamp.scxml`, which the view decode does not enforce), and the sample
   projection then truncates to 16 (`crates/wz-session-core/src/sample.rs`). Read in the
   generated code, not run; the repair is in the generator's decode of a bounded length-ref
-  field, which is the SCE owner's.
+  field, which is the SCE owner's. Reported to the SCE session and answered (2026-11-01): the
+  decode is meant to refuse (the largest encoded size of a codec is computed from
+  `sce:max-size`, so a decode that accepts more breaks it), the generator is wrong and the doc
+  comment is right; only the C11 arm of the generator's length-ref decode compares the length
+  with the bound, and the Rust, C++, Kotlin, Go and Python arms and the string variant do not
+  (the same gap holds for `sce:max-count` on the heap-backed repeat decode, and on the encode
+  side). The fix is made in the SCE generator and wz regenerates `out/**` when it lands; wz adds
+  no check of its own in a wrapper and does not change the generated documentation. Open until
+  then.
