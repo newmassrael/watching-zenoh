@@ -6454,9 +6454,12 @@ layer_c1ay_cargo_test_router_hat() {
     # unrestricted subscriber and queryable interest (+1), the router's dumps answering with the
     # whole table as the token dump does. The arms with a feature of their own also hold the
     # tests that feature gates (access-acl +2 more, the token tables +4 more).
-    _runci_guarded_test "C1AY router_forward 263" 263 \
+    # EVERY arm moves by +5 (2026-10-31, `fix(router): Hold a link-state message that finds no
+    # room`): its tests of the held control lane carry no feature gate, except the one that needs
+    # a session that negotiated QoS, which only the arms with `transport-qos` hold (+6 there).
+    _runci_guarded_test "C1AY router_forward 268" 268 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward qos 265" 265 \
+    _runci_guarded_test "C1AY router_forward qos 271" 271 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -6491,7 +6494,7 @@ layer_c1ay_cargo_test_router_hat() {
     # Step (b), step 2: 258 -> 261 (+3, the peer placement tests); step 3: 264.
     # The network gate: 264 -> 266.
     # Step (b), step 5: 266 -> 267.
-    _runci_guarded_test "C1AY router_forward mcast-faces 288" 288 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 293" 293 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -6515,7 +6518,7 @@ layer_c1ay_cargo_test_router_hat() {
     # Item 751 step 7c -- 252 -> 253: `wzconfig_reconfigure_is_inert_without_config_mutate_runtime`,
     # moved from the retired single-net peer forwarder. Ungated apart from `access-acl`, and
     # `config-mutate-runtime` must be OFF, which this arm and the hotreload arm below both are.
-    _runci_guarded_test "C1AY router_forward 271" 271 \
+    _runci_guarded_test "C1AY router_forward 276" 276 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -6534,7 +6537,7 @@ layer_c1ay_cargo_test_router_hat() {
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
     # Item 751 step 7c -- 255 -> 256, the same inert witness as the arm above.
-    _runci_guarded_test "C1AY router_forward hotreload 274" 274 \
+    _runci_guarded_test "C1AY router_forward hotreload 279" 279 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -6549,13 +6552,13 @@ layer_c1ay_cargo_test_router_hat() {
     # Item 751 step 7c -- 294 -> 295: `an_unrestricted_token_interest_is_answered_with_every_token`
     # (R2614), moved from the retired single-net peer forwarder, which was the only one that
     # answered an Interest carrying no keyexpr with the whole table.
-    _runci_guarded_test "C1AY router_forward 315" 315 \
+    _runci_guarded_test "C1AY router_forward 320" 320 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward multicast 263" 263 \
+    _runci_guarded_test "C1AY router_forward multicast 268" 268 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -6568,7 +6571,7 @@ layer_c1ay_cargo_test_router_hat() {
     # command itself, after that round's full sweep STALLED with an empty log on a
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
-    _runci_guarded_test "C1AY router_forward linkstate 265" 265 \
+    _runci_guarded_test "C1AY router_forward linkstate 270" 270 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -6586,7 +6589,7 @@ layer_c1ay_cargo_test_router_hat() {
     # for each plane). Gated on `routing-interest-pending-gc` through their fixture, so this
     # is the one arm that moves.
     # Item 751 step 7d -- 257 -> 259, the two ungated tests every arm gained.
-    _runci_guarded_test "C1AY router_forward interest broker 273" 273 \
+    _runci_guarded_test "C1AY router_forward interest broker 278" 278 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1

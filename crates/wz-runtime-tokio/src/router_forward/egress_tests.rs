@@ -60,7 +60,9 @@ impl RoomLink {
         })
     }
 
-    /// From now the control lane has room whether the data lanes do or not.
+    /// From now the control lane has room whether the data lanes do or not. Its one test needs
+    /// a session that negotiated QoS, so a build without that has no caller.
+    #[cfg(feature = "transport-qos")]
     fn open_control_lane(&self) {
         self.control_open.store(true, Ordering::SeqCst);
     }
@@ -639,6 +641,7 @@ fn a_link_state_message_keeps_its_place_behind_the_one_held_before_it() {
 
 /// A control message does not wait behind a data message that its link has no room for: the two
 /// lanes are two queues, and the control lane's room is its own.
+#[cfg(feature = "transport-qos")]
 #[test]
 fn a_link_state_message_is_not_held_behind_a_put_the_data_lane_has_no_room_for() {
     let rig = Rig::new(true);
