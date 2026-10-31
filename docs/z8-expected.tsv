@@ -19,7 +19,7 @@ handler	pass	2	yes	all of it
 interceptors	pass	7	yes	all of it
 interest_undeclare	pass	1	yes	all of it; the file arrived with 1.10.2 (measured on the tree of round 3976)
 keyexpr	pass	15	yes	all of it
-liveliness	fail	45	yes	4 tests are ignored upstream; test_liveliness_regression_3 fails in about one run in three on one loaded core (hosted: 1 of 3) and passes in the rest, then the row is `pass 46`: a subscriber that asked for no history is told a token that was declared before it, because the node's Local face is told every token the forwarder learns, whenever it learns it, and not only what a client's interest would be sent (upstream sends a token to a face that asked, so one declared before the interest is never sent), so a token that reaches the node after the subscriber is declared reads as new
+liveliness	pass	46	yes	4 tests are ignored upstream; test_liveliness_regression_3 needs a peer's open to return only after the peers it dialled have replayed their declarations, as upstream's open.return_conditions.declares does: a peer face is now sent the end of its initial declarations and the open waits for it, so a token declared before the subscriber is no longer learnt after it
 low_pass	pass	4	yes	all of it
 matching	pass	24	yes	all of it
 namespace	pass	12	yes	all of it
