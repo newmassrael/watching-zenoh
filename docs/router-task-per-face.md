@@ -495,7 +495,12 @@ beside.
   the tables waited 250 ms there (the recursive read let one wait 325 ms and one 501 ms). In the share tests
   (32 and 64 hogs) the writers wait 1.7 to 3.4 s under all three: the core, and not the readers, is what they
   wait for there. The probe that reads those waits stays in E7s: each line now ends with how many waits of
-  250 ms or more the router logged in the window and the longest. 10 ms is a choice, not a measured optimum.
+  250 ms or more the router logged in the window and the longest.
+  The bound, swept on pc2 the same night, one run each and the reference again at the end: 5 ms 7288, 10 ms
+  8055 (and 7512, 7816 before), 25 ms 8167, 50 ms 8036 messages a second on the starved router, and no write
+  of the tables there waited 250 ms under any of them. From 10 ms up the figures sit inside one another's
+  spread, and only 5 ms reads below it; a longer bound buys nothing measured and lets a writer wait longer,
+  so the bound stays at 10 ms.
   The first form of the test passed by not testing: its churn ran two hundred rounds in a millisecond, before
   the publishers had sent anything, so no face ever left a fan-out. It now waits, every round, until the fan-out
   has written to the face before the face leaves.
