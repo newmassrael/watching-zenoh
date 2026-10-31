@@ -1061,16 +1061,16 @@ Each lands whole with its surface lines, tests and faults in one round.
   written and not at the open (the wire is the same; wz opens it at once); (b) a multicast group
   honours `transport/multicast/compression/enabled` (wz lists the key as not read); (c) a
   companion link of a mixed-reliability pair takes the transport's batch size as its limit
-  (measured in round R4006: wz has no such pair, its QUIC offers neither the mixed-reliability
+  (measured in round R4014: wz has no such pair, its QUIC offers neither the mixed-reliability
   nor the multi-stream protocols, `quic_plaintext.rs`, so the item has no subject until the link
   has one; the datagram link's own budget already enters `negotiated_batch_mtu`); (d)
   the shared-memory negotiation refuses the link when an offer cannot be honoured, where 1.10.1
-  ran without it (taken in round R4006: an acceptor's challenge mismatch, a malformed OpenSyn
+  ran without it (taken in round R4014: an acceptor's challenge mismatch, a malformed OpenSyn
   and counters that cannot be opened refuse the link, an initiator reads the OpenAck against
   the offer in the InitAck, an unmappable segment refuses it, and a malformed InitSyn is
   ignored, which 1.10.x has done since the `bail!` of 1.5.0 went; `ShmAuthError`); (e) an
   unresponsive peer's pipelines are disabled at once and its transport is
-  deleted and not closed with a frame (the first half taken in round R4006: a session a
+  deleted and not closed with a frame (the first half taken in round R4014: a session a
   congestion close was ordered of refuses every later send at once, `congestion_close_ordered`;
   wz still sends a Close frame with reason UNRESPONSIVE, which is the statechart's
   `tx.congestion.exhaust` arm, not changed here); (f) a newer link state restates the role of its node
@@ -1078,7 +1078,7 @@ Each lands whole with its surface lines, tests and faults in one round.
   away clears the finalised flags of its face (both taken in round R4006: a newer link state
   now restates the role of its node whether or not it was known, and an end of interest takes
   the flags its `DeclareFinal` set off the gateway); (g) the start conditions of a peer are released
-  by a synchronous call (measured in round R4006: an internal change of upstream's, a sync mutex
+  by a synchronous call (measured in round R4014: an internal change of upstream's, a sync mutex
   in place of an async one so that a connector task cannot deadlock the session under the
   router's lock; wz has no `StartConditions` or `wait_declares`, so there is nothing to carry).
   Taken in the same round: the key `segmentation_offload` of a QUIC
