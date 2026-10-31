@@ -854,6 +854,60 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   tokio peer that races it (the two keep different rules, and a race can close both links until the
   next redial).
 
+- **L6. `tls/`, both roles. Designed, not built.** pico's `tls/` and zenohd's are TLS with a CA
+  chain, and the cooperative engine has no such link; a build with `tls/` selects the tokio
+  engine (rustls) by its own feature. What stands in the way is not a missing composition, which
+  the first reading of the tree suggests (`wz-tls-mbedtls` already is a `StreamSocket` and a
+  `StreamDial` over another one, so the stream link runs over it unchanged), but a different
+  notion of who the peer is.
+  - What exists, read from the tree. `wz-tls-mbedtls` is TLS 1.3 only with one suite
+    (`MBEDTLS_SSL_CIPHERSUITES` is AES-128-GCM-SHA256), both roles, over an identity the device
+    generates (a self-signed P-256 certificate) and accepts a peer by the zid of that peer's key,
+    never by a chain: `wz_tls.c` sets `MBEDTLS_SSL_VERIFY_OPTIONAL` and `mbedtls_ssl_set_hostname(
+    NULL)`, because "no chain is the verdict here" (decision D1 of
+    `docs/session-lifecycle-intent.md`). Its configuration has no PEM reader. That is the right
+    identity between wz nodes of the fixed-memory profile, and it is not what a real zenoh peer
+    speaks.
+  - What a pico `tls/` is, read from the ABI that already resolves it for the tokio engine
+    (`wz-capi-pico/src/config.rs`, the keys `Z_CONFIG_TLS_*`): the dial verifies the server's
+    chain against the root bundle (a path or inline base64, the same PEM bytes either way),
+    `ENABLE_MTLS` makes the dialer present a certificate chain and key and the listener require
+    one, and the host name is checked only when `VERIFY_NAME_ON_CONNECT` is `true` (pico's
+    default is `false`, and its stock examples depend on it).
+  - Decision. The trust policy is a parameter of the secure channel and not a second channel:
+    `Pinned` (D1, what exists) and `Chain` (roots, whether the name is checked, and the chain and
+    key the end presents, all PEM). One state machine, one arena, two answers to "who is this";
+    a session opened under one never accepts what the other would, and `Pinned` stays the
+    default so the kit's image is byte for byte what it is. The alternative that was weighed and
+    refused is the rustls provider in the cooperative engine (a std host could link it): it
+    works, and it makes the cooperative engine's TLS a different stack on each target, so the
+    MCU line would still have none and the tokio engine's would not be shared.
+  - Structure. The seam is the one that exists, `StreamDial`: a provider that wraps another
+    dial. The engine takes a neutral `TlsConfig` of PEM bytes in `CoopConfig`, as it takes the
+    zid; resolving pico's keys into those bytes (path or base64) is pico's knowledge and moves
+    out of the tokio-only `resolve_tls_config` to where both engines read it, so the tokio engine
+    builds its `CapiTlsConfig` from the same bytes. A build chooses its TLS provider by a
+    feature (`tls` stays rustls on the tokio engine; `tls-mbedtls` with `engine-coop` is this
+    one), and the engine-selection rule is that a `tls/` build selects the tokio engine unless
+    it names the provider.
+  - Steps, each proved alone. T1: the `Chain` policy in `wz-tls-mbedtls` (the Mbed TLS
+    configuration gains the PEM and base64 readers and the signature algorithms a real chain
+    uses; `wz_tls.c` gains the chain, key and root readers and the verify mode), proved against
+    a certificate authority's chain generated in the test, with the wrong root, an expired
+    certificate and a wrong name each refused, and the arena's peak read for it. T2: the dial and
+    the accept over `StreamDial`, proved by two ends of the channel in one process. T3: the
+    engine's `tls/` link, dial then listen, proved as `tcp/` was (a session over it, then two
+    faces over it). T4: the ABI, one resolution of pico's keys for both engines, and the engine
+    selection; proved by the pico drop-in's TLS programs on the cooperative engine against the
+    real library, which are the two programs the cooperative sweep now leaves out. T5: zenohd,
+    whose TLS is rustls, against the cooperative engine in Layer Z, in both roles.
+  - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: zenohd's
+    rustls speaks it, but the real zenoh-pico's own Mbed TLS may offer 1.2 only, and then the
+    channel needs 1.2 as well (read from the negotiated version of the two TLS programs in T4,
+    not guessed). The clock: validity dates need a wall time a device may not have, and pico's
+    own handling of that is read before the `Chain` policy decides. The arena a chain needs (a
+    certificate chain and a verification are not a self-signed pin).
+
 ### What is decided and what is open
 
 Decided: one registration table and per-face tables (D9); the dial role keeps a fixed face id
@@ -875,4 +929,5 @@ dial role's face stands by when its node is held.
 
 Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
 history is when two faces hold the same token key (L2 hands it every face's tokens, and each
-face's loss deletes its own); UDP faces by source address; the secure channel's listening half.
+face's loss deletes its own); UDP faces by source address; `tls/` on the cooperative engine
+(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5).
