@@ -303052,6 +303052,34 @@
         "The guards were already one behind (two with transport-qos) before this commit; which earlier commit added the tests was not traced"
       ]
     },
+    "Round 4037": {
+      "decision_summary": "Hosted run 41192748568 (3aa35fbb5), the first to carry the repairs of Layer E18, was read per job. Layers E17, E18 and Q are green. Of what is red, the new shm interop file's annotations (A4, C0), its bare wait (the bounded census in C1 and C1bn), the accept_loop count and the StreamDial::listen doc link were already repaired by their own sessions. Not repaired: the doc link from multicast_params.rs to crate::compression, a module that needs transport-compression (C1bzr, shard 2 and the settle job); it is code text now. Z8 liveliness failed test_liveliness_regression_3 on that run and passes 46 of 46 on the build host at the tip.",
+      "changes_bullets": [
+        "multicast_params.rs: one doc link."
+      ],
+      "verification_bullets": [
+        "Read from the run's job logs and re-measured at the tip: the shm interop file is annotated at the tip, the lattice and accept_loop guards agree; Z8 liveliness on the build host: 46 passed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Z8 liveliness regression_3 (a subscriber receives an event the test expects none of) failed once on a hosted runner and not on the build host; a second hosted failure would make it a defect to bisect."
+      ],
+      "publishable_decision_summary": "Hosted run 41192748568 (3aa35fbb5), the first to carry the repairs of Layer E18, was read per job. Layers E17, E18 and Q are green. Of what is red, the new shm interop file's annotations (A4, C0), its bare wait (the bounded census in C1 and C1bn), the accept_loop count and the StreamDial::listen doc link were already repaired by their own sessions. Not repaired: the doc link from multicast_params.rs to crate::compression, a module that needs transport-compression (C1bzr, shard 2 and the settle job); it is code text now. Z8 liveliness failed test_liveliness_regression_3 on that run and passes 46 of 46 on the build host at the tip.",
+      "publishable_changes_bullets": [
+        "multicast_params.rs: one doc link."
+      ],
+      "publishable_verification_bullets": [
+        "Read from the run's job logs and re-measured at the tip: the shm interop file is annotated at the tip, the lattice and accept_loop guards agree; Z8 liveliness on the build host: 46 passed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Z8 liveliness regression_3 (a subscriber receives an event the test expects none of) failed once on a hosted runner and not on the build host; a second hosted failure would make it a defect to bisect."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
