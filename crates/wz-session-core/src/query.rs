@@ -2017,6 +2017,10 @@ pub enum QueryableInterestReply {
 pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
     queryables: BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P>,
     next_id: u64,
+    /// The zid the key of the link this registry's session is on proved, when it proved one
+    /// (decision D12): handed to every matched queryable as [`QueryView::requester`]. Set by the
+    /// session before it dispatches, since the registry is the session's and so is the link.
+    requester: Option<[u8; 16]>,
     /// transport-shm -- the receive side of shared memory for the VALUE of a
     /// query: the same state a push and a reply have (the negotiated capability,
     /// the resolver, the means of acknowledging the peer's slices, the drop
@@ -2032,9 +2036,18 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
         Self {
             queryables: BoundedVec::default(),
             next_id: 1,
+            requester: None,
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
         }
+    }
+}
+
+impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
+    /// Say which zid the key of the session's link proved, or `None` when it proved none
+    /// (decision D12). The queries dispatched from now on carry it as [`QueryView::requester`].
+    pub fn set_requester(&mut self, requester: Option<[u8; 16]>) {
+        self.requester = requester;
     }
 }
 
@@ -2971,6 +2984,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         is_remote: bool,
     ) -> usize {
         let QueryEnvelope { rid, target, qos } = envelope;
+        // Who the link proved the sender to be (decision D12), read once for every queryable.
+        let requester = self.requester;
         let QueryProjection {
             parameters: parameters_view,
             attachment: attachment_view,
@@ -3060,7 +3075,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     #[cfg(not(feature = "pubsub-ts-stack"))]
                     let carries_stack = false;
                     if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
-                        queryable.sink.handle(
+                        crate::query_sink::handle_from(
+                            &mut queryable.sink,
                             &crate::query_sink::SharedQuery {
                                 base: query_view,
                                 value: lent_value,
@@ -3068,14 +3084,25 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                                 #[cfg(feature = "pubsub-ts-stack")]
                                 ts_stack,
                             },
+                            requester,
                             &mut responder,
                         )
                     } else {
-                        queryable.sink.handle(&query_view, &mut responder)
+                        crate::query_sink::handle_from(
+                            &mut queryable.sink,
+                            &query_view,
+                            requester,
+                            &mut responder,
+                        )
                     }
                 }
                 #[cfg(not(feature = "alloc"))]
-                queryable.sink.handle(&query_view, &mut responder)
+                crate::query_sink::handle_from(
+                    &mut queryable.sink,
+                    &query_view,
+                    requester,
+                    &mut responder,
+                )
             }
         }
         matched
@@ -5875,6 +5902,39 @@ mod tests {
         );
         assert_eq!(incomplete_hits.load(Ordering::SeqCst), 1);
         assert_eq!(replies_plain.len(), 2);
+    }
+
+    /// Decision D12: the zid the session says its link's key proved reaches every matched
+    /// queryable as [`QueryView::requester`], and a session that says none is asked by nobody
+    /// shown; the registry carries it for the next dispatch and holds nothing else of it.
+    #[test]
+    fn a_queryable_is_told_who_the_links_key_proved_asks() {
+        let seen: Arc<Mutex<Vec<Option<[u8; 16]>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = Arc::clone(&seen);
+        let mut reg = QueryableRegistry::new();
+        reg.register("metrics/cpu", move |q, responder| {
+            seen_cb.lock().unwrap().push(q.requester());
+            responder.reply(b"put");
+        });
+        let ask = |reg: &mut QueryableRegistry<_>, rid: u64| {
+            let mut replies = ReplyStage::new();
+            reg.dispatch_request(
+                &request_query(rid, 0, Some("metrics/cpu")),
+                &HashMap::new(),
+                &mut replies,
+            );
+        };
+
+        ask(&mut reg, 1);
+        reg.set_requester(Some([0x1f; 16]));
+        ask(&mut reg, 2);
+        reg.set_requester(None);
+        ask(&mut reg, 3);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [None, Some([0x1f; 16]), None],
+            "a query is asked by whom the link proved when it proved one, and by nobody shown else"
+        );
     }
 
     /// R2594 — every reply INHERITS the QoS its query arrived with, on every

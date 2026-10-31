@@ -275,12 +275,12 @@ where
     fn on_event(&mut self, event: IterationEvent<'_>) {
         {
             let mut peers = self.handle.peers().borrow_mut();
-            self.observer.borrow_mut().dispatch(
-                &mut peers,
-                &mut self.requesters,
-                event,
-                &*self.handle,
-            );
+            let mut observer = self.observer.borrow_mut();
+            // The observer is the process's and this session is one link: the queries of this
+            // dispatch are asked by whom the link's key proved, or by nobody shown (decision D12).
+            observer.set_requester(self.handle.verified_peer_zid());
+            observer.dispatch(&mut peers, &mut self.requesters, event, &*self.handle);
+            observer.set_requester(None);
         }
         // A query whose deadline has passed ends with a timeout reply and its final, here, because
         // this is the one place that runs on every iteration of the session and holds the pending

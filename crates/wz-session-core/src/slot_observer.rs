@@ -482,6 +482,17 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         } = observer;
     }
 
+    /// Say which zid the key of the link of the session about to be dispatched PROVED, or `None`
+    /// (decision D12): the queryables answer the queries of that dispatch with it as
+    /// [`crate::query_sink::QueryView::requester`]. The observer is the process's and a session
+    /// is one link, so the session says it before every dispatch.
+    pub fn set_requester(&mut self, requester: Option<[u8; 16]>) {
+        #[cfg(feature = "query-queryable")]
+        self.queryables.set_requester(requester);
+        #[cfg(not(feature = "query-queryable"))]
+        let _ = requester;
+    }
+
     /// Fan an [`IterationEvent`] of one session into every registry, against that
     /// session's `peers`. The subscriber side runs first so its alias absorb
     /// binds a `DeclKexpr` BEFORE the planes that resolve keyexprs through it.

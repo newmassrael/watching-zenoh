@@ -5648,6 +5648,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
+    /// The remote peer's zid in its sixteen-byte form, when the key of this session's link
+    /// PROVED it ([`Self::peer_identity_verified`]), and `None` for a zid the peer only claims
+    /// (decision D12: the commander of a lifecycle verb asked in band is this and nothing
+    /// weaker).
+    pub fn verified_peer_zid(
+        &self,
+    ) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        if self.peer_identity_verified() {
+            self.peer_zid_array()
+        } else {
+            None
+        }
+    }
+
     /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
     /// (0 Router, 1 Peer, 2 Client), or `None` before the INIT exchange populated
     /// it. The raw wire datum (see `peer_whatami`); the

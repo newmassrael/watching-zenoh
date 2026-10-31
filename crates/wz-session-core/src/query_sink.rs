@@ -177,6 +177,91 @@ pub trait QueryView {
     /// (`storage-profile`), where `QosLevel` lives.
     #[cfg(feature = "storage-profile")]
     fn qos(&self) -> crate::sample::QosLevel;
+    /// The zid the key of the link this query arrived on PROVED, when the link proved one
+    /// (decision D12 of `docs/session-lifecycle-intent.md`): the commander a lifecycle verb
+    /// asked in band is judged by. `None` when the link proved no zid (a link nothing protects, a
+    /// one-way channel, a query from this very node), and that is the whole of what `None`
+    /// says: the zid the sender CLAIMS is [`Self::source_info`]'s and proves nothing.
+    ///
+    /// Defaults to `None`, the safe direction: a view that does not say who is asking has not
+    /// shown that anybody is.
+    fn requester(&self) -> Option<[u8; 16]> {
+        None
+    }
+}
+
+/// Hand one matched query to a sink, as arriving from `requester` when the link proved one
+/// (decision D12): the sink reads the view it would have read, and [`QueryView::requester`]
+/// answers with the zid. With none, the view is handed over as it is.
+pub fn handle_from<S: QuerySink + ?Sized>(
+    sink: &mut S,
+    view: &dyn QueryView,
+    requester: Option<[u8; 16]>,
+    out: &mut dyn ReplyOut,
+) {
+    match requester {
+        Some(peer) => sink.handle(&ProvenQuery { inner: view, peer }, out),
+        None => sink.handle(view, out),
+    }
+}
+
+/// A query whose link proved the zid of its sender: every accessor is `inner`'s, and
+/// [`QueryView::requester`] answers `peer`. A separate type and not a field of
+/// [`BorrowedQuery`] for the reason [`SharedQuery`] is one: that struct is built as a literal in a
+/// dozen places that have no link to ask.
+pub struct ProvenQuery<'a> {
+    /// The query as the dispatcher built it.
+    pub inner: &'a dyn QueryView,
+    /// The zid the link's key proved.
+    pub peer: [u8; 16],
+}
+
+impl QueryView for ProvenQuery<'_> {
+    fn keyexpr(&self) -> &str {
+        self.inner.keyexpr()
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        self.inner.parameters()
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.inner.attachment()
+    }
+    #[cfg(feature = "storage-profile")]
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        self.inner.source_info()
+    }
+    fn payload(&self) -> Option<&[u8]> {
+        self.inner.payload()
+    }
+    #[cfg(feature = "alloc")]
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.inner.payload_shared()
+    }
+    #[cfg(feature = "alloc")]
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.inner.attachment_shared()
+    }
+    #[cfg(feature = "alloc")]
+    fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+        self.inner.encoding()
+    }
+    fn rid(&self) -> u64 {
+        self.inner.rid()
+    }
+    fn is_local(&self) -> bool {
+        self.inner.is_local()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.inner.ts_stack()
+    }
+    #[cfg(feature = "storage-profile")]
+    fn qos(&self) -> crate::sample::QosLevel {
+        self.inner.qos()
+    }
+    fn requester(&self) -> Option<[u8; 16]> {
+        Some(self.peer)
+    }
 }
 
 /// R311y562 — every optional piece of per-reply metadata, in ONE value.
@@ -1031,6 +1116,48 @@ mod tests {
         assert_eq!(sink.last_param_len, Some(3));
         assert_eq!(out.replies, 1);
         assert_eq!(out.last_len, 2);
+    }
+
+    /// Decision D12: a view says nobody asks unless it was handed over as asked by a zid the
+    /// link proved, and the proof changes nothing else the sink reads of the query.
+    #[test]
+    fn a_query_is_asked_by_nobody_unless_the_links_key_proved_a_zid() {
+        type Seen = Option<(Option<[u8; 16]>, u64, usize)>;
+        struct Who([Seen; 2], usize);
+        impl QuerySink for Who {
+            fn handle(&mut self, query: &dyn QueryView, _out: &mut dyn ReplyOut) {
+                self.0[self.1] = Some((query.requester(), query.rid(), query.keyexpr().len()));
+                self.1 += 1;
+            }
+        }
+        let view = BorrowedQuery {
+            keyexpr: "robot/**",
+            parameters: None,
+            attachment: None,
+            #[cfg(feature = "alloc")]
+            source_info: None,
+            payload: None,
+            #[cfg(feature = "alloc")]
+            encoding: None,
+            rid: 7,
+            is_local: false,
+            #[cfg(feature = "alloc")]
+            qos: crate::sample::QosLevel::DEFAULT,
+        };
+        let mut sink = Who([None; 2], 0);
+        let mut out = CountingReplyOut::default();
+        handle_from(&mut sink, &view, None, &mut out);
+        handle_from(&mut sink, &view, Some([0x2f; 16]), &mut out);
+        assert_eq!(
+            sink.0,
+            [Some((None, 7, 8)), Some((Some([0x2f; 16]), 7, 8))],
+            "the proof is the one thing the view gains"
+        );
+        assert_eq!(
+            view.requester(),
+            None,
+            "a view that says nothing shows nobody"
+        );
     }
 
     #[test]

@@ -1222,6 +1222,24 @@ only authority is the in-band commander list. A locator target with no expected
 zid (D7) is admitted only on a channel whose owner holds the pipe, never in
 band.
 
+The order of building it, because the in-band open of a fixed image is permitted
+today by the write permit and a permit that denies an unproven commander would
+break it before anything proves one: (1) the requester's proof reaches the
+queryable, with no behaviour change; (2) the port becomes `permits(verb,
+commander)`, default deny; (3) the `commander` role and the compiled-in lists;
+(4) an image that binds the verbs. The authority of the heap profile is keyed on
+the key expression alone and stays so until the owner rules whether it also
+takes the commander.
+
+Step (1) built (Round 4052). `QueryView::requester()` answers the zid the key of
+the link proved, and `None` otherwise (a claimed zid is `source_info`'s and
+proves nothing); `handle_from` hands a query to a sink as asked by that zid
+(`ProvenQuery` wraps the view, so no literal of `BorrowedQuery` changes);
+`SessionLinkActions::verified_peer_zid` is the session's answer, and the slot
+profile's `SlotDispatch::on_event` says it to the process's observer before each
+dispatch and clears it after. Nothing reads it yet. The heap profile's dispatch
+does not say it yet; that waits for the ruling above.
+
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the
 link-state flood), and a profile has the sources its build holds: AP has all
