@@ -95,7 +95,6 @@ use futures_util::StreamExt;
 use wz_runtime_core::TimeSource;
 
 use crate::link_collision::{LinkCollisions, Resolution};
-#[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
 use crate::retry_period::RetryPeriod;
 use crate::retry_period::RetryPolicy;
 use crate::runtime_impl::TokioTime;
@@ -118,13 +117,8 @@ use crate::session_open::{
     dial_locator, mesh_dial_plan, AcceptedLink, AcceptedPeer, BoundListener, DialConfig,
     MeshDialTarget, OpenError, OpenedSession,
 };
-// R2900 — the identity is read only where a dial is deduped or re-dialed: the
-// reconcile and multilink substrates, and this module's tests.
-#[cfg(any(
-    test,
-    feature = "router-connect-reconcile",
-    feature = "transport-multilink"
-))]
+// R2900 — the identity is read where a dial is deduped or re-dialed: the reconcile and multilink
+// substrates, and the re-dial schedule's default key, which every build has.
 use crate::session_open::MeshDialKey;
 use wz_session_core::locator::AnyLocator;
 use wz_session_core::locator_directory::{DirectoryZid, Lifetime, LocatorDirectory, LocatorSource};
@@ -1605,6 +1599,66 @@ async fn dial_face_multilink_after(
     .await
 }
 
+/// [`dial_face`] after a backoff: the dial of a node a discovery plane found, made again after
+/// the first did not open. It completes into the same `opening` -> [`Step::Opened`] path as a
+/// first dial, and a failure is retried in the Err arm. The list is [`dial_face`]'s with the
+/// wait, as [`dial_face_multilink_after`]'s is [`dial_face_multilink`]'s.
+#[allow(clippy::too_many_arguments)]
+async fn dial_face_after(
+    id: FaceId,
+    target: MeshDialTarget,
+    dial_config: Arc<DialConfig>,
+    backoff_ms: u64,
+    template: FaceTemplate,
+    offer: SessionOffer,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) -> OpenResult {
+    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+    dial_face(
+        id,
+        target,
+        dial_config,
+        template,
+        offer,
+        clock,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// A node a discovery plane found, whose dial is in flight (a gossip node or a scouted one), by
+/// the face the dial will open as: what the Err arm needs to dial it again.
+struct NodeDial {
+    zid: DirectoryZid,
+    /// How many dials of this node have not opened; the next one tries the locator after the
+    /// one this count names, round the node's dialable locators.
+    attempt: usize,
+}
+
+/// The target of the `attempt`th dial of node `zid`: its dialable candidate locators taken in
+/// turn, so that every locator the node advertised is tried, as upstream's `connect_peer` does,
+/// and a node whose first locator does not answer is not lost to it. `None` when the directory
+/// holds no dialable locator of the node (its link state was withdrawn, or none is numeric).
+fn node_dial_target(
+    directory: &LoopDirectory,
+    zid: &DirectoryZid,
+    now_ms: u64,
+    attempt: usize,
+) -> Option<MeshDialTarget> {
+    let candidates = candidate_locators(directory, zid, now_ms);
+    let dialable: Vec<MeshDialTarget> = candidates
+        .iter()
+        .filter_map(|loc| {
+            crate::session_open::plan_endpoint(loc)
+                .ok()
+                .and_then(|locator| mesh_dial_plan(locator).ok())
+        })
+        .collect();
+    let target = dialable.get(attempt.checked_rem(dialable.len())?)?;
+    Some(target.clone().for_node(*zid))
+}
+
 /// R311y786 — the per-PEER-ADDRESS re-dial schedule: how long each dropped or
 /// failed outbound dial waits before its next attempt, and how that wait grows.
 ///
@@ -1627,7 +1681,6 @@ async fn dial_face_multilink_after(
 /// address's, a node's is the node's and not one of its addresses'. The two
 /// instances are two schedules, one per substrate, and a dial belongs to one
 /// substrate (the planner's are its own; the others are the re-add's).
-#[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
 pub(crate) struct RedialSchedule<K = MeshDialKey> {
     policy: RetryPolicy,
     /// Only addresses with an outage IN PROGRESS. [`Self::forget`] removes an
@@ -1638,7 +1691,6 @@ pub(crate) struct RedialSchedule<K = MeshDialKey> {
     periods: BTreeMap<K, RetryPeriod>,
 }
 
-#[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
 impl<K: Ord + Clone> RedialSchedule<K> {
     pub(crate) fn new(policy: RetryPolicy) -> Self {
         Self {
@@ -2926,13 +2978,12 @@ where
     // pacing. The loop's peers keep their own (decision D5).
     #[cfg(feature = "transport-multilink")]
     let mut redial = RedialSchedule::new(retry);
-    // The FIELD is unconditional (so no construction site carries a cfg) but a build
-    // with NEITHER re-dial substrate schedules nothing to pace, so the local is
-    // discarded here — the same shape `run_router_hat` uses for the admin permit it
-    // only reads under a feature. Keeps that combo warning-clean without putting an
-    // `#[allow]` on the destructure, which would also hide a real future unused.
-    #[cfg(not(any(feature = "router-connect-reconcile", feature = "transport-multilink")))]
-    let _ = retry;
+    // The nodes a discovery plane found whose dial is in flight, by the face the dial will open
+    // as, and the waits between the dials of one node that did not open. A dial that fails is
+    // made again at the node's next locator, as upstream's `peer_connector_retry` and
+    // `connect_peer` do; before, one try at the first locator was all a found node got.
+    let mut dialing_nodes: BTreeMap<FaceId, NodeDial> = BTreeMap::new();
+    let mut node_redial: RedialSchedule<DirectoryZid> = RedialSchedule::new(retry);
     let mut next_id: u64 = 0;
     // R311y205 (transport-multilink) — the per-peer aggregation registry (active
     // only when `max_links > 1`). `ml_sessions` maps a peer zid to its logical
@@ -3187,6 +3238,11 @@ where
                 let node_dial = false;
                 match result {
                     Ok(opened) => {
+                        // A node a discovery plane found is linked: its wait starts from the
+                        // beginning the next time it is down.
+                        if let Some(dial) = dialing_nodes.remove(&id) {
+                            node_redial.forget(&dial.zid);
+                        }
                         // R311y786 — this dial SUCCEEDED, so the outage it was
                         // retrying is over: forget the address's grown wait, and the
                         // NEXT outage starts at `period_init_ms` again. zenoh's
@@ -3661,6 +3717,63 @@ where
                                 id.0
                             );
                         }
+                        // A node a discovery plane found is dialled again, at its next locator
+                        // and after a wait that grows (upstream's `peer_connector_retry`), until
+                        // a face to it is held, the node's locators are gone from the directory
+                        // (its link state was withdrawn), or none of them can be dialled.
+                        if let Some(dial) = dialing_nodes.remove(&id) {
+                            let attempt = dial.attempt + 1;
+                            let target = if holds_zid(&faces, &dial.zid) {
+                                None
+                            } else {
+                                node_dial_target(
+                                    &directory,
+                                    &dial.zid,
+                                    clock.now_monotonic_ms(),
+                                    attempt,
+                                )
+                            };
+                            match target {
+                                Some(target) => {
+                                    let again = FaceId(next_id);
+                                    next_id += 1;
+                                    let backoff_ms = node_redial.next_ms(&dial.zid, target.retry());
+                                    log::info!(
+                                        "autoconnect: dialling node {:02x?} again in {backoff_ms}ms \
+                                         at {:?} (attempt {attempt}, face={})",
+                                        dial.zid,
+                                        target.locator,
+                                        again.0
+                                    );
+                                    dialing_nodes.insert(
+                                        again,
+                                        NodeDial {
+                                            zid: dial.zid,
+                                            attempt,
+                                        },
+                                    );
+                                    opening.push(Box::pin(dial_face_after(
+                                        again,
+                                        target,
+                                        Arc::clone(&dial_config),
+                                        backoff_ms,
+                                        params.clone(),
+                                        offer,
+                                        clock,
+                                        tick_interval_ms,
+                                    ))
+                                        as OpenFuture);
+                                }
+                                None => {
+                                    node_redial.forget(&dial.zid);
+                                    log::debug!(
+                                        "autoconnect: not dialling node {:02x?} again (it is held, \
+                                         or no dialable locator is left)",
+                                        dial.zid
+                                    );
+                                }
+                            }
+                        }
                         // Decision D5 — a peer's dial that did not open: another
                         // node answered (D4), or the peer was not reached. Its
                         // machine backs off and dials again, so the link the dial
@@ -3851,6 +3964,21 @@ where
                         let id = FaceId(next_id);
                         next_id += 1;
                         summary.dialed += 1;
+                        // A dial that does not open is made again at the node's next locator
+                        // (the Err arm). The aggregating dial of a multilink node has its own
+                        // retention and its own re-dial below, so only the single-link dial is
+                        // kept here.
+                        #[cfg(feature = "transport-multilink")]
+                        let single_link = max_links <= 1;
+                        #[cfg(not(feature = "transport-multilink"))]
+                        let single_link = true;
+                        if single_link {
+                            if let Some(zid) =
+                                wz_session_core::credential_identity::zid_from_wire(&intent.zid)
+                            {
+                                dialing_nodes.insert(id, NodeDial { zid, attempt: 0 });
+                            }
+                        }
                         // R311y423 — the discovery-only counters. This arm is
                         // reached ONLY via a DialIntent, which a plane emits only
                         // after its autoconnect policy admits a node it
@@ -7604,6 +7732,92 @@ mod tests {
             summary.established, 1,
             "the autoconnected face reached Established"
         );
+        drop(intent_tx);
+    }
+
+    /// A node a discovery plane found is not given up on when a dial to it does not open, and
+    /// every locator it advertised is tried, as upstream's `peer_connector_retry` and
+    /// `connect_peer` do. Before, one dial was made at the first dialable locator and a failure
+    /// ended it for good, so a node whose first locator did not answer (a locator of an interface
+    /// the dialler cannot reach, a port that was not yet open) was never linked to, however
+    /// good its other locators were.
+    ///
+    /// The node advertises two locators, the one that answers listed first and one nothing
+    /// listens on listed last. The directory offers the most recently confirmed first, so the dead
+    /// one is dialled first; the face is up only if the loop dials again, at the other.
+    #[cfg(feature = "routing-peer")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_gossip_dial_that_does_not_open_is_tried_again_at_the_nodes_next_locator() {
+        let (acc_listener, acc_addr) = bind_loopback().await;
+        let (peer_listener, _peer_addr) = bind_loopback().await;
+        // A port nothing listens on: bound to be given a free one, and let go of.
+        let (dead_listener, dead_addr) = bind_loopback().await;
+        drop(dead_listener);
+
+        let (go_tx, go_rx) = watch::channel(false);
+        let acceptor = accept_loop(
+            acc_listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            |_event: &AcceptEvent| {},
+            &NoOpForwarder,
+        );
+        let (intent_tx, intent_rx) = tokio::sync::mpsc::unbounded_channel();
+        intent_tx
+            .send(DialIntent {
+                zid: vec![0xAA; 4],
+                locators: vec![format!("tcp/{acc_addr}"), format!("tcp/{dead_addr}")],
+                origin: DialIntentOrigin::Gossip,
+            })
+            .expect("buffer the dial-intent");
+        let on_event = move |event: &AcceptEvent| {
+            if let AcceptEvent::FaceUp(_) = event {
+                let _ = go_tx.send(true);
+            }
+        };
+        let peer = peer_loop(
+            FaceSources {
+                listeners: vec![peer_listener],
+                dial_targets: vec![],
+                dial_config: Arc::new(DialConfig::default()),
+                dial_intents: Some(intent_rx),
+                mcast_ingress: None,
+                mcast_members: None,
+                mcast_group_subs: None,
+                reconcile: None,
+                offer: SessionOffer::universal(),
+                retry: RetryPolicy::constant(100),
+                stats: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
+                max_sessions: usize::MAX,
+                accept: AcceptBounds::default(),
+                ceiling: None,
+                peer_board: None,
+            },
+            peer_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+
+        let summary = tokio::time::timeout(Duration::from_secs(15), async {
+            let (_acc, peer) = tokio::join!(acceptor, peer);
+            peer
+        })
+        .await
+        .expect("the node's second locator is dialled after the first did not open");
+
+        assert_eq!(
+            (summary.dialed, summary.gossip_dialed),
+            (1, 1),
+            "one discovery, one dial: the second try is the same dial again"
+        );
+        assert_eq!(summary.established, 1, "the face to the node is up");
         drop(intent_tx);
     }
 
