@@ -1240,7 +1240,7 @@ profile's `SlotDispatch::on_event` says it to the process's observer before each
 dispatch and clears it after. Nothing reads it yet. The heap profile's dispatch
 does not say it yet; that waits for the ruling above.
 
-Step (2) built (Round 4055). `LifecycleNode::permits` takes the commander, a
+Step (2) built (the round that files this paragraph). `LifecycleNode::permits` takes the commander, a
 closed `Commander`: the owner of the control `Pipe`, a `Verified(zid)` the link's
 key proved, or `Unproven`, and every transport says which it is (the control
 port says `Pipe`, the in-band query says what `QueryView::requester` answers).
