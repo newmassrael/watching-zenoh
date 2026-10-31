@@ -123,6 +123,16 @@ IMAGES = (
         pattern=r"const WZ_TASK_STACK_WORDS: u16 = (\d+);",
         unit=4,
         entry="wz_task",
+        # 4,012 bytes over 8 frames, read by Layer Q on one build host at the SCE pin ed2f5d7453
+        # (the same at 11e90bcd77): `wz_task` 632, the scenario's `client_put_reaches_the_router`
+        # 456, the session's send 920, `push_body` 844, `try_as_borrowed` 960 and the borrow of the
+        # Put 112. It is the chain of direct calls, with 15 calls through a register on the path
+        # not followed (the pump and the executor's polled tasks), so it is what a change to the
+        # code moves and not a bound on a run: the qemu run of the same image reads a stack peak
+        # of 8,968 of 32,768 bytes. Before the group session was spawned from a seed
+        # (`MulticastSeed`) the worst frame of the image was `TwoSessions::spawn` at 16,208 and
+        # the chain 17,820; the figure here is what is left of them.
+        peak=4012,
     ),
     # The Zephyr node on the fixed-memory profile: its main thread's stack is the overlay's
     # `CONFIG_MAIN_STACK_SIZE`, and the image is built by west into a directory Layer Qzb
