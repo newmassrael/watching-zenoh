@@ -303688,6 +303688,42 @@
         "Carried in docs/zenoh-api-on-the-engine.md O4 (h): waits for the SCE generator fix and its regeneration; then test a zid_len of 17 on the Timestamp view decode. Also carried: the kit hardware measurement, the mold 2.30.0 link abort, and the hosted verdict of tips after round 4029."
       ]
     },
+    "Round 4055": {
+      "decision_summary": "Four zenoh captures of tags that are not releases. The two latest release candidates of the 1.0.0 line, 1.0.0-rc.1 and 1.0.0-rc.2, were built on the build host, router and clients of one tag, and captured over TCP and UDP. All four read two yes flows and none of their 459 SN steps broke: a release candidate of the 1.0.0 line speaks the wire this reader reads. Counts: units 48625, framing 576, cookies 601, Init pairs 603, versions 1206; residual and undecoded units weigh -13987 on the yes sum. Only the failure weights moved, so the confirming weights and the pinned example sums did not. The alpha and beta tags of 1.0.0 and the 0.x tags were not measured.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-0-0-rc-1|rc-2-tcp|udp` (anonymised, no leak), with manifest entries and a README row.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the failure weights computed from them: cookie differing -7652, Init roles one kind -6657, another version -8649, residual -13987 / -12568, undecoded -13987 / -13098, framing lost -7591 / -7574 (every confirming weight unchanged).",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: four rows (2, 0, 0).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, the release-candidate paragraph and what is still open."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), wz-capi-dissect 227 pass and its 4 C consumer tests, clippy clean for both crates. The pre-push static gate array ran whole alone on the rebased tree: 123 of 123 pass, and the upstream citation form gate reads OK. The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The SN count (459 follows, 0 breaks) is the difference of the corpus sums before and after the four files. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: the alpha and beta tags of 1.0.0 and the 0.x tags, whose wire may differ and which would test the foreign-version weight rather than the yes side; a path that loses more than 1.8% (the load was capped on purpose: going past it presses a network other people use); and the null side only on the protocols the corpus holds. The release binaries and sources are on the build host only."
+      ],
+      "publishable_decision_summary": "Four zenoh captures of tags that are not releases. The two latest release candidates of the 1.0.0 line, 1.0.0-rc.1 and 1.0.0-rc.2, were built on the build host, router and clients of one tag, and captured over TCP and UDP. All four read two yes flows and none of their 459 SN steps broke: a release candidate of the 1.0.0 line speaks the wire this reader reads. Counts: units 48625, framing 576, cookies 601, Init pairs 603, versions 1206; residual and undecoded units weigh -13987 on the yes sum. Only the failure weights moved, so the confirming weights and the pinned example sums did not. The alpha and beta tags of 1.0.0 and the 0.x tags were not measured.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-0-0-rc-1|rc-2-tcp|udp` (anonymised, no leak), with manifest entries and a README row.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the failure weights computed from them: cookie differing -7652, Init roles one kind -6657, another version -8649, residual -13987 / -12568, undecoded -13987 / -13098, framing lost -7591 / -7574 (every confirming weight unchanged).",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: four rows (2, 0, 0).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, the release-candidate paragraph and what is still open."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), wz-capi-dissect 227 pass and its 4 C consumer tests, clippy clean for both crates. The pre-push static gate array ran whole alone on the rebased tree: 123 of 123 pass, and the upstream citation form gate reads OK. The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The SN count (459 follows, 0 breaks) is the difference of the corpus sums before and after the four files. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the alpha and beta tags of 1.0.0 and the 0.x tags, whose wire may differ and which would test the foreign-version weight rather than the yes side; a path that loses more than 1.8% (the load was capped on purpose: going past it presses a network other people use); and the null side only on the protocols the corpus holds. The release binaries and sources are on the build host only."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
