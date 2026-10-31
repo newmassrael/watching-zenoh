@@ -92,6 +92,9 @@ OPTIONAL_KEYS = {
 
 #: The bound `stack_bound_gate.py` computes, committed for the images it holds.
 BOUND_KEY = "static_bound_bytes"
+#: The table's own key for the images the stack gate commits a chain for and the kit does not run: an
+#: object of image key to the reason it has no row.
+OFF_KIT_KEY = "not_measured_on_the_kit"
 
 LATENCY_SOURCES = ("rest-probe", "getter-line")
 
@@ -123,7 +126,21 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
     rows = table.get("images")
     if not isinstance(rows, dict):
         return out + ["`images` is not an object"]
-    for key in sorted(set(images) - set(rows)):
+    # The images whose chain is committed but which the kit does not run: a row is a chain with a kit
+    # reading beside it, so these have none, and the table SAYS so, with the reason, instead of the gate
+    # leaving them out. Held both ways: a key with no committed chain behind it, a key that also has a
+    # row, and a reason that is empty are findings.
+    off_kit = table.get(OFF_KIT_KEY, {})
+    if not isinstance(off_kit, dict):
+        return out + [f"`{OFF_KIT_KEY}` is not an object"]
+    for key, reason in sorted(off_kit.items()):
+        if not isinstance(reason, str) or not reason.strip():
+            out.append(f"{key}: `{OFF_KIT_KEY}` gives no reason")
+        if key not in images:
+            out.append(f"{key}: declared in `{OFF_KIT_KEY}` and the stack gate commits no worst chain for it")
+        if key in rows:
+            out.append(f"{key}: declared in `{OFF_KIT_KEY}` and has a row: it is one or the other")
+    for key in sorted(set(images) - set(rows) - set(off_kit)):
         out.append(f"{key}: the stack gate commits a worst chain for this image and the table has no row")
     for key in sorted(set(rows) - set(images)):
         out.append(f"{key}: a row with no committed worst chain in the stack gate behind it")
@@ -356,6 +373,22 @@ def selftest() -> int:
     case("a tolerance of nothing", {"schema": 1, "images": {"k": dict(row, get_median_tolerance_pct=0)}}, want="between 0 and 100")
     case("a wrong schema", {"schema": 2, "images": {"k": row}}, want="schema")
     expect("an empty population is a finding", problems(good, {}, {}) != [], True)
+    # An image the kit does not run: declared with its reason instead of a row, and held both ways.
+    two = {"k": image, "o": stack.Image(key="o", elf=None, source="s", pattern="p", unit=1, entry="e", peak=4012)}
+    declared_two = {"k": 9216, "o": 32768}
+    off = {"schema": 1, "images": {"k": row}, OFF_KIT_KEY: {"o": "a QEMU image: no kit reading"}}
+    expect("an image declared off the kit needs no row", problems(off, two, declared_two), [])
+    expect("an image with a chain, no row and no declaration is a finding",
+           [p for p in problems({"schema": 1, "images": {"k": row}}, two, declared_two) if "no row" in p] != [], True)
+    expect("a declaration with a row beside it is a finding",
+           [p for p in problems(dict(off, images={"k": row, "o": row}), two, declared_two)
+            if "it is one or the other" in p] != [], True)
+    expect("a declaration for an image with no committed chain is a finding",
+           [p for p in problems(dict(off, **{OFF_KIT_KEY: {"o": "r", "z": "r"}}), two, declared_two)
+            if "commits no worst chain for it" in p] != [], True)
+    expect("a declaration without a reason is a finding",
+           [p for p in problems(dict(off, **{OFF_KIT_KEY: {"o": " "}}), two, declared_two)
+            if "gives no reason" in p] != [], True)
 
     log = "boot\nstack: peak 5900 of 9216 bytes\nstack: peak 5944 of 9216 bytes\n"
     expect("the last stack line is read", last_stack_line(log), (5944, 9216))

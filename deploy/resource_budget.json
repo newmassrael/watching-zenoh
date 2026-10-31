@@ -1,5 +1,9 @@
 {
   "schema": 1,
+  "not_measured_on_the_kit": {
+    "frt": "the FreeRTOS demo (deploy/mcu-freertos-demo) runs in QEMU, not on the T2G kit: its worst chain is committed by the stack gate and the kit has no stack reading of it to hold beside the chain",
+    "frt2": "the FreeRTOS two-session demo (deploy/mcu-freertos-demo, two_session) runs in QEMU, not on the T2G kit: its worst chain is committed by the stack gate, and its qemu run's own stack reading (8,968 of 32,768 bytes) is not a kit reading"
+  },
   "images": {
     "zephyr-client-fixed": {
       "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 4480 bytes), its node wz_session_mcu::slot_node",
