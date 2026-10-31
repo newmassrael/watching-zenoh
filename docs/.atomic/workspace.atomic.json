@@ -303162,6 +303162,34 @@
         "Open: the patch releases not named in the verdict doc's section on them, a client newer than its router by more than four releases, a path that loses more than 1.8% (the load was capped; going past it presses a network other people use), and 1.0.0 puts about 220 units into a minute where the others put 173, not looked into. The close-ingress pin of accept_loop.rs moves with every edit of that file; this round moved it after re-reading the reason against the file, and another session's autoconnect and gated-face changes had moved it before. The old release binaries are on the build host only; build one tag at a time."
       ]
     },
+    "Round 4040": {
+      "decision_summary": "Z8 liveliness failed test_liveliness_regression_3 on hosted run 41192748568 and passed 46 of 46 on the build host at the tip. Repeated on the build host on one core it failed 5 of 12 runs (and 3 of 6 with two busy loops beside it), so it is a race, not a hosted accident. Cause, read from the trace: every session of the test is a router-node (router_forward demux lines), and the node's Local face is told every token the forwarder learns, whenever it learns it (wz-capi-core router_node local_face.rs), not only what a client's interest would be sent; upstream sends a token to a face that asked, so one declared before the subscriber's interest is never sent. A token that reaches the node after declare_subscriber reads as new. The row is held at fail 45 with that reason, as the routing row was before its fix; the gate takes a pass as a note.",
+      "changes_bullets": [
+        "docs/z8-expected.tsv: the liveliness row."
+      ],
+      "verification_bullets": [
+        "pc2: the test alone, 8 runs on one core 3 failures (6 runs: 2, 12 runs: 5), failing at tests/liveliness.rs:3889, the first assert after declare_subscriber; the expectation gate selftest passes and parses the row."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The fix is the design of the Local face: ask for tokens through the forwarder's own client interest (current only with history) instead of telling the face every token. It belongs to the router-mode work that holds the node's declarations in the Local hat; not started."
+      ],
+      "publishable_decision_summary": "Z8 liveliness failed test_liveliness_regression_3 on hosted run 41192748568 and passed 46 of 46 on the build host at the tip. Repeated on the build host on one core it failed 5 of 12 runs (and 3 of 6 with two busy loops beside it), so it is a race, not a hosted accident. Cause, read from the trace: every session of the test is a router-node (router_forward demux lines), and the node's Local face is told every token the forwarder learns, whenever it learns it (wz-capi-core router_node local_face.rs), not only what a client's interest would be sent; upstream sends a token to a face that asked, so one declared before the subscriber's interest is never sent. A token that reaches the node after declare_subscriber reads as new. The row is held at fail 45 with that reason, as the routing row was before its fix; the gate takes a pass as a note.",
+      "publishable_changes_bullets": [
+        "docs/z8-expected.tsv: the liveliness row."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: the test alone, 8 runs on one core 3 failures (6 runs: 2, 12 runs: 5), failing at tests/liveliness.rs:3889, the first assert after declare_subscriber; the expectation gate selftest passes and parses the row."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fix is the design of the Local face: ask for tokens through the forwarder's own client interest (current only with history) instead of telling the face every token. It belongs to the router-mode work that holds the node's declarations in the Local hat; not started."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
