@@ -110,6 +110,9 @@ struct Router {
     /// The sessions the router said it ordered closed because it held more than it measured it can
     /// keep the leases of, summed over its statements of it.
     shed: Arc<AtomicUsize>,
+    /// Every wait for the routing tables the router logged ([`tables_wait_ms`]), in order, so that
+    /// a window can say how often and how long its writers were kept out.
+    tables_waits: Arc<Mutex<Vec<u64>>>,
 }
 
 /// Run `demo` with `args` under a shell that raises the soft open-files limit to the hard one first
@@ -181,6 +184,26 @@ fn keepalive_lateness_ms(line: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// How long, in milliseconds, a writer of the routing tables waited for them, in the router's
+/// `waited <Duration> for the routing tables` (logged from 250 ms): a face coming up, a declaration
+/// or the tick kept out by the faces that were reading them. `<Duration>` is Rust's `Debug` of a
+/// `Duration` (`312.5ms`, `1.204s`, `850µs`).
+fn tables_wait_ms(line: &str) -> Option<u64> {
+    let rest = line.split(" waited ").nth(1)?;
+    let (waited, _) = rest.split_once(" for the routing tables")?;
+    let (number, scale) = if let Some(n) = waited.strip_suffix("ms") {
+        (n, 1.0)
+    } else if let Some(n) = waited.strip_suffix("µs") {
+        (n, 1e-3)
+    } else if let Some(n) = waited.strip_suffix("ns") {
+        (n, 1e-6)
+    } else {
+        (waited.strip_suffix('s')?, 1e3)
+    };
+    let ms = number.parse::<f64>().ok()? * scale;
+    Some(ms.round() as u64)
+}
+
 /// The sessions a router ordered closed in one statement, `closing the newest N to keep K`.
 fn sessions_shed(line: &str) -> Option<usize> {
     let rest = line.split("closing the newest ").nth(1)?;
@@ -223,6 +246,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
     let lateness_ms = Arc::new(AtomicU64::new(0));
     let capacity_line = Arc::new(Mutex::new(String::new()));
     let shed = Arc::new(AtomicUsize::new(0));
+    let tables_waits = Arc::new(Mutex::new(Vec::new()));
     let (port_tx, port_rx) = mpsc::channel();
     {
         let (up, down, down_lines, refused, pushes, lateness_ms, capacity_line, shed) = (
@@ -235,6 +259,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
             Arc::clone(&capacity_line),
             Arc::clone(&shed),
         );
+        let tables_waits = Arc::clone(&tables_waits);
         thread::spawn(move || {
             let mut port_tx = Some(port_tx);
             let mut banner = String::new();
@@ -264,6 +289,10 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
                     lateness_ms.store(late, Ordering::Relaxed);
                 } else if let Some(closed) = sessions_shed(&line) {
                     shed.fetch_add(closed, Ordering::Relaxed);
+                } else if let Some(waited) = tables_wait_ms(&line) {
+                    if let Ok(mut waits) = tables_waits.lock() {
+                        waits.push(waited);
+                    }
                 } else if line.contains("admitting at most") {
                     // Each statement, in order: the series is what says whether the limit
                     // followed the host or the burst.
@@ -292,6 +321,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
         lateness_ms,
         capacity_line,
         shed,
+        tables_waits,
     }
 }
 
@@ -460,11 +490,23 @@ struct Window {
     /// The sessions the router ordered closed in the window because it held more than it measured
     /// it can keep the leases of: the endings and DOWNs that are its own doing and not a lost lease.
     shed: usize,
+    /// The waits for the routing tables the router logged in the window (each 250 ms or more).
+    tables_waits: Vec<u64>,
 }
 
 impl Window {
     fn micros_per_message(&self) -> f64 {
         1e6 * self.cpu_s / self.forwarded.max(1) as f64
+    }
+    /// The window's waits for the routing tables, for a printed line: how many, and the longest.
+    fn tables_waits_text(&self) -> String {
+        match self.tables_waits.iter().max() {
+            None => "no wait for the routing tables of 250 ms or more".to_owned(),
+            Some(longest) => format!(
+                "{} waits for the routing tables of 250 ms or more, the longest {longest} ms",
+                self.tables_waits.len()
+            ),
+        }
     }
     fn messages_per_second(&self) -> f64 {
         self.forwarded as f64 / self.seconds
@@ -574,6 +616,7 @@ fn measure(scenario: Scenario) -> Window {
         ended.load(Ordering::Relaxed),
         router.shed.load(Ordering::Relaxed),
     );
+    let waits_before = router.tables_waits.lock().map(|w| w.len()).unwrap_or(0);
     let started = Instant::now();
     let mut waves: VecDeque<(Instant, ChildGuard)> = VecDeque::new();
     let mut generation = 0;
@@ -612,6 +655,11 @@ fn measure(scenario: Scenario) -> Window {
             .map(|line| line.clone())
             .unwrap_or_default(),
         shed: router.shed.load(Ordering::Relaxed) - shed_before,
+        tables_waits: router
+            .tables_waits
+            .lock()
+            .map(|w| w.get(waits_before..).unwrap_or_default().to_vec())
+            .unwrap_or_default(),
     };
     drop(waves);
     drop(clients);
@@ -773,12 +821,13 @@ fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
     eprintln!(
         "\nstarved router (one shared core, lower priority), 2048 subscribers, offered {offered} messages/s: \
          forwarded {:.0} messages/s ({:.0}% of offered), {} faces went DOWN, {} client sessions ended \
-         on their own, the longest a keepalive timer was served late {} ms",
+         on their own, the longest a keepalive timer was served late {} ms; {}",
         w.messages_per_second(),
         100.0 * w.delivered_share(),
         w.down,
         w.ended,
         w.keepalive_late_ms,
+        w.tables_waits_text(),
     );
 }
 
@@ -828,12 +877,13 @@ fn wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share() {
         "\nrouter told 1.32% of a core, 32 hogs, 2048 sessions knocking, offered {offered} messages/s: \
          forwarded {:.0} messages/s, {} faces went DOWN, {} admitted client sessions ended on their own, \
          {} of them ordered closed by the router, the longest a keepalive timer was served late {} ms; \
-         {} came up in the window; the router said: {}",
+         {}; {} came up in the window; the router said: {}",
         w.messages_per_second(),
         w.down,
         w.ended,
         w.shed,
         w.keepalive_late_ms,
+        w.tables_waits_text(),
         w.admitted,
         w.capacity_note,
     );
@@ -862,12 +912,13 @@ fn wz_router_hat_keeps_its_promise_by_closing_sessions_when_the_host_gives_less_
     eprintln!(
         "\nrouter told 1.32% of a core, 64 hogs, 2048 sessions knocking, offered {offered} messages/s: \
          forwarded {:.0} messages/s, {} faces went DOWN, {} client sessions ended, {} of them \
-         ordered closed by the router, the longest a keepalive timer was served late {} ms",
+         ordered closed by the router, the longest a keepalive timer was served late {} ms; {}",
         w.messages_per_second(),
         w.down,
         w.ended,
         w.shed,
         w.keepalive_late_ms,
+        w.tables_waits_text(),
     );
 }
 
