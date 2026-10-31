@@ -303080,6 +303080,44 @@
         "Z8 liveliness regression_3 (a subscriber receives an event the test expects none of) failed once on a hosted runner and not on the build host; a second hosted failure would make it a defect to bisect."
       ]
     },
+    "Round 4038": {
+      "decision_summary": "The observation round 4023 carried unexplained, a stock zenohd's admin listing losing its multicast locator after a mismatched member's datagram, is zenohd's own behavior and not a defect of wz. Upstream 1.10.2 returns an error from the receive task of a multicast link when a datagram does not decode (the batch fails to read, or the message does not decode) and then deletes the transport, so one such datagram from any member takes the group down for that zenohd. wz's receiver drops the datagram and goes on, which is the sturdier behavior and the one to keep: a member that disagrees about the compression wrap cannot end the group for the others. A comment of the receive path that said upstream also only drops a batch it cannot read was wrong and is corrected; the witness explains why its second member starts only after the first is listed.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/multicast_rx.rs: the doc of unwrap_batch states what upstream does with a batch it cannot read (ends the receive task, deletes the transport) and that wz does not follow.",
+        "crates/wz-integration-tests/tests/zenoh_multicast_compression_foreign_witness.rs: the comment on the second member's start names the second reason for the order.",
+        "docs/zenoh-api-on-the-engine.md: O4 (b) states the cause of the locator loss."
+      ],
+      "verification_bullets": [
+        "Read in the pinned upstream tree: multicast/link.rs rx_task returns the error of the read and of read_messages, start_rx logs `RX task failed` and spawns transport.delete(); multicast/rx.rs read_messages maps a failed TransportMessage decode to `decoding error` and returns it.",
+        "The witness of a mismatched member passes against a zenohd built at 1.10.2 (1 passed, on a build host); no zenohd log was captured, so the chain from a mismatched datagram to the lost locator is read from source and consistent with the first runs, not replayed.",
+        "upstream_citation_anchor_gate --check --resolve-if-pinned OK, reason_review_pin_gate OK, store_reason_citation_gate OK, rustfmt --check clean. Comments and a document only.",
+        "Not run: the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's, the SCE owner's). The locator loss is explained from source and not replayed with a zenohd log."
+      ],
+      "publishable_decision_summary": "The observation round 4023 carried unexplained, a stock zenohd's admin listing losing its multicast locator after a mismatched member's datagram, is zenohd's own behavior and not a defect of wz. Upstream 1.10.2 returns an error from the receive task of a multicast link when a datagram does not decode (the batch fails to read, or the message does not decode) and then deletes the transport, so one such datagram from any member takes the group down for that zenohd. wz's receiver drops the datagram and goes on, which is the sturdier behavior and the one to keep: a member that disagrees about the compression wrap cannot end the group for the others. A comment of the receive path that said upstream also only drops a batch it cannot read was wrong and is corrected; the witness explains why its second member starts only after the first is listed.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/multicast_rx.rs: the doc of unwrap_batch states what upstream does with a batch it cannot read (ends the receive task, deletes the transport) and that wz does not follow.",
+        "crates/wz-integration-tests/tests/zenoh_multicast_compression_foreign_witness.rs: the comment on the second member's start names the second reason for the order.",
+        "docs/zenoh-api-on-the-engine.md: O4 (b) states the cause of the locator loss."
+      ],
+      "publishable_verification_bullets": [
+        "Read in the pinned upstream tree: multicast/link.rs rx_task returns the error of the read and of read_messages, start_rx logs `RX task failed` and spawns transport.delete(); multicast/rx.rs read_messages maps a failed TransportMessage decode to `decoding error` and returns it.",
+        "The witness of a mismatched member passes against a zenohd built at 1.10.2 (1 passed, on a build host); no zenohd log was captured, so the chain from a mismatched datagram to the lost locator is read from source and consistent with the first runs, not replayed.",
+        "upstream_citation_anchor_gate --check --resolve-if-pinned OK, reason_review_pin_gate OK, store_reason_citation_gate OK, rustfmt --check clean. Comments and a document only.",
+        "Not run: the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's, the SCE owner's). The locator loss is explained from source and not replayed with a zenohd log."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
