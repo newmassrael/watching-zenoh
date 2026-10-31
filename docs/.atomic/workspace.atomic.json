@@ -302712,6 +302712,42 @@
         "wz does not implement the QUIC segmentation_offload option the 1.10.2 doc describes; that belongs to the pin-bump work. validate and gate provenance of the run failed on the lattice of counts at that commit, which the tip passes; the whole of Layer C0 was not re-run."
       ]
     },
+    "Round 4028": {
+      "decision_summary": "The shared-memory refusals of O4 (d) cannot be provoked by a stock zenohd, and the interop that remained carried is closed by saying so with the evidence. Upstream 1.10.2 is lenient where a segment cannot be opened (the InitSyn and the InitAck trace the error and the step goes on plain) and refuses only at the OpenSyn (challenge mismatch) and the OpenAck (an acknowledgement that cannot be honoured), which a peer reaches after both ends have opened each other's segment; a zenohd never forges either, so those refusals stay held by the tests of extshm.rs. What a zenohd at 1.10.2 shows is the lenient half: a wz dialler in a mount namespace that shares no /dev/shm with it, and zenohd, both go on without shared memory and the session establishes, where the same dial through the same namespace with the host's /dev/shm negotiates. No defect of wz was found.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_shm_establishment_zenohd_interop.rs: two ignored legs, the control (a dialler that shares /dev/shm negotiates through a bwrap namespace) and the lenient half (a dialler with an empty /dev/shm establishes without shared memory, as does zenohd).",
+        "docs/zenoh-api-on-the-engine.md: O4 (d) states what a zenohd can and cannot show of the refusals."
+      ],
+      "verification_bullets": [
+        "On a build host against a zenohd built at 1.10.2 with shared-memory: the four legs of the file ran 4 passed, 0 failed, none skipped (the two earlier legs of the file still pass beside the two new ones).",
+        "The first run of the new leg expected a refusal and got an established plain session; reading upstream's auth.rs showed the refusals sit at the OpenSyn and the OpenAck, and the hidden /dev/shm also hid wz's own segment from zenohd, so the claim of the leg was changed to what the pair does, not widened by hiding a segment from one side.",
+        "upstream_citation_anchor_gate --check --resolve-if-pinned OK; rustfmt --check clean.",
+        "Not run: the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's, the SCE owner's). Also carried: the cause of a group's admin listing losing its multicast locator after a member's undecodable datagram, which the first runs of 4023 showed and nothing explained."
+      ],
+      "publishable_decision_summary": "The shared-memory refusals of O4 (d) cannot be provoked by a stock zenohd, and the interop that remained carried is closed by saying so with the evidence. Upstream 1.10.2 is lenient where a segment cannot be opened (the InitSyn and the InitAck trace the error and the step goes on plain) and refuses only at the OpenSyn (challenge mismatch) and the OpenAck (an acknowledgement that cannot be honoured), which a peer reaches after both ends have opened each other's segment; a zenohd never forges either, so those refusals stay held by the tests of extshm.rs. What a zenohd at 1.10.2 shows is the lenient half: a wz dialler in a mount namespace that shares no /dev/shm with it, and zenohd, both go on without shared memory and the session establishes, where the same dial through the same namespace with the host's /dev/shm negotiates. No defect of wz was found.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_shm_establishment_zenohd_interop.rs: two ignored legs, the control (a dialler that shares /dev/shm negotiates through a bwrap namespace) and the lenient half (a dialler with an empty /dev/shm establishes without shared memory, as does zenohd).",
+        "docs/zenoh-api-on-the-engine.md: O4 (d) states what a zenohd can and cannot show of the refusals."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host against a zenohd built at 1.10.2 with shared-memory: the four legs of the file ran 4 passed, 0 failed, none skipped (the two earlier legs of the file still pass beside the two new ones).",
+        "The first run of the new leg expected a refusal and got an established plain session; reading upstream's auth.rs showed the refusals sit at the OpenSyn and the OpenAck, and the hidden /dev/shm also hid wz's own segment from zenohd, so the claim of the leg was changed to what the pair does, not widened by hiding a segment from one side.",
+        "upstream_citation_anchor_gate --check --resolve-if-pinned OK; rustfmt --check clean.",
+        "Not run: the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's, the SCE owner's). Also carried: the cause of a group's admin listing losing its multicast locator after a member's undecodable datagram, which the first runs of 4023 showed and nothing explained."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
