@@ -32,6 +32,9 @@ MODES -- required, no default, and an unknown argument is refused by name
 does not guess which was meant):
   --check  regenerate into memory and FAIL if the committed golden differs.
   --write  regenerate and overwrite the committed golden.
+  --header read only the golden's provenance line and the oracle's lock, and FAIL
+           when they name different versions (no build; Layer C0 and pre-push).
+  --header-selftest  the comparison against fixtures.
 
 A build that cannot run is exit 2 with the reason, never a comparison that was
 not made.
@@ -48,7 +51,10 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parents[2]
 ORACLES = REPO / "oracles"
 PACKAGE = "wz-oracle-zenoh-stats-golden"
-GOLDEN = REPO / "crates" / "wz-session-core" / "src" / "stats_registry" / "zenoh_1_10_1.golden"
+# Named for what it holds, not for a version: the file's first line carries the
+# versions it was made at, and a name that carried one went stale beside the pin
+# (the golden said 1.10.2 under a 1_10_1 name, and Layer E17 was red for it).
+GOLDEN = REPO / "crates" / "wz-session-core" / "src" / "stats_registry" / "zenoh_stats.golden"
 
 
 def locked_version(lock: str, crate: str) -> str | None:
@@ -109,7 +115,68 @@ def generate() -> str:
     return header + normalise(run.stdout)
 
 
+HEADER_RE = re.compile(r"^# zenoh-stats (\S+) with prometheus-client (\S+):")
+
+
+def header_findings(golden_text: str, lock_text: str) -> list[str]:
+    """What the golden's provenance line says that the oracle's lock does not.
+
+    The line names the versions the document was made at, and the lock names the
+    versions the oracle builds at. A pin bump moves the lock and leaves the
+    golden until someone regenerates it: round 3976 moved the pin and the golden
+    kept saying 1.10.1, which only Layer E17 (a build of the oracle, on a hosted
+    job) could see. Text only, so a bump meets it where it is made.
+    """
+    found = HEADER_RE.match(golden_text.splitlines()[0] if golden_text else "")
+    if not found:
+        return ["the golden's first line is not a provenance line"]
+    out = []
+    for crate, said in (("zenoh-stats", found.group(1)), ("prometheus-client", found.group(2))):
+        locked = locked_version(lock_text, crate)
+        if locked is None:
+            out.append(f"oracles/Cargo.lock names no {crate}")
+        elif locked != said:
+            out.append(f"the golden says {crate} {said}, the lock builds {locked}")
+    return out
+
+
+def header_selftest() -> int:
+    lock = (
+        'name = "zenoh-stats"\nversion = "1.2.3"\n\n'
+        'name = "prometheus-client"\nversion = "0.9.0"\n'
+    )
+    good = "# zenoh-stats 1.2.3 with prometheus-client 0.9.0: x\nbody\n"
+    assert header_findings(good, lock) == []
+    stale = "# zenoh-stats 1.2.2 with prometheus-client 0.9.0: x\n"
+    assert len(header_findings(stale, lock)) == 1
+    both = "# zenoh-stats 1.2.2 with prometheus-client 0.8.0: x\n"
+    assert len(header_findings(both, lock)) == 2
+    assert header_findings("", lock) and header_findings("not a header\n", lock)
+    assert header_findings(good, "") == [
+        "oracles/Cargo.lock names no zenoh-stats",
+        "oracles/Cargo.lock names no prometheus-client",
+    ]
+    print("zenoh-stats-golden: header selftest OK")
+    return 0
+
+
+def header_check() -> int:
+    findings = header_findings(
+        GOLDEN.read_text() if GOLDEN.exists() else "", (ORACLES / "Cargo.lock").read_text()
+    )
+    if findings:
+        for f in findings:
+            print(f"zenoh-stats-golden: FAIL -- {f}; regenerate with --write", file=sys.stderr)
+        return 1
+    print("zenoh-stats-golden: OK -- the golden's provenance line matches oracles/Cargo.lock")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if argv == ["--header"]:
+        return header_check()
+    if argv == ["--header-selftest"]:
+        return header_selftest()
     modes = {"--check", "--write"}
     unknown = [a for a in argv if a not in modes]
     if unknown:

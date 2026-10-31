@@ -6,7 +6,7 @@ use alloc::string::ToString as _;
 
 /// What the pinned `zenoh-stats` wrote for the event sequences in
 /// `oracles/zenoh-stats-golden`, each block's samples sorted.
-const GOLDEN: &str = include_str!("zenoh_1_10_1.golden");
+const GOLDEN: &str = include_str!("zenoh_stats.golden");
 
 /// One scenario of the golden: its title line and its document.
 fn golden_scenarios() -> Vec<(&'static str, &'static str)> {
