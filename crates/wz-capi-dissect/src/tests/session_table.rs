@@ -155,11 +155,11 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
         doc.contains(&format!(
             "\"frames\":6,\"bytes\":{want_bytes},\"zenoh\":\"yes\",\
              \"announced_version\":\"own\",\"zenoh_evidence\":{{\
-             \"log2_lr_millibits\":22779,\"log2_lr_no_millibits\":38259,\
+             \"log2_lr_millibits\":22780,\"log2_lr_no_millibits\":38260,\
              \"yes_at_millibits\":20000,\
              \"no_at_millibits\":-20000,\"model\":2,\"checks\":[\
              {{\"check\":\"init_roles\",\"strength\":\"handshake\",\"confirmed\":1,\
-             \"violated\":0,\"millibits\":991,\"no_millibits\":991,\
+             \"violated\":0,\"millibits\":992,\"no_millibits\":992,\
              \"q_basis\":\"derived\",\"eps_basis\":\"measured\"}},\
              {{\"check\":\"version_header\",\"strength\":\"header\",\"confirmed\":2,\
              \"violated\":0,\"millibits\":15992,\"no_millibits\":15992,\

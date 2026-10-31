@@ -58,6 +58,9 @@ The original captures are not kept anywhere.
 | `zenoh-mixed-c1-0-2-r1-10-0-*.pcap`, and the same for client 1.3.4, 1.4.0, 1.5.0, 1.6.2, 1.8.0 and 1.10.2 | zenoh | TCP, UDP unicast | a client built from that tag against the eclipse/zenoh 1.10.0 router |
 | `zenoh-matched-1-10-2-*.pcap`, and the same for 1.6.1, 1.3.0, 1.2.0, 1.1.0, 1.0.1 and 1.0.0 | zenoh | TCP, UDP unicast | router and clients both built from the release's tag; 1.0.0 to 1.2.0 with the rest plugin switched off |
 | `zenoh-mixed-c1-10-1-r1-10-2-*.pcap` | zenoh | TCP, UDP unicast | the 1.10.1 examples against a zenohd built from the 1.10.2 tag |
+| `zenoh-mixed-c1-10-2-r1-9-0-*.pcap`, and the same for router 1.8.0 and 1.7.2 | zenoh | TCP, UDP unicast | a 1.10.2 client against the eclipse/zenoh router of that release |
+| `zenoh-matched-1-3-1-*.pcap`, and the same for 1.3.2, 1.3.3, 1.6.0, 1.7.0 and 1.7.1 | zenoh | TCP, UDP unicast | router and clients both built from the release's tag |
+| `zenoh-tunnel-loaded-udp-20pub.pcap` | zenoh | UDP | the tunnelled path of `zenoh-tunnel-udp-20pub.pcap` with a paced UDP load of 150 Mbit/s over it, which made it lose 1.8% of the load's datagrams |
 | `zenoh-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients |
 | `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |
 | `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
