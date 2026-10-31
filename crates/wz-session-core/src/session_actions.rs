@@ -11176,11 +11176,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// A link-state message (`Oam`) is probed the same way, since the flood a router makes when a
     /// face comes up is sent inside its tables and a wait there stops everything that needs them.
+    /// So are a declaration, an interest and the final of a query: a sender that holds data for a
+    /// link must be able to hold them behind it, or they reach the peer before the data that came
+    /// first.
     ///
-    /// Any other message is sent as [`Self::send_network_message_qos`] sends it, which waits.
-    /// The data plane is where a full queue is the common case, and where one message is not
-    /// worth a stalled loop; a declaration or a reply to a queryable is rare, and is not made to
-    /// queue here.
+    /// A request and a response are sent as [`Self::send_network_message_qos`] sends them, which
+    /// waits: they may carry a shared-memory payload, whose handoff a probe would have to open and
+    /// give back, and that is not done here yet.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -11252,6 +11254,58 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
         if let crate::network_message::NetworkMessage::Oam(oam) = &msg {
             return match self.dispatch_oam_at(DispatchStage::Probe, oam, reliable) {
+                Ok(Dispatched::Sent) => Ok(()),
+                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
+                #[cfg(feature = "transport-fragmentation")]
+                Ok(Dispatched::Chain) => Err(Unsent::Chain(msg)),
+                Err(e) => Err(Unsent::Failed(e)),
+            };
+        }
+        // A declaration, an interest and the final of a query are probed too, so that a sender that
+        // may not wait can keep them in order behind the data it holds for the same link, where a
+        // declaration sent past held data would reach the peer before what came first. Each arm is
+        // gated as its arm of the waiting send is.
+        #[cfg(any(
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "liveliness-token",
+            all(
+                feature = "codec-declare",
+                feature = "codec-linkstate",
+                feature = "codec-push"
+            )
+        ))]
+        if let crate::network_message::NetworkMessage::Declare(declare) = &msg {
+            return match self.dispatch_declare_at(DispatchStage::Probe, declare, reliable) {
+                Ok(Dispatched::Sent) => Ok(()),
+                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
+                #[cfg(feature = "transport-fragmentation")]
+                Ok(Dispatched::Chain) => Err(Unsent::Chain(msg)),
+                Err(e) => Err(Unsent::Failed(e)),
+            };
+        }
+        #[cfg(any(
+            feature = "declare-interest",
+            all(feature = "codec-linkstate", feature = "codec-push")
+        ))]
+        if let crate::network_message::NetworkMessage::Interest(interest) = &msg {
+            return match self.dispatch_interest_at(DispatchStage::Probe, interest, reliable) {
+                Ok(Dispatched::Sent) => Ok(()),
+                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
+                #[cfg(feature = "transport-fragmentation")]
+                Ok(Dispatched::Chain) => Err(Unsent::Chain(msg)),
+                Err(e) => Err(Unsent::Failed(e)),
+            };
+        }
+        #[cfg(feature = "codec-response-final")]
+        if let crate::network_message::NetworkMessage::ResponseFinal(response_final) = &msg {
+            return match self.dispatch_response_final_at(
+                DispatchStage::Probe,
+                response_final,
+                reliable,
+            ) {
                 Ok(Dispatched::Sent) => Ok(()),
                 Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
                 #[cfg(feature = "transport-fragmentation")]
@@ -11547,16 +11601,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         declare: wz_codecs::declare::DeclareOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        self.dispatch_network_message(
+        self.dispatch_declare_at(DispatchStage::Fresh, &declare, reliable)
+            // Only a probe can end in `NoRoom`, and this is not one.
+            .map(|_| ())
+    }
+
+    /// [`Self::dispatch_declare`] at a stage, borrowing the message so that a probe that finds no
+    /// room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    #[cfg(any(
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token",
+        all(
+            feature = "codec-declare",
+            feature = "codec-linkstate",
+            feature = "codec-push"
+        ),
+    ))]
+    #[cfg(feature = "alloc")]
+    fn dispatch_declare_at(
+        &self,
+        stage: DispatchStage,
+        declare: &wz_codecs::declare::DeclareOwned,
+        reliable: bool,
+    ) -> Result<Dispatched, SendWireError> {
+        let encode_body = crate::frame_encode::declare_body(declare);
+        self.dispatch_network_message_at(
+            stage,
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
             Priority::Control,
             reliable,
-            crate::declare_ext_qos::read_declare_qos(&declare),
+            crate::declare_ext_qos::read_declare_qos(declare),
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
             // labels cover the four data kinds).
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-            crate::frame_encode::declare_body(&declare),
+            as_encoder(&encode_body),
         )
     }
 
@@ -11712,12 +11794,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         response_final: wz_codecs::response_final::ResponseFinalOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
+        self.dispatch_response_final_at(DispatchStage::Fresh, &response_final, reliable)
+            // Only a probe can end in `NoRoom`, and this is not one.
+            .map(|_| ())
+    }
+
+    /// [`Self::dispatch_response_final`] at a stage, borrowing the message so that a probe that
+    /// finds no room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    #[cfg(feature = "codec-response-final")]
+    #[cfg(feature = "alloc")]
+    fn dispatch_response_final_at(
+        &self,
+        stage: DispatchStage,
+        response_final: &wz_codecs::response_final::ResponseFinalOwned,
+        reliable: bool,
+    ) -> Result<Dispatched, SendWireError> {
         // R2595 — the band comes off the final's own `ext_qos`, as the Response
         // arm's does, so a terminator rides the conduit its replies rode. A
         // final built with `QosLevel::DEFAULT` carries no ext and lands on the
         // DEFAULT band exactly as before.
-        let qos = crate::declare_ext_qos::read_response_final_qos(&response_final);
-        self.dispatch_network_message(
+        let qos = crate::declare_ext_qos::read_response_final_qos(response_final);
+        let encode_body = crate::frame_encode::response_final_body(response_final);
+        self.dispatch_network_message_at(
+            stage,
             qos.priority(),
             reliable,
             qos,
@@ -11725,7 +11824,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A pure correlation marker — no key expression and no payload, so
             // it is control plane even though it closes a data-plane exchange.
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
-            crate::frame_encode::response_final_body(&response_final),
+            as_encoder(&encode_body),
         )
     }
 
@@ -11744,14 +11843,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         interest: wz_codecs::interest::InterestOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        self.dispatch_network_message(
+        self.dispatch_interest_at(DispatchStage::Fresh, &interest, reliable)
+            // Only a probe can end in `NoRoom`, and this is not one.
+            .map(|_| ())
+    }
+
+    /// [`Self::dispatch_interest`] at a stage, borrowing the message so that a probe that finds no
+    /// room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    #[cfg(any(
+        feature = "declare-interest",
+        all(feature = "codec-linkstate", feature = "codec-push")
+    ))]
+    #[cfg(feature = "alloc")]
+    fn dispatch_interest_at(
+        &self,
+        stage: DispatchStage,
+        interest: &wz_codecs::interest::InterestOwned,
+        reliable: bool,
+    ) -> Result<Dispatched, SendWireError> {
+        let encode_body = crate::frame_encode::interest_body(interest);
+        self.dispatch_network_message_at(
+            stage,
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
             Priority::Control,
             reliable,
-            crate::declare_ext_qos::read_interest_qos(&interest),
+            crate::declare_ext_qos::read_interest_qos(interest),
             wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
-            crate::frame_encode::interest_body(&interest),
+            as_encoder(&encode_body),
         )
     }
 

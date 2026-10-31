@@ -1167,6 +1167,61 @@ fn many_small_messages_are_not_a_destinations_budget() {
     );
 }
 
+/// Phase 5a (`docs/router-task-per-face.md`): a declaration for a destination with no room is held,
+/// behind the data the destination already holds, and leaves after it. Sent as it was before, it
+/// waited for room on the thread of the face that routed it, and on a link that frees in the
+/// order frames were queued, a declaration that could be sent past held data reached the peer
+/// before the Put that came first.
+#[test]
+fn a_declaration_is_held_behind_the_data_its_destination_holds_and_leaves_after_it() {
+    let rig = Rig::new(true);
+    forward_frame(
+        &rig.fwd,
+        SOURCE,
+        vec![blocking_put(b"the-put-that-came-first")],
+    );
+    assert_eq!(rig.fwd.egress_held(), 1, "the Put is held");
+
+    let declare = NetworkMessage::Declare(Box::new(
+        build_declare_subscriber(9, 0, Some("demo/declared-after-the-put")).expect("declare"),
+    ));
+    let sent = {
+        let on = rig.fwd.on_tables();
+        let state = on
+            .tables
+            .faces
+            .get(&DEST)
+            .expect("the destination is a face");
+        on.egress_to_face(DEST, state, declare, true, false, Priority::Control, None)
+    };
+    assert!(sent, "a held declaration is on its way, not refused");
+    assert_eq!(
+        rig.fwd.egress_held(),
+        2,
+        "the declaration is held behind the Put"
+    );
+    assert_eq!(
+        rig.link.sent(),
+        rig.baseline,
+        "and nothing left a link with no room"
+    );
+
+    rig.link.set_full(false);
+    rig.fwd.woken();
+    assert_eq!(rig.fwd.egress_held(), 0, "both left");
+    let bytes = rig.link.bytes();
+    let at = |needle: &[u8]| {
+        bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .unwrap_or_else(|| panic!("{} is on the link", String::from_utf8_lossy(needle)))
+    };
+    assert!(
+        at(b"the-put-that-came-first") < at(b"demo/declared-after-the-put"),
+        "the Put that came first reached the link first"
+    );
+}
+
 /// A message larger than the whole budget of a destination is held, alone: a queue that refused it
 /// could never send it. It gates the face that sent it all the same, and leaves when there is room.
 #[test]
@@ -1421,6 +1476,52 @@ fn a_link_state_message_is_probed_and_comes_back_whole_when_there_is_no_room() {
     );
     assert!(outcome.is_ok(), "a link with room is given the message");
     assert!(open.sent() > 0, "and it was written");
+}
+
+/// Phase 5a: a declaration, an interest and the final of a query are probed as a link-state
+/// message is. To a link with no room each comes back whole, with nothing written; to one with
+/// room each leaves. Before, each was sent with a wait for room, which is the thread of a face
+/// parked. Only a probe answers `NoRoom`, so the answer is the proof that no wait was asked for;
+/// the link does not stall a wait here, so that a send that did wait fails the test and does not
+/// hang it.
+#[test]
+fn a_declaration_an_interest_and_a_final_are_probed_and_come_back_whole_when_there_is_no_room() {
+    use wz_session_core::interest_build::build_interest_subscribers;
+    use wz_session_core::session_actions::Unsent;
+
+    let messages = || {
+        let mut messages = vec![
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(9, 0, Some("demo/x")).expect("declare"),
+            )),
+            NetworkMessage::Interest(
+                build_interest_subscribers(9001, false, true, 0, Some("**")).expect("interest"),
+            ),
+        ];
+        #[cfg(feature = "codec-response-final")]
+        messages.push(NetworkMessage::ResponseFinal(
+            wz_session_core::response_final_build::build_response_final(7, QosLevel::DEFAULT),
+        ));
+        messages
+    };
+    for message in messages() {
+        let kind = format!("{message:?}").chars().take(16).collect::<String>();
+        let full = RoomLink::new(true);
+        let actions = client_over(&full, zid(0xCC));
+        let outcome = actions.try_send_network_message_qos(message, true, false, Priority::Control);
+        assert!(
+            matches!(&outcome, Err(Unsent::NoRoom(_))),
+            "{kind}: a message that finds no room is the caller's again, got {outcome:?}"
+        );
+        assert_eq!(full.sent(), 0, "{kind}: nothing was written");
+    }
+    for message in messages() {
+        let open = RoomLink::new(false);
+        let actions = client_over(&open, zid(0xCD));
+        let outcome = actions.try_send_network_message_qos(message, true, false, Priority::Control);
+        assert!(outcome.is_ok(), "a link with room is given the message");
+        assert!(open.sent() > 0, "and it was written");
+    }
 }
 
 /// A put that finds room does not wait at all, and the same put to a link that is full and does

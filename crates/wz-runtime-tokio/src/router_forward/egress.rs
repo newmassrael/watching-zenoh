@@ -74,8 +74,10 @@
 //! ## Not covered
 //!
 //! A message whose payload is in shared memory is sent through the relay, whose mapping of the
-//! payload for the destination cannot be undone and retried, and keeps the waiting send. A
-//! declaration, a query and a reply are rare and are not held here.
+//! payload for the destination cannot be undone and retried, and keeps the waiting send. A query
+//! and a reply keep it too, since they may carry such a payload and a probe of them does not open
+//! and give back its handoff yet. A declaration, an interest and the final of a query are held,
+//! in the data lane behind what the destination holds, so that they keep their order with it.
 //!
 //! A put of the node's own session is not held either: its publisher is the one to slow down,
 //! and waits for room outside the tables ([`super::local_publish`]).
@@ -436,7 +438,13 @@ impl RouterForwarder {
     /// - control: a reliable link-state message, whoever it is sent for. Nobody can be told to
     ///   slow down for it (the router makes it, from a change of its own tables, on the loop that
     ///   serves every face), so the wait that would have stopped that loop is the whole of what
-    ///   holding spares.
+    ///   holding spares;
+    /// - data, too: a reliable declaration, interest or final of a query that may not be dropped,
+    ///   whoever it is sent for (`docs/router-task-per-face.md`, phase 5a). It is held behind the
+    ///   data the destination holds, in the one queue, so that it does not reach the peer before a
+    ///   message that came first, and so that the face's thread that routes it does not park for
+    ///   room. Like a link-state message, it is mostly made by the router from a change of its
+    ///   tables, and what bounds it is the age of the destination's oldest message.
     pub(super) fn held_lane(&self, msg: &NetworkMessage, reliable: bool) -> Option<Lane> {
         if !reliable {
             return None;
@@ -444,6 +452,22 @@ impl RouterForwarder {
         let push = match msg {
             NetworkMessage::Oam(_) => return Some(Lane::Control),
             NetworkMessage::Push(push) => push,
+            NetworkMessage::Declare(declare) => {
+                return Self::held_unless_droppable(
+                    wz_session_core::declare_ext_qos::read_declare_qos(declare),
+                )
+            }
+            NetworkMessage::Interest(interest) => {
+                return Self::held_unless_droppable(
+                    wz_session_core::declare_ext_qos::read_interest_qos(interest),
+                )
+            }
+            #[cfg(feature = "codec-response-final")]
+            NetworkMessage::ResponseFinal(response_final) => {
+                return Self::held_unless_droppable(
+                    wz_session_core::declare_ext_qos::read_response_final_qos(response_final),
+                )
+            }
             _ => return None,
         };
         self.credit.source()?;
@@ -453,9 +477,12 @@ impl RouterForwarder {
                 return None;
             }
         }
-        (wz_session_core::declare_ext_qos::read_push_qos(push).congestion()
-            != CongestionControl::Drop)
-            .then_some(Lane::Data)
+        Self::held_unless_droppable(wz_session_core::declare_ext_qos::read_push_qos(push))
+    }
+
+    /// The data lane for a message whose QoS may not drop it; `None` for one it may.
+    fn held_unless_droppable(qos: wz_session_core::sample::QosLevel) -> Option<Lane> {
+        (qos.congestion() != CongestionControl::Drop).then_some(Lane::Data)
     }
 }
 
