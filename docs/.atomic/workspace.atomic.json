@@ -301354,6 +301354,34 @@
         "Z8 shm was not re-run with the raised limit; if it still hangs the facts step prints the limit. The multicast text baseline follows hosted, the build host reads about 400 bytes higher. The connect_manager mcu test seen in run 41109911837 was not in this run's failures and was not reproduced."
       ]
     },
+    "Round 3995": {
+      "decision_summary": "Hosted run 41140796607 (head c27afce98) failed many jobs on a handful of causes, each read to its own line. Paid: an `.expect` on ExtEntry's encode, which is a Vec since the pin that lets only some codecs refuse (C1g, C1bf, C1bnl, C1cn); the wz-capture struct finder that matched ExtEntryUnknownTag before ExtEntry (C1, C0mut); the lwip doc link to a spawn gated off session-slot (C1bzr, seven jobs); a leg for two zenoh-protocol internal tests (C1cn census); the multicast text baselines to the hosted 71148 and 71228 (Layer Q); the stats golden header for the 1.10.2 oracle (E17); C1ay 263; and Z8's shm file, whose ENOMEM is the runner's 8 MiB memlock limit against an mlock of every segment.",
+      "changes_bullets": [
+        "tx_lend_only_encode.rs, transport_build_tests.rs, multicast_drive.rs doc, nondefault-tests-gate.sh leg, check-footprint.sh baselines, stats golden header, run-ci.sh C1ay, ci.yml Z8 memlock."
+      ],
+      "verification_bullets": [
+        "pc2: C1ay command prints 263; tx_lend_only_encode 8 passed; the kind table test 1 passed with dissect; the golden check OK against the 1.10.2 registry. Gates: actionlint, workflow lints, pin gate, shellcheck pass. Layer Q, C1cn, Z8 and C1bzr are judged by the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Z8 shm was not re-run with the raised limit; if it still hangs the facts step prints the limit. The multicast text baseline follows hosted, the build host reads about 400 bytes higher. The connect_manager mcu test seen in run 41109911837 was not in this run's failures and was not reproduced."
+      ],
+      "publishable_decision_summary": "Hosted run 41140796607 (head c27afce98) failed many jobs on a handful of causes, each read to its own line. Paid: an `.expect` on ExtEntry's encode, which is a Vec since the pin that lets only some codecs refuse (C1g, C1bf, C1bnl, C1cn); the wz-capture struct finder that matched ExtEntryUnknownTag before ExtEntry (C1, C0mut); the lwip doc link to a spawn gated off session-slot (C1bzr, seven jobs); a leg for two zenoh-protocol internal tests (C1cn census); the multicast text baselines to the hosted 71148 and 71228 (Layer Q); the stats golden header for the 1.10.2 oracle (E17); C1ay 263; and Z8's shm file, whose ENOMEM is the runner's 8 MiB memlock limit against an mlock of every segment.",
+      "publishable_changes_bullets": [
+        "tx_lend_only_encode.rs, transport_build_tests.rs, multicast_drive.rs doc, nondefault-tests-gate.sh leg, check-footprint.sh baselines, stats golden header, run-ci.sh C1ay, ci.yml Z8 memlock."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: C1ay command prints 263; tx_lend_only_encode 8 passed; the kind table test 1 passed with dissect; the golden check OK against the 1.10.2 registry. Gates: actionlint, workflow lints, pin gate, shellcheck pass. Layer Q, C1cn, Z8 and C1bzr are judged by the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Z8 shm was not re-run with the raised limit; if it still hangs the facts step prints the limit. The multicast text baseline follows hosted, the build host reads about 400 bytes higher. The connect_manager mcu test seen in run 41109911837 was not in this run's failures and was not reproduced."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
