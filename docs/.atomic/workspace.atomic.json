@@ -303622,6 +303622,38 @@
         "D12 steps 2 to 4 remain: the port permits(verb, commander) with default deny, the commander role and compiled-in lists, an image that binds the verbs; then D14. Open for the owner: whether the heap profile's key-keyed authority also takes the commander. Nothing reads the requester yet, so no behaviour changed. Not witnessed: a verified requester reaching a queryable over a real secure channel on the slot profile. Hosted CI for the tip is unread."
       ]
     },
+    "Round 4053": {
+      "decision_summary": "Round 4046's carry on the 10 ms bound of the faces' frame read is closed by measurement: TABLES_WRITER_FIRST_AFTER swept at 5, 10, 25 and 50 ms on Layer E7s on pc2, one run each with the 10 ms reference run again at the end. The starved router forwarded 7288, 8055, 8167 and 8036 messages a second (10 ms read 7512 and 7816 before), and no write of the tables there waited 250 ms under any bound. From 10 ms up the figures are within one another's spread and only 5 ms reads below; a longer bound buys nothing measured and lets a writer wait longer, so the bound stays at 10 ms. No code changes; the design note records the sweep.",
+      "changes_bullets": [
+        "docs/router-task-per-face.md: the sweep of TABLES_WRITER_FIRST_AFTER and why it stays at 10 ms replace the sentence that called the bound a choice not measured"
+      ],
+      "verification_bullets": [
+        "Layer E7s on pc2, the tree built with each bound in turn, six of six pass in every run: starved router 5 ms 7288, 25 ms 8167, 50 ms 8036, 10 ms 8055 messages a second; no table wait of 250 ms or more in the starved test under any bound; the share tests' waits stay 1.7 to 3.5 s, the core's",
+        "The first 5 ms run ended at bx's learned memory reservation (exit 137, 980 MB for a run of 2048 sessions), not in the test; rerun under a command text bx had not measured",
+        "The working tree was put back to 10 ms before the commit; the commit changes the design note only"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Phases 5 (room reservation) and 6 (async conduit lock) of the router with a task per face are next; phase 6 must keep the shm relay pass out of any await"
+      ],
+      "publishable_decision_summary": "Round 4046's carry on the 10 ms bound of the faces' frame read is closed by measurement: TABLES_WRITER_FIRST_AFTER swept at 5, 10, 25 and 50 ms on Layer E7s on pc2, one run each with the 10 ms reference run again at the end. The starved router forwarded 7288, 8055, 8167 and 8036 messages a second (10 ms read 7512 and 7816 before), and no write of the tables there waited 250 ms under any bound. From 10 ms up the figures are within one another's spread and only 5 ms reads below; a longer bound buys nothing measured and lets a writer wait longer, so the bound stays at 10 ms. No code changes; the design note records the sweep.",
+      "publishable_changes_bullets": [
+        "docs/router-task-per-face.md: the sweep of TABLES_WRITER_FIRST_AFTER and why it stays at 10 ms replace the sentence that called the bound a choice not measured"
+      ],
+      "publishable_verification_bullets": [
+        "Layer E7s on pc2, the tree built with each bound in turn, six of six pass in every run: starved router 5 ms 7288, 25 ms 8167, 50 ms 8036, 10 ms 8055 messages a second; no table wait of 250 ms or more in the starved test under any bound; the share tests' waits stay 1.7 to 3.5 s, the core's",
+        "The first 5 ms run ended at bx's learned memory reservation (exit 137, 980 MB for a run of 2048 sessions), not in the test; rerun under a command text bx had not measured",
+        "The working tree was put back to 10 ms before the commit; the commit changes the design note only"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phases 5 (room reservation) and 6 (async conduit lock) of the router with a task per face are next; phase 6 must keep the shm relay pass out of any await"
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
