@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The event sequences behind `crates/wz-session-core/src/stats_registry/zenoh_1_10_1.golden`,
+//! The event sequences behind `crates/wz-session-core/src/stats_registry/zenoh_stats.golden`,
 //! driven through the REAL `zenoh-stats` registry at the pin.
 //!
 //! `scripts/lib/zenoh_stats_golden.py` runs this binary and writes or checks

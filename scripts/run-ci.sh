@@ -3364,6 +3364,10 @@ layer_c0_test_discipline() {
     # `UPSTREAM_VERSION` enforces; a bullet that states none FAILS, not passes.
     python3 scripts/lib/claude_md_upstream_pin_gate.py --selftest || return 1
     python3 scripts/lib/claude_md_upstream_pin_gate.py --check || return 1
+    # The stats golden's provenance line against the oracle's lock (round 3976 moved the pin and the
+    # golden kept its old versions; Layer E17 is where that showed, hosted and a build later).
+    python3 scripts/lib/zenoh_stats_golden.py --header-selftest || return 1
+    python3 scripts/lib/zenoh_stats_golden.py --header || return 1
     # R2084 — the ACCEPT-DEADLINE gate. A test that opens a listener and spawns
     # an external process at it has its liveness resting entirely on that
     # process dialling; `TcpListener::accept` has no deadline and
