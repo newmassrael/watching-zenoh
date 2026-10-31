@@ -572,7 +572,15 @@ fn egress_on(fwd: &RouterForwarder, msg: NetworkMessage, priority: Priority) -> 
 /// own puts kept its link full). It is given back as no room instead, and is held.
 fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(qos: bool) {
     let rig = Rig::new(true);
+    // The negotiated-QoS flag exists only in a build with `transport-qos`; without it a session
+    // has the one lane, which is the `false` case below.
+    #[cfg(feature = "transport-qos")]
     TokioRuntime::with_mutex_mut(&rig.dest.is_qos, |negotiated| *negotiated = qos);
+    #[cfg(not(feature = "transport-qos"))]
+    assert!(
+        !qos,
+        "a session of a build without transport-qos cannot negotiate it"
+    );
     rig.link.stall_waits();
     let fwd = &rig.fwd;
     let link = &rig.link;
@@ -625,6 +633,7 @@ fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in_without
     a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(false);
 }
 
+#[cfg(feature = "transport-qos")]
 #[test]
 fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in_with_qos() {
     a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(true);
