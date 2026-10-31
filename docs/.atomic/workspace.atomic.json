@@ -302826,6 +302826,40 @@
         "Owed: the whatami a link state restates; the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 4031": {
+      "decision_summary": "Round 41 named the lever for the 1 KiB host cell: write a lone or large frame from the thread that put it, by the tests `flush_inline` already has. That was tried and measured, and it is not the lever. A frame that lands alone, or is 512 bytes or more, was written by its sender whenever the writer's role was free (`OutboundTx::send`, `send_reserved` and the pooled commit path), with the writer-queue tests (632 in the crate) and both clippy feature sets passing.\n\nOn pc3 it changed nothing: 1 KiB reads 155 k batched and 190 k one by one against 160 k and 190 k before, and 8 B and 64 B are unchanged (4.8 M and 4.48 M batched, 4.96 M and 4.48 M one by one). Per thread (`strace -f`, 1 KiB at 150,000 a second), 3 of 158,857 `sendto` calls came from the putting thread and the writer still took one `futex` pair per frame. By reading `recv_wire_tagged_with`, the writer takes the role together with a frame and keeps it until that frame is written, so at 190 k frames a second the role is almost never free to a sender. A sender that waited for the role is not safe: the writer can be waiting on the socket for the runtime thread the sender may be running on.\n\nThe change is not kept; the commit was dropped before any push. What is kept is the reading, in docs/upstream-parity.md, and the correction of the lever: the loss sits in the one-writer pipeline, so a fix has to shorten what the writer holds or take the hop out of the queue.",
+      "changes_bullets": [
+        "docs/upstream-parity.md: the 1 KiB reading now records the attempt, its figures and why the sender cannot get the role; the \"not yet attempted\" sentence is gone.",
+        "No code changed in this round."
+      ],
+      "verification_bullets": [
+        "On pc3 through bx, with the change in the tree: `scripts/pico-compare.sh nodrop 3 8,64,1024` once with `PICO_CMP_BATCH=1` and once without, both returning 0 (the first two attempts were ended by bx at a small memory reservation and refused on a stale git lock left by that end in the service account's checkout; the lock was removed with the owner's consent; the successful runs asked for 8 GB), and `tids 1024 150000`. The writer-queue tests of wz-runtime-tokio passed (632) and clippy -D warnings passed with and without runtime-zero-copy; 123 static gates ran with rc 0 on the tree that had the change. The change was then dropped and this round's tree holds only the document.",
+        "Not run: any further transport change, the role-hold shortening, hosted lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The pico ABI still loses the 1 KiB host cell at about half of pico's rate (160 k batched, 190 k one by one, against 310 k and 360 k). The sender-side write is excluded by measurement. Open levers, untried: let the writer give the role up between taking a frame and writing it so that a sender can write behind it; or take the sender-to-writer hop out of the queue with a hand-off the writer spins on before it parks; either changes the transport of every tokio link and needs the writer-queue tests and a measurement that small messages lose nothing. A counter on `try_acquire_role` failures would turn the role-hold reading from an inference into a measurement and is the first step."
+      ],
+      "publishable_decision_summary": "Round 41 named the lever for the 1 KiB host cell: write a lone or large frame from the thread that put it, by the tests `flush_inline` already has. That was tried and measured, and it is not the lever. A frame that lands alone, or is 512 bytes or more, was written by its sender whenever the writer's role was free (`OutboundTx::send`, `send_reserved` and the pooled commit path), with the writer-queue tests (632 in the crate) and both clippy feature sets passing.\n\nOn pc3 it changed nothing: 1 KiB reads 155 k batched and 190 k one by one against 160 k and 190 k before, and 8 B and 64 B are unchanged (4.8 M and 4.48 M batched, 4.96 M and 4.48 M one by one). Per thread (`strace -f`, 1 KiB at 150,000 a second), 3 of 158,857 `sendto` calls came from the putting thread and the writer still took one `futex` pair per frame. By reading `recv_wire_tagged_with`, the writer takes the role together with a frame and keeps it until that frame is written, so at 190 k frames a second the role is almost never free to a sender. A sender that waited for the role is not safe: the writer can be waiting on the socket for the runtime thread the sender may be running on.\n\nThe change is not kept; the commit was dropped before any push. What is kept is the reading, in docs/upstream-parity.md, and the correction of the lever: the loss sits in the one-writer pipeline, so a fix has to shorten what the writer holds or take the hop out of the queue.",
+      "publishable_changes_bullets": [
+        "docs/upstream-parity.md: the 1 KiB reading now records the attempt, its figures and why the sender cannot get the role; the \"not yet attempted\" sentence is gone.",
+        "No code changed in this round."
+      ],
+      "publishable_verification_bullets": [
+        "On pc3 through bx, with the change in the tree: `scripts/pico-compare.sh nodrop 3 8,64,1024` once with `PICO_CMP_BATCH=1` and once without, both returning 0 (the first two attempts were ended by bx at a small memory reservation and refused on a stale git lock left by that end in the service account's checkout; the lock was removed with the owner's consent; the successful runs asked for 8 GB), and `tids 1024 150000`. The writer-queue tests of wz-runtime-tokio passed (632) and clippy -D warnings passed with and without runtime-zero-copy; 123 static gates ran with rc 0 on the tree that had the change. The change was then dropped and this round's tree holds only the document.",
+        "Not run: any further transport change, the role-hold shortening, hosted lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pico ABI still loses the 1 KiB host cell at about half of pico's rate (160 k batched, 190 k one by one, against 310 k and 360 k). The sender-side write is excluded by measurement. Open levers, untried: let the writer give the role up between taking a frame and writing it so that a sender can write behind it; or take the sender-to-writer hop out of the queue with a hand-off the writer spins on before it parks; either changes the transport of every tokio link and needs the writer-queue tests and a measurement that small messages lose nothing. A counter on `try_acquire_role` failures would turn the role-hold reading from an inference into a measurement and is the first step."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
