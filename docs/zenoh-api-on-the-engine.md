@@ -1070,7 +1070,11 @@ Each lands whole with its surface lines, tests and faults in one round.
   `OpenRefusal::MulticastCompressionNotInBuild`; the profile with no allocator does not compress.
   The key is read by the C ABI session and its router node, `C_ABI_SESSION_HONOURED_KEYS`, and
   the demo's groups state no such switch. Measured over a real UDP group by
-  `compressing_group_delivers_a_compressed_publish`); (c) a
+  `compressing_group_delivers_a_compressed_publish`, and against a stock zenohd built at 1.10.2
+  by `zenoh_multicast_compression_foreign_witness`: what that zenohd beacons on a compressing
+  group is a batch wz unwraps and, without the key, the bare JOIN; a compressing wz member is
+  listed in its admin space, a member that disagrees about the wrap is not, and a plain member
+  of a plain group is, as the control); (c) a
   companion link of a mixed-reliability pair takes the transport's batch size as its limit
   (measured in round R4015: wz has no such pair, its QUIC offers neither the mixed-reliability
   nor the multi-stream protocols, `quic_plaintext.rs`, so the item has no subject until the link
