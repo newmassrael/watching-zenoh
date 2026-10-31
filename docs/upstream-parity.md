@@ -67,11 +67,20 @@ cap). The round trip of the same ABI against pico reads a tie at 10 to 11 micros
 **A cell wz loses: 1 KiB puts, at about half of pico's rate.** With one `sendto` per put on both sides,
 wz adds about two `futex` calls per put (`strace -c`, 50,000 puts a second: 298,725 against pico's 14),
 and 84 percent of its `sendto` calls are made by the writer thread and not the thread that put
-(`strace -f`, 5,000 a second). The zero-copy lend path (`OutboundTx::commit_at`) wakes the writer for
-every frame (`frame_landed`), and the writer is asleep between two frames that are 20 microseconds
-apart; the sender-side flush that exists for a lone message (`flush_inline`, with its quiet-time and
-stream tests) is reached from the batch hook (`wake_for_flush`) and not from this path. Not yet
-attempted: writing a lone lent frame from the sender's thread by the same tests.
+(`strace -f`, 5,000 a second). Every frame landing in a lane wakes the writer (`frame_landed`), and the
+writer is asleep between two frames that are 20 microseconds apart; the sender-side flush that exists
+for a lone message (`flush_inline`, with its quiet-time and stream tests) is reached from the batch
+hook (`wake_for_flush`) and not from the put path.
+
+Attempted and measured, not kept: a frame that lands alone, or is 512 bytes or more, written by the
+thread that put it whenever the writer's role is free. It changed nothing at 1 KiB (155 k batched and
+190 k one by one, as before; 8 and 64 B unchanged), and per thread 3 of 158,857 `sendto` calls came
+from the putting thread. By reading `recv_wire_tagged_with`, the writer takes the role with a frame
+and keeps it until that frame is written, so at 190 k frames a second the role is almost never free
+to a sender. A sender that waited for the role would not be safe (the writer can be waiting on the
+socket for the runtime thread the sender may be). The loss therefore sits in the one-writer pipeline
+itself, and a fix has to shorten what the writer holds or take the hop out of the queue, not add a
+second writer.
 
 - **Host to host, the same build's text differs.** The same pico-client build read
   1,794,606 bytes on the development host, 1,827,441 on the bench host and 1,833,173 on
