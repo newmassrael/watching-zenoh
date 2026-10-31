@@ -6572,7 +6572,10 @@ layer_c1ay_cargo_test_router_hat() {
     # Item 751 step 7c -- 294 -> 295: `an_unrestricted_token_interest_is_answered_with_every_token`
     # (R2614), moved from the retired single-net peer forwarder, which was the only one that
     # answered an Interest carrying no keyexpr with the whole table.
-    _runci_guarded_test "C1AY router_forward 336" 336 \
+    # 336 -> 341: the five tests of the node's own session asking tokens as an interest of its own
+    # (`ask_local_tokens`, `forget_local_tokens`, `local_tokens_alive`); each is cfg(routing-token-tables),
+    # so this arm alone moves. Measured on the build host.
+    _runci_guarded_test "C1AY router_forward 341" 341 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
