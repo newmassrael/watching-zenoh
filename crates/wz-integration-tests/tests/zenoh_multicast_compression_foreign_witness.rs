@@ -364,6 +364,11 @@ async fn what_zenohd_lists(
     // The second member starts once zenohd lists the first: from then on the group is known to
     // be heard, so what the second does not get is a reading of its beacon and not of a wire
     // nothing was listening on, and what it does to the group cannot reach the first's listing.
+    // The order is load-bearing for a second reason: zenohd ends its whole multicast transport when
+    // one datagram of the group does not decode (`io/zenoh-transport/src/multicast/rx.rs` @
+    // `decoding error` is the error, and `io/zenoh-transport/src/multicast/link.rs` @
+    // `RX task failed` the end of the receive task and the delete of the transport), so a member
+    // that disagrees about the wrap, started with the first, took the first's listing with it.
     let first_listed = AtomicBool::new(false);
     let drive_second = async {
         while !first_listed.load(Ordering::SeqCst) {

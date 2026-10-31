@@ -1074,7 +1074,11 @@ Each lands whole with its surface lines, tests and faults in one round.
   by `zenoh_multicast_compression_foreign_witness`: what that zenohd beacons on a compressing
   group is a batch wz unwraps and, without the key, the bare JOIN; a compressing wz member is
   listed in its admin space, a member that disagrees about the wrap is not, and a plain member
-  of a plain group is, as the control); (c) a
+  of a plain group is, as the control. What the first runs showed and nothing explained, the
+  listing losing the group's locator after a mismatched member's datagram, is zenohd's: its
+  receive task of a multicast link returns the error of a datagram that does not decode and the
+  transport is deleted, so one such datagram from any member takes the group down for that
+  zenohd; wz's receiver drops the datagram and goes on, and is not to follow); (c) a
   companion link of a mixed-reliability pair takes the transport's batch size as its limit
   (measured in round R4015: wz has no such pair, its QUIC offers neither the mixed-reliability
   nor the multi-stream protocols, `quic_plaintext.rs`, so the item has no subject until the link

@@ -259,8 +259,11 @@ where
 /// The batch a compressing group's datagram carries: the `BatchHeader` read, and the payload
 /// decompressed when its bit says it is compressed, into a buffer bounded by the group's batch
 /// size ([`crate::compression::decompress_batch`]). `None` for a datagram that is empty or whose
-/// payload does not decompress, which the group drops, as upstream's receive does for a batch
-/// it cannot read (`io/zenoh-transport/src/common/batch.rs` @ `decompress_into`).
+/// payload does not decompress, which the group drops. Upstream does more with a batch it cannot
+/// read: the error ends its receive task and its multicast transport is deleted
+/// (`io/zenoh-transport/src/multicast/link.rs` @ `RX task failed`), so one such datagram takes the
+/// group down for that node; wz drops the datagram and goes on, so a member that disagrees about
+/// the wrap cannot end the group for the others.
 #[cfg(feature = "transport-compression")]
 fn unwrap_batch(params: &MulticastParams, datagram: &[u8]) -> Option<alloc::vec::Vec<u8>> {
     crate::compression::decompress_batch(datagram, usize::from(params.batch_size))
