@@ -2879,7 +2879,11 @@ PIN_NO_SYMBOL = 0
 # R3727 -- 58 -> 59, one atom. `api-compat-rust`'s reason gains the opening and closing of a session
 # of `zenoh` and cites the test that holds it to upstream's. READ off the census's own FAIL line,
 # `wz citations: 59 against a pin of 58`.
-PIN_WZ_CITATIONS = 59
+# R4057 -- 59 -> 62, one atom. `session-close-ingress`'s reason, graded again after D15 and D10 and
+# corrected (Rounds 4044 and 4049), gains three wz citations of files its pin table already holds, so
+# the table keeps its 55 pairs. READ off the census's own FAIL line, `wz citations: 62 against a pin
+# of 59`.
+PIN_WZ_CITATIONS = 62
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
