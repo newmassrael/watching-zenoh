@@ -303366,6 +303366,56 @@
         "Remaining rulings of the session lifecycle in order: D10, D12, D14. The AP table-full refusal of D15 is still only logged. Hosted CI for the tip is unread."
       ]
     },
+    "Round 4046": {
+      "decision_summary": "Phase 4c, section 7 of the router with a task per face, and the defect its first test found. A face leaving mid-fan-out and the group ingress beside the faces' threads are now tests; the shm relay pass is held by construction (a synchronous route). The churn test found that under task-per-face a writer of the tables could wait for ever: the recursive read does not queue behind a waiting writer, and faces' threads reading without pause never left the lock unread. The top of forward_frame now reads recursively unless a writer has waited 10 ms, then queues behind it. Queueing behind every writer at once cost the starved router up to half its throughput on a shared core (3846 to 7959/s against 8215 to 8445); the bound costs about eight per cent (7512, 7816) and lets no write there wait 250 ms. A recorder fixture race the test met is fixed, and E7s now prints the tables' waits.",
+      "changes_bullets": [
+        "sync.rs: PlainRwLock records when a writer that could not take it at once began to wait (slow path of write only) and gains read_behind_a_writer_waiting(longer_than), the recursive read unless a writer has waited that long; two tests (a writer gets in past eight readers that never leave the lock unread; a writer that waited is forgotten once in)",
+        "router_forward.rs: on_tables_for_a_frame takes the tables with that read at TABLES_WRITER_FIRST_AFTER (10 ms) at the two top-level guards of forward_frame; two tests, a face that leaves in the middle of a fan-out is given nothing after it left (two hundred rounds, each after the fan-out wrote to the face) and the multicast ingress routes beside the faces' threads while its member set moves (until the election went both ways)",
+        "test_fixtures.rs: RecordingLinkDriver keeps a frame's bytes, channel and priority in one entry under one lock, so a count during a record is never unequal",
+        "wz_router_hat_data_plane_scaling.rs: each window prints the router's waits for the routing tables of 250 ms or more and the longest",
+        "run-ci.sh: the nine C1AY router_forward guards move +1, mcast-faces +2",
+        "docs/router-task-per-face.md: section 7 answered, with the starvation, the bound and its measurements"
+      ],
+      "verification_bullets": [
+        "Mutations: the recursive read put back at the frame guard makes the churn test time out at 60 s; the bounded read made always recursive makes the lock test fail at 10 s; both restored",
+        "On the build host: sync tests 2 of 2; router_forward 273 (routing-router-hat), 299 (with router-multicast-faces), 278 (with transport-qos); accept_loop 22 under routing-peer; the churn and ingress tests five and three runs each; clippy -D warnings in three feature sets and the default; cargo fmt clean",
+        "guarded_count_gate over 05eaca4cbd..e07592428f: thirteen of thirteen OK",
+        "Layer E7s on pc2, alternating: starved router recursive 8215, 8383, 8445; fair 3846, 4715, 7586, 7959; bounded 7512, 7816 with no table wait of 250 ms; share tests wait 1.7 to 3.4 s under all three",
+        "Layer E7m 13 of 13, live pair 1200 of 1200 with the longest gap about 12 ms; wz_router_hat_mesh 8 of 8"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The 10 ms bound is a choice, not a measured optimum; a sweep (5, 25, 50 ms) against the starved router and the tables' waits is owed",
+        "The share tests' writers wait 1.7 to 3.4 s for the core under every read; that is the capacity model's subject, not this lock's",
+        "Phases 5 (room reservation) and 6 (async conduit lock) are next; phase 6 must keep the shm relay pass out of any await"
+      ],
+      "publishable_decision_summary": "Phase 4c, section 7 of the router with a task per face, and the defect its first test found. A face leaving mid-fan-out and the group ingress beside the faces' threads are now tests; the shm relay pass is held by construction (a synchronous route). The churn test found that under task-per-face a writer of the tables could wait for ever: the recursive read does not queue behind a waiting writer, and faces' threads reading without pause never left the lock unread. The top of forward_frame now reads recursively unless a writer has waited 10 ms, then queues behind it. Queueing behind every writer at once cost the starved router up to half its throughput on a shared core (3846 to 7959/s against 8215 to 8445); the bound costs about eight per cent (7512, 7816) and lets no write there wait 250 ms. A recorder fixture race the test met is fixed, and E7s now prints the tables' waits.",
+      "publishable_changes_bullets": [
+        "sync.rs: PlainRwLock records when a writer that could not take it at once began to wait (slow path of write only) and gains read_behind_a_writer_waiting(longer_than), the recursive read unless a writer has waited that long; two tests (a writer gets in past eight readers that never leave the lock unread; a writer that waited is forgotten once in)",
+        "router_forward.rs: on_tables_for_a_frame takes the tables with that read at TABLES_WRITER_FIRST_AFTER (10 ms) at the two top-level guards of forward_frame; two tests, a face that leaves in the middle of a fan-out is given nothing after it left (two hundred rounds, each after the fan-out wrote to the face) and the multicast ingress routes beside the faces' threads while its member set moves (until the election went both ways)",
+        "test_fixtures.rs: RecordingLinkDriver keeps a frame's bytes, channel and priority in one entry under one lock, so a count during a record is never unequal",
+        "wz_router_hat_data_plane_scaling.rs: each window prints the router's waits for the routing tables of 250 ms or more and the longest",
+        "run-ci.sh: the nine C1AY router_forward guards move +1, mcast-faces +2",
+        "docs/router-task-per-face.md: section 7 answered, with the starvation, the bound and its measurements"
+      ],
+      "publishable_verification_bullets": [
+        "Mutations: the recursive read put back at the frame guard makes the churn test time out at 60 s; the bounded read made always recursive makes the lock test fail at 10 s; both restored",
+        "On the build host: sync tests 2 of 2; router_forward 273 (routing-router-hat), 299 (with router-multicast-faces), 278 (with transport-qos); accept_loop 22 under routing-peer; the churn and ingress tests five and three runs each; clippy -D warnings in three feature sets and the default; cargo fmt clean",
+        "guarded_count_gate over 05eaca4cbd..e07592428f: thirteen of thirteen OK",
+        "Layer E7s on pc2, alternating: starved router recursive 8215, 8383, 8445; fair 3846, 4715, 7586, 7959; bounded 7512, 7816 with no table wait of 250 ms; share tests wait 1.7 to 3.4 s under all three",
+        "Layer E7m 13 of 13, live pair 1200 of 1200 with the longest gap about 12 ms; wz_router_hat_mesh 8 of 8"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The 10 ms bound is a choice, not a measured optimum; a sweep (5, 25, 50 ms) against the starved router and the tables' waits is owed",
+        "The share tests' writers wait 1.7 to 3.4 s for the core under every read; that is the capacity model's subject, not this lock's",
+        "Phases 5 (room reservation) and 6 (async conduit lock) are next; phase 6 must keep the shm relay pass out of any await"
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
