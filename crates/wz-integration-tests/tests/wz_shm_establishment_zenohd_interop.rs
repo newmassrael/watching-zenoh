@@ -66,8 +66,8 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedStatus;
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenohd_shm_binary, ChildGuard,
-    PortReservation, ZENOHD_LISTENER_LINE,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
+    zenohd_shm_binary, ChildGuard, PortReservation, ZENOHD_LISTENER_LINE,
 };
 
 /// The demo's negotiated-capability witness. `is_shm()` is
@@ -330,13 +330,18 @@ fn dial_the_shm_zenohd_from_a_namespace(
     drop(port);
 
     let (mut wz_log, wz_w) = tempfile_pair();
+    // Both namespace legs resolve the demo here, so the freshness check sits where the binary is
+    // resolved (R2686's placement): a demo older than its sources fails here, naming it, instead
+    // of as a missing SHM witness.
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let mut bwrap = Command::new("bwrap");
     bwrap.args(["--bind", "/", "/", "--dev-bind", "/dev", "/dev"]);
     if hide_dev_shm {
         bwrap.args(["--tmpfs", "/dev/shm"]);
     }
     bwrap
-        .arg(wz_ap_demo_binary())
+        .arg(&demo)
         .args(["--connect", &addr, "--shm", "--key", "demo/shm"])
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
