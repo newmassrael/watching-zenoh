@@ -2544,6 +2544,11 @@ enum DispatchStage {
     /// A send that may not wait for room: every ask is made with a wait of zero, and a message
     /// that finds none is neither dropped nor the reason for a close, it is reported as
     /// `Dispatched::NoRoom` and stays the caller's.
+    ///
+    /// It does not wait for a lock that is held across a wait for room either. A blocking
+    /// sender keeps its conduit's lock for as long as it waits (up to `wait_before_close`), so a
+    /// probe that waited for that lock would wait for the room by another name; a conduit that is
+    /// held is a lane with no room, and is answered `NoRoom` the same way.
     #[cfg(feature = "alloc")]
     Probe,
 }
@@ -2732,7 +2737,7 @@ enum UnicastPush {
 enum Dispatched {
     /// The message was handed to the link, or dropped by a rule that is not congestion.
     Sent,
-    /// A probe found no room.
+    /// A probe found no room, or found its lane held by a sender that waits for some.
     #[cfg(feature = "alloc")]
     NoRoom,
     /// A probe met a message that is a chain of fragments the lane cannot hold, and sent
@@ -9838,9 +9843,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // (below). Control messages are rare; the data path never reaches this.
         #[cfg(feature = "transport-batching")]
         if priority == Priority::Control && self.tx_conduits.is_auto() {
+            // A conduit's lock is held across its sender's wait for room, so a send that may not
+            // wait does not wait for it either: it goes ahead only when it can drain every
+            // conduit now, and is told there is no room otherwise.
+            #[cfg(feature = "alloc")]
+            if probing {
+                if !self.try_flush_open_batch() {
+                    return Ok(Dispatched::NoRoom);
+                }
+            } else {
+                self.flush_open_batch();
+            }
+            #[cfg(not(feature = "alloc"))]
             self.flush_open_batch();
         }
-        let push = R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+        let stage_and_emit = |batch: &mut BatchTx| {
             #[cfg(feature = "transport-batching")]
             if self.tx_conduits.is_active() {
                 // The heap stage's helpers: under `tx-lend-only` the window's
@@ -10145,7 +10162,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
                 )),
             }
-        });
+        };
+        // The lock is this conduit's own, and a sender holds it across its wait for room, up to
+        // `wait_before_close` for a blocking message. A probe asked once and without waiting for
+        // room, and does not wait for the lock either, which would be the same wait by another
+        // name (measured: the registration of a face on a node whose own puts kept the link
+        // full took 4.9 s, all of it in the flood of link state, and no wait for room was seen):
+        // a lane that is held has no room for it, and the message is the caller's to send again.
+        #[cfg(feature = "alloc")]
+        let push = if probing {
+            match R::try_with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit) {
+                Some(push) => push,
+                None => return Ok(Dispatched::NoRoom),
+            }
+        } else {
+            R::with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit)
+        };
+        #[cfg(not(feature = "alloc"))]
+        let push = R::with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit);
         // The window is the link's (`set_auto_batching`): a frame may now be open in
         // a conduit, and the link's writer flushes it when it has nothing else to
         // write. Told here, once the conduit's lock is released, because the writer's
@@ -10154,7 +10188,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.tx_conduits.is_auto() {
             if priority == Priority::Control && matches!(push, Ok(UnicastPush::Pushed)) {
                 // The barrier's second half: the control message does not wait for the writer
-                // to go idle, since the data staged after it is owed to follow it.
+                // to go idle, since the data staged after it is owed to follow it. A probe does
+                // not wait for the lock of a conduit whose sender waits for room: that conduit is
+                // skipped, and the writer is told to come back to it, as for a send that staged
+                // nothing (below).
+                #[cfg(feature = "alloc")]
+                if probing {
+                    self.flush_open_batch_nowait();
+                    self.own_link().link_driver().tx_staged();
+                } else {
+                    self.flush_open_batch();
+                }
+                #[cfg(not(feature = "alloc"))]
                 self.flush_open_batch();
             } else {
                 // Whatever the outcome, not only a message staged: the writer's flush skips a
@@ -10720,14 +10765,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// step), and the writer then runs this again and finds the lock free.
     #[cfg(feature = "transport-batching")]
     fn flush_open_batch_nowait(&self) {
+        let _ = self.try_flush_open_batch();
+    }
+
+    /// [`Self::flush_open_batch_nowait`], answering whether every conduit was taken and drained.
+    /// `false` when a conduit's lock was held by a sender, which left that conduit as it was.
+    ///
+    /// A probe needs the answer: a control message is a barrier for the data staged before it, so
+    /// a probe that could not drain every conduit may not go ahead, and is told to come back
+    /// (see [`DispatchStage::Probe`]).
+    #[cfg(feature = "transport-batching")]
+    fn try_flush_open_batch(&self) -> bool {
+        let mut every_conduit = true;
         for idx in 0..TX_CONDUITS {
             let priority = TxConduits::<R>::conduit_priority(idx);
             // `None`: held by a sender, who will ask again. Nothing is open in this call's view
             // of that conduit that the sender's own call does not own.
-            let _ = R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+            let taken = R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
                 self.flush_conduit(idx, priority, batch);
             });
+            every_conduit &= taken.is_some();
         }
+        every_conduit
     }
 
     /// Send the frame open in one conduit, under that conduit's lock (`batch`): the body of

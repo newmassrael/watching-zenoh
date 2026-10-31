@@ -554,9 +554,80 @@ fn empty_link_state() -> wz_codecs::oam::OamOwned {
 /// Send `msg` to `DEST` as the router's own egress does, from a change of its tables and so on
 /// behalf of no face. Whether it was accepted.
 fn egress_to_dest(rig: &Rig, msg: NetworkMessage, priority: Priority) -> bool {
-    let on = rig.fwd.on_tables();
+    egress_on(&rig.fwd, msg, priority)
+}
+
+/// [`egress_to_dest`] on a forwarder alone, which is what a thread of its own can borrow.
+fn egress_on(fwd: &RouterForwarder, msg: NetworkMessage, priority: Priority) -> bool {
+    let on = fwd.on_tables();
     let state = on.tables.faces.get(&DEST).expect("the destination face");
     on.egress_to_face(DEST, state, msg, true, false, priority, None)
+}
+
+/// A send that may not wait does not wait for a lane either. A blocking send holds its lane's lock
+/// across its wait for room (the wait is part of the decision that precedes the sequence number),
+/// and a link-state message asked of the same link, from the loop that serves every face, waited
+/// for that lock: not for room, so no wait for room was ever seen, and for as long as the put
+/// waited, up to `wait_before_close` (5 s, measured as the registration of a face on a node whose
+/// own puts kept its link full). It is given back as no room instead, and is held.
+fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(qos: bool) {
+    let rig = Rig::new(true);
+    TokioRuntime::with_mutex_mut(&rig.dest.is_qos, |negotiated| *negotiated = qos);
+    rig.link.stall_waits();
+    let fwd = &rig.fwd;
+    let link = &rig.link;
+    let dest = &rig.dest;
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let _ = dest.send_network_message_qos(
+                blocking_put(b"waits"),
+                true,
+                false,
+                Priority::DEFAULT,
+            );
+        });
+        let began = Instant::now();
+        while !link.is_waiting() {
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "the blocking put never reached its wait for room"
+            );
+            std::thread::yield_now();
+        }
+        let (done, finished) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let accepted = egress_on(
+                fwd,
+                NetworkMessage::Oam(empty_link_state()),
+                Priority::Control,
+            );
+            let _ = done.send(accepted);
+        });
+        let answered = finished.recv_timeout(Duration::from_secs(2));
+        // Whatever the answer, let the put go, so that the threads end and the test does.
+        link.release();
+        assert_eq!(
+            answered,
+            Ok(true),
+            "the link-state message was neither accepted nor held within 2 s: it waited for the \
+             lane the put holds"
+        );
+    });
+    assert_eq!(
+        rig.fwd.egress_held(),
+        1,
+        "it was held, for when its link has room"
+    );
+}
+
+#[test]
+fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in_without_qos() {
+    a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(false);
+}
+
+#[test]
+fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in_with_qos() {
+    a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(true);
 }
 
 /// A link-state message that finds no room does not wait for it, here, on the loop that serves
