@@ -1872,14 +1872,14 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     // keep-alives carry no SN, the fixture's cookie is empty, and its TCP opens
     // without a SYN, so its framing is not weighed.
     let zenoh = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
-                 \"zenoh_evidence\":{\"log2_lr_millibits\":26637,\
-                 \"log2_lr_no_millibits\":52437,\
+                 \"zenoh_evidence\":{\"log2_lr_millibits\":26641,\
+                 \"log2_lr_no_millibits\":52441,\
                  \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,\
                  \"checks\":[{\"check\":\"init_roles\",\"strength\":\"handshake\",\
-                 \"confirmed\":1,\"violated\":0,\"millibits\":989,\"no_millibits\":989,\
+                 \"confirmed\":1,\"violated\":0,\"millibits\":991,\"no_millibits\":991,\
                  \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                  {\"check\":\"version_header\",\"strength\":\"header\",\
-                 \"confirmed\":2,\"violated\":0,\"millibits\":15988,\"no_millibits\":15988,\
+                 \"confirmed\":2,\"violated\":0,\"millibits\":15990,\"no_millibits\":15990,\
                  \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                  {\"check\":\"unit_reading\",\"strength\":\"unit\",\
                  \"confirmed\":10,\"violated\":0,\"millibits\":9660,\"no_millibits\":35460,\

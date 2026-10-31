@@ -279,13 +279,14 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 19389 units; 0 framings lost in 386 directions held from
-  their start; 0 differing cookies in 390 echoes; 0 Init pairs of one kind in
-  392; 0 other versions in 784 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 33466 units; 0 framings lost in 456 directions held from
+  their start; 0 differing cookies in 460 echoes; 0 Init pairs of one kind in
+  462; 0 other versions in 924 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), 1.7.2, 1.8.0 and 1.9.0
   routers with the clients built from the same release, 1.10.0 and 1.9.0
-  routers with older clients, 1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2 routers
+  routers with older clients (1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2 against
+  1.10.0 as well), 1.0.2, 1.1.1, 1.2.1, 1.3.4, 1.4.0, 1.5.0 and 1.6.2 routers
   with clients of their own release (built from the tags), zenoh-pico 1.10.1
   clients,
   240 short sessions captured for their handshakes, links that drop 1%, 5%,
@@ -303,16 +304,16 @@ the weights by `model_weights_are_their_stated_probabilities`):
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
 | unit read whole | +966 | +3546 | +2603 |
-| unit residual | -12660 | -11242 | -6745 |
-| unit undecoded | -12660 | -11772 | -7000 |
-| stream framing held | +2835 | +6450 | (none) |
-| stream framing lost | -7015 | -6999 | (none) |
-| cookie matched (8 bytes) | +63989 | +63989 | +63999 |
-| cookie differing | -7030 | -7030 | -10000 |
-| Inits of opposite kinds | +989 | +989 | +999 |
-| Inits of one kind | -6037 | -6037 | -9000 |
-| version of this reader | +7994 | +7994 | +8000 |
-| another version | -8029 | -8029 | (none) |
+| unit residual | -13448 | -12029 | -6745 |
+| unit undecoded | -13448 | -12559 | -7000 |
+| stream framing held | +2836 | +6451 | (none) |
+| stream framing lost | -7255 | -7238 | (none) |
+| cookie matched (8 bytes) | +63991 | +63991 | +63999 |
+| cookie differing | -7267 | -7267 | -10000 |
+| Inits of opposite kinds | +991 | +991 | +999 |
+| Inits of one kind | -6274 | -6274 | -9000 |
+| version of this reader | +7995 | +7995 | +8000 |
+| another version | -8266 | -8266 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
@@ -347,12 +348,28 @@ second never has two packets close enough to overtake, and those captures broke
 | TCP, 5% lost | 0 of 239 | 2 / 0 / 0 |
 | TCP, 5% duplicated | 0 of 239 | 2 / 0 / 0 |
 | TCP, 25% reordered | 0 of 1 | 2 / 0 / 0 |
+| TCP, delay 100 ms plus or minus 90 ms, 20 publishers | 0 of 4693 | 21 / 0 / 0 |
+| UDP, the same | 1756 of 4684 (37.5%) | 21 / 0 / 0 |
 
 A duplicated datagram repeats an SN and breaks the step at about the rate it is
 duplicated, and a reordered one breaks the step it arrives out of; TCP hands
 the stream to zenoh in order whatever the link does, so its steps never break.
 The reordered TCP session carried one step in two minutes (99 units); with a
 delay of 1.5 s each way it got little done, and why was not traced.
+
+A link whose delay varies from packet to packet (100 ms plus or minus 90 ms
+each way, with twenty publishers so that packets are close enough to overtake)
+gives a TCP session that does carry steps: 979 of its 11783 packets arrived out
+of order, 230 were retransmissions and 457 duplicate acknowledgements, and none
+of its 4693 SN steps broke. Over UDP the same link broke 1756 of 4684 (37.5%),
+and the 21 flows still read `yes`: the steps that follow are 62.5%, against the
+third needed. The subscriber was delivered 1114 of about 2360 samples. A first
+UDP run with the delay on from the start delivered nothing: the subscriber's
+declaration arrived out of order, was dropped, and without a subscription the
+publishers sent almost nothing (3 SN steps in the capture). The run kept puts
+the subscription up on a clean link and adds the delay after. That the first
+run went that way is inferred from its logs and its few frames, not from a
+trace of the declaration.
 
 A rate measured on any of them would describe that capture's link. The assumed
 `2^-4` is the loss the test is built to tolerate, and it is not where the
@@ -412,9 +429,9 @@ crossing rested on the unit weight the real mDNS beats.
 
 Every zenoh capture added since (the links above and the releases below) moved
 the counts and with them the weights, and the null captures moved with them. A
-residual or undecoded unit now weighs -12660 on the `yes` sum, and -11242 or
--11772 on the `no` sum: two units that no codec of this reader reads whole
-weigh -22484 or more there, past the threshold, where three were needed at
+residual or undecoded unit now weighs -13448 on the `yes` sum, and -12029 or
+-12559 on the `no` sum: two units that no codec of this reader reads whole
+weigh -24058 or more there, past the threshold, where three were needed at
 first (and two undecoded ones, but not two residual ones, after the SSH
 capture). So a flow of two such units, and nothing else weighed, reads `no`.
 `lan-dns` went from 2 `no` and 185 `undecided` to 174 `no` and 13 `undecided`,
@@ -461,17 +478,25 @@ repetition and loss broke them was not traced; the capture inside the tunnel
 cannot tell the tunnel's from the Wi-Fi's. The two captures add 9503 units and
 42 handshakes.
 
-**Older releases.** Router and clients of 1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2
-were built from their tags (no image of those was at hand, so the router is
-built too; that of 1.0.2 starts only with its rest plugin switched off, since
-it requires the plugin otherwise) and captured over TCP and over UDP on a link
-that loses nothing. All ten read two `yes` flows, none of their 1142 SN steps
-broke, and they add 1732 units and 20 handshakes. The corpus now holds routers
-of 1.0.2, 1.3.4, 1.4.0, 1.5.0, 1.6.2, 1.7.2, 1.8.0, 1.9.0, 1.10.0 and 1.10.1.
+**Older releases.** Router and clients of 1.0.2, 1.1.1, 1.2.1, 1.3.4, 1.4.0,
+1.5.0 and 1.6.2 were built from their tags (no image of those was at hand, so
+the router is built too; those of 1.0.2, 1.1.1 and 1.2.1 start only with their
+rest plugin switched off, since they require the plugin otherwise) and captured
+over TCP and over UDP on a link that loses nothing. All fourteen read two `yes`
+flows and none of their 1599 SN steps broke. They add 2425 units and 28
+handshakes.
 
-Still open after model 2: the releases between those (1.1.x, 1.2.x and the
-other patch releases), a client older than its router for any release but
-1.7.2 and 1.9.0, a link that really loses packets (the tunnelled path lost none
-in 300 pings, and broke steps only over UDP), a reordered TCP session that
-carries more than one SN step, and the null side only on the protocols the
-corpus holds.
+**Older clients, further back.** The clients of 1.0.2, 1.3.4, 1.4.0, 1.5.0 and
+1.6.2 against the 1.10.0 router, over TCP and UDP: ten captures, two `yes`
+flows each, none of 1145 SN steps broke, and 1735 units and 20 handshakes more.
+With the 1.7.2 and 1.9.0 pairs of the section above, a client older than its
+router is held for seven releases. The corpus now holds routers of 1.0.2,
+1.1.1, 1.2.1, 1.3.4, 1.4.0, 1.5.0, 1.6.2, 1.7.2, 1.8.0, 1.9.0, 1.10.0 and
+1.10.1.
+
+Still open after model 2: the other patch releases (1.0.0, 1.0.1, 1.1.0, 1.2.0,
+1.3.0 to 1.3.3, 1.4.1 and the like) and 1.10.2, which the repository's
+reference has moved to while every client in the corpus is 1.10.1 or older; a
+client older than its router for 1.8.0; a link that really loses packets (the
+tunnelled path lost none in 300 pings, and broke steps only over UDP); and the
+null side only on the protocols the corpus holds.
