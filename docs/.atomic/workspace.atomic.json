@@ -302604,6 +302604,44 @@
         "Owed: the whatami a link state restates (upstream 1.10.2 network.rs sets it on every newer link state, wz-routing-graph only while unknown); the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 4025": {
+      "decision_summary": "The repository's reference moved to zenoh 1.10.2, while every client in the corpus was 1.10.1 or older. Router and clients of 1.10.2 were built from the tag and captured, and so were a 1.10.2 client against the 1.10.0 router and a 1.10.1 client against a 1.10.2 router. Six more patch releases (1.0.0, 1.0.1, 1.1.0, 1.2.0, 1.3.0, 1.6.1) were built the same way, router and clients, and a 1.8.0 client was put against the 1.10.0 router; 1.0.0 to 1.2.0 start only with their rest plugin switched off. Twenty captures over TCP and UDP, two yes flows each, none of 2298 SN steps broken. Counts: units 37041, framing 496, cookies 500, Init pairs 502, versions 1004. Residual and undecoded units weigh -13594 on the yes sum; the version header +7996 and the cookie violation -7387. The pinned example sums move by 2 millibits (the version header), and no null capture changed word. 1.0.0 puts about 220 units into its minute against 173 for the others; that was not looked into.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-10-2|1-6-1|1-3-0|1-2-0|1-1-0|1-0-1|1-0-0-tcp|udp`, `zenoh-mixed-c1-10-2-r1-10-0`, `zenoh-mixed-c1-10-1-r1-10-2`, `zenoh-mixed-c1-8-0-r1-10-0` (each tcp and udp; anonymised, 113 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie differing -7387, Init pair of one kind -6393, version header +7996 and another version -8385, residual -13594 / -12176, undecoded -13594 / -12706, framing held +2837 / +6452 and lost -7376 / -7359 (cookie fidelity -9, Init roles +991 and unit read whole +966 / +3546 unchanged).",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: twenty rows (2, 0, 0); no null row moved.",
+        "Pinned sums moved with the version header: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs` and `wz_dissect.h`; the C consumer's opening did not move.",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on 1.10.2 and the patch releases, and what is still open."
+      ],
+      "verification_bullets": [
+        "On a build host, on the tree rebased onto main (which changed the dissector's source by one line among 68 files) with its submodules at their pins: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, and its C consumer built against the release cdylib and read the tree. The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The pre-push static gate array ran whole on the rebased tree, alone: 123 of 123 pass. The corpus verifier: 113 files are fixed points. The release binaries were built from the upstream tags on the build host, one tag at a time. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: the patch releases that were not built (for instance 1.3.1 to 1.3.3), a client newer than its router by more than two patch releases, and a link that really loses packets (the tunnelled path lost none in 300 pings; making one lose needs cross traffic on a shared network and was not done). A weights round must follow the null members and the counts together; the weights tool lives in the worktree's target directory and is gone with it. The old release binaries are on the build host only; build one tag at a time."
+      ],
+      "publishable_decision_summary": "The repository's reference moved to zenoh 1.10.2, while every client in the corpus was 1.10.1 or older. Router and clients of 1.10.2 were built from the tag and captured, and so were a 1.10.2 client against the 1.10.0 router and a 1.10.1 client against a 1.10.2 router. Six more patch releases (1.0.0, 1.0.1, 1.1.0, 1.2.0, 1.3.0, 1.6.1) were built the same way, router and clients, and a 1.8.0 client was put against the 1.10.0 router; 1.0.0 to 1.2.0 start only with their rest plugin switched off. Twenty captures over TCP and UDP, two yes flows each, none of 2298 SN steps broken. Counts: units 37041, framing 496, cookies 500, Init pairs 502, versions 1004. Residual and undecoded units weigh -13594 on the yes sum; the version header +7996 and the cookie violation -7387. The pinned example sums move by 2 millibits (the version header), and no null capture changed word. 1.0.0 puts about 220 units into its minute against 173 for the others; that was not looked into.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-matched-1-10-2|1-6-1|1-3-0|1-2-0|1-1-0|1-0-1|1-0-0-tcp|udp`, `zenoh-mixed-c1-10-2-r1-10-0`, `zenoh-mixed-c1-10-1-r1-10-2`, `zenoh-mixed-c1-8-0-r1-10-0` (each tcp and udp; anonymised, 113 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie differing -7387, Init pair of one kind -6393, version header +7996 and another version -8385, residual -13594 / -12176, undecoded -13594 / -12706, framing held +2837 / +6452 and lost -7376 / -7359 (cookie fidelity -9, Init roles +991 and unit read whole +966 / +3546 unchanged).",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: twenty rows (2, 0, 0); no null row moved.",
+        "Pinned sums moved with the version header: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs` and `wz_dissect.h`; the C consumer's opening did not move.",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on 1.10.2 and the patch releases, and what is still open."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, on the tree rebased onto main (which changed the dissector's source by one line among 68 files) with its submodules at their pins: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, and its C consumer built against the release cdylib and read the tree. The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The pre-push static gate array ran whole on the rebased tree, alone: 123 of 123 pass. The corpus verifier: 113 files are fixed points. The release binaries were built from the upstream tags on the build host, one tag at a time. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the patch releases that were not built (for instance 1.3.1 to 1.3.3), a client newer than its router by more than two patch releases, and a link that really loses packets (the tunnelled path lost none in 300 pings; making one lose needs cross traffic on a shared network and was not done). A weights round must follow the null members and the counts together; the weights tool lives in the worktree's target directory and is gone with it. The old release binaries are on the build host only; build one tag at a time."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
