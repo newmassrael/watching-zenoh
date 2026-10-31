@@ -583,6 +583,36 @@ const LONE_STAGED_MAX: u64 = 2;
 /// are well inside this.
 const INLINE_MIN_QUIET_NS: u64 = 8_000;
 
+/// How many frames of the head's size one write may carry, whatever the batch of the link: the
+/// frames queued behind a write under way are joined into the next one
+/// ([`LaneState::take_next_packed`]), and a write is never bounded to fewer than this many.
+///
+/// The batch of a link bounds one FRAME, and every frame already respects it; a stream carries
+/// frames back to back, so how many leave in one `write` is invisible to the peer. Bounding the
+/// write by the batch made it degenerate for a frame that is a large part of it: a link to a
+/// zenoh-pico peer (a batch of 2,048 bytes) wrote each 1 KiB frame (1,037 bytes) by itself, two of
+/// them being 26 bytes over, in a lane that holds four. That was one system call a frame, which
+/// was most of what a frame cost (the writer's time was 91 percent in the kernel).
+///
+/// A frame small against the batch is left as it was: its writes already carry a score of frames,
+/// there is no measurement that a wider write helps it, and a wider write holds more of the lane
+/// while it is written.
+const MIN_FRAMES_PER_WRITE: usize = 4;
+
+/// The most one write is widened to for [`MIN_FRAMES_PER_WRITE`]: what a length prefix can name,
+/// and what zenoh's own TCP batch is. A batch larger than this stands as it is.
+const WRITE_PACK_BYTES: usize = 64 * 1024;
+
+/// The bytes one write may take when its first frame is `head` bytes long on a link whose batch is
+/// `batch`: the batch, or [`MIN_FRAMES_PER_WRITE`] frames of the head's size (up to
+/// [`WRITE_PACK_BYTES`]) when that is more.
+fn write_bound(batch: usize, head: usize) -> usize {
+    batch.max(
+        head.saturating_mul(MIN_FRAMES_PER_WRITE)
+            .min(WRITE_PACK_BYTES),
+    )
+}
+
 /// `last_flush_ns` of a queue that has not flushed yet: it has been quiet for as long as it has
 /// lived.
 const NEVER_FLUSHED: u64 = u64::MAX;
@@ -1201,11 +1231,15 @@ impl LaneState {
         let queued: usize = self.occupied.iter().sum();
         let mut first: Option<(Priority, Vec<u8>)> = None;
         let mut joined: Option<Vec<u8>> = None;
+        // What this take may weigh: the batch until the first frame is known, then
+        // `write_bound` for its size (kept here, because the first frame's buffer is
+        // emptied when the second is joined to it).
+        let mut bound = budget;
         'lanes: for lane in 0..Priority::NUM {
             while let Some(Entry::Heap(_, frame)) = self.lanes[lane].front() {
                 if let Some((_, head)) = first.as_ref() {
                     let so_far = joined.as_ref().map_or(head.len(), Vec::len);
-                    if so_far.saturating_add(frame.len()) > budget {
+                    if so_far.saturating_add(frame.len()) > bound {
                         break 'lanes;
                     }
                 }
@@ -1216,6 +1250,7 @@ impl LaneState {
                 if first.is_none() {
                     // The first frame of the take: held as it is, in case it is
                     // the only one.
+                    bound = write_bound(budget, frame.len());
                     first = Some((priority, frame));
                     continue;
                 }
@@ -1227,7 +1262,7 @@ impl LaneState {
                 // The second frame: only now is there something to join.
                 let (_, head) = first.as_mut().expect("the first frame was held above");
                 let mut buffer =
-                    Vec::with_capacity(queued.min(budget).max(head.len() + frame.len()));
+                    Vec::with_capacity(queued.min(bound).max(head.len() + frame.len()));
                 buffer.extend_from_slice(head);
                 buffer.extend_from_slice(&frame);
                 self.give_spare(std::mem::take(head));
@@ -4239,30 +4274,76 @@ mod tests {
         assert_eq!(wire.as_ptr(), at, "the buffer itself, not a copy of it");
     }
 
-    /// R3366 — the take stops at the batch size and splits no frame: what does not
+    /// R3366 — the take stops at the write bound and splits no frame: what does not
     /// fit stays queued, whole, for the next take; and a frame larger than the
-    /// budget is still taken (alone), because a frame is the unit and a budget
+    /// bound is still taken (alone), because a frame is the unit and a bound
     /// cannot make it smaller.
     #[tokio::test]
-    async fn the_packed_take_stops_at_the_budget_and_splits_no_frame() {
-        let (tx, mut rx) = outbound_channel_with_capacity([8; Priority::NUM], 10);
-        for frame in [b"aaaa", b"bbbb", b"cccc"] {
-            tx.send(Priority::Data, frame.to_vec()).expect("enqueue");
+    async fn the_packed_take_stops_at_the_write_bound_and_splits_no_frame() {
+        let part = WRITE_PACK_BYTES / 2 - 1;
+        let (tx, mut rx) = outbound_channel_with_capacity([8; Priority::NUM], WRITE_PACK_BYTES);
+        for fill in *b"abc" {
+            tx.send(Priority::Data, vec![fill; part]).expect("enqueue");
         }
         let first = rx.recv_wire_packed().await.expect("a buffer").into_vec();
         assert_eq!(
-            first, b"aaaabbbb",
-            "8 of the 10, the next frame would be 12"
+            first.len(),
+            2 * part,
+            "two of the three, the third would pass the bound"
+        );
+        assert!(
+            first[..part].iter().all(|b| *b == b'a') && first[part..].iter().all(|b| *b == b'b'),
+            "in the order they were queued"
         );
         let second = rx.recv_wire_packed().await.expect("a buffer").into_vec();
-        assert_eq!(second, b"cccc", "the frame that did not fit, whole");
+        assert_eq!(
+            second,
+            vec![b'c'; part],
+            "the frame that did not fit, whole"
+        );
 
-        tx.send(Priority::Data, vec![7u8; 25]).expect("enqueue");
+        let past = vec![7u8; WRITE_PACK_BYTES + 25];
+        tx.send(Priority::Data, past.clone()).expect("enqueue");
         tx.send(Priority::Data, b"after".to_vec()).expect("enqueue");
         let big = rx.recv_wire_packed().await.expect("a frame").into_vec();
-        assert_eq!(big, vec![7u8; 25], "past the budget, taken alone");
+        assert_eq!(big, past, "past the bound, taken alone");
         let after = rx.recv_wire_packed().await.expect("a frame").into_vec();
         assert_eq!(after, b"after");
+    }
+
+    /// The batch of a link bounds one FRAME, not one write: frames that are each inside it leave
+    /// together. Three frames of 1,037 bytes on a link whose batch is 2,048 (a zenoh-pico peer's)
+    /// are one write of 3,111, where bounding the write by the batch wrote each by itself, two of
+    /// them being 26 bytes over.
+    #[tokio::test]
+    async fn a_stream_writer_packs_past_the_batch_size_of_its_link() {
+        let (tx, mut rx) = outbound_channel_with_capacity([4; Priority::NUM], 2_048);
+        let frame = vec![9u8; 1_037];
+        for _ in 0..3 {
+            tx.send(Priority::Data, frame.clone()).expect("enqueue");
+        }
+
+        let wire = rx.recv_wire_packed().await.expect("a buffer").into_vec();
+
+        assert_eq!(wire.len(), 3 * 1_037, "all three in one write");
+    }
+
+    /// A frame that is small against the batch is bounded by the batch, as it always was: its
+    /// writes already carry a score of frames, and a wider write would hold more of the lane
+    /// while it is written. Thirty frames of 100 bytes on a link whose batch is 2,048 leave as a
+    /// write of twenty (2,000), the twenty-first being 52 bytes over.
+    #[tokio::test]
+    async fn a_small_frame_is_still_bounded_by_the_batch_of_its_link() {
+        let (tx, mut rx) = outbound_channel_with_capacity([8; Priority::NUM], 2_048);
+        for _ in 0..30 {
+            tx.send(Priority::Data, vec![5u8; 100]).expect("enqueue");
+        }
+
+        let first = rx.recv_wire_packed().await.expect("a buffer").into_vec();
+        let second = rx.recv_wire_packed().await.expect("a buffer").into_vec();
+
+        assert_eq!(first.len(), 2_000, "twenty frames, the batch not passed");
+        assert_eq!(second.len(), 1_000, "the ten that were left, whole");
     }
 
     /// R3366 — every frame of a packed take stays in its lane's occupancy until the
