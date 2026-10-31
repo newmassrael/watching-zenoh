@@ -1195,6 +1195,12 @@ pub struct ZenohNodeConfig {
     /// waits for its peers at all. `None` is absence; upstream's default is
     /// `true`.
     pub open_connect_scouted: Option<bool>,
+    /// `open/return_conditions/declares`: whether a peer's open also waits, within its start
+    /// window, for the initial declarations of the peers it connected to
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `((!wait_declares) || whatami != WhatAmI::Peer)`).
+    /// `None` is absence; upstream's default is `true`. Read by the zenoh-c session's peer open
+    /// ([`C_ABI_SESSION_HONOURED_KEYS`]), which holds on the `DeclareFinal` each peer sends.
+    pub open_declares: Option<bool>,
     /// `transport/multicast/qos/enabled`. wz's `--multicast-qos`. A real
     /// zenohd resolves this to `false`, so the default below is zenoh's.
     pub multicast_qos: bool,
@@ -1560,6 +1566,7 @@ impl Default for ZenohNodeConfig {
             scouting_timeout_ms: None,
             scouting_delay_ms: None,
             open_connect_scouted: None,
+            open_declares: None,
             multicast_qos: false,
             multicast_join_interval_ms: 2_500,
             multicast_compression: false,
@@ -1972,12 +1979,20 @@ impl ZenohNodeConfig {
             let _ = write!(out, ", \"delay\": {ms}");
         }
         out.push_str(" },");
-        // R2950 — the open barrier's one honoured key, emitted only when held,
-        // as every optional scalar here is.
-        if let Some(scouted) = self.open_connect_scouted {
+        // R2950 — the open barrier's keys, each emitted only when held, as every optional
+        // scalar here is, and in one block.
+        if self.open_connect_scouted.is_some() || self.open_declares.is_some() {
+            let mut held = Vec::new();
+            if let Some(scouted) = self.open_connect_scouted {
+                held.push(format!("\"connect_scouted\": {scouted}"));
+            }
+            if let Some(declares) = self.open_declares {
+                held.push(format!("\"declares\": {declares}"));
+            }
             let _ = write!(
                 out,
-                "\n  \"open\": {{ \"return_conditions\": {{ \"connect_scouted\": {scouted} }} }},"
+                "\n  \"open\": {{ \"return_conditions\": {{ {} }} }},",
+                held.join(", ")
             );
         }
         out.push_str("\n  \"timestamping\": { \"enabled\": ");
@@ -2650,7 +2665,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // R2950 — `open/return_conditions/connect_scouted` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: the C-ABI peer open waits on it. Same partition,
     // same total.
-    "open/return_conditions/declares",
+    // `open/return_conditions/declares` LEFT this list for
+    // [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's peer open holds on the end of
+    // its peers' initial declarations. Same partition, same total.
     // R2788 — `plugins` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader
     // carries the section and the storage host runs the storage manager from
     // it. Its two `plugins_loading/*` siblings stay: they govern how a zenohd
@@ -2872,8 +2889,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // §5.23 `adminspace-core` — `metadata` LEFT this list. Its group row said
     // wz lacked "a config-metadata surface", and the adminspace now serves the
     // value, so the capability the row named is one wz has.
-    // R2950 — `connect_scouted` left for the honoured list; `declares` stays.
-    "open/return_conditions/declares",
+    // R2950 — `connect_scouted` left for the honoured list, and `declares` followed it for
+    // [`C_ABI_SESSION_HONOURED_KEYS`] once the open held on the end of the peers' declarations.
     "plugins_loading/search_dirs",
     // `qos/network` LEFT this list as it left its sibling above: wz has the interceptor now.
     "qos/publication",
@@ -3182,15 +3199,6 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
     // run-modes drive both phases through it. This is the outcome R2151 built
     // the table FOR: the day wz grows a capability, its group reds rather than
     // going quietly stale.
-    (
-        "a session-open readiness barrier",
-        "ReturnConditionsConf",
-        &[
-            // R2950 — `connect_scouted` left: the peer open's start window is
-            // the barrier it gates. `declares` has no such barrier yet.
-            "open/return_conditions/declares",
-        ],
-    ),
     // R2230 (item 579/582) — the `configurable link-state weighting` /
     // `RoutingConf` group lost two of its three rows, because upstream 1.10.0
     // retired both: `peers_failover_brokering` is a deprecated no-op and
@@ -3754,6 +3762,7 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// the `RegionName` extension of its Init (the offer of the session carries it). The demo takes
 /// no such key, so it is the C ABI session's alone.
 pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
+    "open/return_conditions/declares",
     "region_name",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
@@ -7448,6 +7457,10 @@ impl ZenohNodeConfig {
             out.open_connect_scouted = Some(v);
             named.push("open/return_conditions/connect_scouted");
         }
+        if let Some(v) = want_bool(&doc, "open/return_conditions/declares")? {
+            out.open_declares = Some(v);
+            named.push("open/return_conditions/declares");
+        }
         if let Some(v) = want_bool(&doc, "transport/multicast/qos/enabled")? {
             out.multicast_qos = v;
             named.push("transport/multicast/qos/enabled");
@@ -7700,6 +7713,38 @@ mod tests {
         assert!(again.named.contains(&KEY));
         // The sibling `qos` the same table carries is not lost by writing the new key beside it.
         assert_eq!(again.config.multicast_qos, read.config.multicast_qos);
+    }
+
+    /// `open/return_conditions/declares` is read, named and written back beside its sibling
+    /// `connect_scouted`, which the same block carries, and it is the C-ABI peer open that
+    /// honours it. Absent it leaves `None`, which the open reads as upstream's `true`.
+    #[test]
+    fn open_declares_is_read_named_and_survives_the_emitter() {
+        const KEY: &str = "open/return_conditions/declares";
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        assert_eq!(silent.config.open_declares, None);
+        assert!(!silent.named.contains(&KEY));
+
+        let source =
+            r#"{ open: { return_conditions: { declares: false, connect_scouted: true } } }"#;
+        let read = ZenohNodeConfig::from_json5(source).expect("the key reads");
+        assert_eq!(read.config.open_declares, Some(false));
+        assert_eq!(read.config.open_connect_scouted, Some(true));
+        assert!(read.named.contains(&KEY), "{:?}", read.named);
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        assert!(C_ABI_SESSION_HONOURED_KEYS.contains(&KEY));
+        assert!(!UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&KEY));
+
+        // The block carries both keys written back, and either alone.
+        let again = ZenohNodeConfig::from_json5(&read.config.to_json5()).expect("it round-trips");
+        assert_eq!(again.config.open_declares, Some(false));
+        assert_eq!(again.config.open_connect_scouted, Some(true));
+        let alone =
+            ZenohNodeConfig::from_json5(r#"{ open: { return_conditions: { declares: true } } }"#)
+                .expect("the key reads alone");
+        let again = ZenohNodeConfig::from_json5(&alone.config.to_json5()).expect("round-trips");
+        assert_eq!(again.config.open_declares, Some(true));
+        assert_eq!(again.config.open_connect_scouted, None);
     }
 
     /// Item 751 — a list of subregions, each filter field read into the value

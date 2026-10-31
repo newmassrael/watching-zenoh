@@ -550,6 +550,7 @@ pub(crate) fn open_router_blocking(
     // conditions), and at once when it connects to none.
     let hold = dial.router_hold;
     let window = dial.start_window.unwrap_or_default();
+    let declares = dial.wait_declares;
     match rx.recv() {
         Ok(Ok(listen_locators)) => {
             match role {
@@ -560,9 +561,24 @@ pub(crate) fn open_router_blocking(
                 // it replays on the new link (`zenoh/src/net/protocol/gossip.rs` @
                 // `terminate_peer_connector_zid(src)`). A subscriber declared right after the open
                 // is then told of what comes alive after it and not of what was already there.
+                //
+                // Of a remote that is a peer upstream waits for more than that when
+                // `open/return_conditions/declares` is set, which it is by default: the start
+                // condition is met by the `DeclareFinal` that ends the remote's initial
+                // declarations, which the remote sends after the ones it holds
+                // (`zenoh/src/net/routing/hat/peer/interests.rs` @ `Terminating peer connector`),
+                // and not by its gossip, which a peer sends before them. A subscriber declared
+                // right after the open would otherwise be told of a token the remote held when the
+                // link came up, which reaches it after the open has returned. The peers this
+                // node's gossip made it dial are connectors of the open as well, and so are
+                // waited for until their face is up and has ended its declarations.
                 NodeRole::Peer if dials > 0 => {
                     let deadline = std::time::Instant::now() + window;
-                    while (forwarder.face_snapshots().len() < dials || forwarder.ingested() < dials)
+                    while (forwarder.face_snapshots().len() < dials
+                        || forwarder.ingested() < dials
+                        || (declares
+                            && (forwarder.initial_declares_pending() > 0
+                                || forwarder.autoconnects_pending() > 0)))
                         && std::time::Instant::now() < deadline
                     {
                         std::thread::sleep(std::time::Duration::from_millis(5));

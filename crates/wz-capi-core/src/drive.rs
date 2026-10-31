@@ -106,6 +106,15 @@ pub struct DialPhase {
     /// soon as its start conditions are met; a router has none and waits the delay out. Read only
     /// for a session that dials as a router; zero for an ABI that has no router role.
     pub router_hold: std::time::Duration,
+    /// `open/return_conditions/declares` (`zenoh/src/net/protocol/gossip.rs` @
+    /// `((!wait_declares) || whatami != WhatAmI::Peer)`): whether a PEER's open also waits, within
+    /// its start window, for the initial declarations of the peers it connected to, which each
+    /// ends with the `DeclareFinal` of the initial interest, and for the peers its gossip made it
+    /// dial. Upstream's default is true. With it clear the open is met when the node it dialled
+    /// is connected and has told it the topology, which is before the declarations of a remote
+    /// peer have arrived, so a subscriber declared right after the open is told of what was
+    /// already there.
+    pub wait_declares: bool,
 }
 
 impl DialPhase {
@@ -117,6 +126,7 @@ impl DialPhase {
         redial: None,
         start_window: None,
         router_hold: std::time::Duration::ZERO,
+        wait_declares: true,
     };
 }
 

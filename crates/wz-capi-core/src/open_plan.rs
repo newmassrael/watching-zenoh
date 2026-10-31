@@ -299,6 +299,10 @@ fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
         // R3125 -- and a router's open is held for the same delay in full, unconditionally
         // (`start_router` sleeps it), where a peer's ends when its start conditions are met.
         router_hold: std::time::Duration::from_millis(node.scouting_delay_ms.unwrap_or(500)),
+        // `open/return_conditions/declares`, which a peer's open honours as it does
+        // `connect_scouted`: it waits for the initial declarations of the peers it met.
+        // Upstream's default is true.
+        wait_declares: node.open_declares.unwrap_or(true),
     }
 }
 
@@ -1290,6 +1294,34 @@ mod tests {
         );
     }
 
+    /// `open/return_conditions/declares` reaches the peer's open as the wait on its peers' initial
+    /// declarations: held when the key says `true` and when it says nothing (upstream's default),
+    /// and not held when it says `false`, and the other key of the block is untouched by it.
+    #[test]
+    fn open_declares_reaches_the_dial_phase() {
+        let phase = |document: &str| dial_phase(&node_of(document), WhatAmI::Peer);
+        assert!(phase("{}").wait_declares, "absent: upstream's default");
+        assert!(
+            phase(r#"{ open: { return_conditions: { declares: true } } }"#).wait_declares,
+            "stated true"
+        );
+        let off = phase(r#"{ open: { return_conditions: { declares: false } } }"#);
+        assert!(!off.wait_declares, "stated false");
+        assert_eq!(
+            off.start_window,
+            phase("{}").start_window,
+            "the start window the other key gates is the same"
+        );
+        let neither = phase(
+            r#"{ open: { return_conditions: { declares: false, connect_scouted: false } } }"#,
+        );
+        assert!(!neither.wait_declares);
+        assert_eq!(
+            neither.start_window, None,
+            "connect_scouted false still ends the wait"
+        );
+    }
+
     /// `region_name` reaches the offer, so each session of the node announces it; a document that
     /// states none, or `null`, offers no region.
     #[test]
@@ -1756,7 +1788,7 @@ mod tests {
                 "{head}\n\
                  dial: DialPhase {{ policy: PhasePolicy {{ budget: PhaseBudget({budget}), \
                  exit_on_failure: {exit} }}, schedule: {SCHEDULE}, redial: Some({SCHEDULE}), \
-                 start_window: Some(500ms), router_hold: 500ms }}\n\
+                 start_window: Some(500ms), router_hold: 500ms, wait_declares: true }}\n\
                  listen_phase: ListenPhase {{ policy: PhasePolicy {{ budget: PhaseBudget(0), \
                  exit_on_failure: true }}, schedule: {SCHEDULE} }}\n\
                  batch_size: 65535\n\
