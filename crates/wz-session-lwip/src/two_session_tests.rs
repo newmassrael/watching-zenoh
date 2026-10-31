@@ -62,7 +62,10 @@ use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::WhatAmI;
 
 use crate::links::test_links;
-use crate::multicast_drive::{spawn_multicast_session, LwipMulticastDriver, MulticastSession};
+use crate::multicast_drive::{
+    spawn_multicast_session, spawn_multicast_session_seeded, LwipMulticastDriver, MulticastSeed,
+    MulticastSession,
+};
 
 /// A clock the test moves. Every session reads the one runtime clock, so a
 /// step moves all of them at once, as time does on a device.
@@ -247,6 +250,18 @@ impl TwoSessions {
         group_socket: wz_link_lwip::rx_sockets::SessionMulticastRxSocket,
         group_port: u16,
     ) -> Self {
+        Self::spawn_with(link, router_port, group_socket, group_port, false)
+    }
+
+    /// [`Self::spawn`], with the group session spawned from a [`MulticastSeed`] (the dispatcher
+    /// built in the task) when `seeded` and from a built [`MulticastSession`] otherwise.
+    fn spawn_with(
+        link: Rc<LwipLink>,
+        router_port: u16,
+        group_socket: wz_link_lwip::rx_sockets::SessionMulticastRxSocket,
+        group_port: u16,
+        seeded: bool,
+    ) -> Self {
         let clock = StepClock::default();
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
@@ -303,29 +318,44 @@ impl TwoSessions {
         let log = group_log.clone();
         let group_stop = Rc::new(Cell::new(false));
         let stop = group_stop.clone();
-        let group_task = spawn_multicast_session(
-            &local,
-            link.clone(),
-            MulticastSession {
-                dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
-                driver: LwipMulticastDriver::new(
-                    group_socket,
-                    SESSION_MULTICAST_GROUP_DEFAULT,
-                    group_port,
+        let on_event = move |event: IterationEvent<'_>| {
+            log.puts.borrow_mut().extend(put_payloads(&event));
+            if let IterationEvent::MulticastPeerLost(_) = event {
+                log.peers_lost.set(log.peers_lost.get() + 1);
+            }
+        };
+        let driver =
+            LwipMulticastDriver::new(group_socket, SESSION_MULTICAST_GROUP_DEFAULT, group_port);
+        let group_task = if seeded {
+            spawn_multicast_session_seeded(
+                &local,
+                link.clone(),
+                MulticastSeed::<4>::new(
+                    MulticastConfig::new(5_000),
+                    driver,
+                    group_params(GROUP_ZID, 10_000),
+                    5,
                 ),
-                params: group_params(GROUP_ZID, 10_000),
-                tick_ms: 5,
-                max_iters: None,
-            },
-            move |event| {
-                log.puts.borrow_mut().extend(put_payloads(&event));
-                if let IterationEvent::MulticastPeerLost(_) = event {
-                    log.peers_lost.set(log.peers_lost.get() + 1);
-                }
-            },
-            || None,
-            move || stop.get(),
-        );
+                on_event,
+                || None,
+                move || stop.get(),
+            )
+        } else {
+            spawn_multicast_session(
+                &local,
+                link.clone(),
+                MulticastSession {
+                    dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
+                    driver,
+                    params: group_params(GROUP_ZID, 10_000),
+                    tick_ms: 5,
+                    max_iters: None,
+                },
+                on_event,
+                || None,
+                move || stop.get(),
+            )
+        };
 
         Self {
             link,
@@ -540,6 +570,43 @@ fn a_stopped_group_session_leaves_the_client_session_answering() {
     s.group_stop.set(true);
     s.pump_until(64, |s| s.group_task.is_finished())
         .expect("the group session stops on its flag");
+
+    std::assert!(s.established(), "the client session is still established");
+    std::assert!(
+        s.client_put_reaches_the_router(b"after the stop"),
+        "and still answers"
+    );
+    std::assert!(!s.client_task.is_finished());
+}
+
+/// (5) THE SEEDED GROUP SESSION. The group session is spawned from a [`MulticastSeed`], so its
+/// dispatcher is built inside the task and not on the caller's stack: it admits a member, hears
+/// its puts beside the client session, stops on its flag, and leaves the client answering. The
+/// scenarios above run the group session from a built `MulticastSession`; this is the
+/// spawn path the two-session image on target takes.
+#[test]
+fn a_seeded_group_session_runs_beside_the_client_session() {
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let (router_port, group_port, member_port) = (7487u16, 7488u16, 7489u16);
+    let group = SESSION_MULTICAST_GROUP_DEFAULT;
+    let group_socket = bind_session_multicast_rx(&link, group, group_port).expect("join group");
+
+    let s = TwoSessions::spawn_with(link.clone(), router_port, group_socket, group_port, true);
+    let mut member = Member::new(&link, member_port, group_port, 10_000);
+    member.join();
+    member.put(b"one");
+    member.put(b"two");
+    s.pump_until(64, |s| s.established() && s.group_puts() == 2)
+        .expect("both sessions up, the member heard twice");
+    std::assert_eq!(
+        *s.group_log.puts.borrow(),
+        vec![b"one".to_vec(), b"two".to_vec()]
+    );
+
+    s.group_stop.set(true);
+    s.pump_until(64, |s| s.group_task.is_finished())
+        .expect("the seeded group session stops on its flag");
 
     std::assert!(s.established(), "the client session is still established");
     std::assert!(

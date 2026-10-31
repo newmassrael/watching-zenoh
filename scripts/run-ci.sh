@@ -11987,8 +11987,9 @@ layer_c1m_session_lwip() {
     # it is the only combination that compiles both handshake halves beside
     # the multicast loop. 25 = the multicast+push leg's 21 + those four, the
     # number this command PRINTED. 26 since the session duties were made causal
-    # (the +1 above), derived.
-    _runci_guarded_test "C1m two sessions" 26 \
+    # (the +1 above), derived. 27 since the group session was also run from a seed
+    # (`a_seeded_group_session_runs_beside_the_client_session`), the number this PRINTED.
+    _runci_guarded_test "C1m two sessions" 27 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
         --quiet || return 1
