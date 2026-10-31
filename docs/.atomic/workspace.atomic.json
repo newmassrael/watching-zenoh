@@ -303302,6 +303302,42 @@
         "Open: clients of 1.10.0 beside its own router, tags other than the plain releases, a path that loses more than 1.8% (the load was capped on purpose: going past it presses a network other people use), and the null side only on the protocols the corpus holds. The release binaries and sources are on the build host only (its home directory, per tag); build one tag at a time, since two collide on the pinned toolchain's install."
       ]
     },
+    "Round 4044": {
+      "decision_summary": "Decision D15 of the session lifecycle is built. An open for a peer nothing can be dialled for enters the bounded table and its machine reports no_locator in the status read; a hint learned later (a confirmed locator on the fixed profile, a discovery on AP) starts the waiting node with no second open, and a close removes the row. The refusal at the opener of step 6c is replaced: the open vocabulary loses peer_unknown and no_dialable_locator, which were facts about reachability and so belong to the status read, and gains a word for a target that is no zid. A peer a build declares with a locator it cannot dial still stops the list at start, since that is a defect of the build. The flood is bounded by the table, not by the opener's guess about reachability.",
+      "changes_bullets": [
+        "wz-session-core: OpenOutcome and RefusedReason lose PeerUnknown and NoDialableLocator and gain NotAZid; the contract table loses its two cases.",
+        "wz-session-mcu: NodeOpener::open and ConnectManager::open_node take the node without a hint; confirm_locator starts a node waiting in NoLocator; DeclaredRefusal::Undialable keeps the build-time stop; the store no longer carries the dialer's classify pointer.",
+        "wz-runtime-tokio: LinkstateOpener::ask sends the node with no locators; LoopPeers::locator_learned and the Step::Dial arm start a waiting node.",
+        "Tests rewritten or added in the connect manager, the loop peers, the opener and the lwip slot node; four mcu CI pins move by one. docs/session-lifecycle-intent.md records D15 as built; the inventory reason of session-close-ingress gains a paragraph."
+      ],
+      "verification_bullets": [
+        "Run on pc2 and pc3 through bx: wz-session-core lifecycle tests 11 passed; wz-session-mcu 19 default, 49 adminspace-write, 59 read and write, 23 and 27 for the peer-node and verb legs at a room for two, admin_open_query 6 and 10; wz-runtime-tokio opener, loop peers and accept loop tests 53 passed; the lwip slot node open test passes; clippy with warnings denied is clean on the three crates in both feature sets. The lwip test a_node_with_fewer_slots_than_endpoints fails after the node test on this tree and on the unmodified tip alike, so it predates this round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The lwip test a_node_with_fewer_slots_than_endpoints_dials_what_it_can_and_the_rest_waits fails on the tip before this round when run after the node-by-zid test in the same process (B admitted 0, expected 1); alone it passes; not diagnosed. On AP the table-full refusal is the loop's and is logged, because the opener answers before the loop sees the request. Remaining rulings in order: D10, D12, D14. Hosted CI for this tree is unread."
+      ],
+      "publishable_decision_summary": "Decision D15 of the session lifecycle is built. An open for a peer nothing can be dialled for enters the bounded table and its machine reports no_locator in the status read; a hint learned later (a confirmed locator on the fixed profile, a discovery on AP) starts the waiting node with no second open, and a close removes the row. The refusal at the opener of step 6c is replaced: the open vocabulary loses peer_unknown and no_dialable_locator, which were facts about reachability and so belong to the status read, and gains a word for a target that is no zid. A peer a build declares with a locator it cannot dial still stops the list at start, since that is a defect of the build. The flood is bounded by the table, not by the opener's guess about reachability.",
+      "publishable_changes_bullets": [
+        "wz-session-core: OpenOutcome and RefusedReason lose PeerUnknown and NoDialableLocator and gain NotAZid; the contract table loses its two cases.",
+        "wz-session-mcu: NodeOpener::open and ConnectManager::open_node take the node without a hint; confirm_locator starts a node waiting in NoLocator; DeclaredRefusal::Undialable keeps the build-time stop; the store no longer carries the dialer's classify pointer.",
+        "wz-runtime-tokio: LinkstateOpener::ask sends the node with no locators; LoopPeers::locator_learned and the Step::Dial arm start a waiting node.",
+        "Tests rewritten or added in the connect manager, the loop peers, the opener and the lwip slot node; four mcu CI pins move by one. docs/session-lifecycle-intent.md records D15 as built; the inventory reason of session-close-ingress gains a paragraph."
+      ],
+      "publishable_verification_bullets": [
+        "Run on pc2 and pc3 through bx: wz-session-core lifecycle tests 11 passed; wz-session-mcu 19 default, 49 adminspace-write, 59 read and write, 23 and 27 for the peer-node and verb legs at a room for two, admin_open_query 6 and 10; wz-runtime-tokio opener, loop peers and accept loop tests 53 passed; the lwip slot node open test passes; clippy with warnings denied is clean on the three crates in both feature sets. The lwip test a_node_with_fewer_slots_than_endpoints fails after the node test on this tree and on the unmodified tip alike, so it predates this round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The lwip test a_node_with_fewer_slots_than_endpoints_dials_what_it_can_and_the_rest_waits fails on the tip before this round when run after the node-by-zid test in the same process (B admitted 0, expected 1); alone it passes; not diagnosed. On AP the table-full refusal is the loop's and is logged, because the opener answers before the loop sees the request. Remaining rulings in order: D10, D12, D14. Hosted CI for this tree is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
