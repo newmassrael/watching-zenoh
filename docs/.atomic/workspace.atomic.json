@@ -303588,6 +303588,40 @@
         "Carried: O4 (h) timestamp ZID bound (the SCE owner's); the kit hardware measurement and the mold 2.30.0 link abort; the hosted verdict of tips after round 4029, which concurrent pushes keep cancelling."
       ]
     },
+    "Round 4052": {
+      "decision_summary": "Step 1 of decision D12 is built: the proof of who asks reaches the queryable, and nothing yet reads it. A permit that denies an unproven commander would break the in-band open of a fixed image before anything proves one, so the order is fixed: the requester's proof first, then the port permits(verb, commander) with default deny, then the commander role and its compiled-in lists, then an image that binds the verbs. QueryView gains requester(), the zid the key of the link proved and none otherwise; a claimed zid is source_info's and proves nothing. The slot profile's session says its proof to the process's observer before each dispatch and clears it after. The heap profile's authority stays keyed on the key expression until the owner rules whether it also takes the commander, so its dispatch does not say it yet.",
+      "changes_bullets": [
+        "wz-session-core: QueryView::requester (default none), handle_from and ProvenQuery in query_sink, QueryableRegistry::set_requester and its use in the one place a query view is built, SessionLinkActions::verified_peer_zid, SlotObserver::set_requester.",
+        "wz-session-mcu: the slot session's on_event says the proof around each dispatch.",
+        "Two tests: a sink is told who asked, and a registry hands the proof to a queryable. The design note records the order of building D12 and step 1 as built."
+      ],
+      "verification_bullets": [
+        "Run on pc2 and pc3 through bx: wz-session-core lib 835, 839 with the lifecycle features, 1014 in the query plane set with the registry test among them, the slot observer sessions test 2 of 2; wz-session-mcu 20, 52, 62 and the peer-node and verb legs 25 and 29; admin_open_query 6 and 10; runtime opener, loop peers and accept loop 55; lwip admin_node_slot 4 of 4; clippy with warnings denied clean on both crates in the feature sets above. The default-feature count of the core lib moved by one (the sink test); no CI pin names that count."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "D12 steps 2 to 4 remain: the port permits(verb, commander) with default deny, the commander role and compiled-in lists, an image that binds the verbs; then D14. Open for the owner: whether the heap profile's key-keyed authority also takes the commander. Nothing reads the requester yet, so no behaviour changed. Not witnessed: a verified requester reaching a queryable over a real secure channel on the slot profile. Hosted CI for the tip is unread."
+      ],
+      "publishable_decision_summary": "Step 1 of decision D12 is built: the proof of who asks reaches the queryable, and nothing yet reads it. A permit that denies an unproven commander would break the in-band open of a fixed image before anything proves one, so the order is fixed: the requester's proof first, then the port permits(verb, commander) with default deny, then the commander role and its compiled-in lists, then an image that binds the verbs. QueryView gains requester(), the zid the key of the link proved and none otherwise; a claimed zid is source_info's and proves nothing. The slot profile's session says its proof to the process's observer before each dispatch and clears it after. The heap profile's authority stays keyed on the key expression until the owner rules whether it also takes the commander, so its dispatch does not say it yet.",
+      "publishable_changes_bullets": [
+        "wz-session-core: QueryView::requester (default none), handle_from and ProvenQuery in query_sink, QueryableRegistry::set_requester and its use in the one place a query view is built, SessionLinkActions::verified_peer_zid, SlotObserver::set_requester.",
+        "wz-session-mcu: the slot session's on_event says the proof around each dispatch.",
+        "Two tests: a sink is told who asked, and a registry hands the proof to a queryable. The design note records the order of building D12 and step 1 as built."
+      ],
+      "publishable_verification_bullets": [
+        "Run on pc2 and pc3 through bx: wz-session-core lib 835, 839 with the lifecycle features, 1014 in the query plane set with the registry test among them, the slot observer sessions test 2 of 2; wz-session-mcu 20, 52, 62 and the peer-node and verb legs 25 and 29; admin_open_query 6 and 10; runtime opener, loop peers and accept loop 55; lwip admin_node_slot 4 of 4; clippy with warnings denied clean on both crates in the feature sets above. The default-feature count of the core lib moved by one (the sink test); no CI pin names that count."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D12 steps 2 to 4 remain: the port permits(verb, commander) with default deny, the commander role and compiled-in lists, an image that binds the verbs; then D14. Open for the owner: whether the heap profile's key-keyed authority also takes the commander. Nothing reads the requester yet, so no behaviour changed. Not witnessed: a verified requester reaching a queryable over a real secure channel on the slot profile. Hosted CI for the tip is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
