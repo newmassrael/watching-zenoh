@@ -301930,6 +301930,42 @@
         "The same pattern keeps recurring on this layer: a commit adds forwarder tests and does not move the guarded counts, and the layer then stops at its first stale leg, so each fix shows the next. Reading the layer on the build host after a change is the instrument. Still red from the last completed hosted run and not yet looked at here: the wz-capture transport kind table test (a run of it with the default features selected no test, since the module needs the dissect feature, so it was not reproduced), C1bnl, C1g, C0mut, E17, Q and the C1bzr docs ledger."
       ]
     },
+    "Round 4006": {
+      "decision_summary": "Two of the 1.10.2 items carried in O4 (f) are taken. A newer link state restates its node's role whether or not it was known (the graph filled it only while unknown), and the end of a brokered interest takes the finalised flags it had set off the gateway face (zenoh 1.10.2 unset_finalized), only for a copy that was finalized. The router_forward counts of Layer C1ay and the gating of the control-lane egress test were repaid in parallel by a peer round, so this round carries only its two new tests in the broker arm (278 to 280).",
+      "changes_bullets": [
+        "crates/wz-routing-graph/src/lib.rs: the full link-state update arm writes the role of each newer entry; test a_newer_linkstate_restates_a_known_role.",
+        "crates/wz-runtime-tokio/src/router_forward/brokered_interest.rs: a brokered copy records that it was finalized and clears its flags when its interest ends; two tests in router_forward.rs.",
+        "scripts/run-ci.sh: the interest broker arm of C1ay counted at 280.",
+        "docs/zenoh-api-on-the-engine.md: O4 (f) marked taken."
+      ],
+      "verification_bullets": [
+        "wz-routing-graph lib tests: 92 passed, with the new one. router_forward on the broker arm (routing-router-hat plus routing-interest-pending-gc): 280 passed. clippy -D warnings on the same features, all targets: clean.",
+        "Not run: the other layers at this tip, and the tests that read a link-state role through the autoconnect emit beyond the routing-graph lib."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (a) QUIC control stream opened on first write, (b) multicast compression key, (c) mixed-reliability companion batch limit, (d) stricter shared-memory negotiation, (e) unresponsive-peer close, (g) synchronous peer start conditions, (h) timestamp ZID bound (the generator's). The gossip arm of the link-state update still fills a role only while unknown, as the pin's singlehop gossip arm never writes it."
+      ],
+      "publishable_decision_summary": "Two of the 1.10.2 items carried in O4 (f) are taken. A newer link state restates its node's role whether or not it was known (the graph filled it only while unknown), and the end of a brokered interest takes the finalised flags it had set off the gateway face (zenoh 1.10.2 unset_finalized), only for a copy that was finalized. The router_forward counts of Layer C1ay and the gating of the control-lane egress test were repaid in parallel by a peer round, so this round carries only its two new tests in the broker arm (278 to 280).",
+      "publishable_changes_bullets": [
+        "crates/wz-routing-graph/src/lib.rs: the full link-state update arm writes the role of each newer entry; test a_newer_linkstate_restates_a_known_role.",
+        "crates/wz-runtime-tokio/src/router_forward/brokered_interest.rs: a brokered copy records that it was finalized and clears its flags when its interest ends; two tests in router_forward.rs.",
+        "scripts/run-ci.sh: the interest broker arm of C1ay counted at 280.",
+        "docs/zenoh-api-on-the-engine.md: O4 (f) marked taken."
+      ],
+      "publishable_verification_bullets": [
+        "wz-routing-graph lib tests: 92 passed, with the new one. router_forward on the broker arm (routing-router-hat plus routing-interest-pending-gc): 280 passed. clippy -D warnings on the same features, all targets: clean.",
+        "Not run: the other layers at this tip, and the tests that read a link-state role through the autoconnect emit beyond the routing-graph lib."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (a) QUIC control stream opened on first write, (b) multicast compression key, (c) mixed-reliability companion batch limit, (d) stricter shared-memory negotiation, (e) unresponsive-peer close, (g) synchronous peer start conditions, (h) timestamp ZID bound (the generator's). The gossip arm of the link-state update still fills a role only while unknown, as the pin's singlehop gossip arm never writes it."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
