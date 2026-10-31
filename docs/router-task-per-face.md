@@ -465,13 +465,45 @@ beside.
   sends after; wz's fan-out calls `send_one_to_face` per target, each a non-blocking enqueue (the probe) or a
   hold. If it holds `read` across the sends, a writer waits for the slowest of them; if it takes the target list
   under `read` and sends after, a face that left in between is sent to and finds it gone, which `deregister`
-  already tolerates. The second is the plan, to be confirmed by a test that deregisters mid-fan-out.
+  already tolerates. The second was the plan, to be confirmed by a test that deregisters mid-fan-out.
+  **Decided by 3e the other way, and held by a test (phase 4c):** a message takes one read guard and sends
+  under it, so `deregister`, which writes, waits for every fan-out that found the face and no fan-out after it
+  finds the face. Eight publishers' threads fan out to `demo/data` while a ninth registers a subscriber of it
+  and deregisters it two hundred times: every thread finishes, the face that stays gets every Put, and no face
+  that left is written to after `deregister` returned
+  (`a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left`). What a writer waits for is
+  the slowest send under the guard; a probe and a hold do not wait, a chain of fragments does (phase 6).
+  **What the test found on the way: under `task-per-face` a writer of the tables could wait for ever.** The
+  tables' read was the recursive form (`read_recursive`), which does not queue behind a waiting writer, so that
+  a method that reads may call one that reads (3b). With one task that was a reader at a time; with a thread per
+  face, eight faces routing without pause each took the guard before the last let it go, the lock never went
+  without a reader, and a face could not leave (the test's first form, with the churn waiting for the fan-out,
+  timed out at sixty seconds with the publishers still routing). Every writer of the tables waits the same way:
+  a face coming up, a declaration, a topology list. The top of `forward_frame`, where a face's thread holds no
+  guard of the tables, now takes them behind a waiting writer (`PlainRwLock::read_behind_writers`, parking_lot's
+  fair `read`); everything under it keeps the recursive read, which it needs. A guard of the fair kind must
+  not be taken by a thread that holds one already, and the only callers of `forward_frame` are the two face
+  drives of the accept loop, which hold none. With the recursive read put back the test times out again.
+  The first form of the test passed by not testing: its churn ran two hundred rounds in a millisecond, before
+  the publishers had sent anything, so no face ever left a fan-out. It now waits, every round, until the fan-out
+  has written to the face before the face leaves.
 - **The multicast ingress plane** (`route_mcast_ingress`, the DR election over `mcast_group_members`) reaches the
   forwarder through a channel into the same loop (`Step::McastIngress`). Under a task per face it becomes one
   more producer, and the member set it elects from has to be read consistently with the tables it routes by.
+  **Answered (phase 4c):** the member set is a lock of its own, read once per Put inside the read guard of the
+  tables and written by the loop without them (`set_mcast_group_members`), so neither order waits on the other,
+  and the election reads one whole set per Put. The group's subscriber set is written under a read guard of the
+  tables and read under one, so a writer of the tables, which excludes both, cannot meet it either. A test runs
+  four publishers' threads, the group's ingress and the member set moving between "this router is the gateway"
+  and "a larger one is" two hundred times each at once; every thread finishes and the client subscriber gets
+  every Put of both, the election deciding only the mesh's copy
+  (`the_multicast_ingress_routes_beside_the_faces_threads_while_its_member_set_moves`).
 - **The shared-memory relay** (`shm_relay`) holds chunk references for the length of a routed Push
   (`open_shm_relay_pass`) and has its own counters; the counters move in phase 1, and the pass guard must not be
-  held across an await.
+  held across an await. **Answered by construction:** the pass (`RelayPass<'_>`) borrows the forwarder, is
+  opened at the top of `route_push` and dropped when it returns, and `FaceForwarder::forward` is a synchronous
+  call, so no await can fall inside it on either value of `routing-face-drive`. Phase 6, which makes the
+  conduit's lock async, is the change that could put one there, and must keep the pass out of it.
 - **The gain is a prediction until phase 4 runs.** Layer E7s measures one loop's cost per message; a task per
   face is expected to move the knee of the 32-hog table and the size of the worst keepalive lateness, and it is
   not known by how much. If phase 3 (the lock) already costs more per message than it recovers, B is the

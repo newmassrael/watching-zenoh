@@ -223,9 +223,26 @@ impl<T> PlainRwLock<T> {
     /// this replaces allowed and what the router's code relies on (a method that reads calls one
     /// that reads the same table): the recursive form, which does not queue behind a writer that is
     /// waiting for the first guard, so the pair cannot deadlock. The price is that a steady stream
-    /// of readers can keep a writer waiting; the writers here are declarations and configuration.
+    /// of readers can keep a writer waiting for as long as the stream lasts, which is what
+    /// [`Self::read_behind_writers`] is for.
     pub fn read(&self) -> PlainReadGuard<'_, T> {
         self.0.read_recursive()
+    }
+
+    /// The value for reading, queued behind a writer that is waiting: a writer is let in before
+    /// the readers that came after it.
+    ///
+    /// For a thread that takes the lock over and over and holds no guard of it when it does, such
+    /// as each of a router's faces taking its tables once per message. Several such threads, each
+    /// with a guard taken before the last one let go, never leave the lock without a reader, and
+    /// with [`Self::read`] a writer (a face coming up, a declaration, a face leaving) would wait
+    /// for as long as they read, which under load is for ever (measured: eight faces' threads
+    /// routing without pause kept a face from leaving for a minute). This form lets it in.
+    ///
+    /// It must not be taken by a thread that already holds a guard of this lock: a writer waiting
+    /// for that guard would be ahead of this one, and the two would wait on each other.
+    pub fn read_behind_writers(&self) -> PlainReadGuard<'_, T> {
+        self.0.read()
     }
 
     /// The value for writing, waiting for every reader and writer to finish.

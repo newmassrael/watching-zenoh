@@ -3424,6 +3424,19 @@ impl RouterForwarder {
         }
     }
 
+    /// [`Self::on_tables`] for a face's own frame, taken behind any writer that waits
+    /// ([`PlainRwLock::read_behind_writers`]): every face's thread takes the tables once per
+    /// message, and with the recursive read their guards overlap without end, so that a face
+    /// coming up, a declaration or a face leaving waits for as long as the faces route. Only where
+    /// the thread holds no guard of the tables, which is the top of [`Self::forward_frame`]: a
+    /// face's drive calls it with nothing held.
+    fn on_tables_for_a_frame(&self) -> OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>> {
+        OnTables {
+            fwd: self,
+            tables: self.tables.read_behind_writers(),
+        }
+    }
+
     /// The forwarder with its tables held for writing: alone, until the result is dropped. A
     /// thread that holds them for writing must not take them again for any use, which is why
     /// the methods that write take `&mut self` and call the readers through it.
@@ -12447,7 +12460,7 @@ impl RouterForwarder {
         // Whatever a destination can take now goes first, so that what an earlier frame left
         // held is ahead of what this one adds; and the destinations this frame fills gate THIS
         // face, which is what `source` records until the guard drops.
-        let on = self.on_tables();
+        let on = self.on_tables_for_a_frame();
         on.drain_egress();
         // A frame that arrived on a JOINED aggregated link is routed as its session's primary
         // face's, against the one face table (keyexpr aliases, graph link, ACL subject): the
@@ -12563,7 +12576,7 @@ impl RouterForwarder {
                     _ => {}
                 }
             } else {
-                let on = self.on_tables();
+                let on = self.on_tables_for_a_frame();
                 if !on.admits_ingress(id, message) {
                     continue;
                 }
@@ -12947,6 +12960,221 @@ mod tests {
             sink.frame_count(),
             total,
             "every Put reached the subscriber's link"
+        );
+    }
+
+    /// Clears a flag when dropped, on every way out of the thread that holds it, so that the threads
+    /// that run while it is set stop also when that thread fails.
+    struct StopOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// A face that leaves while other faces' threads fan out to it (`docs/router-task-per-face.md`,
+    /// section 7, the first question). A fan-out reads its targets and sends to them under one read
+    /// guard of the tables, and `deregister` takes them for writing, so the face's leaving waits for
+    /// every fan-out that found it, and no fan-out that starts after finds it: once `deregister` has
+    /// returned, its link is given nothing more. Eight publisher faces forward Puts to `demo/data`
+    /// without pause while a ninth thread, two hundred times, registers a subscriber of
+    /// `demo/data`, waits until the fan-out has written to it, and deregisters it while the
+    /// publishers go on: every round is a face leaving in the middle of the fan-outs that target it.
+    /// The face that stays receives every Put, the count is exact, every thread finishes, and no
+    /// face that left was written to after it left.
+    #[test]
+    fn a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const PUBLISHERS: u64 = 8;
+        const ROUNDS: u64 = 200;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (subscriber, sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &subscriber);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        let mut publishers = Vec::new();
+        for p in 1..=PUBLISHERS {
+            let (actions, _sink) = face(zid(0xA0 + p as u8), WIRE_CLIENT);
+            fwd.register(FaceId(p), &actions);
+            publishers.push(FaceId(p));
+        }
+        sink.reset();
+        let churning = Arc::new(AtomicBool::new(true));
+        let (done, finished) = std::sync::mpsc::channel();
+        let mut threads = Vec::new();
+        for id in publishers {
+            let (fwd, churning, done) = (Arc::clone(&fwd), Arc::clone(&churning), done.clone());
+            threads.push(std::thread::spawn(move || {
+                let mut sent = 0usize;
+                while churning.load(Ordering::Acquire) {
+                    let put = wz_session_core::push_build::build_push_literal("demo/data", b"x")
+                        .expect("build push");
+                    forward_one(&fwd, id, NetworkMessage::Push(Box::new(put)));
+                    sent += 1;
+                }
+                done.send(sent).expect("the test is waiting");
+            }));
+        }
+        // What each churned face's link had been given at the moment `deregister` returned.
+        let left = {
+            let (fwd, churning) = (Arc::clone(&fwd), Arc::clone(&churning));
+            std::thread::spawn(move || {
+                // The publishers stop when the churn ends, however it ends: a churn that failed an
+                // assertion must fail the test and not leave it publishing for ever.
+                let _stop = StopOnDrop(Arc::clone(&churning));
+                let mut left = Vec::new();
+                for round in 0..ROUNDS {
+                    let id = FaceId(100 + round % 4);
+                    let (actions, churned) = face(zid(0xE0 + (round % 4) as u8), WIRE_CLIENT);
+                    fwd.register(id, &actions);
+                    forward_one(&fwd, id, declare_sub("demo/data"));
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while churned.frame_count() == 0 {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "round {round}: the fan-out never reached the face it was told of"
+                        );
+                        std::thread::yield_now();
+                    }
+                    fwd.deregister(id);
+                    let given = churned.frame_count();
+                    left.push((churned, given));
+                }
+                left
+            })
+        };
+        drop(done);
+        let mut total = 0;
+        for _ in 0..PUBLISHERS {
+            total += finished
+                .recv_timeout(Duration::from_secs(60))
+                .expect("every thread finishes: a thread that does not is waiting for a guard");
+        }
+        for t in threads {
+            t.join().expect("a publisher of the router finishes");
+        }
+        let left = left.join().expect("the churn finishes");
+        assert_eq!(fwd.data_seen(), total, "every Put was counted once");
+        assert_eq!(
+            sink.frame_count(),
+            total,
+            "the face that stayed was given every Put"
+        );
+        assert_eq!(left.len(), ROUNDS as usize);
+        for (round, (churned, given)) in left.iter().enumerate() {
+            assert_eq!(
+                churned.frame_count(),
+                *given,
+                "the face of round {round} was written to after it left"
+            );
+        }
+    }
+
+    /// The multicast ingress beside the faces' threads (`docs/router-task-per-face.md`, section 7,
+    /// the second question). Under a task per face the group's ingress, which the loop's own task
+    /// routes, is one producer more beside the faces' tasks, and the member set it elects its
+    /// gateway from is written by the loop while they route. The member set is a lock of its own,
+    /// read once per Put inside the read guard of the tables and written without them, so no order
+    /// of the two can wait on the other. Four publisher faces forward Puts without pause, a fifth
+    /// thread moves the member set between empty (this router the gateway) and a larger router
+    /// (another the gateway) without pause, and a sixth routes Puts of the group's ingress until it
+    /// has routed 200 and the election has gone both ways, so that the case under test happened:
+    /// every thread finishes, every Put of the group was put to the election once, and the client
+    /// subscriber is given every Put of both, because what the election decides is the mesh's copy
+    /// and not the local delivery.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn the_multicast_ingress_routes_beside_the_faces_threads_while_its_member_set_moves() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const PUBLISHERS: u64 = 4;
+        const PUTS: usize = 200;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (subscriber, sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &subscriber);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        let mut publishers = Vec::new();
+        for p in 1..=PUBLISHERS {
+            let (actions, _sink) = face(zid(0xA0 + p as u8), WIRE_CLIENT);
+            fwd.register(FaceId(p), &actions);
+            publishers.push(FaceId(p));
+        }
+        sink.reset();
+        let put = || {
+            wz_session_core::push_build::build_push_literal("demo/data", b"x").expect("build push")
+        };
+        // Everything but the ingress runs for as long as the ingress does.
+        let routing = Arc::new(AtomicBool::new(true));
+        let (done, finished) = std::sync::mpsc::channel();
+        let mut threads = Vec::new();
+        for id in publishers {
+            let (fwd, routing, done) = (Arc::clone(&fwd), Arc::clone(&routing), done.clone());
+            threads.push(std::thread::spawn(move || {
+                let mut sent = 0usize;
+                while routing.load(Ordering::Acquire) {
+                    forward_one(&fwd, id, NetworkMessage::Push(Box::new(put())));
+                    sent += 1;
+                }
+                done.send(sent).expect("the test is waiting");
+            }));
+        }
+        {
+            let (fwd, routing, done) = (Arc::clone(&fwd), Arc::clone(&routing), done.clone());
+            threads.push(std::thread::spawn(move || {
+                let larger = vec![0xFF; 16];
+                let mut round = 0usize;
+                while routing.load(Ordering::Acquire) {
+                    let members: &[Vec<u8>] = if round % 2 == 0 {
+                        std::slice::from_ref(&larger)
+                    } else {
+                        &[]
+                    };
+                    fwd.set_mcast_group_members(members);
+                    round += 1;
+                }
+                done.send(0).expect("the test is waiting");
+            }));
+        }
+        let ingress = {
+            let (fwd, routing) = (Arc::clone(&fwd), Arc::clone(&routing));
+            std::thread::spawn(move || {
+                let _stop = StopOnDrop(routing);
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut routed = 0usize;
+                while routed < PUTS
+                    || fwd.mcast_ingress_federated() == 0
+                    || fwd.mcast_ingress_suppressed() == 0
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the election did not go both ways while the member set moved \
+                         ({routed} routed)"
+                    );
+                    fwd.route_mcast_ingress(Priority::DEFAULT, true, &put(), None);
+                    routed += 1;
+                }
+                routed
+            })
+        };
+        drop(done);
+        let mut total = 0;
+        for _ in 0..threads.len() {
+            total += finished
+                .recv_timeout(Duration::from_secs(60))
+                .expect("every thread finishes: a thread that does not is waiting for a lock");
+        }
+        for t in threads {
+            t.join().expect("a thread of the router finishes");
+        }
+        let routed = ingress.join().expect("the ingress finishes");
+        assert_eq!(
+            fwd.mcast_ingress_federated() + fwd.mcast_ingress_suppressed(),
+            routed,
+            "every Put of the group was put to the election once"
+        );
+        assert_eq!(
+            sink.frame_count(),
+            total + routed,
+            "the subscriber was given every Put of the faces and of the group"
         );
     }
 
