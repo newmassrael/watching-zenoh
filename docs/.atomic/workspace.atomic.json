@@ -303724,6 +303724,40 @@
         "Open: the alpha and beta tags of 1.0.0 and the 0.x tags, whose wire may differ and which would test the foreign-version weight rather than the yes side; a path that loses more than 1.8% (the load was capped on purpose: going past it presses a network other people use); and the null side only on the protocols the corpus holds. The release binaries and sources are on the build host only."
       ]
     },
+    "Round 4056": {
+      "decision_summary": "Step 2 of decision D12 is built: the node's permit takes the commander. A closed type names who asks: the owner of the control pipe, a peer whose link's key proved a zid, or nobody shown. Every transport says which it is: the control port says the pipe, the in-band query says what the link proved, and a zid the sender merely claims is nobody. The compiled-in list of commanders is one list per verb, empty by default, naming only a verified zid; a zid listed for one verb commands no other, and a node commanded over a pipe as well gives the pipe every verb and the others to the list. Nothing a node does today changed: the write permit and the heap profile's key authority judge every commander alike, as they did, and an image that names its commanders gives the list in their place. The commander role in the declaration and the image that binds the verbs are the steps that remain.",
+      "changes_bullets": [
+        "wz-session-core: Commander in lifecycle_node; LifecycleNode::permits and the verdict functions take it; the heap query passes what the query carries and its key authority ignores it.",
+        "wz-session-mcu: the opening port, the in-band query, the control port, the permit trait and the conformance adapter take it; Commanders and PipeOr are new; the write permit judges every commander alike. deploy/host-slot-node: HostPermits permits the pipe alone.",
+        "Tests: the commander reaches the permit of every verb, a list is per verb and default deny, a listed commander is answered and the others are refused by name; the lifecycle-verbs CI pin moves by two."
+      ],
+      "verification_bullets": [
+        "Run on pc2 and pc3 through bx: wz-session-core lib 836, 840 with the lifecycle features; wz-session-mcu 20, 52, 62, the peer-node leg 25 and the verb leg 31, admin_open_query 6 and 10; wz-runtime-tokio opener, loop peers and accept loop 55; lwip admin_node_slot 4 of 4; the host node control channel 4 of 4; clippy with warnings denied clean on core (three feature sets), mcu (three) and lwip, and on the host node binary with and without tls. Clippy over all targets of the host node binary fails with a duplicate panic_impl in its own test target, unrelated to this round and not a CI command."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "D12 steps 3 and 4 remain: the commander role and the compiled-in lists in the declaration (wz_node.py and what it generates), and an image that binds the verbs with a list; then D14. Open for the owner: whether the heap profile's key authority also takes the commander. Nothing reads a list yet, so no node behaves differently. Hosted CI for the tip is unread."
+      ],
+      "publishable_decision_summary": "Step 2 of decision D12 is built: the node's permit takes the commander. A closed type names who asks: the owner of the control pipe, a peer whose link's key proved a zid, or nobody shown. Every transport says which it is: the control port says the pipe, the in-band query says what the link proved, and a zid the sender merely claims is nobody. The compiled-in list of commanders is one list per verb, empty by default, naming only a verified zid; a zid listed for one verb commands no other, and a node commanded over a pipe as well gives the pipe every verb and the others to the list. Nothing a node does today changed: the write permit and the heap profile's key authority judge every commander alike, as they did, and an image that names its commanders gives the list in their place. The commander role in the declaration and the image that binds the verbs are the steps that remain.",
+      "publishable_changes_bullets": [
+        "wz-session-core: Commander in lifecycle_node; LifecycleNode::permits and the verdict functions take it; the heap query passes what the query carries and its key authority ignores it.",
+        "wz-session-mcu: the opening port, the in-band query, the control port, the permit trait and the conformance adapter take it; Commanders and PipeOr are new; the write permit judges every commander alike. deploy/host-slot-node: HostPermits permits the pipe alone.",
+        "Tests: the commander reaches the permit of every verb, a list is per verb and default deny, a listed commander is answered and the others are refused by name; the lifecycle-verbs CI pin moves by two."
+      ],
+      "publishable_verification_bullets": [
+        "Run on pc2 and pc3 through bx: wz-session-core lib 836, 840 with the lifecycle features; wz-session-mcu 20, 52, 62, the peer-node leg 25 and the verb leg 31, admin_open_query 6 and 10; wz-runtime-tokio opener, loop peers and accept loop 55; lwip admin_node_slot 4 of 4; the host node control channel 4 of 4; clippy with warnings denied clean on core (three feature sets), mcu (three) and lwip, and on the host node binary with and without tls. Clippy over all targets of the host node binary fails with a duplicate panic_impl in its own test target, unrelated to this round and not a CI command."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D12 steps 3 and 4 remain: the commander role and the compiled-in lists in the declaration (wz_node.py and what it generates), and an image that binds the verbs with a list; then D14. Open for the owner: whether the heap profile's key authority also takes the commander. Nothing reads a list yet, so no node behaves differently. Hosted CI for the tip is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
