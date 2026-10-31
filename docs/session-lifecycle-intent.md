@@ -1115,7 +1115,7 @@ Each step lands with its own done-when; sizes are not estimated here.
          opener a process cannot be given (an accepted open, and a node that
          does not permit) through the process.
 
-## 5. Open
+## 5. Open, and what the rulings of 2026-11-01 closed
 
 - The out-of-band remainder. Step 7d built one command, `open <peer>`, because
   the port it maps onto, `NodeOpening`, was open-only on the fixed-memory
@@ -1128,8 +1128,8 @@ Each step lands with its own done-when; sizes are not estimated here.
   still not reachable out of band is a locator target with no expected zid,
   which D7 admits "when the authority admits locator targets" and which the
   fixed profile has no path for (a plain stream is refused `Unverifiable`,
-  D4). A control channel whose owner holds the pipe is such an authority, so
-  this needs a decision on who the authority is there; none is scheduled.
+  D4). A control channel whose owner holds the pipe is such an authority, and
+  D12 (section 5a) rules that only such a channel admits it.
   A hold that succeeds over a secure channel is run by the fourth leg of
   `wz_fixed_memory_tls_zenohd_interop`: the host image, built with `control`
   and room for one node and told a router by `--peer ZID=LOCATOR` (peers a
@@ -1137,25 +1137,110 @@ Each step lands with its own done-when; sizes are not estimated here.
   holds it over mutual TLS against zenohd, and `status`, `close`, `open` and
   `reset` with a generation on the control channel do what the contract says.
   What is not run is a Zephyr image that binds the verbs.
-- Whether a node may be told to open a session as the accepting side (a
-  listen intent). The contract of D5 and D6 has the dialling side only; adding
-  the other changes the contract, so it is the owner's ruling.
-- Whether the feature catalog records this scope as a regrade of
-  `session-close-ingress` or as a new atom. Round 2697 regraded that atom when
-  item 761 widened it; this is the owner's ruling either way.
+- A listen intent (a node told to open a session as the accepting side):
+  ruled in D10, section 5a.
+- Whether the catalog records this scope as a regrade or as a new atom: ruled
+  in D11, section 5a.
 - Whether a Push on an `@/` key reaches a zenohd plugin's subscriber. The
-  router routes `@/` keys as admin space; not measured.
+  router routes `@/` keys as admin space; not measured, and not a ruling.
 - Whether upstream zenoh admits a pinned self-signed certificate with name
-  verification off as D9 uses it. Not measured.
-- The memory and handshake time of D9's channel on the fixed-memory profile,
-  including how far the record size limit (RFC 8449) shrinks the 16 KiB
-  record buffers. Not measured.
-- Whether an `open` for a peer the link-state graphs do not hold should enter
-  the peer table and let its machine refuse with `no_locator` (D5), rather than
-  be refused at the opener (step 6c). The first lets a `Hello` the loop's
-  directory learns later satisfy it and shows the refusal in the status read;
-  the second keeps a flood of opens from filling the bounded table. Neither is
-  measured, and a table that reclaims a refused entry would allow both.
+  verification off as D9 uses it: measured on the listening side, not on the
+  dialling side (section 5a, last paragraph).
+- The memory and handshake time of D9's channel on the fixed-memory profile:
+  measured on the kit at Round 3493 (section 3, D9).
+- Whether an `open` for a peer the link-state graphs do not hold enters the peer
+  table: ruled in D15, section 5a.
+
+### 5a. Rulings (owner, 2026-11-01)
+
+The owner's criterion ("cost ignored, the most correct long-term, textbook,
+ultimate") is the one of D1 to D9 and of step 8, applied to the questions above
+and to what the close-ingress atom still lacked. Each ruling names its model;
+none is implemented by this section, and the work each leaves is listed after
+them.
+
+**D10. A listen intent is the passive form of `open`, not a new verb.** RFC 4271
+section 8.1.2 gives the BGP peer two administrative start events, `ManualStart`
+and `ManualStart_with_PassiveTcpEstablishment`: the same machine, started
+either to dial or to wait for the remote's connection and never dial. D5 took
+the first for `open`; the second is the passive form, spelled as the modifier
+chunk before the peer that `reset` already uses for its generation
+(`.../session/open/passive/<peer-zid>`; a zid is lower-case hex, so the word
+cannot be taken for one). A passive intent admits an inbound session whose
+proven zid (D1, D9) is the peer's and dials nothing; the machine reports
+`passive` in the status read. A node with no intent for a peer admits or refuses
+its inbound session as its accept policy already says, and a passive intent
+neither widens nor narrows that. Two ends that both dial are the connection
+collision `link_admission` already resolves (RFC 4271 section 6.8: compare
+the two zids, keep the link the lower one opened), so this adds no new rule.
+
+**D11. One atom.** `session-close-ingress` stays one atom, PARTIAL while it has
+residuals. A second atom would carry a second cargo feature gating the same
+verbs, the phantom split of catalog invariant 1 that Round 3450 declined when
+it lowered the grade instead; the per-verb features `lifecycle-close`,
+`lifecycle-reset` and `lifecycle-status` are the MCU crate's size selectors of
+one capability (6.10) and are not capabilities of their own. Round 2697 is the
+precedent for lowering a grade when scope widens.
+
+**D12. Authority is a function of the verified commander, per verb, default
+deny.** Mechanism is separated from policy and each verb carries the least
+authority it needs (Saltzer and Schroeder, 1975). The port `permits(verb)`
+becomes `permits(verb, commander)`, where `commander` is the zid the link's key
+proved (`peer_identity_verified`, D1), so a grant can name who may act as well
+as, through the key expression, what it may act on. A fixed image states its
+commanders in its declaration, per verb, as a compiled-in list of zids (a
+`commander` role beside `peer` in `wz_node.py`); an image with none binds no
+verb, which is today's default, and a wildcard commander does not exist.
+`status` is a verb of its own: it reads and changes nothing, and it still needs
+a permit because it reveals which peers a node holds. On the control channel
+the authority is possession of the pipe (the process that starts a node owns
+it, and a pipe proves no zid), so `HostPermits` stands and a node meant to be
+driven that way is built with `control`. The Zephyr image has no pipe, so its
+only authority is the in-band commander list. A locator target with no expected
+zid (D7) is admitted only on a channel whose owner holds the pipe, never in
+band.
+
+**D13. The Hello source is the scouting capability's to supply.** D3 gives the
+directory three sources (the build-time declaration, scouting `Hello`, the
+link-state flood), and a profile has the sources its build holds: AP has all
+three, a fixed profile has the declaration and never the flood, since it holds
+no routing graph. A `Hello` on a fixed profile needs a scouting receive there,
+which is the cooperative engine's scouting work; this atom depends on it and
+does not own it, so its completion no longer waits for it. When it lands, the
+`Hello` is one more producer into the directory and the verbs do not change.
+
+**D14. The witness on a built Zephyr image follows the image that binds the
+verbs.** The two residuals are one step in one order. An image first binds
+`Verbs` with a commander list (D12), because an image should not bind verbs
+before it says who may use them; then the kit lane (`admin_node_verdict.py`)
+gains the open by zid and the read of the admin root's `sessions[]` on that
+image, built with room for one node and a declared hint for the peer the lane
+runs. The lane's grammar change is the kit lane's file; this ruling is the
+instruction for it.
+
+**D15. An `open` for a peer the graphs do not hold enters the table.** An
+intent is declarative state: a configured BGP neighbour exists whether or not
+it is reachable, and a desired state in a reconciliation loop is recorded
+before it is satisfied. The machine reports `Refused` with cause `no_locator`
+in the status read, and a `Hello` or a hint learned later satisfies it with no
+second open. The table is bounded, so a flood of opens is refused by `NoRoom`
+and not by the opener's guess about reachability, and a `close` removes the
+row. This replaces the refusal at the opener of step 6c.
+
+What the rulings leave to build, in order: D10 (the SCXML event and the intent's
+`passive` attribute, the key chunk, the control port's word, the status field and
+two cases in the contract's table); D12 (the commander in the permit port, the
+`commander` role, the image that binds the verbs); D15 (the opener enters the
+table, and its refusal cases move to the status read); D14 (the lane's step on
+the image). D11 and D13 change what the atom is graded against and need no code.
+
+What is measured of the one question left, upstream zenohd and D9's pinned
+self-signed certificate: the reference router built at the pin, with mutual TLS
+on and the device's self-signed certificate as its `root_ca_certificate`,
+admits the device and refuses another device (`wz_fixed_memory_tls_zenohd_interop`,
+which Layer Z runs; its fourth leg drives the verbs over the same channel). The
+dialling side, a zenohd that connects to a device with name verification
+off, is not measured.
 
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
