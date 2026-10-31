@@ -59,6 +59,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 zenoh-core = { path = "../wz-zenoh-core" }
 zenoh-result = { path = "../wz-zenoh-result", features = ["default"] }
 
+# The log setup is tested against the `log` crate, which the engine records through.
+[dev-dependencies]
+log = "0.4"
+
 # The interface list of a Unix system is read through `pnet_datalink`.
 [target.'cfg(unix)'.dependencies]
 pnet_datalink = "0.35.0"

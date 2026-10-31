@@ -4783,6 +4783,7 @@ dependencies = [
  "humantime",
  "lazy_static",
  "libloading",
+ "log",
  "pnet_datalink",
  "schemars 1.2.3",
  "serde",

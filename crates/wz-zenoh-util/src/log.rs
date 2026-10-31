@@ -58,6 +58,21 @@ where
     init_env_filter(env_filter);
 }
 
+/// Install `subscriber` as the process's, for `tracing` events and for the records of the `log`
+/// crate.
+///
+/// Modified by newmassrael: upstream installs a subscriber with `set_global_default`, which
+/// carries only what is recorded through `tracing`. The engine of this workspace, and the
+/// crates it is built on, record through the `log` crate, so under that call a process that set
+/// up its logging here saw not one line of the router's face lifecycle, its flow control or its
+/// dials. `try_init` installs the same subscriber and, with the `tracing-log` feature of
+/// `tracing-subscriber` (on by default), the bridge that turns a `log` record into a `tracing`
+/// event, so the one filter governs both. An installation that fails because the process has a
+/// subscriber already is ignored, as upstream's was.
+fn install<S: tracing_subscriber::util::SubscriberInitExt>(subscriber: S) {
+    let _ = subscriber.try_init();
+}
+
 fn init_env_filter(env_filter: EnvFilter) {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -66,8 +81,7 @@ fn init_env_filter(env_filter: EnvFilter) {
         .with_level(true)
         .with_target(true);
 
-    let subscriber = subscriber.finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    install(subscriber.finish());
 }
 
 #[derive(Debug)]
@@ -153,8 +167,7 @@ pub fn init_log_with_callback(
     enabled: impl Fn(&Metadata) -> bool + Send + Sync + 'static,
     callback: impl Fn(LogRecord) + Send + Sync + 'static,
 ) {
-    let subscriber = tracing_subscriber::registry().with(Layer { enabled, callback });
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    install(tracing_subscriber::registry().with(Layer { enabled, callback }));
 }
 
 #[cfg(feature = "test")]
@@ -171,4 +184,38 @@ pub fn init_log_test() {
 
     let subscriber = subscriber.finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
+/// Added by newmassrael: the one test of this module. The subscriber is process-wide and is
+/// installed once, so it is one test, through [`init_log_with_callback`], which shares
+/// [`install`] with the setup from the environment: what carries a `log` record for the one
+/// carries it for the other.
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::{init_log_with_callback, LogRecord};
+
+    static RECORDS: Mutex<Vec<LogRecord>> = Mutex::new(Vec::new());
+
+    /// The engine of this workspace records through the `log` crate. Under upstream's
+    /// installation (`set_global_default`) that record never reached the subscriber, and a host
+    /// that took its logs through the callback was handed none of the router's lines.
+    #[test]
+    fn a_record_of_the_log_crate_reaches_the_callback_of_a_host() {
+        init_log_with_callback(
+            |_| true,
+            |record| RECORDS.lock().expect("records").push(record),
+        );
+        log::error!("a router line recorded through the log crate");
+        let records = RECORDS.lock().expect("records");
+        assert!(
+            records.iter().any(|record| record
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("recorded through the log crate"))),
+            "the callback was handed {} record(s), none of them the line the `log` crate was given",
+            records.len()
+        );
+    }
 }
