@@ -303002,6 +303002,56 @@
         "Carried: Layer Z8 liveliness (test_liveliness_regression_3, `sub.try_recv().unwrap().is_none()` failed once in run 41192748568, 45 of 46) is measured next to say whether it is timing or a router change; O4 (h) is the SCE owner's."
       ]
     },
+    "Round 4036": {
+      "decision_summary": "Phase 4b of the router with a task per face: a gated face is woken by the pass that releases it, once. Under 4a one Notify served every gated face, any link's room woke them all, and each face woken drained and swept every destination itself, which a task per face turns into one full pass per gated face per notice under the queues' locks. Now a link's room wakes the loop only, read_gate only reads, each face waits on its own Notify, and release_gates wakes exactly the faces whose last gate it took. It also closes a hole 4a opened: a gate asserted after another face's thread drained its destination found no later pass, because a router holding nothing runs none, and the face waited for ever. The face that asserts a gate now rechecks it (hold_and_recheck). The nine router_forward count guards move to what the build host printed.",
+      "changes_bullets": [
+        "egress.rs: Credit loses the shared wake; room_waker wakes the loop only; release_gates collects the faces it frees and wakes each one's own Notify; gate_of only reads; drain_egress releases only after a pass that moved something; hold returns whether it asserted a gate and credited_send rechecks through hold_and_recheck; a departing face goes through forget_egress_and_release",
+        "router_forward.rs: RouterFaceState gains gate_wake, the face's own Notify",
+        "accept_loop.rs: the READ_GATE_BACKSTOP comment says what ends a healthy wait now",
+        "egress_tests.rs: four tests take the loop's pass explicitly; the room test asserts the link wakes the loop and not the face; two new tests (woken by the pass that takes the last gate; a gate asserted after its destination drained is released at once, through a test-only hook in the window)",
+        "run-ci.sh: the nine C1AY router_forward guards move +3 (+4 with transport-qos): +2 are these tests, the rest was already printed at b58a5fc59d (270 and 275 against 269 and 273)",
+        "docs/router-task-per-face.md: phase 4b written"
+      ],
+      "verification_bullets": [
+        "router_forward::egress tests under routing-router-hat: 29 passed; clippy -D warnings of wz-runtime-tokio with routing-router-hat clean; cargo fmt clean at the commit hook",
+        "Mutation: with the recheck removed, the window test fails on its gate assertion (left 1, right 0); a stress test of eight filling threads and one draining thread passed ten of ten against that mutant and was therefore not kept",
+        "guarded_count_gate over the commit: nine of nine reached guards OK at 272, 277, 297, 280, 283, 324, 272, 274, 284",
+        "Layer E7m on the build host: 13 of 13, the live pair beside a subscriber that stopped reading received 1200 of 1200 with the longest gap about 13 ms for blocking and for droppable puts",
+        "Layer E7s on pc2 at the default task-per-face: six of six; one shared core 8951 per second, within the earlier runs; its publishers send droppable puts, so it does not load the gate path"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Section 7 tests still owed under task-per-face: a face deregistered mid-fan-out, the multicast ingress as a producer beside the face tasks, the shm relay guard across an await; then phases 5 (room reservation) and 6 (async conduit lock)",
+        "No E7 lane puts with blocking congestion under load; the gate path is held by the egress unit tests and E7m's live-pair test, not by a load figure",
+        "The guards were already one behind (two with transport-qos) before this commit; which earlier commit added the tests was not traced"
+      ],
+      "publishable_decision_summary": "Phase 4b of the router with a task per face: a gated face is woken by the pass that releases it, once. Under 4a one Notify served every gated face, any link's room woke them all, and each face woken drained and swept every destination itself, which a task per face turns into one full pass per gated face per notice under the queues' locks. Now a link's room wakes the loop only, read_gate only reads, each face waits on its own Notify, and release_gates wakes exactly the faces whose last gate it took. It also closes a hole 4a opened: a gate asserted after another face's thread drained its destination found no later pass, because a router holding nothing runs none, and the face waited for ever. The face that asserts a gate now rechecks it (hold_and_recheck). The nine router_forward count guards move to what the build host printed.",
+      "publishable_changes_bullets": [
+        "egress.rs: Credit loses the shared wake; room_waker wakes the loop only; release_gates collects the faces it frees and wakes each one's own Notify; gate_of only reads; drain_egress releases only after a pass that moved something; hold returns whether it asserted a gate and credited_send rechecks through hold_and_recheck; a departing face goes through forget_egress_and_release",
+        "router_forward.rs: RouterFaceState gains gate_wake, the face's own Notify",
+        "accept_loop.rs: the READ_GATE_BACKSTOP comment says what ends a healthy wait now",
+        "egress_tests.rs: four tests take the loop's pass explicitly; the room test asserts the link wakes the loop and not the face; two new tests (woken by the pass that takes the last gate; a gate asserted after its destination drained is released at once, through a test-only hook in the window)",
+        "run-ci.sh: the nine C1AY router_forward guards move +3 (+4 with transport-qos): +2 are these tests, the rest was already printed at b58a5fc59d (270 and 275 against 269 and 273)",
+        "docs/router-task-per-face.md: phase 4b written"
+      ],
+      "publishable_verification_bullets": [
+        "router_forward::egress tests under routing-router-hat: 29 passed; clippy -D warnings of wz-runtime-tokio with routing-router-hat clean; cargo fmt clean at the commit hook",
+        "Mutation: with the recheck removed, the window test fails on its gate assertion (left 1, right 0); a stress test of eight filling threads and one draining thread passed ten of ten against that mutant and was therefore not kept",
+        "guarded_count_gate over the commit: nine of nine reached guards OK at 272, 277, 297, 280, 283, 324, 272, 274, 284",
+        "Layer E7m on the build host: 13 of 13, the live pair beside a subscriber that stopped reading received 1200 of 1200 with the longest gap about 13 ms for blocking and for droppable puts",
+        "Layer E7s on pc2 at the default task-per-face: six of six; one shared core 8951 per second, within the earlier runs; its publishers send droppable puts, so it does not load the gate path"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Section 7 tests still owed under task-per-face: a face deregistered mid-fan-out, the multicast ingress as a producer beside the face tasks, the shm relay guard across an await; then phases 5 (room reservation) and 6 (async conduit lock)",
+        "No E7 lane puts with blocking congestion under load; the gate path is held by the egress unit tests and E7m's live-pair test, not by a load figure",
+        "The guards were already one behind (two with transport-qos) before this commit; which earlier commit added the tests was not traced"
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
