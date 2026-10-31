@@ -303870,6 +303870,42 @@
         "Read the next hosted run per job for Z8 liveliness. The router-mode Local face of other planes (subscribers, queryables) is unchanged."
       ]
     },
+    "Round 4060": {
+      "decision_summary": "Layer E6 did not build its demo: three errors at the locator_learned arm of decision D15 in the face loop (cannot find macro peer_cx, cannot find macro take_peer_actions, cannot find value peers), so 29 of the lane's 30 guarded legs did not run. The arm was gated on session-close-ingress alone, while the peers table and the two macros that wrap the planner are defined under router-connect-reconcile, and the two features do not imply each other; the E6 demo is built with the first and not the second. The arm and its not-branch are now gated on both, as the D10 arm beside it already was. The error was reproduced with the E6 demo's own build command before the change and the same command builds after it; the loop also compiles with both features on and with router-connect-reconcile alone, and clippy is clean on the feature set without it. The change is a gate and moves no behaviour in a build that had the machines. The pins of accept_loop.rs and of wz-session-core session_actions.rs moved to the read blobs: the second changed after its pin by the probe of a declaration, an interest and a final (the held-data ordering of round 4058), which touches nothing the reason says of the close request, the out-of-band slot or the loop-head raise.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: the locator_learned arm and its not-branch are gated on router-connect-reconcile and session-close-ingress together.",
+        "docs/reason-review-pins.md: the rows of accept_loop.rs and wz-session-core session_actions.rs at the read blobs."
+      ],
+      "verification_bullets": [
+        "Reported by the session that landed D12 and the router rounds after reading Layer E6 on its tree; reproduced here with `cargo build -p wz-ap-demo --features routing-peer,router-hat-router,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,tls,zenoh-config` on a build host: three errors at accept_loop.rs 4021-4023.",
+        "After the change on a build host: the same demo build exits 0; cargo check of wz-runtime-tokio --lib exits 0 with routing-peer,router-connect-reconcile,session-close-ingress,transport-link-tls and with routing-peer,router-connect-reconcile; cargo clippy -D warnings --lib exits 0 with routing-peer,session-close-ingress,transport-link-tls.",
+        "reason_review_pin_gate --check OK; rustfmt --check clean.",
+        "Not run: Layer E6 itself (29 legs) on this tree, and the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Carried: Layer E6 run in full on a build host after this lands; O4 (h) waits for the SCE generator fix; the kit hardware measurement and the mold 2.30.0 link abort; the hosted verdict of tips after round 4029."
+      ],
+      "publishable_decision_summary": "Layer E6 did not build its demo: three errors at the locator_learned arm of decision D15 in the face loop (cannot find macro peer_cx, cannot find macro take_peer_actions, cannot find value peers), so 29 of the lane's 30 guarded legs did not run. The arm was gated on session-close-ingress alone, while the peers table and the two macros that wrap the planner are defined under router-connect-reconcile, and the two features do not imply each other; the E6 demo is built with the first and not the second. The arm and its not-branch are now gated on both, as the D10 arm beside it already was. The error was reproduced with the E6 demo's own build command before the change and the same command builds after it; the loop also compiles with both features on and with router-connect-reconcile alone, and clippy is clean on the feature set without it. The change is a gate and moves no behaviour in a build that had the machines. The pins of accept_loop.rs and of wz-session-core session_actions.rs moved to the read blobs: the second changed after its pin by the probe of a declaration, an interest and a final (the held-data ordering of round 4058), which touches nothing the reason says of the close request, the out-of-band slot or the loop-head raise.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: the locator_learned arm and its not-branch are gated on router-connect-reconcile and session-close-ingress together.",
+        "docs/reason-review-pins.md: the rows of accept_loop.rs and wz-session-core session_actions.rs at the read blobs."
+      ],
+      "publishable_verification_bullets": [
+        "Reported by the session that landed D12 and the router rounds after reading Layer E6 on its tree; reproduced here with `cargo build -p wz-ap-demo --features routing-peer,router-hat-router,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,tls,zenoh-config` on a build host: three errors at accept_loop.rs 4021-4023.",
+        "After the change on a build host: the same demo build exits 0; cargo check of wz-runtime-tokio --lib exits 0 with routing-peer,router-connect-reconcile,session-close-ingress,transport-link-tls and with routing-peer,router-connect-reconcile; cargo clippy -D warnings --lib exits 0 with routing-peer,session-close-ingress,transport-link-tls.",
+        "reason_review_pin_gate --check OK; rustfmt --check clean.",
+        "Not run: Layer E6 itself (29 legs) on this tree, and the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried: Layer E6 run in full on a build host after this lands; O4 (h) waits for the SCE generator fix; the kit hardware measurement and the mold 2.30.0 link abort; the hosted verdict of tips after round 4029."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
