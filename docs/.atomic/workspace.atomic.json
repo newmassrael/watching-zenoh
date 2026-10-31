@@ -303190,6 +303190,38 @@
         "The fix is the design of the Local face: ask for tokens through the forwarder's own client interest (current only with history) instead of telling the face every token. It belongs to the router-mode work that holds the node's declarations in the Local hat; not started."
       ]
     },
+    "Round 4041": {
+      "decision_summary": "The open questions of the session lifecycle contract are ruled under the standing criterion (cost ignored, the most correct long-term, textbook, ultimate), D10 to D15 of the design note. A listen intent is the passive form of open on the same peer machine, as RFC 4271 section 8.1.2 has two start events; the collision of two dialling ends is the rule link_admission already holds (D10). The close-ingress atom stays one atom (D11). Authority is a function of the verified commander per verb, default deny, with a compiled-in commander list for an image that has no pipe, and the control channel's authority is possession of the pipe (D12). The Hello source on a fixed profile is the scouting capability's (D13). The Zephyr witness follows the image that binds the verbs (D14). An open for an unplaced peer enters the bounded table and reports no_locator (D15). The atom's reason is graded against what remains. The grade stays PARTIAL; nothing is implemented by this round.",
+      "changes_bullets": [
+        "docs/session-lifecycle-intent.md: section 5 retitled and its open bullets point to the rulings; a new section 5a holds D10 to D15, the work they leave in order, and what is measured of the one question left.",
+        "The inventory entry session-close-ingress: one paragraph appended to its reason through set_inventory_status; status, source and section reference unchanged."
+      ],
+      "verification_bullets": [
+        "After the mutation, validate-workspace reports 14 T1 orphans, none new; the catalog audit passes with REMAINING WORK still 2; the store reason citation gate passes. The claims the rulings rest on were read in the tree: D3's three sources, the link_admission module and its reference to RFC 4271 section 6.8, the Round 3493 measurement of the channel on the kit, and the Layer Z legs that run the pinned self-signed certificate against the reference router. Documentation and a grade paragraph only; no code and no test changed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The rulings are not implemented. In order: D10 (the SCXML event, the intent's passive attribute, the key chunk, the control port's word, the status field and two cases of the contract table), D12 (the commander in the permit port, the commander role of a declaration, the image that binds the verbs), D15 (the opener enters the table), D14 (the kit lane's step on that image). Not measured: a router that dials a device with name verification off, and a Push on an @/ key reaching a plugin subscriber. Hosted CI for the current tree is unread."
+      ],
+      "publishable_decision_summary": "The open questions of the session lifecycle contract are ruled under the standing criterion (cost ignored, the most correct long-term, textbook, ultimate), D10 to D15 of the design note. A listen intent is the passive form of open on the same peer machine, as RFC 4271 section 8.1.2 has two start events; the collision of two dialling ends is the rule link_admission already holds (D10). The close-ingress atom stays one atom (D11). Authority is a function of the verified commander per verb, default deny, with a compiled-in commander list for an image that has no pipe, and the control channel's authority is possession of the pipe (D12). The Hello source on a fixed profile is the scouting capability's (D13). The Zephyr witness follows the image that binds the verbs (D14). An open for an unplaced peer enters the bounded table and reports no_locator (D15). The atom's reason is graded against what remains. The grade stays PARTIAL; nothing is implemented by this round.",
+      "publishable_changes_bullets": [
+        "docs/session-lifecycle-intent.md: section 5 retitled and its open bullets point to the rulings; a new section 5a holds D10 to D15, the work they leave in order, and what is measured of the one question left.",
+        "The inventory entry session-close-ingress: one paragraph appended to its reason through set_inventory_status; status, source and section reference unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "After the mutation, validate-workspace reports 14 T1 orphans, none new; the catalog audit passes with REMAINING WORK still 2; the store reason citation gate passes. The claims the rulings rest on were read in the tree: D3's three sources, the link_admission module and its reference to RFC 4271 section 6.8, the Round 3493 measurement of the channel on the kit, and the Layer Z legs that run the pinned self-signed certificate against the reference router. Documentation and a grade paragraph only; no code and no test changed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The rulings are not implemented. In order: D10 (the SCXML event, the intent's passive attribute, the key chunk, the control port's word, the status field and two cases of the contract table), D12 (the commander in the permit port, the commander role of a declaration, the image that binds the verbs), D15 (the opener enters the table), D14 (the kit lane's step on that image). Not measured: a router that dials a device with name verification off, and a Push on an @/ key reaching a plugin subscriber. Hosted CI for the current tree is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
