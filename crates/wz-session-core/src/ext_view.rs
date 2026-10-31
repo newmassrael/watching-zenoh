@@ -241,7 +241,7 @@ mod query {
     use super::{
         CodecStorage, ExtEntryBytes, ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryView, SceByteBuf,
     };
-    use wz_codecs::ext_entry::ExtEntryUnknownTag;
+    use sce_forge_runtime::codec::UnknownTag;
     use wz_codecs::query_ext_entry::{
         QueryExtEntryOwned, QueryExtEntryOwnedVariant, QueryExtEntryUnknownTag,
     };
@@ -413,13 +413,14 @@ mod query {
             }
             ExtEntryOwnedVariant::Default { tag, body } => {
                 // The two entries read the same two-bit tag and name the same arms, so a tag the
-                // generic entry's default arm holds is one the Query's holds (the assertion
-                // below); the two types are each their own, which is why the tag is rebuilt and
-                // not carried over.
-                let Some(tag) = QueryExtEntryUnknownTag::new(tag.get()) else {
-                    unreachable!("an unknown tag of the generic entry is one of the Query's")
-                };
-                QueryExtEntryOwnedVariant::Default { tag, body }
+                // generic entry's default arm holds is one the Query's holds. The conversion
+                // proves it at compile time: it builds only when the target admits every tag the
+                // source can hold, so a codec change that gives the two different arms stops the
+                // build here.
+                QueryExtEntryOwnedVariant::Default {
+                    tag: QueryExtEntryUnknownTag::from_unknown(tag),
+                    body,
+                }
             }
         };
         QueryExtEntryOwned {
@@ -427,21 +428,6 @@ mod query {
             body,
         }
     }
-
-    // The two entries' default arms hold the same tags: checked for every byte, so a codec
-    // change that gives them different arms stops the build here and not in a `None` at run
-    // time. It is what `query_ext_from_generic` rests on.
-    const _: () = {
-        let mut tag = 0u16;
-        while tag < 256 {
-            assert!(
-                ExtEntryUnknownTag::new(tag as u8).is_some()
-                    == QueryExtEntryUnknownTag::new(tag as u8).is_some(),
-                "the generic and the Query extension entries name different unknown tags"
-            );
-            tag += 1;
-        }
-    };
 }
 
 #[cfg(feature = "codec-request")]
