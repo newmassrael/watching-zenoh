@@ -302408,6 +302408,42 @@
         "Round 4014's carry stands: the destination wake list, the section 7 questions, and more E7s runs before reading the faces DOWN counts"
       ]
     },
+    "Round 4020": {
+      "decision_summary": "The routing row of docs/z8-expected.tsv is raised from `fail 7` to `pass 8`. Upstream's routing file lost a recipe of three_node_combination in about one run in four, and the cause found in round 4017 (a probe that waited for the lock of a lane which a blocking send holds across its wait for room, and so stopped the loop of a node for up to 5 s) is removed. The file itself, run through the suite tool, passed in 8 of 8 runs on a tree with that round, 213 to 228 s each. At the old rate (one in four) eight passes in a row have a chance of about one in ten, so the figure is a reading of the evidence together with the mechanism, which was shown by 59 registrations of 4.85 to 4.96 s per 960 recipes before and none in 11 complete runs after, and not a proof of stability: the hosted lane runs this file, and a recipe lost there is a red to read at once.",
+      "changes_bullets": [
+        "docs/z8-expected.tsv: the routing row is `pass 8` (8 tests run and pass, 2 are ignored upstream), its reason says what the loss of a recipe was and what removed it."
+      ],
+      "verification_bullets": [
+        "Locally, on the tree of round 4017: upstream's routing file through the suite tool 8 times, `pass ran=8 passed=8 ignored=2` every time, 213 to 228 s; the expectation gate grades that report at 0 below the table against the raised row, and its self-test passes. Not run: the other 32 files of the table on this tree, the hosted run of this change. The probe's one stop of a whole process (round 4017's carry) was not seen in these 8 runs of the file; that is eight runs, not a reason to think it gone."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, first: the stop of the whole process seen once in about twelve complete runs of the probe (every node silent from one instant, the node loops asleep on a lock; RouterState::close joins a node thread with no limit). Its cause is not known and no stack was read. Take the stack: run the probe as a child of a debugger until one run stops, or give each node loop a watchdog that logs the step it is in after a stall.",
+        "Owed: a test of the barrier flush before and after a control message with QoS and auto batching (the lane test with QoS does not reach it).",
+        "Owed: gossip dials are never retried, and only the first dialable locator of a node is tried (upstream retries and tries every locator).",
+        "Owed: measure regions as a whole on this tree and raise its row; ten tests of scenario 1 time out (the client node) and 72 fail on the count of upstream's routing steps by tracing span.",
+        "Owed: the whatami a link state restates (upstream 1.10.2 network.rs sets it on every newer link state, wz-routing-graph only while unknown); the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
+      ],
+      "publishable_decision_summary": "The routing row of docs/z8-expected.tsv is raised from `fail 7` to `pass 8`. Upstream's routing file lost a recipe of three_node_combination in about one run in four, and the cause found in round 4017 (a probe that waited for the lock of a lane which a blocking send holds across its wait for room, and so stopped the loop of a node for up to 5 s) is removed. The file itself, run through the suite tool, passed in 8 of 8 runs on a tree with that round, 213 to 228 s each. At the old rate (one in four) eight passes in a row have a chance of about one in ten, so the figure is a reading of the evidence together with the mechanism, which was shown by 59 registrations of 4.85 to 4.96 s per 960 recipes before and none in 11 complete runs after, and not a proof of stability: the hosted lane runs this file, and a recipe lost there is a red to read at once.",
+      "publishable_changes_bullets": [
+        "docs/z8-expected.tsv: the routing row is `pass 8` (8 tests run and pass, 2 are ignored upstream), its reason says what the loss of a recipe was and what removed it."
+      ],
+      "publishable_verification_bullets": [
+        "Locally, on the tree of round 4017: upstream's routing file through the suite tool 8 times, `pass ran=8 passed=8 ignored=2` every time, 213 to 228 s; the expectation gate grades that report at 0 below the table against the raised row, and its self-test passes. Not run: the other 32 files of the table on this tree, the hosted run of this change. The probe's one stop of a whole process (round 4017's carry) was not seen in these 8 runs of the file; that is eight runs, not a reason to think it gone."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, first: the stop of the whole process seen once in about twelve complete runs of the probe (every node silent from one instant, the node loops asleep on a lock; RouterState::close joins a node thread with no limit). Its cause is not known and no stack was read. Take the stack: run the probe as a child of a debugger until one run stops, or give each node loop a watchdog that logs the step it is in after a stall.",
+        "Owed: a test of the barrier flush before and after a control message with QoS and auto batching (the lane test with QoS does not reach it).",
+        "Owed: gossip dials are never retried, and only the first dialable locator of a node is tried (upstream retries and tries every locator).",
+        "Owed: measure regions as a whole on this tree and raise its row; ten tests of scenario 1 time out (the client node) and 72 fail on the count of upstream's routing steps by tracing span.",
+        "Owed: the whatami a link state restates (upstream 1.10.2 network.rs sets it on every newer link state, wz-routing-graph only while unknown); the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
