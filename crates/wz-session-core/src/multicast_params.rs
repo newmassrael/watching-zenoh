@@ -173,7 +173,8 @@ pub struct MulticastParams {
     /// 1.10.2 reads the key into the multicast manager,
     /// `io/zenoh-transport/src/multicast/manager.rs` @ `self = self.compression(*config.transport().multicast().compression().enabled());`;
     /// 1.10.1 never did). The same wrap as the unicast session's
-    /// ([`crate::compression`]), but with no negotiation to switch it on: multicast has no
+    /// (`crate::compression`, a build with `transport-compression` has it), but with no
+    /// negotiation to switch it on: multicast has no
     /// handshake, so every member of a group must run the same setting, as for `batch_size`
     /// and `is_qos`, and a peer that does not reads the header byte as the start of a
     /// message. A plain bool, inert without the `transport-compression` feature (the key is
