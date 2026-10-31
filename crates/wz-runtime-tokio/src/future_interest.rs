@@ -123,6 +123,25 @@ pub enum InterestOrigin {
     /// the admission's `is_client` gate. Fixing a REPORT by changing the data
     /// plane is the trade this distinction exists to refuse.
     Mesh,
+    /// A face of a region the pin's PEER hat serves on a ROUTER node's south side: a peer of a
+    /// group the node is the gateway of. Push paths reach it, as for a client, and for the same
+    /// reason: the pin's peer hat sends a face a declaration only when the face is north-bound or
+    /// holds a matching interest
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn maybe_propagate_subscriber`). A face
+    /// north of the node is told unasked, and is not kept here.
+    ///
+    /// It differs from a [`Client`](Self::Client) in what a push may carry: the peers of one
+    /// region are linked to one another and told what each declares there, so a declaration
+    /// that a peer of the region made is never pushed to another face of the same region (the
+    /// `reaches` filter of [`FutureInterestStore::pushes_for_new_in`]).
+    PeerHat,
+}
+
+impl InterestOrigin {
+    /// Whether the push paths may reach a face held under this role.
+    fn is_pushed_to(self) -> bool {
+        matches!(self, Self::Client | Self::PeerHat)
+    }
 }
 
 /// One face's FUTURE interests + the declarations already pushed to it. See
@@ -228,7 +247,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     fn push_faces_mut(&mut self) -> impl Iterator<Item = (&FaceId, &mut FaceFutureInterests<V>)> {
         self.by_face
             .iter_mut()
-            .filter(|(_, state)| state.origin == InterestOrigin::Client)
+            .filter(|(_, state)| state.origin.is_pushed_to())
     }
 
     /// Record a CLIENT face's FUTURE interest for `target` (a resolved literal; a
@@ -268,6 +287,24 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     ) {
         let state = self.by_face.entry(face).or_default();
         state.origin = InterestOrigin::Mesh;
+        state
+            .interests
+            .insert(interest_id, FutureInterest { target, aggregate });
+    }
+
+    /// Record the FUTURE interest of a face of a south PEER-hat region of a router node. Same
+    /// bookkeeping as [`store_interest`](Self::store_interest); the role it stamps is
+    /// [`InterestOrigin::PeerHat`], which lets the push paths reach the face with the one
+    /// restriction that role carries.
+    pub fn store_peer_hat_interest(
+        &mut self,
+        face: FaceId,
+        interest_id: u64,
+        target: String,
+        aggregate: bool,
+    ) {
+        let state = self.by_face.entry(face).or_default();
+        state.origin = InterestOrigin::PeerHat;
         state
             .interests
             .insert(interest_id, FutureInterest { target, aggregate });
@@ -319,10 +356,31 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         origin: Option<FaceId>,
         value_of: F,
     ) -> Vec<(FaceId, String, u64, V)> {
+        self.pushes_for_new_in(new_ke, origin, |_, _| true, value_of)
+    }
+
+    /// [`pushes_for_new`](Self::pushes_for_new) for the faces `reaches` admits, given the face
+    /// and the role it is held under. The caller states what the store cannot know: which
+    /// region a face is in, so that a declaration made in a region served by the peer hat is
+    /// not pushed to another face of it, and which faces a derived declaration of one region
+    /// is meant for.
+    pub fn pushes_for_new_in<
+        R: Fn(FaceId, InterestOrigin) -> bool,
+        F: Fn(&str, FaceId, bool) -> V,
+    >(
+        &mut self,
+        new_ke: &str,
+        origin: Option<FaceId>,
+        reaches: R,
+        value_of: F,
+    ) -> Vec<(FaceId, String, u64, V)> {
         let mut out = Vec::new();
         for (face, state) in self.push_faces_mut() {
             if origin == Some(*face) {
                 continue; // never echo a declaration back to the face that sourced it
+            }
+            if !reaches(*face, state.origin) {
+                continue;
             }
             // Gather the reply kes this face's interests want BEFORE interning: the
             // read borrow of `interests` and the mutable `intern` cannot overlap. Each is
@@ -418,8 +476,24 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         withdrawn_ke: &str,
         still_backed: B,
     ) -> Vec<(FaceId, String, u64)> {
+        self.forgets_for_withdrawn_in(withdrawn_ke, |_| true, still_backed)
+    }
+
+    /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) for the faces `reaches` admits:
+    /// the retraction of what self advertised into one region, which the faces of that region
+    /// alone were told, and which is backed by what the OTHER regions hold, so the caller's
+    /// `still_backed` is that region's.
+    pub fn forgets_for_withdrawn_in<R: Fn(FaceId) -> bool, B: Fn(&str, bool) -> bool>(
+        &mut self,
+        withdrawn_ke: &str,
+        reaches: R,
+        still_backed: B,
+    ) -> Vec<(FaceId, String, u64)> {
         let mut out = Vec::new();
         for (face, state) in self.push_faces_mut() {
+            if !reaches(*face) {
+                continue;
+            }
             // Select the pushed reply kes the withdrawal could have un-backed (the
             // withdrawn ke intersects the reply ke) that are now unbacked — collect
             // before mutating `pushed` (the read borrow can't overlap the remove).

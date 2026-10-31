@@ -403,7 +403,7 @@ use wz_session_core::wireexpr_resolve::{
 use crate::accept_loop::{
     DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
 };
-use crate::future_interest::{FutureQablStore, FutureSubStore};
+use crate::future_interest::{FutureQablStore, FutureSubStore, InterestOrigin};
 #[cfg(feature = "routing-interceptor-hotreload")]
 use crate::interceptor::InterceptorKeyexprCache;
 use crate::interceptor::{
@@ -1246,6 +1246,27 @@ trait DeclPlane {
         _value: Option<Self::Value>,
     ) {
     }
+    /// Whether the faces of a south region the peer hat serves are told this plane's
+    /// declarations only for an interest they hold ([`Tables::serves_asking_peers`]). The
+    /// plane then also supplies [`push_asked`](Self::push_asked) and
+    /// [`retract_asked`](Self::retract_asked); the liveliness plane has its own rule for them
+    /// and keeps the flood.
+    const ASKED_FOR: bool = false;
+    /// Advertise `value` for `keyexpr` to the faces of `target` that asked for it.
+    fn push_asked<T: std::ops::DerefMut<Target = Tables>>(
+        _fwd: &mut OnTables<'_, T>,
+        _target: Region,
+        _keyexpr: &str,
+        _value: Self::Value,
+    ) {
+    }
+    /// Retract `keyexpr` from the faces of `target` that were told it.
+    fn retract_asked<T: std::ops::DerefMut<Target = Tables>>(
+        _fwd: &mut OnTables<'_, T>,
+        _target: Region,
+        _keyexpr: &str,
+    ) {
+    }
 }
 
 /// The subscriber plane.
@@ -1265,6 +1286,22 @@ impl DeclPlane for SubPlane {
     }
     fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
         build_undeclare_subscriber_with_keyexpr(keyexpr)
+    }
+    const ASKED_FOR: bool = true;
+    fn push_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+        (): (),
+    ) {
+        fwd.push_subscriber_to_asking(target, keyexpr);
+    }
+    fn retract_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) {
+        fwd.retract_subscriber_from_asking(target, keyexpr);
     }
 }
 
@@ -1286,6 +1323,22 @@ impl DeclPlane for QablPlane {
     }
     fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
         build_undeclare_queryable_with_keyexpr(keyexpr)
+    }
+    const ASKED_FOR: bool = true;
+    fn push_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+        info: QueryableInfo,
+    ) {
+        fwd.push_queryable_to_asking(target, keyexpr, info);
+    }
+    fn retract_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) {
+        fwd.retract_queryable_from_asking(target, keyexpr);
     }
 }
 
@@ -3270,6 +3323,16 @@ impl Tables {
     /// topology exchange, not to relay between them.
     fn face_based(&self, region: Region) -> bool {
         is_peer_hat(region, self.node_mode) && !self.runs_linkstate_peers(region)
+    }
+
+    /// Whether `region` is a region of the pin's PEER hat that lies SOUTH of this node: the group
+    /// of peers a router is the gateway of. The pin's peer hat sends a face a declaration of
+    /// another hat only when the face is north-bound or holds a matching interest
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn maybe_propagate_subscriber`): a face
+    /// south of the node is told what it asked for, and nothing unasked. A peer node's own
+    /// region is north of it and is told unasked, as it always was.
+    fn serves_asking_peers(&self, region: Region) -> bool {
+        self.face_based(region) && region.bound().is_south()
     }
 
     /// Whether `region`'s hat is a peer hat running wz's link-state peer
@@ -6720,6 +6783,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 );
             }
         }
+        // A face of a south region the peer hat serves is told a declaration of another region
+        // only when it holds an interest that matches it, so its interest is kept as a client's is
+        // ([`asks_for_declarations`](Self::asks_for_declarations)).
+        let peer_hat_face = self.asks_for_declarations(inbound);
+        if interest.f() && body.su() && peer_hat_face {
+            if let Some(t) = target.as_deref() {
+                self.tables.future_subs.store_peer_hat_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
         // The QUERYABLE-plane twin (R311y150): store a FUTURE queryable interest so a
         // queryable learned LATER is pushed to this querier (the querier-before-
         // queryable close), and a completeness flip re-pushes (value-aware). Same
@@ -6735,6 +6812,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 );
             }
         }
+        if interest.f() && body.qu() && peer_hat_face {
+            if let Some(t) = target.as_deref() {
+                self.tables.future_qabls.store_peer_hat_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
         // Item 751, step 6 — a MESH face's FUTURE subscriber or queryable interest, kept for
         // the admin `publisher` and `querier` legs and for nothing else: the face is stamped
         // with the mesh role, which keeps it off every push path (the mesh plane is served by
@@ -6743,7 +6830,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_publishers`). The peer
         // node's admission is the same, as it runs this forwarder.
         #[cfg(feature = "adminspace-introspection-handlers")]
-        if interest.f() && !self.is_client_face(inbound) {
+        if interest.f() && !self.is_client_face(inbound) && !peer_hat_face {
             if let Some(t) = target.as_deref() {
                 if body.su() {
                     self.tables.future_subs.store_reporting_only_interest(
@@ -6797,7 +6884,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     aggregate,
                     &self_zid,
                     interest_id,
-                    store_future,
+                    store_future || (interest.f() && peer_hat_face),
                 );
             }
             if body.qu() {
@@ -6807,7 +6894,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     aggregate,
                     &self_zid,
                     interest_id,
-                    store_future_qabl,
+                    store_future_qabl || (interest.f() && peer_hat_face),
                 );
             }
             // §5.21 routing-token-tables (slice-4): the CURRENT liveliness-TOKEN dump —
@@ -6864,6 +6951,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .faces
             .get(&face)
             .is_some_and(|s| is_leaf(s.tier, self.tables.node_mode))
+    }
+
+    /// Whether `face` is a face of a south region the peer hat serves, which is told the
+    /// declarations of the other regions that match what it asked for and no others
+    /// ([`Tables::serves_asking_peers`]).
+    fn asks_for_declarations(&self, face: FaceId) -> bool {
+        self.tables
+            .faces
+            .get(&face)
+            .is_some_and(|s| self.tables.serves_asking_peers(s.tier))
     }
 
     /// Whether a token interest of `face` is answered with the tokens the router knows of at the
@@ -8186,10 +8283,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let pushes = self
-            .tables
-            .future_subs
-            .pushes_for_new(new_ke, Some(origin), |_, _, _| ());
+        let tables: &mut Tables = &mut self.tables;
+        let origin_tier = tables.faces.get(&origin).map(|s| s.tier);
+        let faces = &tables.faces;
+        let pushes = tables.future_subs.pushes_for_new_in(
+            new_ke,
+            Some(origin),
+            |face, role| {
+                role != InterestOrigin::PeerHat || faces.get(&face).map(|s| s.tier) != origin_tier
+            },
+            |_, _, _| (),
+        );
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -8252,10 +8356,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let self_zid = *self.north_net().self_zid();
         let tables: &mut Tables = &mut self.tables;
+        let origin_tier = tables.faces.get(&origin).map(|s| s.tier);
+        let faces = &tables.faces;
         let hats = &tables.hats;
-        let pushes = tables.future_qabls.pushes_for_new(
+        let pushes = tables.future_qabls.pushes_for_new_in(
             new_ke,
             Some(origin),
+            |face, role| {
+                role != InterestOrigin::PeerHat || faces.get(&face).map(|s| s.tier) != origin_tier
+            },
             |reply_ke, dest, aggregate| {
                 merged_qabl_info_in(hats, reply_ke, &self_zid, dest, aggregate)
             },
@@ -8517,19 +8626,167 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// region never changes here, since its fold excludes the owner, and a
     /// face-down purge that removes several sources at once is one snapshot
     /// per keyexpr.
-    fn repropagate<P: DeclPlane>(&self, snapshot: Snapshot<P>) {
+    fn repropagate<P: DeclPlane>(&mut self, snapshot: Snapshot<P>)
+    where
+        T: std::ops::DerefMut,
+    {
+        let keyexpr = snapshot.keyexpr.clone();
+        for (target, after) in self.advertisement_changes(snapshot) {
+            // The faces of a south region the peer hat serves are told what they asked for, and
+            // not by a flood to every face of the region ([`Tables::serves_asking_peers`]).
+            if P::ASKED_FOR && self.tables.serves_asking_peers(target) {
+                match after {
+                    Some(value) => P::push_asked(self, target, &keyexpr, value),
+                    None => P::retract_asked(self, target, &keyexpr),
+                }
+                continue;
+            }
+            self.flood_advertisement::<P>(target, &keyexpr, after);
+        }
+    }
+
+    /// The regions whose fold outside them changed since `snapshot`, with the value self now
+    /// advertises into each (`None` for a retraction), after recording it.
+    fn advertisement_changes<P: DeclPlane>(
+        &self,
+        snapshot: Snapshot<P>,
+    ) -> Vec<(Region, Option<P::Value>)> {
         let keyexpr = snapshot.keyexpr.as_str();
+        let mut changed = Vec::new();
         for (target, derived_before) in snapshot.before {
             let after = P::fold_outside(self, target, keyexpr);
             let before = P::advertised(self, target, keyexpr, derived_before);
             P::remember(self, target, keyexpr, after);
-            if after == before {
-                continue;
+            if after != before {
+                changed.push((target, after));
             }
-            match after {
-                Some(value) => self.flood_self_sourced(target, keyexpr, |ke| P::declare(ke, value)),
-                None => self.flood_self_sourced(target, keyexpr, P::undeclare),
+        }
+        changed
+    }
+
+    /// Send one change of what self advertises into `target`: the declaration with `value`, or
+    /// the retraction, flooded along the region's tree or to its faces.
+    fn flood_advertisement<P: DeclPlane>(
+        &self,
+        target: Region,
+        keyexpr: &str,
+        after: Option<P::Value>,
+    ) {
+        match after {
+            Some(value) => self.flood_self_sourced(target, keyexpr, |ke| P::declare(ke, value)),
+            None => self.flood_self_sourced(target, keyexpr, P::undeclare),
+        }
+    }
+
+    /// Tell the faces of the south peer-hat region `target` that hold a matching interest in
+    /// subscribers about the subscriber of `keyexpr` that self now advertises into the region,
+    /// each at most once ([`FutureInterestStore::pushes_for_new_in`]): upstream's
+    /// `maybe_propagate_subscriber` sends a face that is not north-bound a declaration only
+    /// for an interest it holds.
+    fn push_subscriber_to_asking(&mut self, target: Region, keyexpr: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let pushes = tables.future_subs.pushes_for_new_in(
+            keyexpr,
+            None,
+            |face, _| faces.get(&face).is_some_and(|s| s.tier == target),
+            |_, _, _| (),
+        );
+        for (face, reply_ke, id, ()) in pushes {
+            match build_declare_subscriber(id, 0, Some(&reply_ke)) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_pushes.bump();
+                }
+                Err(e) => log::warn!(
+                    "router forward: peer-hat sub push build failed for {reply_ke:?}: {e:?}"
+                ),
             }
+        }
+    }
+
+    /// The queryable twin of [`push_subscriber_to_asking`](Self::push_subscriber_to_asking). A
+    /// reply for the exact keyexpr carries the value self advertises; an aggregate one, keyed on
+    /// the interest's own keyexpr, carries the fold over what matches it.
+    fn push_queryable_to_asking(&mut self, target: Region, keyexpr: &str, info: QueryableInfo)
+    where
+        T: std::ops::DerefMut,
+    {
+        let self_zid = *self.north_net().self_zid();
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let hats = &tables.hats;
+        let pushes = tables.future_qabls.pushes_for_new_in(
+            keyexpr,
+            None,
+            |face, _| faces.get(&face).is_some_and(|s| s.tier == target),
+            |reply_ke, dest, aggregate| {
+                if aggregate {
+                    merged_qabl_info_in(hats, reply_ke, &self_zid, dest, aggregate)
+                } else {
+                    info
+                }
+            },
+        );
+        for (face, reply_ke, id, info) in pushes {
+            match build_declare_queryable_with_id_info(id, &reply_ke, info) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_qabl_pushes.bump();
+                }
+                Err(e) => log::warn!(
+                    "router forward: peer-hat qabl push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
+        }
+    }
+
+    /// Retract from the faces of the south peer-hat region `target` what was pushed to them for
+    /// `keyexpr`, now that no other region holds it. Only the reply for that exact keyexpr is
+    /// retracted: one keyed on an aggregate interest's target stands for everything that target
+    /// meets and stays until its last backer goes, as it does for a client.
+    fn retract_subscriber_from_asking(&mut self, target: Region, keyexpr: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let forgets = tables.future_subs.forgets_for_withdrawn_in(
+            keyexpr,
+            |face| faces.get(&face).is_some_and(|s| s.tier == target),
+            |reply_ke, aggregate| aggregate || reply_ke != keyexpr,
+        );
+        for (face, reply_ke, id) in forgets {
+            self.send_one_to_face_about(
+                face,
+                NetworkMessage::Declare(Box::new(build_undeclare_subscriber(id))),
+                &reply_ke,
+            );
+        }
+    }
+
+    /// The queryable twin of
+    /// [`retract_subscriber_from_asking`](Self::retract_subscriber_from_asking).
+    fn retract_queryable_from_asking(&mut self, target: Region, keyexpr: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let forgets = tables.future_qabls.forgets_for_withdrawn_in(
+            keyexpr,
+            |face| faces.get(&face).is_some_and(|s| s.tier == target),
+            |reply_ke, aggregate| aggregate || reply_ke != keyexpr,
+        );
+        for (face, reply_ke, id) in forgets {
+            self.send_one_to_face_about(
+                face,
+                NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
+                &reply_ke,
+            );
         }
     }
 
@@ -11335,6 +11592,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if is_router_hat(tier, self.tables.node_mode) {
             return;
         }
+        // Nor subscribers or queryables to a face of a south region the peer hat serves: it is
+        // told what it asks for, by the answer to its interest and by the pushes that follow it,
+        // and a face that has just come up has asked for nothing yet
+        // ([`Tables::serves_asking_peers`]); upstream's peer hat does the same on a new face
+        // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `New south-bound peer remote; not propagating subscribers`).
+        // The tokens below keep their own rule.
+        let told_what_it_asks = self.tables.serves_asking_peers(tier);
         // Nor to a CLIENT face, in any node mode: the pin's broker hat, which
         // owns it, re-propagates nothing to a new face, "the broker hat is never
         // the north hat, thus there are no interests to re-propagate"
@@ -11349,7 +11613,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if is_leaf(tier, self.tables.node_mode) {
             return;
         }
-        for keyexpr in self.derived_cross_tier_subs_into(tier) {
+        let subscribers = if told_what_it_asks {
+            Vec::new()
+        } else {
+            self.derived_cross_tier_subs_into(tier)
+        };
+        for keyexpr in subscribers {
             match build_declare_subscriber(0, 0, Some(&keyexpr)) {
                 Ok(decl) => {
                     self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
@@ -11364,7 +11633,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // not: `derived_cross_tier_qabl_info` is the MERGED completeness the
         // re-advertise floods, so a late face is told the same thing a late tree
         // child is rather than a default that a later merge would contradict.
-        for keyexpr in self.derived_cross_tier_qabls_into(tier) {
+        let queryables = if told_what_it_asks {
+            Vec::new()
+        } else {
+            self.derived_cross_tier_qabls_into(tier)
+        };
+        for keyexpr in queryables {
             let Some(info) = self.derived_cross_tier_qabl_info(tier, &keyexpr) else {
                 continue;
             };
@@ -12129,7 +12403,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// no client / native / host still holds it. The `FaceForwarder` default
     /// is a no-op — only the router advertises a group's interest.
     #[cfg(feature = "router-multicast-faces")]
-    fn set_mcast_group_subs(&self, subs: &[String]) {
+    fn set_mcast_group_subs(&mut self, subs: &[String])
+    where
+        T: std::ops::DerefMut,
+    {
         let new: HashSet<String> = subs.iter().cloned().collect();
         // Diff against the current set, snapshot every keyexpr it changes,
         // then COMMIT the new set (move — no clone).
@@ -12468,7 +12745,7 @@ impl FaceForwarder for RouterForwarder {
 
     #[cfg(feature = "router-multicast-faces")]
     fn set_mcast_group_subs(&self, subs: &[String]) {
-        self.on_tables().set_mcast_group_subs(subs)
+        self.on_tables_mut().set_mcast_group_subs(subs)
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
@@ -12961,6 +13238,11 @@ mod tests {
     /// Make `neighbour` (on `face`) advertise a link back to self, forming the
     /// mutual graph edge (mirror of the linkstate `advertise_link_back`). Fed
     /// through `forward`; the caller `tick()`s to flush the coalesced recompute.
+    ///
+    /// A face of a south region the peer hat serves also asks for everything here
+    /// ([`peer_asks_for_everything`]): the tests that use this helper watch such a peer for the
+    /// advertisements a router makes into its region, and the pin's peer hat makes them only for
+    /// a face that holds an interest ([`Tables::serves_asking_peers`]).
     fn advertise_link_back(
         fwd: &RouterForwarder,
         face: FaceId,
@@ -12974,6 +13256,26 @@ mod tests {
         ]))
         .expect("build oam");
         forward_one(fwd, face, NetworkMessage::Oam(oam));
+        if fwd.on_tables().asks_for_declarations(face) {
+            peer_asks_for_everything(fwd, face);
+        }
+    }
+
+    /// `face` holds a future interest in the subscribers and the queryables of every keyexpr, as
+    /// a peer does that has declared a publisher and a querier. A face of a south region the peer
+    /// hat serves is told what another region holds only for an interest like this one
+    /// ([`Tables::serves_asking_peers`]), so a test that watches such a face for an advertisement
+    /// has the face ask first.
+    fn peer_asks_for_everything(fwd: &RouterForwarder, face: FaceId) {
+        use wz_session_core::interest_build::{
+            build_interest_queryables, build_interest_subscribers,
+        };
+        let subscribers = build_interest_subscribers(9001, false, true, 0, Some("**"))
+            .expect("build subscribers interest");
+        forward_one(fwd, face, NetworkMessage::Interest(subscribers));
+        let queryables = build_interest_queryables(9002, false, true, 0, Some("**"))
+            .expect("build queryables interest");
+        forward_one(fwd, face, NetworkMessage::Interest(queryables));
     }
 
     /// A literal `DeclareSubscriber` for `keyexpr` (id 0, no ext_nodeid — the
@@ -12998,9 +13300,14 @@ mod tests {
     /// asserted at 0 first for the same reason -- a `> 0` at the end proves the
     /// replay ran rather than that some other push happened to fire, since both
     /// paths emit the identical unsolicited `DeclareSubscriber`.
+    ///
+    /// The node is a PEER node: the remote that never asks is a pico peer attached to a node that
+    /// is not a router. Attached to a router it does ask (`_z_session_has_router_peer`), and the
+    /// router's south peer hat then tells it what it asked for and nothing before
+    /// ([`a_late_peer_of_a_router_is_told_nothing_until_it_asks`]).
     #[test]
     fn a_late_face_is_told_the_subscriptions_the_router_already_had() {
-        let fwd = RouterForwarder::new(zid(0x01));
+        let fwd = RouterForwarder::peer(zid(0x01));
         let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
@@ -13025,6 +13332,40 @@ mod tests {
         );
     }
 
+    /// The peer of a router that comes up late has asked for nothing, so it is told nothing
+    /// when its face registers: upstream's peer hat does not repropagate subscribers to a
+    /// south-bound peer
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `New south-bound peer remote; not propagating subscribers`).
+    /// Its interest, when it comes, is answered with what the node holds.
+    #[test]
+    fn a_late_peer_of_a_router_is_told_nothing_until_it_asks() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+
+        let (peer, sink_p) = face(zid(0xBB), WIRE_PEER);
+        sink_p.reset();
+        fwd.register(FaceId(1), &peer);
+        assert_eq!(fwd.face_up_replays_seen(), 0, "no replay to a south peer");
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            0,
+            "no declaration reached the wire unasked"
+        );
+
+        let interest =
+            build_interest_subscribers(1, true, false, 0, Some("demo/**")).expect("build interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            2,
+            "the subscriber it asked for, then the final of the answer"
+        );
+    }
+
     /// A router that comes up late is told what the node holds once, by the re-advertise a
     /// recompute makes to the children it gained, as upstream's router hat does: the face-up
     /// replay is for a remote that does not speak link-state, and beside the re-advertise it sent
@@ -13044,6 +13385,117 @@ mod tests {
             fwd.face_up_replays_seen(),
             0,
             "a router face is told by the tree re-advertise, and not by a replay beside it"
+        );
+    }
+
+    /// A peer of a group the router is the gateway of is told what another region holds only
+    /// when it asked: upstream's peer hat sends a face that is not north-bound a declaration
+    /// for an interest it holds and for none else (`maybe_propagate_subscriber`). A flood to
+    /// every face of the region gave a peer that had asked for nothing a registration of its own
+    /// for each subscriber of the other regions, which upstream's test of its regions counts.
+    #[test]
+    fn a_peer_that_asked_for_nothing_is_not_told_a_subscriber_of_another_region() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        let (client, _sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &peer);
+        fwd.register(FaceId(1), &client);
+        sink_peer.reset();
+
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+
+        assert_eq!(
+            sink_peer.frame_count(),
+            0,
+            "a peer with no interest is told nothing of the subscriber of a client"
+        );
+    }
+
+    /// The same peer, once it holds an interest that matches, is told the subscriber, once.
+    #[test]
+    fn a_peer_that_asked_is_told_the_subscriber_of_another_region_once() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        let (client, _sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &peer);
+        fwd.register(FaceId(1), &client);
+        // A publisher of the peer: current and future subscribers of `demo/**`.
+        let interest =
+            build_interest_subscribers(1, true, true, 0, Some("demo/**")).expect("build interest");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Interest(interest));
+        sink_peer.reset();
+
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "the subscriber of a client is pushed to the peer that asked"
+        );
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "and a second declaration of the same key is not told again"
+        );
+    }
+
+    /// An interest that arrives after the subscriber is answered by the current dump, once, and
+    /// the declaration that follows the answer is the one the face already holds.
+    #[test]
+    fn a_peer_that_asks_late_is_answered_once_and_not_pushed_the_same_key() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        let (client, _sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        let (other, _sink_other) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &peer);
+        fwd.register(FaceId(1), &client);
+        fwd.register(FaceId(2), &other);
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink_peer.reset();
+
+        let interest =
+            build_interest_subscribers(1, true, true, 0, Some("demo/**")).expect("build interest");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Interest(interest));
+        let answered = sink_peer.frame_count();
+        assert_eq!(answered, 2, "the declaration, then the final of the answer");
+
+        // A second client declares the same key: a new declaration, which the peer holds
+        // already under the id the answer gave it.
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
+        assert_eq!(
+            sink_peer.frame_count(),
+            answered,
+            "the key the answer carried is not pushed again"
+        );
+    }
+
+    /// The peers of one region are linked to one another and told what each declares there:
+    /// a declaration of a peer of the region is not pushed to another face of it, whatever that
+    /// face asked for.
+    #[test]
+    fn a_peer_is_not_pushed_what_a_peer_of_its_own_region_declared() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (declarer, _sink_declarer) = face(zid(0xB1), WIRE_PEER);
+        let (asker, sink_asker) = face(zid(0xB2), WIRE_PEER);
+        fwd.register(FaceId(0), &declarer);
+        fwd.register(FaceId(1), &asker);
+        let interest =
+            build_interest_subscribers(1, true, true, 0, Some("demo/**")).expect("build interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        sink_asker.reset();
+
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+
+        assert_eq!(
+            sink_asker.frame_count(),
+            0,
+            "the asker learns what its region declares over its own links"
         );
     }
 
@@ -19665,8 +20117,10 @@ mod tests {
         // peer that joins AFTER the client declared. R2890 (751 rule 8c): it is
         // told when its FACE registers, as the pin's peer hat repropagates in
         // `new_transport_unicast_face`, and the tick adds nothing — the peer
-        // region has no tree whose delta could name the newcomer.
-        let fwd = RouterForwarder::new(zid(0x01));
+        // region has no tree whose delta could name the newcomer. The node is a PEER node, whose
+        // peers are north of it and told unasked; the peer of a ROUTER is south and is told what
+        // it asks for ([`a_late_peer_of_a_router_is_told_nothing_until_it_asks`]).
+        let fwd = RouterForwarder::peer(zid(0x01));
         let (client, _) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // client subscribes; no peer yet
@@ -22731,6 +23185,7 @@ mod tests {
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // advertise into peer mesh
+        let pushed_id = last_declared_queryable_id(&sink_p);
         sink_p.reset();
         forward_one(
             &fwd,
@@ -22753,9 +23208,9 @@ mod tests {
             "the last contributor left ⇒ a single cross-tier retraction into the peer mesh"
         );
         assert_eq!(
-            forwarded_undecl_queryable_keyexpr(&sink_p.frame_bytes(0)),
-            "demo/q",
-            "the peer mesh receives the UndeclareQueryable retraction (None arm)"
+            forwarded_undecl_queryable_id(&sink_p.frame_bytes(0)),
+            pushed_id,
+            "the peer is told to drop the queryable under the id it was pushed it with (None arm)"
         );
     }
 
@@ -22939,6 +23394,7 @@ mod tests {
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         fwd.register(FaceId(2), &p);
+        peer_asks_for_everything(&fwd, FaceId(2));
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
         fwd.tick();
@@ -23066,9 +23522,26 @@ mod tests {
         }
     }
 
-    /// The keyexpr a forwarded `Declare(UndeclareQueryable)` retracts, read off its
-    /// `ext_wire_expr` extension — the retraction twin of [`forwarded_qabl_info`].
-    fn forwarded_undecl_queryable_keyexpr(frame: &[u8]) -> String {
+    /// The id a forwarded frame declares a queryable under, `None` for any other frame.
+    fn forwarded_declare_queryable_id(frame: &[u8]) -> Option<u64> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(frame) else {
+            return None;
+        };
+        let msgs = parse_frame_payload(&payload).ok()?;
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => match &d.body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(q) => Some(q.id),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The id a forwarded `Declare(UndeclareQueryable)` retracts: what a face that was pushed a
+    /// queryable under an id is told, as the pin's peer hat tells it
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn maybe_unpropagate_queryable`).
+    fn forwarded_undecl_queryable_id(frame: &[u8]) -> u64 {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         let InboundFrame::Frame { payload, .. } =
             parse_inbound(frame).expect("parse forwarded frame")
@@ -23078,15 +23551,19 @@ mod tests {
         let msgs = parse_frame_payload(&payload).expect("parse frame payload");
         match msgs.first() {
             Some(NetworkMessage::Declare(d)) => match &d.body {
-                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
-                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
-                        .expect("undecl queryable carries an ext_keyexpr")
-                        .to_string()
-                }
+                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.id,
                 _ => panic!("forwarded Declare is not an UndeclareQueryable"),
             },
             other => panic!("expected a forwarded Declare, got {other:?}"),
         }
+    }
+
+    /// The id of the last queryable declaration `sink` was sent.
+    fn last_declared_queryable_id(sink: &RecordingLinkDriver) -> u64 {
+        (0..sink.frame_count())
+            .rev()
+            .find_map(|i| forwarded_declare_queryable_id(&sink.frame_bytes(i)))
+            .expect("a queryable declaration was sent")
     }
 
     #[test]
@@ -23189,6 +23666,8 @@ mod tests {
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         fwd.register(FaceId(2), &p);
+        // The peer asked for subscribers, as the pin's peer hat requires of a south face.
+        peer_asks_for_everything(&fwd, FaceId(2));
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // edge self<->A
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // edge self<->C
         fwd.tick(); // compute the spanning trees
@@ -23216,7 +23695,8 @@ mod tests {
     /// R2890 (751 rule 8c) — what a peer face of the south region receives when
     /// a ROUTERS-region declaration arrives: the router's OWN cross-region
     /// advertisement (the pin peer hat's `other_info` case, propagated to every
-    /// owned face), never the source's within-region re-flood. The two carry
+    /// owned face that asked for it, [`Tables::serves_asking_peers`]), never the
+    /// source's within-region re-flood. The two carry
     /// the same keyexpr, so the witness is the source: the bridge originates at
     /// self (node id 0, the extension omitted), the re-flood names the source.
     fn assert_only_the_bridge_reaches_the_peer_region(sink_p: &RecordingLinkDriver) {
@@ -24362,6 +24842,7 @@ mod tests {
                 .contains_key(&FaceId(0)),
             "the client's queryable is stored"
         );
+        let pushed_id = last_declared_queryable_id(&sink_p);
         sink_p.reset();
         fwd.deregister(FaceId(0)); // the client face goes down (linkless)
         assert!(
@@ -24392,9 +24873,9 @@ mod tests {
             "the closing final carries the querier's original rid"
         );
         assert_eq!(
-            forwarded_undecl_queryable_keyexpr(&sink_p.frame_bytes(1)),
-            "demo/q",
-            "the cross-tier advertisement for the departed client queryable is retracted"
+            forwarded_undecl_queryable_id(&sink_p.frame_bytes(1)),
+            pushed_id,
+            "the cross-tier advertisement for the departed client queryable is retracted by id"
         );
     }
 
