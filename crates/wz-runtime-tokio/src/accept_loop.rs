@@ -52,12 +52,13 @@
 //! the drive future owns carries callbacks with no `+ Send` bound, no longer
 //! holds: `sce-rust-runtime`'s `completion_callback` and `on_http_send` are both
 //! `+ Send` at the pinned revision, and the drive future of a face is `Send`
-//! when its forwarder is `Sync`. What keeps this the default is the forwarder:
-//! the routing forwarder (`RouterForwarder`) keeps its link-state graphs in
-//! `Rc`/`RefCell`, so it can only be called from one task. A node
-//! whose forwarder is `Send + Sync` (the C ABI's) is being moved to a task per
-//! face's drive instead; the plan and its stages are in
-//! `docs/parallel-faces-design.md`.
+//! when its forwarder is `Sync`. What keeps this the default is a forwarder
+//! that is not `Sync`, which can only be called from one task. A node whose
+//! forwarder is `Send + Sync` spawns each face's drive instead: the C ABI's
+//! sessions (`docs/parallel-faces-design.md`), and a routing node over
+//! `RouterForwarder` (its tables behind one reader-writer lock since round
+//! 3668) under the `routing-face-drive` policy (`peer_loop_shared`,
+//! `docs/router-task-per-face.md`).
 //!
 //! ## NON-goals (this atom)
 //!
@@ -127,6 +128,10 @@ use crate::session_open::{
 use crate::session_open::MeshDialKey;
 use wz_session_core::locator::AnyLocator;
 use wz_session_core::locator_directory::{DirectoryZid, Lifetime, LocatorDirectory, LocatorSource};
+/// The `routing-face-drive` policy [`peer_loop_shared`] takes; its `Default` is the build's
+/// value.
+#[cfg(feature = "routing-peer")]
+pub use wz_session_core::policy::RoutingFaceDrive;
 
 // R311y205 (transport-multilink) — the aggregation seam wired into the live
 // accept/dial path: when `WzConfig.max_links > 1` a face is opened via the
@@ -4290,8 +4295,9 @@ where
 /// puts its read gate around it).
 ///
 /// The forwarder is called from several threads at once: an implementation keeps its state
-/// behind locks, as the C ABI's does (a registry of `Arc`s and mutexes). The routing
-/// forwarders keep theirs in `Rc`/`RefCell` and so reach only [`accept_loop_offering`].
+/// behind locks, as the C ABI's does (a registry of `Arc`s and mutexes) and `RouterForwarder`
+/// does (its tables behind one reader-writer lock), which a routing node drives through
+/// `peer_loop_shared` (feature `routing-peer`).
 #[allow(clippy::too_many_arguments)]
 pub async fn accept_loop_offering_spawned<S, F>(
     listener: BoundListener,
@@ -4514,6 +4520,59 @@ where
         FaceDriving {
             forwarder,
             spawned: None,
+        },
+    )
+    .await
+}
+
+/// [`peer_loop`] for a node whose forwarder is `Send + Sync`, serving its faces as the
+/// `routing-face-drive` policy says (`docs/router-task-per-face.md`, section 4).
+///
+/// [`RoutingFaceDrive::TaskPerFace`], upstream's: each face's drive is spawned on the runtime's
+/// workers, so the faces are read, decoded and routed by as many threads as the runtime has,
+/// and the accept, the dials, the tick and the multicast planes stay on THIS task, which is the
+/// control plane (as [`accept_loop_offering_spawned`] splits them). Upstream reads each link on
+/// a task of its own on its receive runtime and routes on that task
+/// (`io/zenoh-transport/src/unicast/universal/link.rs` @
+/// `.spawn_with_rt(zenoh_runtime::ZRuntime::RX, task);`). On a current-thread runtime the
+/// faces are still tasks of their own and run on its one thread.
+///
+/// [`RoutingFaceDrive::OneTask`]: every face's drive is held inside this task, which is what
+/// [`peer_loop`] does with a forwarder that is not `Sync`.
+#[cfg(feature = "routing-peer")]
+#[allow(clippy::too_many_arguments)]
+pub async fn peer_loop_shared<S, F>(
+    sources: FaceSources,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    shutdown: S,
+    on_event: F,
+    forwarder: Arc<dyn FaceForwarder + Send + Sync>,
+    drive: RoutingFaceDrive,
+) -> AcceptLoopSummary
+where
+    S: Future<Output = ()>,
+    F: FnMut(&AcceptEvent),
+{
+    let spawned = match drive {
+        RoutingFaceDrive::OneTask => None,
+        RoutingFaceDrive::TaskPerFace => Some(SpawnedFaces {
+            forwarder: Arc::clone(&forwarder),
+            executor: Arc::new(PlainFaceExecutor),
+            on: SpawnOn::Workers,
+        }),
+    };
+    face_drive_loop(
+        sources,
+        params,
+        clock,
+        tick_interval_ms,
+        shutdown,
+        on_event,
+        FaceDriving {
+            forwarder: &*forwarder,
+            spawned,
         },
     )
     .await
@@ -5563,6 +5622,9 @@ mod tests {
         Workers,
         /// Spawned as local tasks of the loop's own thread (inside a `LocalSet`).
         Local,
+        /// As the routing node's loop drives them under the `routing-face-drive` value.
+        #[cfg(feature = "routing-peer")]
+        Routing(RoutingFaceDrive),
     }
 
     /// Four chatty peers against an accept-only node whose forwarder is the
@@ -5625,6 +5687,24 @@ mod tests {
                         shutdown_on(go_rx.clone()),
                         on_event,
                         &*probe,
+                    )
+                    .await
+                }
+                #[cfg(feature = "routing-peer")]
+                Drive::Routing(value) => {
+                    peer_loop_shared(
+                        accept_only_sources(
+                            listener,
+                            SessionOffer::universal(),
+                            AcceptBounds::default(),
+                        ),
+                        acceptor_params(),
+                        TokioTime::new(),
+                        DEFAULT_OPEN_TICK_MS,
+                        shutdown_on(go_rx.clone()),
+                        on_event,
+                        probe.clone(),
+                        value,
                     )
                     .await
                 }
@@ -5709,6 +5789,42 @@ mod tests {
             probe.threads.lock().expect("probe threads").len(),
             1,
             "every face's drive ran on the one thread"
+        );
+    }
+
+    /// `routing-face-drive` = `task-per-face`, upstream's value: the routing node's loop drives
+    /// four peers' faces AT THE SAME TIME, on more than one thread, as upstream reads each link
+    /// on a task of its own on its receive runtime.
+    #[cfg(all(feature = "codec-push", feature = "routing-peer"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn routing_face_drive_task_per_face_drives_the_faces_in_parallel() {
+        let (summary, probe) = overlap_run(Drive::Routing(RoutingFaceDrive::TaskPerFace)).await;
+        assert_eq!(summary.established, 4, "all four peers are held");
+        let calls = probe.calls.load(SeqCst);
+        assert!(calls > 20, "the probe saw the traffic ({calls} calls)");
+        let deepest = probe.deepest.load(SeqCst);
+        assert!(
+            deepest >= 2,
+            "two faces' drives were inside the forwarder at once, deepest was {deepest}"
+        );
+        let threads = probe.threads.lock().expect("probe threads").len();
+        assert!(threads >= 2, "the drives ran on {threads} thread(s)");
+    }
+
+    /// `routing-face-drive` = `one-task`: the same four peers, on the same runtime of four
+    /// workers, are driven ONE AT A TIME by the loop's own task, so the forwarder is never
+    /// entered by two of them at once. The pair of the test above.
+    #[cfg(all(feature = "codec-push", feature = "routing-peer"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn routing_face_drive_one_task_drives_the_faces_one_at_a_time() {
+        let (summary, probe) = overlap_run(Drive::Routing(RoutingFaceDrive::OneTask)).await;
+        assert_eq!(summary.established, 4, "all four peers are held");
+        let calls = probe.calls.load(SeqCst);
+        assert!(calls > 20, "the probe saw the traffic ({calls} calls)");
+        assert_eq!(
+            probe.deepest.load(SeqCst),
+            1,
+            "one task never has two faces inside the forwarder"
         );
     }
 

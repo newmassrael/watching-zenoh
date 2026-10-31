@@ -244,4 +244,30 @@ config WZ_POLICY_CLOCK_QUALITY_STAMPING_TRUSTED_ONLY
 
 endchoice
 
+choice WZ_POLICY_ROUTING_FACE_DRIVE
+	prompt "routing-face-drive"
+	default WZ_POLICY_ROUTING_FACE_DRIVE_TASK_PER_FACE
+	help
+	  How a node that routes for others serves its links. `task-per-face` gives each
+	  link a task of its own on the node's worker threads: a node with many peers
+	  uses more than one core, and a link that is slow to serve holds up only itself.
+	  `one-task` serves every link from the node's one task, one message at a time,
+	  on one core: the order in which the node handles what its links bring is then
+	  the order the task polled them, which a run replayed for a test needs, and a
+	  host with one core loses nothing by it. Neither changes what a peer is sent or
+	  in what order one link's messages are routed.
+	  Upstream: Reads each link of a node on a task of its own, spawned on the
+	  node's receive runtime (two worker threads unless the runtime is configured
+	  otherwise), and routes what that link brings on the same task under a read
+	  lock of the routing tables, so the links of a node are served by several
+	  threads at once.
+
+config WZ_POLICY_ROUTING_FACE_DRIVE_TASK_PER_FACE
+	bool "task-per-face"
+
+config WZ_POLICY_ROUTING_FACE_DRIVE_ONE_TASK
+	bool "one-task"
+
+endchoice
+
 endmenu

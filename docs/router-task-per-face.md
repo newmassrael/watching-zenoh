@@ -74,6 +74,27 @@ the instrument is Step 6 of the plan, built in round 3607 as a count of heap all
 (`crates/wz-runtime-tokio/tests/router_hot_path_cost.rs`, section 6), together with Layer E7s's microseconds
 per message; B is the answer only if those say the lock is what is being paid for.
 
+**Two axes, each a policy (owner, 2026-10-30: upstream is a preset of wz, not its boundary).** The choice
+above is really two, and both are build choices of `deploy/wz-config.toml` and not a structure fixed for every
+build:
+
+- **How the faces are driven** is the policy `routing-face-drive`. `task-per-face` is upstream's (each link
+  read on a task of its own on the receive runtime, `io/zenoh-transport/src/unicast/universal/link.rs` @
+  `.spawn_with_rt(zenoh_runtime::ZRuntime::RX, task);`) and so the default and the value of every upstream
+  preset. `one-task` is the loop this document began from: one task, one core, and an order of handling that
+  is the order the task polled the faces, which a replayed run needs. Phases 4 to 6 below build the first value;
+  the second is kept, not retired.
+- **How the tables are shared** is A, B or C of the table. A is the zenoh preset's, because it is upstream's.
+  B (snapshots read with no lock) and C (a shard of the faces per loop) are structures upstream does not have;
+  each enters, when it is built, as another value of a second policy, off in every upstream preset, so that a
+  deployment whose fan-out is the cost (many subscribers per key, as a game world has) can choose it while a
+  peer of the zenoh preset still sees upstream's behaviour. That policy is not declared yet: a value enters with
+  the code that implements it and the pair of tests that names it (`docs/build-configuration.md`, C8).
+
+Measuring both values of each axis with the same instrument is what gives the scaling model its parameters: the
+contention a value pays (the lock, the cross-loop message) and the coherence it pays (a snapshot republished,
+tables copied per loop), per subscriber and per core.
+
 ## 5. Phases
 
 Each phase ends with the tree green and the numbers of Layer E7s (microseconds per message at 256, 1024 and
@@ -312,6 +333,39 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
 4. **A task per face.** The accept loop already spawns a face's drive onto the runtime when its forwarder is
    `Send + Sync` (`SpawnedFaces`, `drive_face_shared`); the router takes that path. The closure watcher
    (`watch_room`) becomes the wake list of a destination, and a gated face awaits its destination's room.
+
+   **4a, what landed.** The path is taken under the policy `routing-face-drive` (section 4, two axes):
+   `peer_loop_shared` (`accept_loop.rs`) spawns each face's drive on the runtime's workers under
+   `task-per-face` and holds it in the loop's task under `one-task`; the accept, the dials, the tick and the
+   multicast planes stay on the loop's task either way. Both router hosts take it: the demo's `--router-hat`
+   holds its forwarder in an `Arc` and runs on the demo's runtime of two workers, and the C ABI's router node
+   (`wz-capi-core/src/drive/router_node.rs`) builds a runtime of workers under `task-per-face` (two, as
+   upstream's receive runtime, or `WZ_CAPI_WORKER_THREADS`) and the runtime of its own thread under
+   `one-task`. The pair of tests runs four chatty peers into a probe forwarder through `peer_loop_shared`:
+   under `task-per-face` two faces are inside the forwarder at once on two threads or more, under `one-task`
+   never. A gated face still waits inside its own drive (`READ_GATE_BACKSTOP`), which is now its own task; the
+   wake list of a destination is not built.
+
+   **4a, what it measured.** Layer E7s on pc2, the one tree built with each value in turn (the policy is a
+   build value, so the build changes and nothing else), alternating, two runs each, `one-task` first; six of six
+   pass in all four. Figures are `one-task` runs | `task-per-face` runs.
+
+   | E7s figure | `one-task` | `task-per-face` |
+   |---|---|---|
+   | us per message, 256 / 1024 / 2048 subscribers, no churn | 21.5, 24.2, 24.6; 18.5, 20.9, 20.3 | 9.1, 13.1, 13.8; 26.1, 16.4, 17.6 |
+   | us per message, 256 / 1024 with churn | 20.5, 23.3; 30.2, 37.3 | 12.7, 15.8; 25.9, 24.3 |
+   | starved router (one shared core), forwarded of 40 000/s | 6 400; 5 535 | 8 932; 7 916 |
+   | told 1.32 % of a core, 32 hogs, forwarded per second | 565; 401 | 962; 973 |
+   | keepalive lateness at 1024 / 1536 / 2048 sessions, ms | 1849, 4651, 8083; 2821, 5428, 8352 | 1353, 2867, 6300; 2223, 3781, 6312 |
+   | sessions ended at 2048 | 404; 646 | 37; 102 |
+   | faces DOWN at 32 hogs; at 64 hogs | 1, 0; 0, 0 | 0, 0; 3, 1 |
+
+   Read as: the starved and told-a-share router forwards more (by about 40 per cent on one shared core and
+   about twice at 32 hogs) and serves its keepalives sooner, which is where section 7 expected a task per face to
+   show, and both runs agree. The microseconds per message of the uncontended table do not: the first
+   `task-per-face` run read about half of the control and the second read above it at 256 subscribers, so no
+   direction is claimed for it. The faces DOWN under the share tests (which assert the population and not these
+   counts) are recorded and not attributed: the control had one too, and two runs do not separate the two.
 5. **The reservation.** A face task awaits `poll_reserve` for the destination's lane and sends under the
    conduit's lock with the permit (7.6), which is the first consumer of the session core's opaque permit; the
    thread park (`ParkBudget`, `wait_for_room`) leaves the router's path.

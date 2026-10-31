@@ -6368,7 +6368,9 @@ async fn run_router_hat_until(
     #[cfg(not(feature = "scouting-responder"))]
     let _ = scout_listen;
     use std::time::Duration;
-    use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
+    use wz::runtime_tokio::accept_loop::{
+        peer_loop_shared, AcceptEvent, FaceSources, RoutingFaceDrive,
+    };
     use wz::runtime_tokio::linkstate_forward::Zid;
     use wz::runtime_tokio::router_forward::RouterForwarder;
     // Cadence of the OBSERVE-only application driver (a pure router originates no
@@ -6459,10 +6461,14 @@ async fn run_router_hat_until(
     // Item 751 — the south partition, before any face registers (the hats a
     // face joins are the ones it keeps); the face loop reads it back off the
     // forwarder for every session it opens.
-    let forwarder =
+    //
+    // Shared, because under the `routing-face-drive` policy's upstream value each face's drive
+    // is a task of its own and holds the forwarder (`peer_loop_shared`).
+    let forwarder = Arc::new(
         RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping)
             .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
-            .with_south_partition(opts.south_partition.clone());
+            .with_south_partition(opts.south_partition.clone()),
+    );
 
     // R2634 — the ONE live `WzConfig` this host runs on, built before the first
     // face so the weights it carries are what the first flood advertises. R2633
@@ -6584,7 +6590,7 @@ async fn run_router_hat_until(
     forwarder.set_peer_region_full_linkstate(opts.peer_region_full_linkstate);
     {
         let count = host_cfg.guard().router_link_weights().len();
-        match host_cfg.guard().install_router_link_weights(&forwarder) {
+        match host_cfg.guard().install_router_link_weights(&*forwarder) {
             Ok(_) => {
                 if count > 0 {
                     log::info!("router-hat: {count} configured link weight(s) applied");
@@ -6712,7 +6718,7 @@ async fn run_router_hat_until(
     // socket and one drive loop. It used to be two faces, an egress (R311y188)
     // and an ingress (R311y194), which a zenoh member saw as two peers under
     // this router's zid, from two source addresses. The ingress half folds each
-    // admitted Push and Query into the `!Send` forwarder through peer_loop
+    // admitted Push and Query into the forwarder through the face loop's own task
     // (`route_mcast_ingress`, echo-guarded off the groups); the RX self-zid gate
     // drops this node's own loopback, so it never self-delivers. I3b relays the
     // on-group ROUTER members (the Designated-Router candidates) and S2 the
@@ -7517,7 +7523,7 @@ async fn run_router_hat_until(
         log::info!("wz-ap-demo router-hat: adminspace config WRITE at {write_key}");
     }
 
-    let loop_fut = peer_loop(
+    let loop_fut = peer_loop_shared(
         FaceSources {
             // R2099 (item 512) — EVERY bound `listen/endpoints` member.
             listeners,
@@ -7585,7 +7591,8 @@ async fn run_router_hat_until(
                 log_face_event("router-hat", event)
             }
         },
-        &forwarder,
+        forwarder.clone(),
+        RoutingFaceDrive::default(),
     );
     tokio::pin!(loop_fut);
 
@@ -7694,8 +7701,8 @@ async fn run_router_hat_until(
                     let queued: Vec<PendingConfigWrite> =
                         std::mem::take(&mut *pending_config_writes.guard());
                     let sinks = wz::runtime_tokio::config::ConfigSinks::none()
-                        .with_interceptors(&forwarder)
-                        .with_router_link_weights(&forwarder);
+                        .with_interceptors(&*forwarder)
+                        .with_router_link_weights(&*forwarder);
                     // R2667 — the `connect/endpoints` consumer, and it is the
                     // only sink here that is NOT the forwarder. The desired
                     // connect-set lives as a loop-local inside the face drive

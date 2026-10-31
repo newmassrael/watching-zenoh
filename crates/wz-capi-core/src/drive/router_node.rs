@@ -6,7 +6,7 @@
 //!
 //! The other roles of this crate are one session with N peers and no forwarding between them
 //! ([`SharedSession`](crate::faces::SharedSession)); a router is the forwarder of the runtime
-//! ([`RouterForwarder`]) run by its face loop ([`peer_loop`]), which is what the demo's
+//! ([`RouterForwarder`]) run by its face loop ([`peer_loop_shared`]), which is what the demo's
 //! `--router-hat` runs. This module is that composition without the demo's operator surface, and
 //! it is a child of the drive module for the parts it shares with it (the bind of the listeners,
 //! the scouting responder, the parameters of the handshake), which are private there.
@@ -17,7 +17,7 @@
 //! the router session). A configuration that asks for what this node does not carry is refused
 //! at the open, by what it asked for, and not opened as a node without it.
 
-use wz_runtime_tokio::accept_loop::{peer_loop, FaceSources};
+use wz_runtime_tokio::accept_loop::{peer_loop_shared, FaceSources, RoutingFaceDrive};
 use wz_runtime_tokio::linkstate_forward::Zid;
 use wz_runtime_tokio::router_forward::RouterForwarder;
 use wz_runtime_tokio::session::QueryOptions;
@@ -476,14 +476,30 @@ pub(crate) fn open_router_blocking(
     // connected and told it what it holds (upstream's `start_conditions` counts one connector
     // for each).
     let dials = connect.len();
+    let face_drive = RoutingFaceDrive::default();
     let handle = std::thread::Builder::new()
         .name("wz-capi-router".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
+            // Under the `routing-face-drive` policy's upstream value each face is a task of its
+            // own on this runtime's workers, so the node routes on as many threads as it has:
+            // two unless `WZ_CAPI_WORKER_THREADS` says otherwise, as upstream's receive runtime
+            // has (`commons/zenoh-runtime/src/lib.rs` @
+            // `/// Renamed to rx. Default param: worker_threads = 2.`). The workers carry the
+            // drive thread's stack, because they poll the same futures. Under `one-task` every
+            // face is driven on this thread, and a runtime of this thread alone is all it needs.
+            let built = match face_drive {
+                RoutingFaceDrive::TaskPerFace => tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(drive_workers())
+                    .thread_stack_size(DRIVE_THREAD_STACK_BYTES)
+                    .enable_all()
+                    .thread_name("wz-capi-router-rt")
+                    .build(),
+                RoutingFaceDrive::OneTask => tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build(),
+            };
+            let rt = match built {
                 Ok(rt) => rt,
                 Err(_) => {
                     let _ = tx.send(Err(OpenError::DriveFailed));
@@ -501,6 +517,7 @@ pub(crate) fn open_router_blocking(
                 link_conf,
                 offer,
                 node_forwarder,
+                face_drive,
                 groups,
                 dial_intents,
                 #[cfg(feature = "scout")]
@@ -576,6 +593,7 @@ async fn run_router(
     link_conf: LinkConf,
     offer: SessionOffer,
     forwarder: Arc<RouterForwarder>,
+    face_drive: RoutingFaceDrive,
     groups: Vec<GroupJoin>,
     dial_intents: Option<wz_runtime_tokio::accept_loop::DialIntentReceiver>,
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
@@ -721,14 +739,15 @@ async fn run_router(
             shutdown.notified().await;
         }
     };
-    let _summary = peer_loop(
+    let _summary = peer_loop_shared(
         sources,
         params,
         clock,
         DEFAULT_OPEN_TICK_MS,
         until_stopped,
         |_event| {},
-        &*forwarder,
+        forwarder.clone(),
+        face_drive,
     )
     .await;
     // The node leaves its group as it ends, which announces the departure to the members, where

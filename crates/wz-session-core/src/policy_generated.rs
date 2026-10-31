@@ -322,6 +322,51 @@ impl Default for ClockQualityStamping {
     }
 }
 
+/// `routing-face-drive`: How a node that routes for others serves its links. `task-per-
+/// face` gives each link a task of its own on the node's worker threads: a node with many
+/// peers uses more than one core, and a link that is slow to serve holds up only itself.
+/// `one-task` serves every link from the node's one task, one message at a time, on one
+/// core: the order in which the node handles what its links bring is then the order the
+/// task polled them, which a run replayed for a test needs, and a host with one core loses
+/// nothing by it. Neither changes what a peer is sent or in what order one link's messages
+/// are routed.
+/// Upstream: Reads each link of a node on a task of its own, spawned on the node's receive
+/// runtime (two worker threads unless the runtime is configured otherwise), and routes what
+/// that link brings on the same task under a read lock of the routing tables, so the links
+/// of a node are served by several threads at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutingFaceDrive {
+    /// `task-per-face`.
+    TaskPerFace,
+    /// `one-task`.
+    OneTask,
+}
+
+impl RoutingFaceDrive {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::TaskPerFace => "task-per-face",
+            Self::OneTask => "one-task",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["task-per-face", "one-task"];
+    const ALL: [Self; 2] = [Self::TaskPerFace, Self::OneTask];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_ROUTING_FACE_DRIVE");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for RoutingFaceDrive {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -366,6 +411,12 @@ pub struct SessionPolicy {
     /// `clock-quality-stamping`. Upstream: Stamps with whatever time the system clock
     /// reads, and has no notion of whether that clock is set or follows a reference.
     pub clock_quality_stamping: ClockQualityStamping,
+    /// `routing-face-drive`. Upstream: Reads each link of a node on a task of its own,
+    /// spawned on the node's receive runtime (two worker threads unless the runtime is
+    /// configured otherwise), and routes what that link brings on the same task under a
+    /// read lock of the routing tables, so the links of a node are served by several
+    /// threads at once.
+    pub routing_face_drive: RoutingFaceDrive,
 }
 
 impl SessionPolicy {
@@ -382,6 +433,7 @@ impl SessionPolicy {
         let supervision_after_expiry = SupervisionAfterExpiry::stated();
         let event_ring_full = EventRingFull::stated();
         let clock_quality_stamping = ClockQualityStamping::stated();
+        let routing_face_drive = RoutingFaceDrive::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
@@ -394,6 +446,7 @@ impl SessionPolicy {
             supervision_after_expiry,
             event_ring_full,
             clock_quality_stamping,
+            routing_face_drive,
         }
     }
 }
