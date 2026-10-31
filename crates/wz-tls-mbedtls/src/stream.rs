@@ -314,8 +314,8 @@ pub struct AcceptBudget {
 
 /// The dial of a secure channel: the stream `D` connects, then a TLS 1.3 handshake under the
 /// policy the dial was made with. The link sees the stream only once the peer is known by it.
-/// The same value listens ([`StreamDial::listen`], [`TlsDial::listener`]) once it has an
-/// [`AcceptBudget`].
+/// The same value listens (`StreamDial::listen`, which a build without `alloc` or with
+/// `session-slot` does not have, and [`TlsDial::listener`]) once it has an [`AcceptBudget`].
 #[derive(Clone, Copy)]
 pub struct TlsDial<D> {
     inner: D,
