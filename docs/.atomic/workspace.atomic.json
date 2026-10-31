@@ -302372,6 +302372,42 @@
         "Open: the wz_task frame of frt is 5,352 of a budget of 8,192 and holds the session it drives; hosted CI per job is unread; the wz-side migration to SCE R2 and R4 waits on R4."
       ]
     },
+    "Round 4019": {
+      "decision_summary": "Two count-guard reds found by measuring the guards the round 4014 push reached, which its pre-push deferred. First, a peer's red: the link-kind recorders of test_fixtures.rs were gated on transport-multilink or session-extshm, wider than any consumer, so the multilink lanes of C1ba (multilink with no qos and no router) failed to compile their tests on dead code. The gate is now the union of the three consumers' own gates. Second, this session's: the C1y accept_loop guard read 19 while round 4014's routing-face-drive pair makes it 21; moved, and C1v, whose feature set does not compile the pair, stays at 14.",
+      "changes_bullets": [
+        "test_fixtures.rs: recording_actions_over and recording_driver_over are gated on any(all(transport-multilink, transport-qos, codec-push, codec-close), all(transport-multilink, routing-router-hat), all(session-extshm, unix)), the gates of multilink's joined_qos_pair_over, router_forward::joined_link_tests and the shm_auth_segment test",
+        "run-ci.sh: the C1y accept_loop guard moves 19 to 21 with its reason"
+      ],
+      "verification_bullets": [
+        "guarded_count_gate over the round 4014 range: 12 of 15 guards OK, the two C1ba multilink lanes exited non-zero on dead code in test_fixtures.rs, and C1y measured 21 against 19 on the build host",
+        "After the fix, on the build host: the C1ba lanes print 5 and 1 passed (their guards), C1bb multilink 16 (its guard), joined_link_tests 1 under routing-router-hat with multilink, shm_auth_segment 24 under session-extshm; clippy -D warnings of the multilink-only feature set and cargo fmt --check clean",
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop prints 21 passed, 733 filtered out"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The session that widened the fixture gate (commit 8781555655) was not identified among the live sessions and was not told; this entry is the notice",
+        "Round 4014's carry stands: the destination wake list, the section 7 questions, and more E7s runs before reading the faces DOWN counts"
+      ],
+      "publishable_decision_summary": "Two count-guard reds found by measuring the guards the round 4014 push reached, which its pre-push deferred. First, a peer's red: the link-kind recorders of test_fixtures.rs were gated on transport-multilink or session-extshm, wider than any consumer, so the multilink lanes of C1ba (multilink with no qos and no router) failed to compile their tests on dead code. The gate is now the union of the three consumers' own gates. Second, this session's: the C1y accept_loop guard read 19 while round 4014's routing-face-drive pair makes it 21; moved, and C1v, whose feature set does not compile the pair, stays at 14.",
+      "publishable_changes_bullets": [
+        "test_fixtures.rs: recording_actions_over and recording_driver_over are gated on any(all(transport-multilink, transport-qos, codec-push, codec-close), all(transport-multilink, routing-router-hat), all(session-extshm, unix)), the gates of multilink's joined_qos_pair_over, router_forward::joined_link_tests and the shm_auth_segment test",
+        "run-ci.sh: the C1y accept_loop guard moves 19 to 21 with its reason"
+      ],
+      "publishable_verification_bullets": [
+        "guarded_count_gate over the round 4014 range: 12 of 15 guards OK, the two C1ba multilink lanes exited non-zero on dead code in test_fixtures.rs, and C1y measured 21 against 19 on the build host",
+        "After the fix, on the build host: the C1ba lanes print 5 and 1 passed (their guards), C1bb multilink 16 (its guard), joined_link_tests 1 under routing-router-hat with multilink, shm_auth_segment 24 under session-extshm; clippy -D warnings of the multilink-only feature set and cargo fmt --check clean",
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop prints 21 passed, 733 filtered out"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The session that widened the fixture gate (commit 8781555655) was not identified among the live sessions and was not told; this entry is the notice",
+        "Round 4014's carry stands: the destination wake list, the section 7 questions, and more E7s runs before reading the faces DOWN counts"
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
