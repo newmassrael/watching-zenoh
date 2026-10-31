@@ -302684,6 +302684,34 @@
         "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the refusals against a zenohd, and the earlier ledger entries that name tx.congestion.exhaust as going to Closing, which are frozen and are corrected by this entry."
       ]
     },
+    "Round 4027": {
+      "decision_summary": "Hosted run 41162550527 (b9dc6b151, which graded the repairs of the previous rounds) failed six jobs; read per job and re-measured at the tip, five were already repaired by their own sessions (the connect_manager size bound by 15c182c0e5, the C1AY counts, the corpus tally, the lattice of counts) and one was not: Layer E18, whose config test named zenoh-1.10.1 in the registry after the reference train moved to 1.10.2, and whose copy of DEFAULT_CONFIG.json5 differs from 1.10.2's by two doc blocks on QUIC segmentation_offload. Paid: the version in the test and the copy, byte-equal to upstream's file.",
+      "changes_bullets": [
+        "zenoh_api_config.rs (differential), wz-zenoh/DEFAULT_CONFIG.json5."
+      ],
+      "verification_bullets": [
+        "pc2: the differential config test 11 passed; cmp of the copy against the registry's 1.10.2 file is equal; the lattice gate passes at the tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "wz does not implement the QUIC segmentation_offload option the 1.10.2 doc describes; that belongs to the pin-bump work. validate and gate provenance of the run failed on the lattice of counts at that commit, which the tip passes; the whole of Layer C0 was not re-run."
+      ],
+      "publishable_decision_summary": "Hosted run 41162550527 (b9dc6b151, which graded the repairs of the previous rounds) failed six jobs; read per job and re-measured at the tip, five were already repaired by their own sessions (the connect_manager size bound by 15c182c0e5, the C1AY counts, the corpus tally, the lattice of counts) and one was not: Layer E18, whose config test named zenoh-1.10.1 in the registry after the reference train moved to 1.10.2, and whose copy of DEFAULT_CONFIG.json5 differs from 1.10.2's by two doc blocks on QUIC segmentation_offload. Paid: the version in the test and the copy, byte-equal to upstream's file.",
+      "publishable_changes_bullets": [
+        "zenoh_api_config.rs (differential), wz-zenoh/DEFAULT_CONFIG.json5."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: the differential config test 11 passed; cmp of the copy against the registry's 1.10.2 file is equal; the lattice gate passes at the tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz does not implement the QUIC segmentation_offload option the 1.10.2 doc describes; that belongs to the pin-bump work. validate and gate provenance of the run failed on the lattice of counts at that commit, which the tip passes; the whole of Layer C0 was not re-run."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
