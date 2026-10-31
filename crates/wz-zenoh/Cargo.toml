@@ -132,6 +132,9 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-feat
     "adminspace-router-linkstate",
     "adminspace-metrics",
     "adminspace-read",
+    # Upstream's `zenoh` always carries `tracing`, and its own test of regions counts the spans of
+    # its routing; the node opens the same ones, in a build of the facade only.
+    "tracing-spans",
 ] }
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
 zenoh-codec = { path = "../wz-zenoh-codec" }

@@ -3711,6 +3711,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tracing",
  "webpki-roots",
  "windows-sys 0.61.2",
  "wz-access-control",

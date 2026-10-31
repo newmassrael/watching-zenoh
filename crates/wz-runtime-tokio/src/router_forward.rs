@@ -459,6 +459,7 @@ mod local_publish;
 mod peer_differential_tests;
 #[cfg(test)]
 mod peer_network_tests;
+mod routing_spans;
 mod shed;
 #[cfg(test)]
 mod shed_tests;
@@ -6146,7 +6147,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        match declared {
+        // Upstream's `register_subscriber` of a hat is an instrumented function, and a test of
+        // upstream counts the events it makes (`routing_spans`).
+        let span = routing_spans::register_subscriber(&region, declared.keyexpr());
+        let registered = match declared {
             Declared::Sourced(sourced) => self.commit_register(
                 inbound,
                 region,
@@ -6164,7 +6168,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 store.insert(inbound, decl_id, keyexpr.clone());
                 !already
             }
-        }
+        };
+        span.returned(registered);
+        registered
     }
 
     /// An `UndeclareSubscriber` on `inbound` (its keyexpr rides the
@@ -6304,7 +6310,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        match declared {
+        // The queryable twin of the span `register_subscriber` opens.
+        let span = routing_spans::register_queryable(&region, declared.keyexpr());
+        let registered = match declared {
             Declared::Sourced(sourced) => self.commit_register(
                 inbound,
                 region,
@@ -6321,7 +6329,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 by_id.insert(decl_id, (keyexpr.clone(), info));
                 face_qabl_info(by_id, keyexpr) != before
             }
-        }
+        };
+        span.returned(registered);
+        registered
     }
 
     /// An `UndeclareQueryable` on `inbound`, the query twin of
@@ -12173,6 +12183,8 @@ impl RouterForwarder {
         };
         drop(on);
         for message in messages {
+            // One message of a face, as upstream's `DeMux::handle_message` opens it.
+            let _demux = routing_spans::demux(self.own_zid, id);
             log::debug!(
                 "router forward: face {id:?} tier {tier:?} inbound {}",
                 match message {

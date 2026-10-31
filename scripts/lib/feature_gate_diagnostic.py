@@ -397,6 +397,11 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "storage-mgr-strip-prefix",
             "storage-mgr-wildcard-updates",
             "switchboard",
+            # `tracing-spans` opens the spans of upstream's routing (`demux`, `register_subscriber`,
+            # `register_queryable`) inside the router forwarder's own functions; the module that
+            # holds them (`router_forward::routing_spans`) is private and its functions are
+            # `pub(super)`, so no public item carries the feature.
+            "tracing-spans",
             "transport-compression",
             "transport-fragmentation",
             "transport-link-tls-keylog",

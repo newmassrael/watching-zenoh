@@ -74,6 +74,14 @@ path = "src/lib.rs"
 # emit continues to compile; `liveliness-subscriber` implies
 # `declare-interest` + `declare-final` (R280 send_interest_*).
 [features]
+# The router and peer node open the spans of upstream's routing code where it registers a
+# declaration in a hat: `demux{zid, src}` round the handling of one message of a face, and
+# `register_subscriber{self, res}` / `register_queryable{self, res}` round the registration, with
+# the one event upstream's `#[instrument(ret)]` makes inside it. Upstream's own test of its regions
+# counts those events, which is a count of upstream's steps and not an observable of the API
+# (`docs/zenoh-api-on-the-engine.md`, Z8). Off the data path, and not even a check made where no
+# subscriber of `tracing` is installed. Turned on by the facade crate, `wz-zenoh`.
+tracing-spans = ["dep:tracing"]
 # R311y492 (§5.22) — the DYNAMIC PLUGIN HOST, and with it the four atoms
 # R311y256 deprecated. That round's reasoning was correct and conditional: the
 # other four "exist only to SERVE dynamic loading, so if this is ever built they
@@ -2087,6 +2095,10 @@ sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # `LuaEngine` remains in the graph. This completes the runtime-schism
 # resolution begun for scouting in R311ik.
 log = "0.4"
+# The spans of upstream's routing code, which a test of upstream's regions counts (`tracing-spans`).
+# Upstream's `zenoh` always has `tracing`; here it is the facade's, so that a build of the C ABI
+# or of the cooperative host links none of it.
+tracing = { version = "0.1.41", optional = true }
 # What a hosted OS tells a node about its network (the interface table and what is read from it),
 # which this crate re-exports rather than owns: the cooperative host reads the same table. Pulled
 # by `link-interfaces`, so every other build is byte-identical.
