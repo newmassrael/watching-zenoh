@@ -301484,6 +301484,44 @@
         "Owed: the whatami a link state restates (upstream 1.10.2 network.rs sets it on every newer link state, wz-routing-graph only while unknown); the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 3999": {
+      "decision_summary": "Twelve zenoh captures: a real path and five older releases. The real path is a zenohd 1.10.1 on the build host with one subscriber and twenty publishers (a put a second each) on this host, over its Wi-Fi and the Tailscale tunnel (300 pings lost none, 2.7 to 178 ms), TCP and UDP, two minutes each, captured inside the tunnel (raw IP, a fixed Ethernet header added). All 42 flows read yes. TCP broke 0 of 3723 SN steps; UDP broke 274 of 3510 (7.8%), above the assumed 2^-4, and the verdict held (92% follow, a third is enough); the cause was not traced. The releases are 1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2, router and clients built from the tags, TCP and UDP: ten captures, two yes flows each, none of 1142 steps broken. Counts: units 19389, framing 386, cookies 390, Init pairs 392, versions 784. Residual and undecoded units weigh -12660 on the yes sum, so two of them now cross the no threshold: lan-dns reads 174 no and busylan-ntp 89 no. The pinned example sums move by up to 14 millibits.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-tunnel-udp-20pub`, `zenoh-tunnel-tcp-20pub`, and `zenoh-matched-1-0-2|1-3-4|1-4-0|1-5-0|1-6-2-tcp|udp` (anonymised, 77 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie fidelity -11 and differing -7030, Init roles +989 and one kind -6037, version header +7994 and another version -8029, unit read whole +966 / +3546, residual -12660 / -11242, undecoded -12660 / -11772, framing held +2835 / +6450 and lost -7015 / -6999; the cookie-weight test follows.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: rows for the twelve captures (21 yes flows each for the tunnel, 2 for the others) and two moved null rows: lan-dns (0, 174, 13), busylan-ntp (0, 89, 5).",
+        "Pinned sums moved with the weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (no sum 10638).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on the real path, one on the older releases, the null captures that moved, and what is still open."
+      ],
+      "verification_bullets": [
+        "On a build host, on the tree rebased onto main with its submodules updated to their pins: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, and its C consumer built against the release cdylib and read the tree. The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The pre-push static gate array ran whole on the rebased tree: 121 of 121 pass. The corpus verifier: 77 files are fixed points. The release binaries were built from the upstream tags on the build host. The tunnel captures were converted from raw IP to Ethernet framing by a script that only prepends the header. Not run: the hosted layers. Two bx runs were refused or ended by the scheduler (a session request to the build host, then a memory reservation) and rerun; neither said anything about the code."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: the releases between those held (1.1.x, 1.2.x and the other patch releases), a client older than its router for any release but 1.7.2 and 1.9.0, a link that really loses packets (the tunnelled path lost none in 300 pings and broke steps only over UDP, 7.8%, cause untraced), and a reordered TCP session that carries more than one SN step. The old release binaries are on the build host only (the home directory, per release); build one tag at a time, since two collide on the pinned toolchain's install."
+      ],
+      "publishable_decision_summary": "Twelve zenoh captures: a real path and five older releases. The real path is a zenohd 1.10.1 on the build host with one subscriber and twenty publishers (a put a second each) on this host, over its Wi-Fi and the Tailscale tunnel (300 pings lost none, 2.7 to 178 ms), TCP and UDP, two minutes each, captured inside the tunnel (raw IP, a fixed Ethernet header added). All 42 flows read yes. TCP broke 0 of 3723 SN steps; UDP broke 274 of 3510 (7.8%), above the assumed 2^-4, and the verdict held (92% follow, a third is enough); the cause was not traced. The releases are 1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2, router and clients built from the tags, TCP and UDP: ten captures, two yes flows each, none of 1142 steps broken. Counts: units 19389, framing 386, cookies 390, Init pairs 392, versions 784. Residual and undecoded units weigh -12660 on the yes sum, so two of them now cross the no threshold: lan-dns reads 174 no and busylan-ntp 89 no. The pinned example sums move by up to 14 millibits.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-tunnel-udp-20pub`, `zenoh-tunnel-tcp-20pub`, and `zenoh-matched-1-0-2|1-3-4|1-4-0|1-5-0|1-6-2-tcp|udp` (anonymised, 77 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts and the weights computed from them: cookie fidelity -11 and differing -7030, Init roles +989 and one kind -6037, version header +7994 and another version -8029, unit read whole +966 / +3546, residual -12660 / -11242, undecoded -12660 / -11772, framing held +2835 / +6450 and lost -7015 / -6999; the cookie-weight test follows.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: rows for the twelve captures (21 yes flows each for the tunnel, 2 for the others) and two moved null rows: lan-dns (0, 174, 13), busylan-ntp (0, 89, 5).",
+        "Pinned sums moved with the weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (no sum 10638).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, a paragraph on the real path, one on the older releases, the null captures that moved, and what is still open."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, on the tree rebased onto main with its submodules updated to their pins: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass, and its C consumer built against the release cdylib and read the tree. The weights were recomputed by a port that first reproduces the weights in the tree from the counts in the tree. The pre-push static gate array ran whole on the rebased tree: 121 of 121 pass. The corpus verifier: 77 files are fixed points. The release binaries were built from the upstream tags on the build host. The tunnel captures were converted from raw IP to Ethernet framing by a script that only prepends the header. Not run: the hosted layers. Two bx runs were refused or ended by the scheduler (a session request to the build host, then a memory reservation) and rerun; neither said anything about the code."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the releases between those held (1.1.x, 1.2.x and the other patch releases), a client older than its router for any release but 1.7.2 and 1.9.0, a link that really loses packets (the tunnelled path lost none in 300 pings and broke steps only over UDP, 7.8%, cause untraced), and a reordered TCP session that carries more than one SN step. The old release binaries are on the build host only (the home directory, per release); build one tag at a time, since two collide on the pinned toolchain's install."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
