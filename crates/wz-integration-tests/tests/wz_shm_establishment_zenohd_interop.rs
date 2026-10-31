@@ -64,6 +64,7 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedStatus;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenohd_shm_binary, ChildGuard,
     PortReservation, ZENOHD_LISTENER_LINE,
@@ -295,7 +296,7 @@ fn bwrap_can_hide_dev_shm() -> bool {
         .args(["--bind", "/", "/", "--tmpfs", "/dev/shm", "true"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_bounded()
         .is_ok_and(|s| s.success())
 }
 
@@ -372,6 +373,8 @@ fn dial_the_shm_zenohd_from_a_namespace(
 /// dialler that still sees the host's `/dev/shm` negotiates and establishes as in
 /// leg 1. Without this the next leg's plain session could be the sandbox and not
 /// the segments.
+// wz-proves: session-extshm wz->zenohd
+// wz-proves: transport-shm wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm + bwrap); Layer Z runs via --ignored"]
 fn wz_dialler_that_shares_dev_shm_negotiates_with_a_zenohd_through_a_namespace() {
@@ -419,6 +422,7 @@ fn wz_dialler_that_shares_dev_shm_negotiates_with_a_zenohd_through_a_namespace()
 /// two are on different `/dev/shm`), both go on plain, and the session
 /// establishes. The control above is the same dial with the one difference
 /// undone.
+// wz-proves: session-extshm wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm + bwrap); Layer Z runs via --ignored"]
 fn wz_dialler_that_shares_no_dev_shm_establishes_with_a_zenohd_without_shm() {

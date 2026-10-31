@@ -1143,7 +1143,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `z_sub`, `z_pub` and `z_queryable` run as `-m peer -l` listeners, each adjudicating
 # `api-compat-pico` in the `wz->pico` direction: 3 tests x 1 atom = 3. The helper
 # `wz_dialer_binary` maps to `wz-capi-pico` as `wz_held_listener_binary` does.
-FOREIGN_ADJUDICATOR_LINKS = 1081
+# Round 4028's two namespace legs of `wz_shm_establishment_zenohd_interop.rs` -- 1081 -> 1084,
+# RISING by three: the control (a wz dialler that shares /dev/shm negotiates through a namespace)
+# adjudicates `session-extshm` and `transport-shm` and the lenient half (a dialler with an empty
+# /dev/shm and a stock zenohd both go on plain) adjudicates `session-extshm`, all `wz->zenohd`:
+# 3 links. They were pushed WITHOUT the `wz-proves` lines and hosted Layer A4 redded for it (run
+# 41192748568, `corpus test declares nothing: 2`); measured by `audit-crossimpl-proof.sh`
+# (`measured 1084, declared 1081`).
+FOREIGN_ADJUDICATOR_LINKS = 1084
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
