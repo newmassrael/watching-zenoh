@@ -221,6 +221,17 @@ impl RouterState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
         if let Some(handle) = handle {
+            // Joined with no limit, as before; but a node thread that has not ended after 5 s
+            // is named every 5 s, since a close that waits for ever is otherwise silent.
+            let asked = std::time::Instant::now();
+            let mut next_note = std::time::Duration::from_secs(5);
+            while !handle.is_finished() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                if asked.elapsed() >= next_note {
+                    self.forwarder.note_stop_pending(asked.elapsed());
+                    next_note += std::time::Duration::from_secs(5);
+                }
+            }
             let _ = handle.join();
         }
     }

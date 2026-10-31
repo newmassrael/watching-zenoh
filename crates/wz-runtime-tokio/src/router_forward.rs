@@ -3985,6 +3985,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 }
 
 impl RouterForwarder {
+    /// Said by the host that asked this node to stop and is waiting for its thread: the thread has
+    /// not ended `waited` after it was asked. A node that stops takes milliseconds, so a line here
+    /// is a node loop that is held by something (a lock, a send), named by the node's zid.
+    pub fn note_stop_pending(&self, waited: Duration) {
+        log::warn!(
+            "router: node={} was asked to stop {waited:?} ago and its thread has not ended",
+            self.own_zid
+        );
+    }
+
     /// As [`new`](Self::new), but with an INJECTED monotonic clock — the dependency
     /// injection a deterministic pending-query-timeout test uses to advance "now"
     /// across a deadline.
