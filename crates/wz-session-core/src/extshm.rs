@@ -1234,8 +1234,11 @@ fn read_and_acknowledge<R>(
 /// Why the SHM exchange REFUSES THE LINK. Before the Open messages every failure of the
 /// exchange degrades to "no shared memory" and the session goes on; from the moment a peer has
 /// committed to shared memory in an Open message, zenoh 1.10.2 refuses the link rather than run
-/// with shared memory on one side only (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs`,
-/// `recv_open_syn` and `recv_open_ack`, which 1.10.1 answered `Ok(())` and went on without).
+/// with shared memory on one side only
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @
+/// `Challenge mismatch: refusing the SHM proposal`, and the same file @
+/// `SHM acknowledgement without a local proposal`; 1.10.1 answered `Ok(())` at both and went
+/// on without).
 #[cfg(feature = "session-extshm")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShmAuthError {

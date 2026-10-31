@@ -671,7 +671,7 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "codec": 4,
     "dispatcher": 48,
     "establishment": 34,
-    "ext": 15,
+    "ext": 14,
     "lowlatency": 4,
     "memory_backend": 11,
     "protocol": 7,
@@ -792,7 +792,7 @@ def rootless_undeclared_budget() -> int:
 # R3706 — 504 -> 502, the two `builders` occurrences (`builders/...` paths a reason cites) that now
 # resolve to a tracked file, the top crate's own `api/builders` directory; its row left the table.
 # Item 751 -- 502 -> 500, the same two line-form removals as ROOTLESS_LINE_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 485
+ROOTLESS_TOTAL_BUDGET = 484
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
