@@ -302050,6 +302050,36 @@
         "L6 T2 to T5: the dial and accept over StreamDial, the engine tls/ link, the ABI and engine selection, zenohd in Layer Z. Open: whether TLS 1.3 alone suffices for a real zenoh-pico, the key and signature types real certificates use, how pico gets the time, the arena beyond a two-link chain. Hosted results of earlier pushes still unread: Layer Z8 shm timeout and the zenoh-src cache."
       ]
     },
+    "Round 4010": {
+      "decision_summary": "The connect-manager test that guards the manager against carrying the machines of its peers is corrected a second time. The first correction replaced a byte floor of 8 KiB, stale since the machines shrank, with a relative bound of twice the manager; the hosted run then failed it in the one row of the non-default table that selects the slot profile with the admin surface, where the store is 3,016 bytes and the manager 2,264, so the correction had traded one red for another and was not run over every row that holds the test. The bound is now that the store is larger than the manager, which is what the invariant needs: the machines are in the store, and a manager that carried them would exceed the store, which holds them and not the rest of what the manager holds. The row that failed (7 features), the whole-crate row (15 features) and the default admin leg pass on the build host.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/connect_manager.rs: the_manager_does_not_carry_the_machines_of_its_peers asks that the store be larger than the manager, and its doc says why the two can be close."
+      ],
+      "verification_bullets": [
+        "On a build host: the slot profile with the admin surface (adminspace-core, adminspace-write, the three lifecycle verbs, session-slot, test-support), the fifteen-feature whole-crate row, and wz-session-mcu with adminspace-write all pass. The failing row was read from the hosted log first (the message of the first correction, store 3,016 and manager 2,264), and every row of nondefault-tests-gate.sh that selects this crate was named before the fix. The other jobs of that hosted run were attributed one by one: C1bf, C1cn and C1bnl on wz-session-core were the oracle entry bytes (fixed on main), the wz-capture kind table and C0mut were the struct lookup (fixed on main), the zenoh-protocol leg, E17, Q and Z8 were fixed on main, and C1g passes at the current head. Left: the C1bzr docs ledger, with the ci-red session."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The lesson of the two corrections of this test: a bound in a test that every feature row builds has to be proved over every row that selects the crate, and the table names them (scripts/lib/nondefault-tests-gate.sh), not only the one leg that went red. The Layer C1bzr docs ledger of the last completed hosted run is with the ci-red session. Read the hosted run of the current tree, which is the first that carries the router_forward counts, the held-lane test gate and this correction together."
+      ],
+      "publishable_decision_summary": "The connect-manager test that guards the manager against carrying the machines of its peers is corrected a second time. The first correction replaced a byte floor of 8 KiB, stale since the machines shrank, with a relative bound of twice the manager; the hosted run then failed it in the one row of the non-default table that selects the slot profile with the admin surface, where the store is 3,016 bytes and the manager 2,264, so the correction had traded one red for another and was not run over every row that holds the test. The bound is now that the store is larger than the manager, which is what the invariant needs: the machines are in the store, and a manager that carried them would exceed the store, which holds them and not the rest of what the manager holds. The row that failed (7 features), the whole-crate row (15 features) and the default admin leg pass on the build host.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/connect_manager.rs: the_manager_does_not_carry_the_machines_of_its_peers asks that the store be larger than the manager, and its doc says why the two can be close."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the slot profile with the admin surface (adminspace-core, adminspace-write, the three lifecycle verbs, session-slot, test-support), the fifteen-feature whole-crate row, and wz-session-mcu with adminspace-write all pass. The failing row was read from the hosted log first (the message of the first correction, store 3,016 and manager 2,264), and every row of nondefault-tests-gate.sh that selects this crate was named before the fix. The other jobs of that hosted run were attributed one by one: C1bf, C1cn and C1bnl on wz-session-core were the oracle entry bytes (fixed on main), the wz-capture kind table and C0mut were the struct lookup (fixed on main), the zenoh-protocol leg, E17, Q and Z8 were fixed on main, and C1g passes at the current head. Left: the C1bzr docs ledger, with the ci-red session."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The lesson of the two corrections of this test: a bound in a test that every feature row builds has to be proved over every row that selects the crate, and the table names them (scripts/lib/nondefault-tests-gate.sh), not only the one leg that went red. The Layer C1bzr docs ledger of the last completed hosted run is with the ci-red session. Read the hosted run of the current tree, which is the first that carries the router_forward counts, the held-lane test gate and this correction together."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
