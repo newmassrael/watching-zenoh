@@ -60,6 +60,9 @@ pub(super) struct BrokeredCopy {
     target: Option<String>,
     subscribers: bool,
     queryables: bool,
+    /// Whether the gateway's `DeclareFinal` for this copy set the flags it names: the pin's
+    /// `InterestState::finalized`, which `unset_finalized` reads before it clears them.
+    finalized: bool,
 }
 
 /// R2904 — the exact resources whose brokered interest one gateway has FINALIZED, by plane: the
@@ -252,6 +255,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                         target: target.map(str::to_owned),
                         subscribers: options.su(),
                         queryables: options.qu(),
+                        finalized: false,
                     });
             }
             sent += 1;
@@ -306,6 +310,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 copy.upstream,
                 NetworkMessage::Interest(build_interest_final_propagated(copy.up_id)),
             );
+            self.unset_brokered_finalized(&copy);
+        }
+    }
+
+    /// The interest goes away, so the flags its `DeclareFinal` set go with it: the gateway stops
+    /// sending declarations for the resource, and a flag that kept claiming they were complete
+    /// would withhold data that should reach it. zenoh 1.10.2's `InterestState::unset_finalized`
+    /// (`zenoh/src/net/routing/dispatcher/face.rs` @ `ctx.subscriber_interest_finalized = false;`)
+    /// does it when the interest is undeclared, and only for an interest that was finalized.
+    fn unset_brokered_finalized(&self, copy: &BrokeredCopy) {
+        let (true, Some(target)) = (copy.finalized, copy.target.as_ref()) else {
+            return;
+        };
+        let mut finalized = self.broker.finalized.guard();
+        let Some(entry) = finalized.get_mut(&copy.upstream) else {
+            return;
+        };
+        if copy.subscribers {
+            entry.subscribers.remove(target);
+        }
+        if copy.queryables {
+            entry.queryables.remove(target);
         }
     }
 
@@ -441,10 +467,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .broker
             .future
             .guard()
-            .values()
+            .values_mut()
             .flatten()
             .find(|c| c.upstream == upstream && c.up_id == up_id)
-            .cloned();
+            .map(|c| {
+                // Read by `unset_brokered_finalized` when the interest goes away.
+                c.finalized = c.target.is_some();
+                c.clone()
+            });
         let Some(BrokeredCopy {
             target: Some(target),
             subscribers,

@@ -15417,6 +15417,83 @@ mod tests {
         );
     }
 
+    /// zenoh 1.10.2 `unset_finalized`: the flag a finalized interest set goes with the interest.
+    /// The client that asked ends it (`Interest(Final)`), the gateway stops sending declarations
+    /// for the resource, and the key it was withheld is sent to it again.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_finalized_key_is_sent_again_once_the_interest_that_finalized_it_ends() {
+        use wz_session_core::interest_build::{build_interest_final, build_interest_subscribers};
+
+        let (fwd, sink_gateway, _sink_client) = gateway_and_client();
+        let interest =
+            build_interest_subscribers(3, true, true, 0, Some("demo/a")).expect("build interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let copy = forwarded_interest(&sink_gateway.frame_bytes(0));
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(copy.interest_id))),
+        );
+        sink_gateway.reset();
+        client_puts(&fwd, "demo/a");
+        assert_eq!(
+            sink_gateway.frame_count(),
+            0,
+            "finalized and declared nothing"
+        );
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Interest(build_interest_final(3)),
+        );
+        sink_gateway.reset();
+        client_puts(&fwd, "demo/a");
+        assert_eq!(
+            sink_gateway.frame_count(),
+            1,
+            "the interest is gone, so the key is no longer withheld"
+        );
+    }
+
+    /// The same flag outlives nothing it did not set: an interest that ends BEFORE its gateway
+    /// answered finalized nothing, so there is no flag to clear, and another client's finalized
+    /// key on the same gateway stays withheld.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn an_interest_that_never_finalized_clears_no_flag() {
+        use wz_session_core::interest_build::{build_interest_final, build_interest_subscribers};
+
+        let (fwd, sink_gateway, _sink_client) = gateway_and_client();
+        let interest =
+            build_interest_subscribers(3, true, true, 0, Some("demo/a")).expect("build interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let copy = forwarded_interest(&sink_gateway.frame_bytes(0));
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(copy.interest_id))),
+        );
+        // A second copy of the same resource, never answered.
+        let second =
+            build_interest_subscribers(4, true, true, 0, Some("demo/a")).expect("build interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(second));
+        sink_gateway.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Interest(build_interest_final(4)),
+        );
+        sink_gateway.reset();
+        client_puts(&fwd, "demo/a");
+        assert_eq!(
+            sink_gateway.frame_count(),
+            0,
+            "the first interest's flag stands: the second one finalized nothing"
+        );
+    }
+
     // The typed-config proofs of the peer node: a `WzConfig` drives the LIVE forwarder through
     // the `InterceptorSink` seam. They moved here from the retired single-net peer forwarder
     // with the peer node (item 751 step 7), over the same topology: a peer publisher (face 0)
