@@ -7089,7 +7089,7 @@ layer_c1af_cargo_test_shm() {
     # R3111 -- 36 -> 38, MEASURED by running this exact command: the two tests of what the Open
     # messages declare on a link that is not reliable (both messages declare Disabled and lease
     # nothing, and a declaration of Disabled withdraws the handoff an earlier one gave).
-    # R4014 -- 37 -> 40, and 53 -> 56 below: zenoh 1.10.2's refusals in the Open messages (a
+    # R4015 -- 37 -> 40, and 53 -> 56 below: zenoh 1.10.2's refusals in the Open messages (a
     # malformed OpenSyn, counters that cannot be opened, an OpenAck read against the offer) are
     # three tests of the dispatch, and `a_malformed_init_syn_is_the_one_hard_error` became
     # `a_malformed_init_syn_is_ignored`. `shm_auth_segment` 24 -> 25 and 27 -> 28: the segment
