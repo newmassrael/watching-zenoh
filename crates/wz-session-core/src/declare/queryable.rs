@@ -372,6 +372,12 @@ pub struct RemoteQueryablePeer<P: Storage = Profile> {
     /// share one ([`crate::declare::DeclEpoch`]), nothing on one that cannot.
     #[cfg(feature = "storage-profile")]
     epoch: P::Epoch,
+    /// The declarations that name a keyexpr the peer had already declared under another id and
+    /// with the same completeness, `{id -> the id the application was told it under}`: the
+    /// queryable twin of `RemoteSubscriberPeer::aliases`. A change of completeness is news and
+    /// is announced; a repeat of what the application knows is not.
+    #[cfg(feature = "alloc")]
+    aliases: alloc::collections::BTreeMap<u64, u64>,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -380,6 +386,8 @@ pub struct RemoteQueryablePeer<P: Storage = Profile> {
 impl<P: Storage> Default for RemoteQueryablePeer<P> {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "alloc")]
+            aliases: alloc::collections::BTreeMap::new(),
             #[cfg(feature = "storage-profile")]
             declared: DeclaredQueryables::<P>::default(),
             #[cfg(feature = "storage-profile")]
@@ -402,6 +410,8 @@ impl RemoteQueryablePeer<Static> {
             oversize: 0,
             #[cfg(feature = "storage-profile")]
             epoch: (),
+            #[cfg(feature = "alloc")]
+            aliases: alloc::collections::BTreeMap::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -541,8 +551,24 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     pub fn forget(&mut self) -> usize {
         let dropped = self.declared.count();
         self.declared.reset();
+        #[cfg(feature = "alloc")]
+        self.aliases.clear();
         self.changed();
         dropped
+    }
+
+    /// The id the application was told the queryable of `key` under, when the peer already holds
+    /// the same keyexpr with the same completeness, under `id` itself or another id.
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        feature = "codec-declare"
+    ))]
+    fn told_as(&self, key: &str, complete: bool) -> Option<u64> {
+        self.declared
+            .entries()
+            .find(|(_, held)| held.complete == complete && held.keyexpr.as_ref() == key)
+            .map(|(other, _)| self.aliases.get(&other).copied().unwrap_or(other))
     }
 }
 
@@ -1088,6 +1114,8 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
+        #[cfg(feature = "alloc")]
+        let told_as = peer.told_as(resolved, complete);
         if peer
             .declared
             .bind(
@@ -1102,6 +1130,20 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
             return;
         }
         peer.changed();
+        // A queryable the peer already declared with this completeness is not news: the row is
+        // kept for a withdrawal by either id and the application hears of it once.
+        #[cfg(feature = "alloc")]
+        match told_as {
+            Some(told) => {
+                if told != id {
+                    peer.aliases.insert(id, told);
+                }
+                return;
+            }
+            None => {
+                peer.aliases.remove(&id);
+            }
+        }
         let view = BorrowedDecl {
             id,
             keyexpr: resolved,
@@ -1127,9 +1169,33 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
         let _ = &local_matching;
+        #[cfg(feature = "alloc")]
+        let held = peer.declared.find(id).map(|row| {
+            (
+                alloc::string::String::from(row.keyexpr.as_ref()),
+                row.complete,
+            )
+        });
         peer.declared.unbind(id);
         peer.changed();
-        self.dispatch_undeclared(id);
+        // Told gone when the last declaration of the queryable goes, under the id it was told
+        // by (`RemoteSubscriberPeer::aliases` for the reading).
+        #[cfg(feature = "alloc")]
+        let report = {
+            let told = peer.aliases.remove(&id);
+            let remains = held.as_ref().is_some_and(|(key, complete)| {
+                peer.declared.entries().any(|(_, row)| {
+                    row.complete == *complete && row.keyexpr.as_ref() == key.as_str()
+                })
+            });
+            if remains {
+                return;
+            }
+            told.unwrap_or(id)
+        };
+        #[cfg(not(feature = "alloc"))]
+        let report = id;
+        self.dispatch_undeclared(report);
         // R311kh — see `apply_declared`.
         #[cfg(feature = "session-matching")]
         self.matching_watches
@@ -1673,6 +1739,50 @@ mod tests {
             },
         );
         DeclareOwnedVariant::CodecZenohDeclQueryable(dq)
+    }
+
+    /// The queryable twin of the subscriber registry's idempotent declaration: a keyexpr the
+    /// peer declares again with the completeness the application knows is told once, a change
+    /// of completeness is announced, and the keyexpr is told gone when its last declaration
+    /// goes, under the id it was told by.
+    #[test]
+    fn a_queryable_declared_twice_is_told_once_and_a_completeness_change_is_news() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let declared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let undeclared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let declared_for_cb = declared.clone();
+        reg.on_queryable_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()));
+        let undeclared_for_cb = undeclared.clone();
+        reg.on_queryable_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id));
+
+        reg.dispatch_declare(
+            &decl_queryable_complete(1, "home/temp", false),
+            &HashMap::new(),
+        );
+        reg.dispatch_declare(
+            &decl_queryable_complete(2, "home/temp", false),
+            &HashMap::new(),
+        );
+        assert_eq!(*declared.lock().unwrap(), vec![1], "a repeat is not news");
+        reg.dispatch_declare(
+            &decl_queryable_complete(3, "home/temp", true),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            *declared.lock().unwrap(),
+            vec![1, 3],
+            "a change of completeness is"
+        );
+
+        let undeclare =
+            |id: u64| DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(id));
+        reg.dispatch_declare(&undeclare(1), &HashMap::new());
+        assert!(
+            undeclared.lock().unwrap().is_empty(),
+            "id 2 still declares it"
+        );
+        reg.dispatch_declare(&undeclare(2), &HashMap::new());
+        assert_eq!(*undeclared.lock().unwrap(), vec![1]);
     }
 
     /// The membership table stores the peer's `QueryableInfo::complete`,

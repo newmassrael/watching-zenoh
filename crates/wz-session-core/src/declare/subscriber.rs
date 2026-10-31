@@ -223,6 +223,16 @@ pub struct RemoteSubscriberPeer<P: Storage = Profile> {
     /// share one ([`crate::declare::DeclEpoch`]), nothing on one that cannot.
     #[cfg(feature = "storage-profile")]
     epoch: P::Epoch,
+    /// The declarations that name a keyexpr the peer had already declared under another id,
+    /// `{id -> the id the application was told the keyexpr under}`. A peer says one entity
+    /// twice when it announces a subscriber and then answers an interest for it (a member of a
+    /// multicast group does both), and the application is told the entity once: what a peer
+    /// has declared is a set of keyexprs, as upstream's hat holds one registration per face and
+    /// resource (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn register_subscriber`). The
+    /// rows stay in `declared`, so a withdrawal by either id and the matching watches read what
+    /// they always read; only the events the observers hear are one per entity.
+    #[cfg(feature = "alloc")]
+    aliases: alloc::collections::BTreeMap<u64, u64>,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -239,6 +249,8 @@ impl<P: Storage> Default for RemoteSubscriberPeer<P> {
             initial_final: false,
             #[cfg(feature = "storage-profile")]
             epoch: <P::Epoch as Default>::default(),
+            #[cfg(feature = "alloc")]
+            aliases: alloc::collections::BTreeMap::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -257,6 +269,8 @@ impl RemoteSubscriberPeer<Static> {
             initial_final: false,
             #[cfg(feature = "storage-profile")]
             epoch: (),
+            #[cfg(feature = "alloc")]
+            aliases: alloc::collections::BTreeMap::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -375,10 +389,28 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     pub fn forget(&mut self) -> usize {
         let dropped = self.declared.count();
         self.declared.reset();
+        #[cfg(feature = "alloc")]
+        self.aliases.clear();
         // A reconnected peer declares again from the start and ends it again.
         self.initial_final = false;
         self.changed();
         dropped
+    }
+
+    /// The id the application was told `key` under, when the peer already holds `key`, under
+    /// `id` itself (a declaration repeated, as an answer repeats an announcement that used the
+    /// subscriber's own id) or under another id: a declaration of it adds nothing the
+    /// application has not heard.
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        feature = "codec-declare"
+    ))]
+    fn told_as(&self, key: &str) -> Option<u64> {
+        self.declared
+            .entries()
+            .find(|(_, held)| held.as_ref() == key)
+            .map(|(other, _)| self.aliases.get(&other).copied().unwrap_or(other))
     }
 }
 
@@ -956,10 +988,27 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
+        #[cfg(feature = "alloc")]
+        let told_as = peer.told_as(resolved);
         if peer.declared.bind(id, text).is_err() {
             return;
         }
         peer.changed();
+        // The peer declares a keyexpr it already declared (an announcement, then the answer to
+        // an interest): the row is kept, so that either id withdraws it, and the application
+        // hears of the keyexpr once ([`RemoteSubscriberPeer::aliases`]).
+        #[cfg(feature = "alloc")]
+        match told_as {
+            Some(told) => {
+                if told != id {
+                    peer.aliases.insert(id, told);
+                }
+                return;
+            }
+            None => {
+                peer.aliases.remove(&id);
+            }
+        }
         // R311gb-3d / Track 2 — fan through the DeclSink seam via
         // the no-heap SSOT: build the `(id, resolved-keyexpr)`
         // view once and hand each observer `&dyn DeclView`.
@@ -993,9 +1042,29 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         // get_matching_status fired from inside the
         // on_undecl callback chain observes the post-
         // undeclare state.
+        #[cfg(feature = "alloc")]
+        let key = peer
+            .declared
+            .find(id)
+            .map(|k| alloc::string::String::from(k.as_ref()));
         peer.declared.unbind(id);
         peer.changed();
-        self.dispatch_undeclared(id);
+        // The application is told a keyexpr is gone when its last declaration goes, under the
+        // id it was told it by ([`RemoteSubscriberPeer::aliases`]).
+        #[cfg(feature = "alloc")]
+        let report = {
+            let told = peer.aliases.remove(&id);
+            let remains = key
+                .as_deref()
+                .is_some_and(|key| peer.declared.entries().any(|(_, v)| v.as_ref() == key));
+            if remains {
+                return;
+            }
+            told.unwrap_or(id)
+        };
+        #[cfg(not(feature = "alloc"))]
+        let report = id;
+        self.dispatch_undeclared(report);
         // R311kh — see `apply_declared`.
         #[cfg(feature = "session-matching")]
         self.matching_watches
@@ -1374,6 +1443,68 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         assert_eq!(*captured, vec![42]);
+    }
+
+    /// A peer says one keyexpr twice when it announces a subscriber and then answers an
+    /// interest for it (a member of a multicast group does both). The application is told the
+    /// keyexpr once, and told it is gone when the last declaration of it goes, under the id it
+    /// was told it by, whichever id is withdrawn first.
+    #[test]
+    fn a_keyexpr_declared_twice_is_told_once_and_gone_when_the_last_goes() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let declared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let undeclared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let declared_for_cb = declared.clone();
+        reg.on_subscriber_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()));
+        let undeclared_for_cb = undeclared.clone();
+        reg.on_subscriber_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id));
+
+        let declare = |id: u64| {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(id, 0, Some("home/temp")))
+        };
+        let undeclare =
+            |id: u64| DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(id));
+        reg.dispatch_declare(&declare(1), &HashMap::new());
+        // The answer to an interest repeats the announcement under the same id...
+        reg.dispatch_declare(&declare(1), &HashMap::new());
+        // ...or names the keyexpr under another.
+        reg.dispatch_declare(&declare(2), &HashMap::new());
+        assert_eq!(*declared.lock().unwrap(), vec![1], "told once, under id 1");
+        assert!(reg.has_matching("home/temp"), "both rows are held");
+
+        reg.dispatch_declare(&undeclare(1), &HashMap::new());
+        assert!(
+            undeclared.lock().unwrap().is_empty(),
+            "id 2 still declares the keyexpr"
+        );
+        assert!(reg.has_matching("home/temp"));
+
+        reg.dispatch_declare(&undeclare(2), &HashMap::new());
+        assert_eq!(
+            *undeclared.lock().unwrap(),
+            vec![1],
+            "gone when the last declaration goes, under the id it was told by"
+        );
+        assert!(!reg.has_matching("home/temp"));
+    }
+
+    /// The same keyexpr under another id after a withdrawal is news again.
+    #[test]
+    fn a_keyexpr_declared_again_after_its_withdrawal_is_told_again() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let declared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let declared_for_cb = declared.clone();
+        reg.on_subscriber_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()));
+        let declare = |id: u64| {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(id, 0, Some("home/temp")))
+        };
+        reg.dispatch_declare(&declare(1), &HashMap::new());
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(1)),
+            &HashMap::new(),
+        );
+        reg.dispatch_declare(&declare(2), &HashMap::new());
+        assert_eq!(*declared.lock().unwrap(), vec![1, 2]);
     }
 
     /// R311kh — matching listener flip-fires through the production
