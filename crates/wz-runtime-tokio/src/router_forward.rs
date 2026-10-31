@@ -11319,6 +11319,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if self.tables.runs_linkstate_peers(tier) {
             return;
         }
+        // Nor in a region the pin's ROUTER hat serves: its remote is a router, which learns what
+        // self holds along the spanning tree, from the re-advertise the next recompute makes to
+        // the children it gained ([`recompute_and_advertise_tier`](Self::recompute_and_advertise_tier)),
+        // and the pin's router hat repropagates nothing on a new face
+        // (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn new_transport_unicast_face(`). A replay
+        // beside the re-advertise sent every declaration twice on the same face, about one tick
+        // apart, and upstream's test of its regions counts each registration a node makes
+        // (`zenoh/tests/regions/scenario5.rs` @ `we should receive 3 declarations`): measured as a
+        // fourth registration of a subscriber on each node under a gateway.
+        if is_router_hat(tier, self.tables.node_mode) {
+            return;
+        }
         // Nor to a CLIENT face, in any node mode: the pin's broker hat, which
         // owns it, re-propagates nothing to a new face, "the broker hat is never
         // the north hat, thus there are no interests to re-propagate"
@@ -13005,6 +13017,28 @@ mod tests {
         assert!(
             sink_p.frame_count() > 0,
             "the replay must reach the wire, not only the counter"
+        );
+    }
+
+    /// A router that comes up late is told what the node holds once, by the re-advertise a
+    /// recompute makes to the children it gained, as upstream's router hat does: the face-up
+    /// replay is for a remote that does not speak link-state, and beside the re-advertise it sent
+    /// every declaration twice on the same face. Upstream's test of its regions counts the
+    /// registrations a node makes, and read four where it expects three.
+    #[test]
+    fn a_late_router_face_is_not_replayed_what_the_recompute_tells_it() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+
+        let (router, _sink) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(1), &router);
+
+        assert_eq!(
+            fwd.face_up_replays_seen(),
+            0,
+            "a router face is told by the tree re-advertise, and not by a replay beside it"
         );
     }
 
