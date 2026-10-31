@@ -51,6 +51,27 @@ cell without a same-condition measurement makes no claim.
 | MCU text, fixed client vs tuned pico | 157,088 | 164,396 | storage doc 5, different feature sets |
 | MCU answer turnaround | fixed 0.203 ms, heap 0.210 ms | pico 0.213 ms | storage doc 5, 12 boots each |
 | MCU GET (wz node asking) | 76.0 us | pico 80.4, zenoh 99.9, zenoh-c 96.3 | storage doc 5.2, ranges overlap |
+| host no-drop rate, pico ABI, puts batched per 1 ms slot, 8 / 64 / 1024 B | at least 5.12 M / 4.48 M / 160 k msg/s | pico 4.48 M / 4.00 M / 310 k | `pico-compare.sh nodrop`, pc3, TCP loopback peer, median of 3, 2026-10-31 |
+| host no-drop rate, pico ABI, puts one by one, 8 / 64 / 1024 B | at least 5.12 M / 4.48 M / 190 k | pico 360 k / 360 k / 350 k | the same |
+
+**The no-drop rate** (`scripts/host-bench/`, RFC 2544): the publisher OFFERS a stated rate and the
+subscriber counts what it is delivered; a rate stands when every message arrived and the rate was
+really offered, and the search doubles it and bisects to 5 percent. It replaces the free-running
+upstream examples for the throughput cell, because the control of those (pico on both sides) read "no
+samples". A trial is valid only when the pinned CPUs were used by nothing else (the share of their busy
+time that is not the two processes', at most 10 percent): on the shared bench host pc2 (load 15 to 30)
+every trial was disturbed and the same search read values tens of times apart; on pc3 the three
+repetitions agree within 5 percent. The 8 B figure of wz is a lower bound (the search stops at its
+cap). The round trip of the same ABI against pico reads a tie at 10 to 11 microseconds.
+
+**A cell wz loses: 1 KiB puts, at about half of pico's rate.** With one `sendto` per put on both sides,
+wz adds about two `futex` calls per put (`strace -c`, 50,000 puts a second: 298,725 against pico's 14),
+and 84 percent of its `sendto` calls are made by the writer thread and not the thread that put
+(`strace -f`, 5,000 a second). The zero-copy lend path (`OutboundTx::commit_at`) wakes the writer for
+every frame (`frame_landed`), and the writer is asleep between two frames that are 20 microseconds
+apart; the sender-side flush that exists for a lone message (`flush_inline`, with its quiet-time and
+stream tests) is reached from the batch hook (`wake_for_flush`) and not from this path. Not yet
+attempted: writing a lone lent frame from the sender's thread by the same tests.
 
 - **Host to host, the same build's text differs.** The same pico-client build read
   1,794,606 bytes on the development host, 1,827,441 on the bench host and 1,833,173 on
