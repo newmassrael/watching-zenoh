@@ -9255,7 +9255,10 @@ layer_c1y_cargo_test_routing_peer() {
     # pin. Read off what the command PRINTED (`18 passed; 909 filtered out`).
     # 18 -> 19: one more `accept_loop` test (hosted C1y printed `19 passed`); re-derived on the
     # build host.
-    _runci_guarded_test "C1y accept_loop" 19 \
+    # Round 4014 -- 19 -> 21: the `routing-face-drive` pair, `routing-peer`-gated, which C1v's
+    # feature set does not compile (it stays at 14). Read off what the command PRINTED on the
+    # build host (`21 passed; 733 filtered out`).
+    _runci_guarded_test "C1y accept_loop" 21 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
