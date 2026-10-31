@@ -570,7 +570,15 @@ fn egress_on(fwd: &RouterForwarder, msg: NetworkMessage, priority: Priority) -> 
 /// for that lock: not for room, so no wait for room was ever seen, and for as long as the put
 /// waited, up to `wait_before_close` (5 s, measured as the registration of a face on a node whose
 /// own puts kept its link full). It is given back as no room instead, and is held.
-fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(qos: bool) {
+///
+/// With auto batching a control message is also a barrier for the data staged before it, and drains
+/// every lane first, the lane of the waiting put among them: a drain that waited for that lock was
+/// the same wait by another name, and a QoS session reaches it where a session with one lane does
+/// not (its control message is on the data lane).
+fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(
+    qos: bool,
+    auto_batching: bool,
+) {
     let rig = Rig::new(true);
     // The negotiated-QoS flag exists only in a build with `transport-qos`; without it a session
     // has the one lane, which is the `false` case below.
@@ -581,6 +589,7 @@ fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(qos: bo
         !qos,
         "a session of a build without transport-qos cannot negotiate it"
     );
+    rig.dest.set_auto_batching(auto_batching);
     rig.link.stall_waits();
     let fwd = &rig.fwd;
     let link = &rig.link;
@@ -630,13 +639,19 @@ fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(qos: bo
 
 #[test]
 fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in_without_qos() {
-    a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(false);
+    a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(false, false);
 }
 
 #[cfg(feature = "transport-qos")]
 #[test]
 fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in_with_qos() {
-    a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(true);
+    a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(true, false);
+}
+
+#[cfg(feature = "transport-qos")]
+#[test]
+fn a_link_state_message_does_not_drain_a_lane_a_blocking_put_waits_in() {
+    a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(true, true);
 }
 
 /// A link-state message that finds no room does not wait for it, here, on the loop that serves
