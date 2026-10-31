@@ -112,6 +112,15 @@ IMAGES = (
         pattern=r"const WZ_TASK_STACK_WORDS: u16 = (\d+);",
         unit=4,
         entry="mcu_freertos_demo::wz_task",
+        # 7,664 bytes over 13 frames, read by Layer Q on one build host at the SCE pin ed2f5d7453:
+        # `wz_task` 5,352, then the session's receive path, `dispatch_unit` 76, `read_unit_in` 108,
+        # `decide_unit_in` 352, `parse_frame_payload_out_of_line` 1,536 and
+        # `refuse_unknown_mandatory_ext` 56, and the frames beneath them. `wz_task` is most of it,
+        # because the task's own locals hold the session it drives; its frame read 6,296 at the pin
+        # b2ff4da1cb, 5,488 at 11e90bcd77 and 5,352 from dc579571aa on. It is the chain of direct
+        # calls, with 6 calls through a register on the path not followed, so it is what a change
+        # to the code moves and not a bound on a run.
+        peak=7664,
     ),
     Image(
         key="frt2",
