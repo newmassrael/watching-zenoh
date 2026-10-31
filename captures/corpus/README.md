@@ -49,7 +49,7 @@ The original captures are not kept anywhere.
 | `zenoh-v1-9-0-tcp-full.pcap`, `zenoh-v1-9-0-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.9.0 |
 | `zenoh-v1-8-0-tcp-full.pcap`, `zenoh-v1-8-0-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.8.0 |
 | `zenoh-v1-7-2-tcp-full.pcap`, `zenoh-v1-7-2-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.7.2 |
-| `zenoh-matched-1-7-2-tcp.pcap`, `zenoh-matched-1-7-2-udp.pcap`, and the same for 1.8.0 and 1.9.0 | zenoh | TCP, UDP unicast | the eclipse/zenoh router of that release with the `z_pub` and `z_sub` examples built from the same tag as clients, a minute on a link that loses nothing |
+| `zenoh-matched-1-7-2-tcp.pcap`, `zenoh-matched-1-7-2-udp.pcap`, and the same for 1.8.0, 1.9.0 and 1.10.0 | zenoh | TCP, UDP unicast | the eclipse/zenoh router of that release with the `z_pub` and `z_sub` examples built from the same tag as clients, a minute on a link that loses nothing |
 | `zenoh-mixed-c1-7-2-r1-10-0-*.pcap`, `zenoh-mixed-c1-9-0-r1-10-0-*.pcap`, `zenoh-mixed-c1-7-2-r1-9-0-*.pcap` | zenoh | TCP, UDP unicast | the same with clients (`c`) older than the router (`r`): 1.7.2 against 1.10.0 and 1.9.0, 1.9.0 against 1.10.0 |
 | `zenoh-matched-1-0-2-*.pcap`, and the same for 1.3.4, 1.4.0, 1.5.0 and 1.6.2 | zenoh | TCP, UDP unicast | router and clients both built from the release's tag (no image of it was at hand), the same link; 1.0.2's zenohd runs with its rest plugin switched off |
 | `zenoh-tunnel-udp-20pub.pcap`, `zenoh-tunnel-tcp-20pub.pcap` | zenoh | UDP, TCP | a real path (Wi-Fi and a Tailscale tunnel to the router's host): a zenohd 1.10.1, one subscriber and twenty publishers, taken inside the tunnel with a fixed Ethernet header added to its raw IP frames |
