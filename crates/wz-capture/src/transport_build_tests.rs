@@ -1402,7 +1402,18 @@ fn an_inits_resolution_is_a_field_and_not_a_ring() {
 /// The generated codecs' field names, read out of the generated sources.
 fn codec_fields(source: &str, strukt: &str) -> Vec<String> {
     let head = format!("pub struct {strukt}");
-    let start = source.find(&head).unwrap_or_else(|| panic!("no `{head}`"));
+    // The struct itself, not a type that merely starts with its name: the generator also
+    // writes `ExtEntryUnknownTag(u8)` ahead of `ExtEntry<'a> {`, and `ExtEntryOwned` after it.
+    let start = source
+        .match_indices(&head)
+        .map(|(at, _)| at)
+        .find(|at| {
+            matches!(
+                source[at + head.len()..].chars().next(),
+                Some(' ') | Some('<')
+            )
+        })
+        .unwrap_or_else(|| panic!("no `{head}`"));
     let open = source[start..].find('{').expect("a body") + start;
     let close = source[open..].find("\n}").expect("an end") + open;
     source[open..close]
