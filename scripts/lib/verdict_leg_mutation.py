@@ -1001,6 +1001,34 @@ TERM_CASES = (
 )
 
 
+#: The variables that tell a child of `make` or a cargo that a jobserver is open, and on which
+#: file descriptors. `subprocess.run` closes every descriptor above 2 in its child, so a child
+#: handed these reads `--jobserver-auth=3,4` and finds nothing there: `sccache` then cannot
+#: run `rustc -vV`, and the sweep reports an unmutated tree that is not green for a reason that
+#: has nothing to do with the tree. The runner that sets them (a build host's `make`-style
+#: slot pool) does not set them for a program that cannot use them.
+JOBSERVER_ENV = ("MAKEFLAGS", "MFLAGS", "CARGO_MAKEFLAGS")
+
+#: The variables that put a compiler cache in front of `rustc`. The sweep builds INCREMENTALLY on
+#: purpose (round 3140, below), and `sccache` refuses an incremental build outright (`incremental
+#: compilation is prohibited`), so on a host that wraps `rustc` the baseline cannot even run
+#: `rustc -vV`. A cache pays where each crate is compiled once from a clean checkout; this sweep
+#: recompiles one crate after a one-line edit a hundred times, which incremental state serves and a
+#: cache cannot, so the sweep does without the wrapper rather than without the incremental state.
+COMPILER_CACHE_ENV = ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER")
+
+
+def without_jobserver(env: dict[str, str]) -> dict[str, str]:
+    """`env` as a child that inherits no descriptors may be told it: no jobserver variables."""
+    return {k: v for k, v in env.items() if k not in JOBSERVER_ENV}
+
+
+def sweep_env(env: dict[str, str]) -> dict[str, str]:
+    """The environment of one cargo run of the sweep: no jobserver it cannot reach, no compiler cache
+    it cannot use. Everything else is the caller's."""
+    return {k: v for k, v in without_jobserver(env).items() if k not in COMPILER_CACHE_ENV}
+
+
 def selftest() -> int:
     """Drive [`predicate_terms`] over the shapes above, both directions.
 
@@ -1023,6 +1051,21 @@ def selftest() -> int:
         failures.append(f"  coverage test: expected ['self.b'], got {unswept}")
     if [t for t in predicate_terms("self.a") if not any(t in r for r in {"self.a == 0"})]:
         failures.append("  coverage test: a recipe rewriting a COMPARISON must cover its term")
+
+    # The child's environment, both directions: the jobserver variables are gone and nothing else is.
+    handed = {
+        "MAKEFLAGS": " -j --jobserver-auth=3,4",
+        "MFLAGS": "-j",
+        "CARGO_MAKEFLAGS": "x",
+        "RUSTC_WRAPPER": "sccache",
+        "CARGO_BUILD_RUSTC_WRAPPER": "sccache",
+        "PATH": "/bin",
+    }
+    cleaned = sweep_env(handed)
+    if cleaned != {"PATH": "/bin"}:
+        failures.append(f"  child environment: expected only PATH to remain, got {cleaned}")
+    if sweep_env({"PATH": "/bin"}) != {"PATH": "/bin"}:
+        failures.append("  child environment: an environment with neither must be unchanged")
 
     # R2268 (item 609) — AND THE LEFTOVER-BACKUP CLASSIFIER, every state.
     #
@@ -1412,7 +1455,7 @@ def run_suite(packages: list[str]) -> tuple[str, str]:
     not build is told apart from a test that fails by WHICH CALL stopped, not by
     reading cargo's prose, and so each phase has a clock of its own.
     """
-    env = dict(os.environ)
+    env = sweep_env(dict(os.environ))
     env["CARGO_TARGET_DIR"] = str(REPO_ROOT / TARGET_DIR)
     # Round 3140 -- INCREMENTAL, on purpose and against the workflow's
     # `CARGO_INCREMENTAL=0`. That setting is right for a job that compiles each
