@@ -302526,6 +302526,44 @@
         "The pico ABI loses one host cell, 1 KiB puts at half of pico's rate; the mechanism is read (a writer-thread hop and about two futex calls per put) and the lever is the sender-side write of a lone lent frame in `wz-runtime-tokio`'s `writer_queue.rs`, which has its machinery for the batch path and not for this one; it is a change to the transport of every tokio link and needs the writer-queue tests and a measurement that it costs small messages nothing. The host matrix is not a gate: the figures are in docs/upstream-parity.md and their method in scripts/host-bench; zenoh-c and zenoh have no counterpart yet, and the throughput of pico as a SUBSCRIBER was not separated from the publisher's."
       ]
     },
+    "Round 4023": {
+      "decision_summary": "Multicast compression, item (b) of O4, is now measured against a stock zenohd built at 1.10.2, the first release that reads transport/multicast/compression/enabled, and wz and zenohd read each other's batches. A compressing zenohd beacons its JOIN as a batch that wz unwraps and, without the key, the bare JOIN; zenohd lists a compressing wz member in its admin space, and does not list a member that disagrees about the wrap, with a control that plain members of a plain group are listed. No defect of wz was found. Two facts the harness had to learn from zenohd: it drops a JOIN whose batch size is not the link's, and a member that sends over the default interface is not heard by a zenohd that joined on lo.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/zenoh_multicast_compression_foreign_witness.rs: five ignored witnesses against a stock zenohd (zenohd beacons a compressing group, zenohd beacons a plain group, zenohd lists a compressing wz member and not a plain one, the converse, and the control).",
+        "crates/wz-integration-tests/Cargo.toml: transport-compression on the session-core dev-dependency, for the batch unwrap the witnesses use.",
+        "scripts/run-ci.sh: a guarded Layer Ewirez line with 5 cases.",
+        "docs/zenoh-api-on-the-engine.md: O4 (b) names the zenohd legs."
+      ],
+      "verification_bullets": [
+        "A zenohd built at 1.10.2 from the pinned tag on a build host (the cargo git checkout cannot name the pin, so the build script took the tag clone; the first build was ended at its memory reservation and the rerun finished): the five witnesses ran 5 passed, 0 failed, in 6.9s.",
+        "The first runs failed and each failure was read before the test was changed: the member advertised a batch of 2048 where zenohd's link is 8192 (zenohd drops the JOIN), then sent over the default interface (not heard on lo), then two members started together so one member's datagram ended the other's listing; the control passing first is what separated the harness from the wrap.",
+        "Not run: the shared-memory refusals against a zenohd; the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (e) the transport deleted without a Close frame (the statechart's tx.congestion.exhaust arm goes through Closing and sends one), (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the refusals against a zenohd; the cause of a group's admin listing losing its multicast locator after a member's undecodable datagram, which the first runs showed and nothing here explained."
+      ],
+      "publishable_decision_summary": "Multicast compression, item (b) of O4, is now measured against a stock zenohd built at 1.10.2, the first release that reads transport/multicast/compression/enabled, and wz and zenohd read each other's batches. A compressing zenohd beacons its JOIN as a batch that wz unwraps and, without the key, the bare JOIN; zenohd lists a compressing wz member in its admin space, and does not list a member that disagrees about the wrap, with a control that plain members of a plain group are listed. No defect of wz was found. Two facts the harness had to learn from zenohd: it drops a JOIN whose batch size is not the link's, and a member that sends over the default interface is not heard by a zenohd that joined on lo.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/zenoh_multicast_compression_foreign_witness.rs: five ignored witnesses against a stock zenohd (zenohd beacons a compressing group, zenohd beacons a plain group, zenohd lists a compressing wz member and not a plain one, the converse, and the control).",
+        "crates/wz-integration-tests/Cargo.toml: transport-compression on the session-core dev-dependency, for the batch unwrap the witnesses use.",
+        "scripts/run-ci.sh: a guarded Layer Ewirez line with 5 cases.",
+        "docs/zenoh-api-on-the-engine.md: O4 (b) names the zenohd legs."
+      ],
+      "publishable_verification_bullets": [
+        "A zenohd built at 1.10.2 from the pinned tag on a build host (the cargo git checkout cannot name the pin, so the build script took the tag clone; the first build was ended at its memory reservation and the rerun finished): the five witnesses ran 5 passed, 0 failed, in 6.9s.",
+        "The first runs failed and each failure was read before the test was changed: the member advertised a batch of 2048 where zenohd's link is 8192 (zenohd drops the JOIN), then sent over the default interface (not heard on lo), then two members started together so one member's datagram ended the other's listing; the control passing first is what separated the harness from the wrap.",
+        "Not run: the shared-memory refusals against a zenohd; the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (e) the transport deleted without a Close frame (the statechart's tx.congestion.exhaust arm goes through Closing and sends one), (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the refusals against a zenohd; the cause of a group's admin listing losing its multicast locator after a member's undecodable datagram, which the first runs showed and nothing here explained."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
