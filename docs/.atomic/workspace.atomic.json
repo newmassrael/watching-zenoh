@@ -303338,6 +303338,34 @@
         "The lwip test a_node_with_fewer_slots_than_endpoints_dials_what_it_can_and_the_rest_waits fails on the tip before this round when run after the node-by-zid test in the same process (B admitted 0, expected 1); alone it passes; not diagnosed. On AP the table-full refusal is the loop's and is logged, because the opener answers before the loop sees the request. Remaining rulings in order: D10, D12, D14. Hosted CI for this tree is unread."
       ]
     },
+    "Round 4045": {
+      "decision_summary": "The lwip slot-node test of a node held by its zid took the ports 7611 and 7612, which the fewer-slots test of the same file also binds, and the loopback is one for the whole process. Run after it, the fewer-slots test was answered by the sockets of the first, and its listener admitted nothing; alone it passed. The node test now uses 7621 and 7622. Round 4044 recorded the failure as not diagnosed; this round diagnoses and pays it.",
+      "changes_bullets": [
+        "crates/wz-session-lwip/tests/admin_node_slot.rs: the node-by-zid test binds 7621 and 7622 and declares its hint at 7621; no other file changed."
+      ],
+      "verification_bullets": [
+        "On pc2 through bx with room for two peers, the whole admin_node_slot file passes, 4 of 4, in the order that failed before, on this tree and on the unmodified tip. The failure was reproduced twice before the change, on one thread and on several."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Remaining rulings of the session lifecycle in order: D10, D12, D14. The AP table-full refusal of D15 is still only logged. Hosted CI for the tip is unread."
+      ],
+      "publishable_decision_summary": "The lwip slot-node test of a node held by its zid took the ports 7611 and 7612, which the fewer-slots test of the same file also binds, and the loopback is one for the whole process. Run after it, the fewer-slots test was answered by the sockets of the first, and its listener admitted nothing; alone it passed. The node test now uses 7621 and 7622. Round 4044 recorded the failure as not diagnosed; this round diagnoses and pays it.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-lwip/tests/admin_node_slot.rs: the node-by-zid test binds 7621 and 7622 and declares its hint at 7621; no other file changed."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 through bx with room for two peers, the whole admin_node_slot file passes, 4 of 4, in the order that failed before, on this tree and on the unmodified tip. The failure was reproduced twice before the change, on one thread and on several."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Remaining rulings of the session lifecycle in order: D10, D12, D14. The AP table-full refusal of D15 is still only logged. Hosted CI for the tip is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
