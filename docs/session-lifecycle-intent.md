@@ -1176,7 +1176,7 @@ neither widens nor narrows that. Two ends that both dial are the connection
 collision `link_admission` already resolves (RFC 4271 section 6.8: compare
 the two zids, keep the link the lower one opened), so this adds no new rule.
 
-Built (Round 4046). The machine gains `Passive` and `PassiveUp` and the events
+Built (Round 4049). The machine gains `Passive` and `PassiveUp` and the events
 `manual.start_passive` and `inbound.established`; a passive peer arms no retry and
 dials nothing, the peer's session is held under it, and its loss goes back to
 `Passive` and not to `Backoff`. A dialling `open` of a passive peer is the other
