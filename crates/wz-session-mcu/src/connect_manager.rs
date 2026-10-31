@@ -45,6 +45,11 @@ use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_PEER_NODES, MAX_STATIC_CONNECT};
 use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+#[cfg(any(
+    feature = "lifecycle-verbs",
+    all(feature = "adminspace-fixed", feature = "session-slot")
+))]
+use wz_session_core::lifecycle_node::Commander;
 #[cfg(feature = "lifecycle-verbs")]
 use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Verb, Zid};
 #[cfg(feature = "lifecycle-verbs")]
@@ -578,8 +583,75 @@ impl NodeDesk {
 /// refuses by default (least privilege). The image that binds a verb states who may use it.
 #[cfg(feature = "lifecycle-verbs")]
 pub trait LifecyclePermits {
-    /// Whether the node permits `verb`.
-    fn permits(&self, verb: Verb) -> bool;
+    /// Whether the node permits `verb` to `commander` (decision D12): the authority is a
+    /// function of who asks, per verb, and the answer of a node that was told nothing is no.
+    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool;
+}
+
+/// The zids that may command each verb, compiled into the image (decision D12): a list per verb
+/// because "may hold a peer", "may close", "may cycle" and "may read the status" are permissions
+/// to grant apart. A verb with an empty list is commanded by nobody, which is where an image
+/// starts, and a wildcard commander does not exist: a zid is on a list or it is not.
+///
+/// It judges the commander a link's key proved ([`Commander::Verified`]) and nobody else. The
+/// owner of a control pipe is the pipe's ([`PipeOr`]), and a commander the link proved nothing
+/// of is never on a list.
+#[cfg(feature = "lifecycle-verbs")]
+#[derive(Debug, Clone, Copy)]
+pub struct Commanders {
+    /// May hold a peer by its zid.
+    pub open: &'static [DirectoryZid],
+    /// May close the sessions with a peer and take it out of the intent.
+    pub close: &'static [DirectoryZid],
+    /// May cycle the sessions with a peer.
+    pub reset: &'static [DirectoryZid],
+    /// May read which peers the node holds.
+    pub status: &'static [DirectoryZid],
+}
+
+#[cfg(feature = "lifecycle-verbs")]
+impl Commanders {
+    /// Nobody commands any verb: the image's default.
+    pub const NONE: Self = Self {
+        open: &[],
+        close: &[],
+        reset: &[],
+        status: &[],
+    };
+
+    /// The zids that may command `verb`.
+    pub const fn of(&self, verb: Verb) -> &'static [DirectoryZid] {
+        match verb {
+            Verb::Open => self.open,
+            Verb::Close => self.close,
+            Verb::Reset => self.reset,
+            Verb::Status => self.status,
+        }
+    }
+}
+
+#[cfg(feature = "lifecycle-verbs")]
+impl LifecyclePermits for Commanders {
+    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
+        match commander {
+            Commander::Verified(zid) => self.of(verb).iter().any(|listed| listed == zid),
+            Commander::Pipe | Commander::Unproven => false,
+        }
+    }
+}
+
+/// The permit of a node that is commanded over a pipe as well as by peers (decision D12): the
+/// owner of the pipe may ask any verb, since the process that starts a node owns it, and every
+/// other commander is judged by `P`.
+#[cfg(feature = "lifecycle-verbs")]
+#[derive(Debug, Clone, Copy)]
+pub struct PipeOr<P>(pub P);
+
+#[cfg(feature = "lifecycle-verbs")]
+impl<P: LifecyclePermits> LifecyclePermits for PipeOr<P> {
+    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
+        matches!(commander, Commander::Pipe) || self.0.permits(verb, commander)
+    }
 }
 
 /// A node's lifecycle verbs, for `lifecycle_node::lifecycle_verdict` to decide: the desk of the
@@ -615,8 +687,8 @@ impl<P: LifecyclePermits> LifecycleNode for StoreNode<P> {
         }
     }
 
-    fn permits(&self, verb: Verb) -> bool {
-        self.binds(verb) && self.permits.permits(verb)
+    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
+        self.binds(verb) && self.permits.permits(verb, commander)
     }
 
     fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
@@ -683,7 +755,9 @@ impl ControlledOpener {
 
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 impl crate::admin_fixed::NodeOpening for ControlledOpener {
-    fn permitted(&self) -> bool {
+    /// The write permit of the configuration, judged alike for every commander: the image that
+    /// names who may command the verbs states it by [`Commanders`] and not by this opener.
+    fn permitted(&self, _commander: Commander<'_>) -> bool {
         self.permit.write_permit()
     }
 
@@ -712,7 +786,9 @@ pub struct WritePermit(pub &'static (dyn crate::admin_status::ConnectStatusSourc
     feature = "lifecycle-verbs"
 ))]
 impl LifecyclePermits for WritePermit {
-    fn permits(&self, verb: Verb) -> bool {
+    /// Judged alike for every commander, which is what the write permit has always done; an
+    /// image that wants the commanders named gives [`Commanders`] in its place.
+    fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
         matches!(verb, Verb::Open) && self.0.write_permit()
     }
 }
@@ -2944,7 +3020,7 @@ mod tests {
         struct CasePermits(wz_session_core::lifecycle_contract::verbs::Permits);
 
         impl LifecyclePermits for CasePermits {
-            fn permits(&self, verb: Verb) -> bool {
+            fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
                 match verb {
                     Verb::Open => true,
                     Verb::Close => self.0.close,
@@ -2960,8 +3036,8 @@ mod tests {
         }
 
         impl<N: LifecycleNode> LifecycleNode for Counting<N> {
-            fn permits(&self, verb: Verb) -> bool {
-                self.inner.permits(verb)
+            fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
+                self.inner.permits(verb, commander)
             }
             fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
                 self.inner.open(peer, mode)
@@ -3041,7 +3117,7 @@ mod tests {
                         Request::Status(peer) => Command::Status { peer },
                     };
                     let mut out = FixedText::<256>::new();
-                    lifecycle_verdict(&node, command, &mut out);
+                    lifecycle_verdict(&node, command, Commander::Pipe, &mut out);
                     std::assert!(!out.overflowed());
                     Some(String::from(out.prefix()))
                 })
@@ -3105,6 +3181,7 @@ mod tests {
                     peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
                     generation: "1",
                 },
+                Commander::Pipe,
                 &mut out,
             );
             std::assert_eq!(out.prefix(), "{\"verdict\":\"resetting\",\"links\":1}");
@@ -3134,6 +3211,7 @@ mod tests {
                 Command::Close {
                     peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
                 },
+                Commander::Pipe,
                 &mut out,
             );
             std::assert_eq!(out.prefix(), "{\"verdict\":\"closing\",\"links\":1}");
@@ -3145,6 +3223,107 @@ mod tests {
                 2,
                 "and nothing dials it again"
             );
+        }
+
+        /// Decision D12: a list of commanders is per verb and default deny; only a zid the link's
+        /// key proved can be on it, a commander nothing proved is on no list, a node with no list
+        /// is commanded by nobody, and the owner of a pipe is the pipe's.
+        #[test]
+        fn a_commander_is_judged_by_the_list_of_the_verb_it_asks() {
+            const ADMIN: DirectoryZid = [0x1f; CREDENTIAL_ZID_BYTES];
+            const READER: DirectoryZid = [0x2f; CREDENTIAL_ZID_BYTES];
+            static ADMINS: [DirectoryZid; 1] = [ADMIN];
+            static READERS: [DirectoryZid; 2] = [ADMIN, READER];
+            let listed = Commanders {
+                open: &ADMINS,
+                close: &ADMINS,
+                reset: &ADMINS,
+                status: &READERS,
+            };
+            let verbs = [Verb::Open, Verb::Close, Verb::Reset, Verb::Status];
+            for verb in verbs {
+                std::assert!(
+                    listed.permits(verb, Commander::Verified(&ADMIN)),
+                    "{verb:?}"
+                );
+                std::assert!(!listed.permits(verb, Commander::Unproven), "{verb:?}");
+                std::assert!(
+                    !listed.permits(verb, Commander::Pipe),
+                    "a list is no pipe's"
+                );
+                std::assert!(
+                    !Commanders::NONE.permits(verb, Commander::Verified(&ADMIN)),
+                    "a node with no list is commanded by nobody"
+                );
+            }
+            std::assert!(listed.permits(Verb::Status, Commander::Verified(&READER)));
+            for verb in [Verb::Open, Verb::Close, Verb::Reset] {
+                std::assert!(
+                    !listed.permits(verb, Commander::Verified(&READER)),
+                    "{verb:?}: a zid listed for one verb commands no other"
+                );
+            }
+            std::assert!(!listed.permits(
+                Verb::Open,
+                Commander::Verified(&[0u8; CREDENTIAL_ZID_BYTES])
+            ));
+
+            let with_pipe = PipeOr(listed);
+            for verb in verbs {
+                std::assert!(with_pipe.permits(verb, Commander::Pipe), "{verb:?}");
+                std::assert!(!with_pipe.permits(verb, Commander::Unproven), "{verb:?}");
+            }
+            std::assert!(with_pipe.permits(Verb::Status, Commander::Verified(&READER)));
+            std::assert!(!with_pipe.permits(Verb::Open, Commander::Verified(&READER)));
+        }
+
+        /// Decision D12 end to end through the node's one function: the same request is refused
+        /// by name for a commander the list does not name and for one nothing proved, answered
+        /// for the one it names, and the node is asked nothing in the first two.
+        #[test]
+        fn a_listed_commander_is_answered_and_the_others_are_refused_by_name() {
+            use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Verdict};
+            use wz_session_core::lifecycle_wire::{RefusedReason, StatusVerdict};
+            use wz_session_core::text_out::FixedText;
+            const READER: DirectoryZid = [0x2f; CREDENTIAL_ZID_BYTES];
+            static READERS: [DirectoryZid; 1] = [READER];
+            static STORE: PeerStore = PeerStore::new();
+            let node = StoreNode::new(
+                &STORE,
+                Commanders {
+                    status: &READERS,
+                    ..Commanders::NONE
+                },
+            );
+            let ask = |commander: Commander<'_>| {
+                let mut out = FixedText::<256>::new();
+                let verdict = lifecycle_verdict(
+                    &node,
+                    Command::Status {
+                        peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                    },
+                    commander,
+                    &mut out,
+                );
+                (verdict, String::from(out.prefix()))
+            };
+            let (verdict, _) = ask(Commander::Verified(&READER));
+            std::assert!(
+                matches!(verdict, Verdict::Status(StatusVerdict::Status { .. })),
+                "{verdict:?}"
+            );
+            for commander in [
+                Commander::Verified(&[0x3f; CREDENTIAL_ZID_BYTES]),
+                Commander::Unproven,
+                Commander::Pipe,
+            ] {
+                let (verdict, doc) = ask(commander);
+                std::assert_eq!(
+                    verdict,
+                    Verdict::Status(StatusVerdict::Refused(RefusedReason::StatusNotPermitted)),
+                    "{doc}"
+                );
+            }
         }
 
         fn all_permits() -> wz_session_core::lifecycle_contract::verbs::Permits {

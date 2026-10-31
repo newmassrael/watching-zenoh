@@ -11840,7 +11840,9 @@ layer_c1m_session_lwip() {
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu lifecycle verbs" 29 \
+    # 29 -> 31: the commanders of a verb are a list per verb, default deny, and the same request
+    # is answered for the one a list names and refused by name for the others (decision D12).
+    _runci_guarded_test "C1m mcu lifecycle verbs" 31 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \

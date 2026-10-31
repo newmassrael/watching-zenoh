@@ -27,7 +27,9 @@
 //! repeated `close` is `already_closed`, and a repeated `reset` carries its generation, so an agent
 //! that lost a reply may send it again.
 
-use wz_session_core::lifecycle_node::{lifecycle_verdict, Command as Asked, LifecycleNode};
+use wz_session_core::lifecycle_node::{
+    lifecycle_verdict, Command as Asked, Commander, LifecycleNode,
+};
 use wz_session_core::lifecycle_wire::{OpenMode, PASSIVE_CHUNK};
 use wz_session_core::text_out::TextOut;
 
@@ -173,7 +175,9 @@ where
         }
         Err(malformed) => return malformed.write_json(out),
     };
-    lifecycle_verdict(node, command, out);
+    // The agent that writes to the node's pipe owns the pipe, and the pipe proves no zid
+    // (decision D12), so its commander is the pipe's.
+    lifecycle_verdict(node, command, Commander::Pipe, out);
 }
 
 #[cfg(test)]
@@ -193,7 +197,7 @@ mod tests {
     }
 
     impl NodeOpening for Node {
-        fn permitted(&self) -> bool {
+        fn permitted(&self, _commander: Commander<'_>) -> bool {
             self.permit
         }
         fn open(&self, _zid: &[u8; CREDENTIAL_ZID_BYTES], _mode: OpenMode) -> OpenOutcome {

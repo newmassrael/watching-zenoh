@@ -26,6 +26,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use wz_session_core::lifecycle_node::Commander;
 use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome, RefusedReason};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::peer_tables::PeerTables;
@@ -121,7 +122,7 @@ impl Recording {
 }
 
 impl NodeOpening for Recording {
-    fn permitted(&self) -> bool {
+    fn permitted(&self, _commander: Commander<'_>) -> bool {
         self.permitted
     }
 
@@ -362,7 +363,7 @@ mod binding {
     struct Yes;
 
     impl LifecyclePermits for Yes {
-        fn permits(&self, _verb: Verb) -> bool {
+        fn permits(&self, _verb: Verb, _commander: Commander<'_>) -> bool {
             true
         }
     }
@@ -385,7 +386,7 @@ mod binding {
         for (verb, name, bound) in BOUND {
             assert_eq!(node.binds(verb), bound, "{name}");
             assert_eq!(
-                node.permits(verb),
+                node.permits(verb, Commander::Pipe),
                 bound,
                 "{name}: a bound verb is permitted by Yes"
             );
@@ -417,7 +418,7 @@ mod binding {
             ),
         ] {
             let mut out = FixedText::<256>::new();
-            lifecycle_verdict(node, command, &mut out);
+            lifecycle_verdict(node, command, Commander::Pipe, &mut out);
             assert_eq!(
                 out.prefix() == refused(reason),
                 !bound,
@@ -483,7 +484,7 @@ mod verbs {
     struct CasePermits(Permits);
 
     impl LifecyclePermits for CasePermits {
-        fn permits(&self, verb: Verb) -> bool {
+        fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
             match verb {
                 Verb::Open => true,
                 Verb::Close => self.0.close,
@@ -500,8 +501,8 @@ mod verbs {
     }
 
     impl LifecycleNode for Counting {
-        fn permits(&self, verb: Verb) -> bool {
-            self.inner.permits(verb)
+        fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
+            self.inner.permits(verb, commander)
         }
         fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
             self.inner.open(peer, mode)

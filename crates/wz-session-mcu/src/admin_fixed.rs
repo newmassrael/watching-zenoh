@@ -58,6 +58,7 @@ use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 use wz_session_core::text_out::{FixedText, TextOut};
 
 use crate::node_opening::open_verdict;
+use wz_session_core::lifecycle_node::Commander;
 
 use crate::admin_status::{
     write_connect_status, ConfigView, ConnectStatusSource, DialStatus, CONNECT_STATUS_TAIL,
@@ -597,7 +598,14 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
     if parsed.node_zid != zid_hex || parsed.whatami != whatami {
         return;
     }
-    let verdict = open_verdict(opener, parsed.peer_zid, parsed.mode);
+    // The commander is whom the link's key proved asks, or nobody shown (decision D12).
+    let requester = query.requester();
+    let verdict = open_verdict(
+        opener,
+        parsed.peer_zid,
+        parsed.mode,
+        Commander::of_requester(requester.as_ref()),
+    );
     // The key's own tail, `session/open/<peer>`: it follows `@/<zid>/<whatami>/`, which the
     // parse has just held to name this node. A reply the arena refuses is counted there; the
     // open has happened either way, as the heap profile's reply says.
@@ -625,7 +633,7 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
     whatami: &str,
     node: &N,
 ) {
-    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Verb};
+    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Commander, Verb};
     use wz_session_core::lifecycle_wire::{CLOSE_VERB, RESET_VERB, STATUS_VERB};
     // The capability document says what the node KNOWS, not whether this caller may use it: the
     // verbs the build compiled in, in the order the heap profile lists them.
@@ -661,6 +669,8 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
         return;
     }
     let peer = parsed.peer_zid;
+    // The commander is whom the link's key proved asks, or nobody shown (decision D12).
+    let requester = query.requester();
     // A verb the build did not compile in is no query of this node's: nothing is replied, as for a
     // node that binds no opener.
     let (verb, command) = match parsed.verb {
@@ -699,7 +709,12 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
         tail,
         AdminLegEncoding::Json,
         |body| {
-            lifecycle_verdict(node, command, body);
+            lifecycle_verdict(
+                node,
+                command,
+                Commander::of_requester(requester.as_ref()),
+                body,
+            );
         },
     );
 }

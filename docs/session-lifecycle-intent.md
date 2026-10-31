@@ -1240,6 +1240,19 @@ profile's `SlotDispatch::on_event` says it to the process's observer before each
 dispatch and clears it after. Nothing reads it yet. The heap profile's dispatch
 does not say it yet; that waits for the ruling above.
 
+Step (2) built (Round 4054). `LifecycleNode::permits` takes the commander, a
+closed `Commander`: the owner of the control `Pipe`, a `Verified(zid)` the link's
+key proved, or `Unproven`, and every transport says which it is (the control
+port says `Pipe`, the in-band query says what `QueryView::requester` answers).
+`Commanders` is the compiled-in list, one per verb, empty by default, and a zid
+on the list of one verb commands no other; it names only a verified zid, so
+`Pipe` and `Unproven` are on no list, and `PipeOr<P>` is the permit of a node
+commanded over a pipe as well, which gives the pipe every verb and every other
+commander to `P`. `HostPermits` is the pipe's alone now. Nothing about what a
+node does today changed: the write permit (`WritePermit`, `ControlledOpener`) and
+the heap profile's key authority judge every commander alike, which is what they
+did, and an image that names its commanders gives `Commanders` in their place.
+
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the
 link-state flood), and a profile has the sources its build holds: AP has all

@@ -22,7 +22,7 @@
 use core::ops::ControlFlow;
 
 use wz_runtime_posix::control::{reply, Lines};
-use wz_session_core::lifecycle_node::{LifecycleNode, Verb};
+use wz_session_core::lifecycle_node::{Commander, LifecycleNode, Verb};
 use wz_session_core::text_out::FixedText;
 use wz_session_mcu::connect_manager::{LifecyclePermits, PeerStore, StoreNode};
 use wz_session_mcu::control_port::{self, Malformed};
@@ -35,12 +35,14 @@ const LINES_PER_ROUND: usize = 4;
 const ANSWER_BYTES: usize = 256;
 
 /// The permit of the control channel: every verb its pipe asks is permitted, since the channel is
-/// the agent's own.
+/// the agent's own (decision D12: the authority on the pipe is possession of the pipe). A
+/// commander that is not the pipe is none of this permit's, so a node served in band as well
+/// gives that commander the permit it states for it and not this one.
 pub struct HostPermits;
 
 impl LifecyclePermits for HostPermits {
-    fn permits(&self, _verb: Verb) -> bool {
-        true
+    fn permits(&self, _verb: Verb, commander: Commander<'_>) -> bool {
+        matches!(commander, Commander::Pipe)
     }
 }
 

@@ -88,7 +88,7 @@ pub use crate::drive::{LifecycleKey, SessionLifecycleAuthority};
 // written once, in `lifecycle_wire`.
 use crate::credential_identity::canonical_zid;
 use crate::lifecycle_node::{
-    lifecycle_verdict, Command, Generation, LifecycleNode, Verb, Verdict, Zid,
+    lifecycle_verdict, Command, Commander, Generation, LifecycleNode, Verb, Verdict, Zid,
 };
 pub use crate::lifecycle_wire::{
     write_verbs_json, CloseOrder, CloseVerdict, MachineReport, OpenMode, OpenOutcome, OpenVerdict,
@@ -425,12 +425,14 @@ where
         // The body is a list for a status, so it has no bound a fixed buffer could be
         // sized to: a string, which this profile has.
         let mut body = String::new();
+        let requester = view.requester();
         let verdict = lifecycle_verdict(
             &Asked {
                 queries: self,
                 key: &parsed,
             },
             command,
+            Commander::of_requester(requester.as_ref()),
             &mut body,
         );
         // A reply the stage refused still happened as an order or a read: the verdict is
@@ -461,7 +463,10 @@ where
     M: PeerMachines,
     O: PeerOpener,
 {
-    fn permits(&self, verb: Verb) -> bool {
+    /// The heap profile's authority judges the KEY, which is what a grant here names; it does not
+    /// yet judge the commander, whom the query now carries (decision D12 leaves the owner to rule
+    /// whether it should), so every commander is judged alike.
+    fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
         let authority = &self.queries.authority;
         match verb {
             Verb::Open => authority.admits_open(self.key),

@@ -51,6 +51,33 @@ pub enum Verb {
     Status,
 }
 
+/// Who asks a verb of the node (decision D12): the authority is a function of the commander, per
+/// verb, and a node refuses by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Commander<'a> {
+    /// The owner of the node's control pipe. The process that starts a node owns the pipe, and a
+    /// pipe proves no zid, so what this commander may do is the node's own statement about its
+    /// pipe and not a list of zids.
+    Pipe,
+    /// A peer whose link's key proved this zid (decision D1): the only commander a list of zids
+    /// can name.
+    Verified(&'a Zid),
+    /// Nobody shown: the link proved no zid (a link nothing protects, or a query of this very
+    /// node), and a zid the sender claims proves nothing. Never permitted by a list.
+    Unproven,
+}
+
+impl<'a> Commander<'a> {
+    /// The commander of a query that arrived from `requester`
+    /// ([`crate::query_sink::QueryView::requester`]): the zid the link proved, or nobody shown.
+    pub const fn of_requester(requester: Option<&'a Zid>) -> Self {
+        match requester {
+            Some(zid) => Self::Verified(zid),
+            None => Self::Unproven,
+        }
+    }
+}
+
 /// One request, as a transport reads it: the peer and the generation are the text the transport
 /// carried, and [`lifecycle_verdict`] reads them, so that no transport spells a zid its own way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,9 +139,9 @@ pub trait LifecycleNode {
         true
     }
 
-    /// Whether the node permits `verb`. Asked first, so a node that does not permit it is never
-    /// asked anything else.
-    fn permits(&self, verb: Verb) -> bool;
+    /// Whether the node permits `verb` to `commander` (decision D12). Asked first, so a node that
+    /// does not permit it is never asked anything else.
+    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool;
 
     /// Ask the node to hold the peer, by dialling it or, in the passive mode, by waiting for its
     /// own session (decision D10). Accepted, not completed: how the dial ends is read in the
@@ -154,32 +181,37 @@ pub enum Verdict {
     Status(StatusVerdict),
 }
 
-/// Decide `command` on `node` and write the reply document into `out`.
+/// Decide `command` on `node`, asked by `commander`, and write the reply document into `out`.
 ///
 /// The one place the lifecycle contract is written: the permit, the spelling, then the effect, in
 /// that order for every verb. The words are `lifecycle_wire`'s.
-pub fn lifecycle_verdict<N, W>(node: &N, command: Command<'_>, out: &mut W) -> Verdict
+pub fn lifecycle_verdict<N, W>(
+    node: &N,
+    command: Command<'_>,
+    commander: Commander<'_>,
+    out: &mut W,
+) -> Verdict
 where
     N: LifecycleNode + ?Sized,
     W: TextOut + ?Sized,
 {
     match command {
         Command::Open { peer, mode } => {
-            let verdict = open_verdict(node, peer, mode);
+            let verdict = open_verdict(node, peer, mode, commander);
             verdict.write_json(out);
             Verdict::Open(verdict)
         }
         Command::Close { peer } => {
-            let verdict = close(node, peer);
+            let verdict = close(node, peer, commander);
             verdict.write_json(out);
             Verdict::Close(verdict)
         }
         Command::Reset { peer, generation } => {
-            let verdict = reset(node, peer, generation);
+            let verdict = reset(node, peer, generation, commander);
             verdict.write_json(out);
             Verdict::Reset(verdict)
         }
-        Command::Status { peer } => Verdict::Status(status(node, peer, out)),
+        Command::Status { peer } => Verdict::Status(status(node, peer, commander, out)),
     }
 }
 
@@ -192,8 +224,9 @@ pub fn open_verdict<N: LifecycleNode + ?Sized>(
     node: &N,
     peer: &str,
     mode: OpenMode,
+    commander: Commander<'_>,
 ) -> OpenVerdict {
-    if !node.permits(Verb::Open) {
+    if !node.permits(Verb::Open, commander) {
         return OpenVerdict::Refused(RefusedReason::OpenNotPermitted);
     }
     match zid_from_key_text(peer) {
@@ -205,8 +238,12 @@ pub fn open_verdict<N: LifecycleNode + ?Sized>(
 /// Close: the peer leaves the intent, and every session with it is ordered closed. Withdrawn
 /// first, so a session that ends before the withdrawal reaches the node's machines is not dialled
 /// again for long: the machine that took the loss is stopped where it waits.
-fn close<N: LifecycleNode + ?Sized>(node: &N, peer: &str) -> CloseVerdict {
-    if !node.permits(Verb::Close) {
+fn close<N: LifecycleNode + ?Sized>(
+    node: &N,
+    peer: &str,
+    commander: Commander<'_>,
+) -> CloseVerdict {
+    if !node.permits(Verb::Close, commander) {
         return CloseVerdict::Refused(RefusedReason::NotPermitted);
     }
     let Some(peer) = zid_from_key_text(peer) else {
@@ -221,8 +258,13 @@ fn close<N: LifecycleNode + ?Sized>(node: &N, peer: &str) -> CloseVerdict {
 /// than the latest taken for the peer is a retransmission and closes nothing. The generation is
 /// taken before the close is ordered: a close the node could not carry out (no session) is still
 /// this generation's, so a retransmission after the peer is back does not close it.
-fn reset<N: LifecycleNode + ?Sized>(node: &N, peer: &str, generation: &str) -> ResetVerdict {
-    if !node.permits(Verb::Reset) {
+fn reset<N: LifecycleNode + ?Sized>(
+    node: &N,
+    peer: &str,
+    generation: &str,
+    commander: Commander<'_>,
+) -> ResetVerdict {
+    if !node.permits(Verb::Reset, commander) {
         return ResetVerdict::Refused(RefusedReason::ResetNotPermitted);
     }
     let Some(peer) = zid_from_key_text(peer) else {
@@ -240,7 +282,7 @@ fn reset<N: LifecycleNode + ?Sized>(node: &N, peer: &str, generation: &str) -> R
 
 /// Status: the links of the sessions with the peer and each machine that holds it, written into
 /// `out`. Reads only: nothing here changes a session, a machine or the intent.
-fn status<N, W>(node: &N, peer: &str, out: &mut W) -> StatusVerdict
+fn status<N, W>(node: &N, peer: &str, commander: Commander<'_>, out: &mut W) -> StatusVerdict
 where
     N: LifecycleNode + ?Sized,
     W: TextOut + ?Sized,
@@ -250,7 +292,7 @@ where
         verdict.write_json(out, &[]);
         verdict
     };
-    if !node.permits(Verb::Status) {
+    if !node.permits(Verb::Status, commander) {
         return refused(RefusedReason::StatusNotPermitted, out);
     }
     let Some(peer) = zid_from_key_text(peer) else {
@@ -286,6 +328,8 @@ mod tests {
         permit: [bool; 4],
         taken: Cell<Generation>,
         asked: RefCell<Vec<&'static str>>,
+        /// The commander each permit was asked for, as a verb and a word.
+        commanders: RefCell<Vec<(Verb, std::string::String)>>,
     }
 
     impl Recording {
@@ -294,6 +338,7 @@ mod tests {
                 permit: [permit; 4],
                 taken: Cell::new(Generation::Taken),
                 asked: RefCell::new(Vec::new()),
+                commanders: RefCell::new(Vec::new()),
             }
         }
         fn note(&self, what: &'static str) {
@@ -302,7 +347,15 @@ mod tests {
     }
 
     impl LifecycleNode for Recording {
-        fn permits(&self, verb: Verb) -> bool {
+        fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
+            self.commanders.borrow_mut().push((
+                verb,
+                match commander {
+                    Commander::Pipe => std::string::String::from("pipe"),
+                    Commander::Verified(zid) => std::format!("verified:{:02x}", zid[0]),
+                    Commander::Unproven => std::string::String::from("unproven"),
+                },
+            ));
             self.permit[verb as usize]
         }
         fn open(&self, _peer: &Zid, mode: OpenMode) -> OpenOutcome {
@@ -337,8 +390,16 @@ mod tests {
     }
 
     fn run(node: &Recording, command: Command<'_>) -> (Verdict, std::string::String) {
+        run_as(node, command, Commander::Pipe)
+    }
+
+    fn run_as(
+        node: &Recording,
+        command: Command<'_>,
+        commander: Commander<'_>,
+    ) -> (Verdict, std::string::String) {
         let mut text: FixedText<256> = FixedText::new();
-        let verdict = lifecycle_verdict(node, command, &mut text);
+        let verdict = lifecycle_verdict(node, command, commander, &mut text);
         (
             verdict,
             std::string::String::from(text.finish().expect("fits")),
@@ -399,6 +460,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Decision D12: the commander is what the permit of every verb is asked about, and it is
+    /// asked once, first, whoever the commander is.
+    #[test]
+    fn the_permit_of_every_verb_is_asked_about_the_commander() {
+        let proven: Zid = [0x2f; CREDENTIAL_ZID_BYTES];
+        for (commander, word) in [
+            (Commander::Pipe, "pipe"),
+            (Commander::Verified(&proven), "verified:2f"),
+            (Commander::Unproven, "unproven"),
+        ] {
+            for (verb, command) in [Verb::Open, Verb::Close, Verb::Reset, Verb::Status]
+                .into_iter()
+                .zip(EVERY)
+            {
+                let node = Recording::new(true);
+                run_as(&node, command("1"), commander);
+                assert_eq!(
+                    *node.commanders.borrow(),
+                    [(verb, std::string::String::from(word))],
+                    "{verb:?} as {word}"
+                );
+            }
+        }
+        assert_eq!(
+            Commander::of_requester(Some(&proven)),
+            Commander::Verified(&proven)
+        );
+        assert_eq!(Commander::of_requester(None), Commander::Unproven);
     }
 
     /// Decision D10: an open carries its mode to the node, and a passive open has the same permit

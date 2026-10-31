@@ -16,6 +16,7 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+use wz_session_core::lifecycle_node::Commander;
 use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome};
 
 pub use wz_session_core::lifecycle_contract::{
@@ -77,7 +78,7 @@ impl Recording {
 }
 
 impl NodeOpening for Recording {
-    fn permitted(&self) -> bool {
+    fn permitted(&self, _commander: Commander<'_>) -> bool {
         self.permitted
     }
 
@@ -135,11 +136,11 @@ mod tests {
         conforms(|case, opener| {
             let mut out = FixedText::<192>::new();
             match case.binding {
-                Binding::Bound => {
-                    open_verdict(opener, case.peer_text, case.mode).write_json(&mut out)
-                }
+                Binding::Bound => open_verdict(opener, case.peer_text, case.mode, Commander::Pipe)
+                    .write_json(&mut out),
                 Binding::Unbound => {
-                    open_verdict(&NoOpening, case.peer_text, case.mode).write_json(&mut out)
+                    open_verdict(&NoOpening, case.peer_text, case.mode, Commander::Pipe)
+                        .write_json(&mut out)
                 }
             }
             Some(out.prefix().to_string())
