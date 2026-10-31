@@ -20650,10 +20650,13 @@ mod tests {
         forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // client subscribes; no peer yet
         let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // joins LATER
         fwd.register(FaceId(1), &p);
+        // Two declares: the sub, and the `DeclareFinal` that ends the node's initial declarations
+        // to a peer that meets it north-bound (what the other end's open waits for).
         assert_eq!(
             declare_frame_count(&sink_p),
-            1,
-            "the derived self cross-tier sub told to the late-joining peer at face-up"
+            2,
+            "the derived self cross-tier sub and the end of the declarations, told to the \
+             late-joining peer at face-up"
         );
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 6);
         sink_p.reset();
