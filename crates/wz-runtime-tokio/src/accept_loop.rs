@@ -7745,14 +7745,16 @@ mod tests {
     /// The node advertises two locators, the one that answers listed first and one nothing
     /// listens on listed last. The directory offers the most recently confirmed first, so the dead
     /// one is dialled first; the face is up only if the loop dials again, at the other.
-    #[cfg(feature = "routing-peer")]
+    #[cfg(all(feature = "routing-peer", target_os = "linux"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_gossip_dial_that_does_not_open_is_tried_again_at_the_nodes_next_locator() {
         let (acc_listener, acc_addr) = bind_loopback().await;
         let (peer_listener, _peer_addr) = bind_loopback().await;
-        // A port nothing listens on: bound to be given a free one, and let go of.
-        let (dead_listener, dead_addr) = bind_loopback().await;
-        drop(dead_listener);
+        // A port that refuses: held for the whole test and never listened on, so no other test
+        // can be handed the number between the dial and its refusal. Refusal is a Linux property
+        // of such a socket (`refusing_port`'s doc), which is why the test is Linux only.
+        let dead = wz_runtime_tokio_test_support::refusing_port();
+        let dead_addr = dead.addr();
 
         let (go_tx, go_rx) = watch::channel(false);
         let acceptor = accept_loop(
