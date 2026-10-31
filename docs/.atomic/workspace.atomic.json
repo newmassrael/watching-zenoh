@@ -302176,6 +302176,60 @@
         "Open: 1.10.2 (the repository's reference has moved to it, every client in the corpus is 1.10.1 or older), the other patch releases (1.0.0, 1.0.1, 1.1.0, 1.2.0, 1.3.0 to 1.3.3, 1.4.1 and the like), a client older than its router for 1.8.0, and a link that really loses packets (the tunnelled path lost none in 300 pings; making one lose needs cross traffic on a shared network and was not done). The jitter UDP capture needed the delay added after the subscription: a declaration that arrives out of order is dropped, which was inferred from logs, not traced. The old release binaries are on the build host only; build one tag at a time."
       ]
     },
+    "Round 4014": {
+      "decision_summary": "Phase 4a of the router with a task per face, as a build choice rather than a fixed structure (owner, 2026-10-30: upstream is a preset of wz, not its boundary). The policy routing-face-drive says how a routing node serves its links: task-per-face, upstream's and so the default of every upstream preset, spawns each face's drive on the runtime's workers; one-task holds every face in the loop's own task, the structure the design began from, kept for replayed runs and one-core hosts. peer_loop_shared drives a Send + Sync forwarder by the value, and both router hosts take it (the demo router-hat, the C ABI router node, which builds a worker runtime under task-per-face). The table-sharing structures upstream does not have (snapshots, shards) are named as values of a second policy that enters with its code.",
+      "changes_bullets": [
+        "deploy/wz-config.toml declares the choice policy routing-face-drive (task-per-face default, one-task); Kconfig.policies and policy_generated.rs regenerated, the three upstream defconfigs unchanged",
+        "accept_loop.rs gains peer_loop_shared, which spawns face drives on the workers under task-per-face and holds them in the loop under one-task, and re-exports RoutingFaceDrive; two stale module comments that called RouterForwarder Rc-bound are corrected",
+        "wz-ap-demo router-hat holds its forwarder in an Arc and runs peer_loop_shared with the build's value; three dyn-sink borrows pass the forwarder itself",
+        "wz-capi-core router_node builds a multi-thread runtime of drive_workers() workers under task-per-face and a current-thread runtime under one-task, and passes the value to peer_loop_shared",
+        "accept_loop tests gain the pair routing_face_drive_task_per_face_drives_the_faces_in_parallel and routing_face_drive_one_task_drives_the_faces_one_at_a_time over the OverlapProbe forwarder",
+        "docs/router-task-per-face.md section 4 states the two axes (face drive, table sharing) as policies; section 5 records 4a and its E7s runs"
+      ],
+      "verification_bullets": [
+        "wz_config.py --check and --check-presets pass; upstream_feature_census, no_allocator_link_gate --population, feature_public_surface_census --check, prose_named_identifier_gate --check, depth_axis_census and upstream_citation_anchor_gate --check --resolve pass",
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop: 21 ran, 21 passed, the new pair among them",
+        "cargo test -p wz-capi-c: 296 passed, 0 failed, 17 ignored, across 34 test binaries",
+        "wz_router_hat_mesh with the Layer E7 demo build: 8 of 8 pass under the default task-per-face",
+        "clippy -D warnings clean for wz-runtime-tokio (routing-peer; routing-router-hat), wz-capi-core, and wz-ap-demo with router-hat-router, the Layer E demo superset and an adminspace set; cargo fmt --check clean",
+        "Layer E7s on pc2, the tree built with each value in turn, alternating, two runs each: six of six pass in all four; starved one-core forwarding 6400 and 5535 against 8932 and 7916 per second; 32-hog forwarding 565 and 401 against 962 and 973; uncontended microseconds per message overlap between the values, no direction claimed"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Phase 4 is not whole: the wake list of a destination (a gated face awaits its destination's room) is not built; a gated face still waits inside its own drive with the 25 ms backstop",
+        "Section 7 questions still open under task-per-face: a test that deregisters a face mid-fan-out, the multicast ingress as a producer beside the face tasks, and the shm relay pass guard across an await",
+        "The faces DOWN counts of the E7s share tests (0,0 then 3,1 under task-per-face against 1,0 then 0,0) are recorded and not attributed; more runs are owed before reading them",
+        "The table-sharing policy (snapshots, shards) is named and not declared; it enters with its code and its test pair"
+      ],
+      "publishable_decision_summary": "Phase 4a of the router with a task per face, as a build choice rather than a fixed structure (owner, 2026-10-30: upstream is a preset of wz, not its boundary). The policy routing-face-drive says how a routing node serves its links: task-per-face, upstream's and so the default of every upstream preset, spawns each face's drive on the runtime's workers; one-task holds every face in the loop's own task, the structure the design began from, kept for replayed runs and one-core hosts. peer_loop_shared drives a Send + Sync forwarder by the value, and both router hosts take it (the demo router-hat, the C ABI router node, which builds a worker runtime under task-per-face). The table-sharing structures upstream does not have (snapshots, shards) are named as values of a second policy that enters with its code.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml declares the choice policy routing-face-drive (task-per-face default, one-task); Kconfig.policies and policy_generated.rs regenerated, the three upstream defconfigs unchanged",
+        "accept_loop.rs gains peer_loop_shared, which spawns face drives on the workers under task-per-face and holds them in the loop under one-task, and re-exports RoutingFaceDrive; two stale module comments that called RouterForwarder Rc-bound are corrected",
+        "wz-ap-demo router-hat holds its forwarder in an Arc and runs peer_loop_shared with the build's value; three dyn-sink borrows pass the forwarder itself",
+        "wz-capi-core router_node builds a multi-thread runtime of drive_workers() workers under task-per-face and a current-thread runtime under one-task, and passes the value to peer_loop_shared",
+        "accept_loop tests gain the pair routing_face_drive_task_per_face_drives_the_faces_in_parallel and routing_face_drive_one_task_drives_the_faces_one_at_a_time over the OverlapProbe forwarder",
+        "docs/router-task-per-face.md section 4 states the two axes (face drive, table sharing) as policies; section 5 records 4a and its E7s runs"
+      ],
+      "publishable_verification_bullets": [
+        "wz_config.py --check and --check-presets pass; upstream_feature_census, no_allocator_link_gate --population, feature_public_surface_census --check, prose_named_identifier_gate --check, depth_axis_census and upstream_citation_anchor_gate --check --resolve pass",
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop: 21 ran, 21 passed, the new pair among them",
+        "cargo test -p wz-capi-c: 296 passed, 0 failed, 17 ignored, across 34 test binaries",
+        "wz_router_hat_mesh with the Layer E7 demo build: 8 of 8 pass under the default task-per-face",
+        "clippy -D warnings clean for wz-runtime-tokio (routing-peer; routing-router-hat), wz-capi-core, and wz-ap-demo with router-hat-router, the Layer E demo superset and an adminspace set; cargo fmt --check clean",
+        "Layer E7s on pc2, the tree built with each value in turn, alternating, two runs each: six of six pass in all four; starved one-core forwarding 6400 and 5535 against 8932 and 7916 per second; 32-hog forwarding 565 and 401 against 962 and 973; uncontended microseconds per message overlap between the values, no direction claimed"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 4 is not whole: the wake list of a destination (a gated face awaits its destination's room) is not built; a gated face still waits inside its own drive with the 25 ms backstop",
+        "Section 7 questions still open under task-per-face: a test that deregisters a face mid-fan-out, the multicast ingress as a producer beside the face tasks, and the shm relay pass guard across an await",
+        "The faces DOWN counts of the E7s share tests (0,0 then 3,1 under task-per-face against 1,0 then 0,0) are recorded and not attributed; more runs are owed before reading them",
+        "The table-sharing policy (snapshots, shards) is named and not declared; it enters with its code and its test pair"
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
