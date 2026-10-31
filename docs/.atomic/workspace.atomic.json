@@ -302230,6 +302230,44 @@
         "The table-sharing policy (snapshots, shards) is named and not declared; it enters with its code and its test pair"
       ]
     },
+    "Round 4015": {
+      "decision_summary": "Two more of the 1.10.2 items carried in O4 are taken, and two are measured as having no subject in wz. (d) The shared-memory negotiation refuses the link, as zenoh 1.10.2 does, where an Open message commits a peer in a way this node cannot honour (an acceptor's challenge mismatch, a malformed OpenSyn, counters that cannot be opened, an OpenAck read against the offer of the InitAck), and ignores a malformed InitSyn as 1.10.x does. (e) A session a congestion close was ordered of refuses every later send at once. (c) and (g) have no subject: wz has no mixed-reliability QUIC pair and no start-condition wait.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/extshm.rs: ShmAuthError carries the refusals, ShmOpenReceived a refusal, the dispatch records the acceptor's offer, open_peer_handoff returns a Result (ShmHandoffRefused), recv_init_syn never refuses; session_actions.rs and drive.rs fail the establishment on a refusal; the runtime's authenticator and test fakes follow.",
+        "crates/wz-session-core/src/session_actions.rs: a sticky congestion_close_ordered that the send gate reads; test in session_glue.rs.",
+        "scripts/run-ci.sh: C1af counts 37/53/24/27 become 40/56/25/28.",
+        "docs/zenoh-api-on-the-engine.md: O4 (c) (d) (e) (g) recorded."
+      ],
+      "verification_bullets": [
+        "wz-session-core shm lib tests 40 and 56 pass, shm_auth_segment 25 and 28, joined_link_tests 3, the shm_e2e test 6 (wz to wz with real segments), the runtime session tests 471; session_glue 96 and router_forward on the qos arm 271 pass for the send refusal.",
+        "clippy -D warnings on wz-session-core and wz-runtime-tokio under the shared-memory features is clean.",
+        "Not run: the interop of the new refusals against a zenohd with shared memory; the other layers at this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (a) QUIC control stream opened on first write, (b) multicast compression key, (e) the transport deleted without a Close frame (the statechart's tx.congestion.exhaust arm goes through Closing and sends one), (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the new refusals against a zenohd."
+      ],
+      "publishable_decision_summary": "Two more of the 1.10.2 items carried in O4 are taken, and two are measured as having no subject in wz. (d) The shared-memory negotiation refuses the link, as zenoh 1.10.2 does, where an Open message commits a peer in a way this node cannot honour (an acceptor's challenge mismatch, a malformed OpenSyn, counters that cannot be opened, an OpenAck read against the offer of the InitAck), and ignores a malformed InitSyn as 1.10.x does. (e) A session a congestion close was ordered of refuses every later send at once. (c) and (g) have no subject: wz has no mixed-reliability QUIC pair and no start-condition wait.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/extshm.rs: ShmAuthError carries the refusals, ShmOpenReceived a refusal, the dispatch records the acceptor's offer, open_peer_handoff returns a Result (ShmHandoffRefused), recv_init_syn never refuses; session_actions.rs and drive.rs fail the establishment on a refusal; the runtime's authenticator and test fakes follow.",
+        "crates/wz-session-core/src/session_actions.rs: a sticky congestion_close_ordered that the send gate reads; test in session_glue.rs.",
+        "scripts/run-ci.sh: C1af counts 37/53/24/27 become 40/56/25/28.",
+        "docs/zenoh-api-on-the-engine.md: O4 (c) (d) (e) (g) recorded."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core shm lib tests 40 and 56 pass, shm_auth_segment 25 and 28, joined_link_tests 3, the shm_e2e test 6 (wz to wz with real segments), the runtime session tests 471; session_glue 96 and router_forward on the qos arm 271 pass for the send refusal.",
+        "clippy -D warnings on wz-session-core and wz-runtime-tokio under the shared-memory features is clean.",
+        "Not run: the interop of the new refusals against a zenohd with shared memory; the other layers at this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (a) QUIC control stream opened on first write, (b) multicast compression key, (e) the transport deleted without a Close frame (the statechart's tx.congestion.exhaust arm goes through Closing and sends one), (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the new refusals against a zenohd."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
