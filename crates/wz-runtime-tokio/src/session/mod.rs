@@ -2935,6 +2935,44 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         })
     }
 
+    /// Open upstream's `demux{zid}` and `register_subscriber` / `register_queryable` spans for
+    /// every declaration the link of this session tells it, through the sinks the registries
+    /// already fan a declaration to ([`crate::session_spans`]). `zid_hex` is the node's own.
+    #[cfg(all(
+        feature = "tracing-spans",
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    fn open_routing_spans(&self, zid_hex: &str) {
+        #[cfg(feature = "declare-subscriber")]
+        {
+            let zid_hex = zid_hex.to_owned();
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer
+                    .remote_subscribers
+                    .on_subscriber_declared_sink(wz_session_core::decl_sink::BoxedDeclSink::new(
+                        move |decl| {
+                            crate::session_spans::registered(&zid_hex, false, decl.keyexpr())
+                        },
+                    ))
+                    .expect("observer install on the alloc backing never exceeds capacity");
+            });
+        }
+        #[cfg(feature = "declare-queryable")]
+        {
+            let zid_hex = zid_hex.to_owned();
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer
+                    .remote_queryables
+                    .on_queryable_declared_sink(wz_session_core::decl_sink::BoxedDeclSink::new(
+                        move |decl| {
+                            crate::session_spans::registered(&zid_hex, true, decl.keyexpr())
+                        },
+                    ))
+                    .expect("observer install on the alloc backing never exceeds capacity");
+            });
+        }
+    }
+
     /// transport-shm — install the AP SHM resolver onto the subscriber registry
     /// (the std mmap-open `PosixShmResolver`). Call once at bring-up so an inbound
     /// SHM Put's descriptor can be resolved off /dev/shm; absent the resolver an
@@ -3820,6 +3858,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // out-of-range value (returns `false`); empty zid skipped here so the
         // registry stays in its pre-R231 default state for test fixtures that
         // don't supply a zid.
+        // The spans of upstream's routing code, for a registration this session makes of what its
+        // link declared: the node's own zid names them, as upstream's `demux` does.
+        #[cfg(all(
+            feature = "tracing-spans",
+            any(feature = "declare-subscriber", feature = "declare-queryable")
+        ))]
+        session.open_routing_spans(&wz_session_core::zid_hex::zid_to_zenoh_hex(&zid));
         if !zid.is_empty() {
             let _ = session.set_own_zid(zid);
         }

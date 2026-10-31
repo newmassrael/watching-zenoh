@@ -99,6 +99,14 @@ pub mod plugin;
 #[cfg(feature = "transport-unicast")]
 pub mod session_glue;
 
+/// The spans of upstream's routing code, opened by the sinks a session installs on the
+/// registries of what its link declared (see the module's own doc).
+#[cfg(all(
+    feature = "tracing-spans",
+    any(feature = "declare-subscriber", feature = "declare-queryable")
+))]
+pub(crate) mod session_spans;
+
 /// The backstop that keeps KEEPALIVE flowing while the drive loop is blocked in
 /// an application callback — the AP realisation of the session FSM's
 /// `start_keepalive_worker` action.
