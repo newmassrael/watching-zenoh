@@ -155,17 +155,11 @@ impl BoxedLinkDriver for RecordingLinkDriver {
 
 /// R2943 — [`recording_actions`] over a recorder that stands for a link of
 /// `kind`, so egress selection sees that link's intrinsic reliability class.
-/// Gated like its consumers: `multilink`'s `joined_qos_pair`, and (R3111) the auth segment's
-/// test of what a session declares on a link of each kind.
-#[cfg(any(
-    all(
-        feature = "transport-multilink",
-        feature = "transport-qos",
-        feature = "codec-push",
-        feature = "codec-close"
-    ),
-    feature = "session-extshm"
-))]
+/// Gated like its consumers: `multilink`'s `joined_qos_pair` and the forwarder's tests of a link
+/// joined to a session (`router_forward::joined_link_tests`, which needs `transport-multilink`
+/// alone, so a build with that feature and nothing else must still find this), and (R3111) the
+/// auth segment's test of what a session declares on a link of each kind.
+#[cfg(any(feature = "transport-multilink", feature = "session-extshm"))]
 pub(crate) fn recording_actions_over(
     kind: wz_session_core::link::LinkKind,
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
@@ -181,15 +175,7 @@ pub(crate) fn recording_actions_over(
 /// The recorder [`recording_actions_over`] builds its session on, alone, for a
 /// test that puts another driver layer in front of it (a lending one, in
 /// `multilink`'s batch tests). Gated as that function is, its first caller.
-#[cfg(any(
-    all(
-        feature = "transport-multilink",
-        feature = "transport-qos",
-        feature = "codec-push",
-        feature = "codec-close"
-    ),
-    feature = "session-extshm"
-))]
+#[cfg(any(feature = "transport-multilink", feature = "session-extshm"))]
 pub(crate) fn recording_driver_over(
     kind: wz_session_core::link::LinkKind,
 ) -> Arc<RecordingLinkDriver> {
