@@ -386,7 +386,8 @@ where
 }
 
 /// A multicast session before its dispatcher exists: [`MulticastSession`] without the dispatcher,
-/// which [`spawn_multicast_session_seeded`] builds where the task keeps it. A caller that spawns
+/// which `spawn_multicast_session_seeded` (a build without `session-slot` has it) builds where
+/// the task keeps it. A caller that spawns
 /// the session beside others uses this one to keep the dispatcher (7.7 KB at four peers) off its
 /// own stack, where [`MulticastSession`] makes it hold two.
 pub struct MulticastSeed<const MAX_PEERS: usize> {
