@@ -452,7 +452,20 @@ mod brokered_interest;
 mod egress;
 #[cfg(test)]
 mod egress_tests;
-#[cfg(all(test, feature = "transport-multilink"))]
+// Gated like the fixture it reads (`test_fixtures::recording_actions_over`): a build with
+// multilink alone has the module and not the fixture, and the module did not compile there.
+#[cfg(all(
+    test,
+    feature = "transport-multilink",
+    any(
+        all(
+            feature = "transport-qos",
+            feature = "codec-push",
+            feature = "codec-close"
+        ),
+        feature = "session-extshm"
+    )
+))]
 mod joined_link_tests;
 mod local_publish;
 #[cfg(test)]
