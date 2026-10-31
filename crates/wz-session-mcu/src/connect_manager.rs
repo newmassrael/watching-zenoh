@@ -2277,14 +2277,17 @@ mod tests {
     /// moves with the frames a refactor brings down (the store of the default rows was over 8 KiB
     /// when this was written and 3,456 bytes after the machines shrank), and a floor in bytes then
     /// failed on a store that still held every machine. What the test needs is that the machines
-    /// are the larger part, so the store must stay well above the manager.
+    /// are in the store and not in the manager: a manager that carried them would be larger than
+    /// the store, which holds them and nothing else of the manager's, and a build with fewer
+    /// features has the two close (3,016 and 2,264 bytes on the slot profile with the admin
+    /// surface), so the store is asked to be the larger and no more.
     #[test]
     fn the_manager_does_not_carry_the_machines_of_its_peers() {
         let manager = core::mem::size_of::<ConnectManager<FakeDialer>>();
         let store = core::mem::size_of::<PeerStore>();
         std::assert!(
-            store > 2 * manager,
-            "the store is where the machines are ({store} bytes) and must be well above the \
+            store > manager,
+            "the store is where the machines are ({store} bytes) and must be larger than the \
              manager ({manager} bytes), or this test guards nothing"
         );
         std::assert!(
