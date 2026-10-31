@@ -16793,6 +16793,17 @@ layer_ewirez_zenohd_wire_dissection() {
         || return 1
     echo "  Ewirez: the Join qos table read bytes a stock zenohd broadcast"
 
+    # `transport/multicast/compression/enabled` — the group's batches against a stock zenohd
+    # at the pin (1.10.2 is the first release that reads the key): what it beacons is read,
+    # what a compressing wz member beacons is listed, a member that disagrees about the wrap
+    # is not, and a control that a plain member of a plain group is listed. 5 = the number
+    # the command PRINTED, against the 1.10.2 oracle; it needs the same host as the leg above.
+    _runci_guarded_test "Ewirez stock-zenoh multicast compression" 5 \
+        timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
+        --test zenoh_multicast_compression_foreign_witness -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: a stock zenohd and wz read each other's compressed group batches"
+
     # R2051 (open-debt item 378) — the TIMESTAMP leg, and the only one in this
     # family with THREE processes and TWO implementations on the wire: pico
     # publishes, zenohd stamps while routing, pico subscribes. It therefore

@@ -181,6 +181,11 @@ wz-session-core = { path = "../wz-session-core", features = [
     # in-process test binary's feature closure (audit A4-5 containment) and is
     # what compiles the qos ext path in reach at all (it is opt-in, in no preset).
     "transport-qos", "session-multicast", "codec-join",
+    # `transport/multicast/compression/enabled` — tests/zenoh_multicast_compression_foreign_witness.rs
+    # unwraps the batch a compressing zenohd beacons through `compression::decompress_batch`,
+    # and drives a compressing wz member (`MulticastParams::compression`) against it. The wrap
+    # is inert unless a group states the key, so the pin changes no other test.
+    "transport-compression",
     # R311y630d — the SCOUTING half of the driving oracle
     # (pico_transport_decode_differential.rs::
     # the_two_agree_on_the_scouting_namespaces_extensions) drives pico's
