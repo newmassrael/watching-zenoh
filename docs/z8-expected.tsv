@@ -28,7 +28,7 @@ qos	pass	2	yes	all of it
 qos_overwrite	pass	10	yes	all of it
 queryable	pass	3	yes	all of it
 regions	fail	43	no	scenario 1 needs the client node (its ten tests time out); all the rest fail on a count of upstream's routing steps by tracing span (71 tests, 72 when order 2 of getque of scenario 7 runs alone: in a run of the whole file it times out instead, as 27 tests share the machine); each failing test waits out a minute, so a person runs it
-routing	fail	7	yes	three_node_combination loses one recipe of its publishers and subscribers in about one run in four, a different one each time (the queries it lost are ended with their face since round 3935); it passes in the other runs, and then the row is `pass 8`
+routing	pass	8	yes	2 tests are ignored upstream; three_node_combination lost a recipe in about one run in four until a probe stopped waiting for the lock of a lane a blocking send holds (round 4017), and passed in 8 of 8 runs after
 scouting	pass	3	yes	all of it
 session	pass	5	yes	all of it
 shm	pass	10	yes	all of it
