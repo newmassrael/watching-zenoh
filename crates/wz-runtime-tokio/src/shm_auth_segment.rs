@@ -78,8 +78,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use wz_session_core::extshm::{
-    decode_shm_descriptor, ShmAuthenticator, ShmHandoff, ShmTxHandoff, ShmTxTransaction,
-    SHM_PRIORITY_BANDS,
+    decode_shm_descriptor, ShmAuthenticator, ShmHandoff, ShmHandoffRefused, ShmTxHandoff,
+    ShmTxTransaction, SHM_PRIORITY_BANDS,
 };
 
 use crate::shm_watchdog::Confirmed;
@@ -621,9 +621,12 @@ impl ShmAuthenticator for PosixShmAuthenticator {
         &self,
         peer_segment: u32,
         counters: &[u16; SHM_PRIORITY_BANDS],
-    ) -> Option<Box<dyn ShmHandoff>> {
+    ) -> Result<Option<Box<dyn ShmHandoff>>, ShmHandoffRefused> {
+        // A segment that cannot be mapped, or a counter outside its array, is zenoh's `Handoff
+        // channel creation error`, which 1.10.2 answers by refusing the link.
         PeerHandoff::open(peer_segment, counters)
-            .map(|handoff| Box::new(handoff) as Box<dyn ShmHandoff>)
+            .map(|handoff| Some(Box::new(handoff) as Box<dyn ShmHandoff>))
+            .ok_or(ShmHandoffRefused)
     }
 
     /// R3122 -- a band of counters leased from this node's segment for ONE link, `None` when the
@@ -999,9 +1002,18 @@ mod tests {
         let a = PosixShmAuthenticator::new().expect("authenticator");
         let handoff = a
             .open_peer_handoff(peer.id(), &BAND_IDS)
+            .expect("the peer's counters are not refused")
             .expect("the peer's counters open");
         handoff.on_rx(5);
         assert_eq!(counter_of(peer.id(), BAND_IDS[5]), 1);
+    }
+
+    /// zenoh 1.10.2 refuses the link on a `Handoff channel creation error`, so a segment this
+    /// node cannot map answers `Err` and not "no handoff".
+    #[test]
+    fn counters_in_a_segment_that_cannot_be_mapped_are_refused() {
+        let a = PosixShmAuthenticator::new().expect("authenticator");
+        assert!(a.open_peer_handoff(u32::MAX - 1, &BAND_IDS).is_err());
     }
 
     /// The authenticator draws a challenge that is neither zero nor a counter

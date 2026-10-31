@@ -886,12 +886,11 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 // validates that echo against its own challenge on
                 // InitAck and maps the acceptor's segment.
                 //
-                // Only the acceptor's arm can ABORT: zenoh `bail!`s on a
-                // malformed InitSyn body while the initiator's mirror
-                // degrades to "no SHM", and that asymmetry is upstream's
-                // — a malformed challenge aimed at an acceptor is an
-                // attack surface, a malformed answer is just a peer that
-                // will not get shared memory.
+                // Neither Init step can ABORT: zenoh 1.10.x ignores an
+                // InitSyn body that does not decode (the 1.5.0 `bail!` is
+                // gone), and the initiator's mirror degrades to "no SHM".
+                // A malformed challenge answered by silence costs the peer
+                // shared memory and nothing else.
                 #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
                 if let InboundFrame::Init {
                     is_ack, extensions, ..
@@ -899,28 +898,35 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 {
                     if *is_ack {
                         actions.shm_recv_init_ack(extensions);
-                    } else if actions.shm_recv_init_syn(extensions).is_err() {
-                        engine.process_event(E::EstablishmentExtRejected);
-                        return DriverLoopOutcome::ShmChallengeRejected;
+                    } else {
+                        actions.shm_recv_init_syn(extensions);
                     }
                 }
                 // session-extshm (R311y507) — the Open phase, where BOTH
                 // roles finally decide `is_shm`: the acceptor on the
                 // initiator's echo (OpenSyn), the initiator on the
-                // acceptor's literal `1` (OpenAck). A peer that offered
-                // SHM but never proved it can map our memory lands on
-                // `is_shm = false` here rather than at the capability
-                // merge — which is the whole difference between a
-                // capability flag and a proof.
+                // acceptor's OpenAck. A peer that offered SHM but never
+                // proved it can map our memory lands on `is_shm = false`
+                // here rather than at the capability merge — which is the
+                // whole difference between a capability flag and a proof.
+                //
+                // From the moment a peer has COMMITTED to shared memory in
+                // an Open message, zenoh 1.10.2 refuses the link rather
+                // than run with shared memory on one side only: the
+                // establishment fails, as for a rejected InitSyn challenge.
                 #[cfg(all(feature = "session-extshm", feature = "codec-open-body"))]
                 if let InboundFrame::Open {
                     is_ack, extensions, ..
                 } = &frame
                 {
-                    if *is_ack {
-                        actions.shm_recv_open_ack(extensions);
+                    let refused = if *is_ack {
+                        actions.shm_recv_open_ack(extensions)
                     } else {
-                        actions.shm_recv_open_syn(extensions);
+                        actions.shm_recv_open_syn(extensions)
+                    };
+                    if refused.is_err() {
+                        engine.process_event(E::EstablishmentExtRejected);
+                        return DriverLoopOutcome::ShmChallengeRejected;
                     }
                 }
                 // R3b — feed the admitted handshake frame's ext chain into

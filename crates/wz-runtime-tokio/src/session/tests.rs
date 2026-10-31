@@ -1348,10 +1348,11 @@ fn a_session_acknowledges_the_shm_slices_it_receives_through_the_counters_its_pe
             &self,
             peer_segment: u32,
             counters: &[u16; SHM_PRIORITY_BANDS],
-        ) -> Option<Box<dyn ShmHandoff>> {
+        ) -> Result<Option<Box<dyn ShmHandoff>>, wz_session_core::extshm::ShmHandoffRefused>
+        {
             assert_eq!(peer_segment, PEER_SEGMENT, "the peer's own segment");
             assert_eq!(*counters, COUNTERS, "the ids the peer named, in band order");
-            Some(Box::new(BandLog(self.bands.clone())))
+            Ok(Some(Box::new(BandLog(self.bands.clone()))))
         }
     }
 
@@ -1367,14 +1368,16 @@ fn a_session_acknowledges_the_shm_slices_it_receives_through_the_counters_its_pe
     let init_syn = encode_shm_zbuf_ext(&encode_shm_init_syn_body(PEER_SEGMENT)).expect("fits");
     session
         .actions()
-        .shm_recv_init_syn(std::slice::from_ref(&init_syn))
-        .expect("well-formed InitSyn");
+        .shm_recv_init_syn(std::slice::from_ref(&init_syn));
     let open_syn = encode_shm_zbuf_ext(&encode_shm_open_syn_body(
         LOCAL_CHALLENGE,
         ShmHandoffCounters::PerPriority(COUNTERS),
     ))
     .expect("fits");
-    session.actions().shm_recv_open_syn(&[open_syn]);
+    session
+        .actions()
+        .shm_recv_open_syn(&[open_syn])
+        .expect("the proof stands");
     assert!(session.actions().is_shm(), "the proof stood, so SHM stands");
 
     let got: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
@@ -1421,8 +1424,7 @@ fn a_session_acknowledges_the_shm_slices_it_receives_through_the_counters_its_pe
     // so a Put after it writes no counter of the peer this session has left.
     session
         .actions()
-        .shm_recv_init_syn(std::slice::from_ref(&init_syn))
-        .expect("well-formed InitSyn");
+        .shm_recv_init_syn(std::slice::from_ref(&init_syn));
     dispatch_one(b"second");
     assert_eq!(got.lock().unwrap().len(), 2, "still delivered");
     assert_eq!(
@@ -1481,14 +1483,16 @@ fn a_session_admits_a_protocol_only_when_the_peer_lists_it() {
         let init_syn = encode_shm_zbuf_ext(&encode_shm_init_syn_body(PEER_SEGMENT)).expect("fits");
         session
             .actions()
-            .shm_recv_init_syn(std::slice::from_ref(&init_syn))
-            .expect("well-formed InitSyn");
+            .shm_recv_init_syn(std::slice::from_ref(&init_syn));
         let open_syn = encode_shm_zbuf_ext(&encode_shm_open_syn_body(
             LOCAL_CHALLENGE,
             ShmHandoffCounters::Disabled,
         ))
         .expect("fits");
-        session.actions().shm_recv_open_syn(&[open_syn]);
+        session
+            .actions()
+            .shm_recv_open_syn(&[open_syn])
+            .expect("the proof stands");
         assert!(session.actions().is_shm(), "the proof stood, so SHM stands");
         let _ = SHM_PRIORITY_BANDS;
         session

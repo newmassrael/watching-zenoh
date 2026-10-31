@@ -8642,17 +8642,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Step 2a (ACCEPTOR) — map the initiator's segment and remember its
-    /// challenge. `Err` only for a malformed body, which zenoh aborts on.
+    /// challenge. Never refuses the link: a body that does not decode is ignored, as zenoh
+    /// 1.10.x ignores it.
     #[cfg(feature = "session-extshm")]
-    pub fn shm_recv_init_syn(
-        &self,
-        extensions: &[ExtEntryOwned],
-    ) -> Result<(), crate::extshm::ShmAuthError> {
-        let received = R::with_mutex_mut(&self.shm_auth, |d| d.recv_init_syn(extensions));
+    pub fn shm_recv_init_syn(&self, extensions: &[ExtEntryOwned]) {
+        R::with_mutex_mut(&self.shm_auth, |d| d.recv_init_syn(extensions));
         // R3123 -- a new establishment is a new peer: this link lets go of the handoff it opened
         // from the last one, so nothing is written to counters that are no longer in play.
         self.withdraw_shm_rx();
-        received
     }
 
     /// R3123 -- withdraw the handoff this LINK opened from its last peer. Reported once to
@@ -8717,8 +8714,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the ACCEPT side's `is_shm` is finally decided (zenoh sets
     /// `negotiated_to_use_shm` in `recv_open_syn`), so an installed
     /// authenticator turns the capability flag into a proof-gated one.
+    ///
+    /// `Err` when the initiator proposed shared memory in a way this node cannot honour (zenoh
+    /// 1.10.2 refuses the link rather than run plain beside a peer that sends descriptors); the
+    /// caller fails the establishment.
     #[cfg(feature = "session-extshm")]
-    pub fn shm_recv_open_syn(&self, extensions: &[ExtEntryOwned]) {
+    pub fn shm_recv_open_syn(
+        &self,
+        extensions: &[ExtEntryOwned],
+    ) -> Result<(), crate::extshm::ShmAuthError> {
         let (installed, received) = R::with_mutex_mut(&self.shm_auth, |d| {
             (d.is_installed(), d.recv_open_syn(extensions))
         });
@@ -8727,6 +8731,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if installed && !received.accepted {
             R::with_mutex_mut(&self.is_shm, |s| *s = false);
         }
+        received.refusal.map_or(Ok(()), Err)
     }
 
     /// Step 4b (ACCEPTOR) — confirm with the literal `1`, and only when the
@@ -8742,8 +8747,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Step 4c (INITIATOR) — the acceptor's confirmation, which is where the
     /// OPEN side's `is_shm` is decided (zenoh `recv_open_ack`).
+    ///
+    /// `Err` when the acceptor offered shared memory and its OpenAck commits it to it in a way
+    /// this node cannot honour (zenoh 1.10.2 refuses the link); the caller fails the
+    /// establishment.
     #[cfg(feature = "session-extshm")]
-    pub fn shm_recv_open_ack(&self, extensions: &[ExtEntryOwned]) {
+    pub fn shm_recv_open_ack(
+        &self,
+        extensions: &[ExtEntryOwned],
+    ) -> Result<(), crate::extshm::ShmAuthError> {
         let (installed, received) = R::with_mutex_mut(&self.shm_auth, |d| {
             (d.is_installed(), d.recv_open_ack(extensions))
         });
@@ -8752,6 +8764,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if installed && !received.accepted {
             R::with_mutex_mut(&self.is_shm, |s| *s = false);
         }
+        received.refusal.map_or(Ok(()), Err)
     }
 
     /// R3040 -- what changed in the means of acknowledging the peer's

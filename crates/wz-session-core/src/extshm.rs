@@ -498,21 +498,20 @@ pub trait ShmAuthenticator {
     /// R3040 -- open the peer's handoff counters: the peer's auth segment
     /// (`peer_segment`, the id it published at establishment) mapped so that its
     /// counters can be written, and the counter ids it named for each priority,
-    /// in priority order. `None` when the segment cannot be mapped or names a
-    /// counter outside its array, which upstream treats as "no handoff on this
-    /// link" and carries on (`recv_open_ack` logs `Handoff channel creation
-    /// error` and returns `Ok(())`).
+    /// in priority order. `Err` when the segment cannot be mapped or names a
+    /// counter outside its array: zenoh 1.10.2 refuses the link on its `Handoff
+    /// channel creation error` (1.10.1 logged it and carried on without a handoff).
     ///
-    /// Defaults to `None`, an authenticator that cannot write a peer's counters:
-    /// the session then runs exactly as before, a receiver that never
+    /// `Ok(None)` for an authenticator that cannot write a peer's counters, which is the
+    /// default: the session then runs exactly as before, a receiver that never
     /// acknowledges.
     fn open_peer_handoff(
         &self,
         peer_segment: u32,
         counters: &[u16; SHM_PRIORITY_BANDS],
-    ) -> Option<alloc::boxed::Box<dyn ShmHandoff>> {
+    ) -> Result<Option<alloc::boxed::Box<dyn ShmHandoff>>, ShmHandoffRefused> {
         let _ = (peer_segment, counters);
-        None
+        Ok(None)
     }
 
     /// R3110 -- this node's own handoff as a SENDER: the counters it names in its Open messages
@@ -544,6 +543,12 @@ pub trait ShmAuthenticator {
         None
     }
 }
+
+/// The counters a peer named in its Open message could not be opened
+/// ([`ShmAuthenticator::open_peer_handoff`]): zenoh's `Handoff channel creation error`.
+#[cfg(feature = "session-extshm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShmHandoffRefused;
 
 /// The no_std/std seam: an SHM-backed Put's descriptor is resolved to its bytes
 /// by an AP-injected resolver (the `std` mmap-open lives in
@@ -1226,20 +1231,33 @@ fn read_and_acknowledge<R>(
     resolved
 }
 
-/// Why a SHM challenge-response step refused. Only ONE of zenoh's arms is an
-/// error; every other failure degrades to "no shared memory" and lets the
-/// session continue, which is deliberate and asymmetric upstream.
+/// Why the SHM exchange REFUSES THE LINK. Before the Open messages every failure of the
+/// exchange degrades to "no shared memory" and the session goes on; from the moment a peer has
+/// committed to shared memory in an Open message, zenoh 1.10.2 refuses the link rather than run
+/// with shared memory on one side only (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs`,
+/// `recv_open_syn` and `recv_open_ack`, which 1.10.1 answered `Ok(())` and went on without).
 #[cfg(feature = "session-extshm")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShmAuthError {
-    /// The initiator's InitSyn carried an `Shm` ext whose body does not decode.
-    /// zenoh `recv_init_syn` `bail!`s here (`ext/shm.rs`), aborting the
-    /// handshake, while the initiator's own `recv_init_ack` merely traces and
-    /// returns `Ok(None)` on the same class of failure. The asymmetry is
-    /// upstream's: a malformed challenge aimed at an ACCEPTOR is an attack
-    /// surface, a malformed answer to an initiator is just a peer that will not
-    /// get SHM.
-    MalformedInitSyn,
+    /// ACCEPTOR: the initiator's OpenSyn carries an `Shm` ext whose body does not decode
+    /// (`bail!("")`).
+    MalformedOpenSyn,
+    /// ACCEPTOR: the initiator proposed shared memory over a segment this node mapped and
+    /// echoed a challenge that is not ours. An unpatched initiator has already enabled shared
+    /// memory from the segment it mapped, without waiting for the OpenAck, so declining here
+    /// would run this side plain while that peer sends descriptors.
+    ChallengeMismatch,
+    /// Either role: the counters the peer named in its Open message could not be opened (the
+    /// segment cannot be mapped, or a counter is outside its array): zenoh's `Handoff channel
+    /// creation error`.
+    HandoffRefused,
+    /// INITIATOR: the acceptor offered shared memory and its OpenAck commits it to it, but this
+    /// node cannot honour that: it did not map the acceptor's segment, so it proposed nothing
+    /// (`Unexpected SHM acknowledgement`, `SHM acknowledgement without a local proposal`).
+    OpenAckNotHonoured,
+    /// INITIATOR: the acceptor's OpenAck after an offer carries an `Shm` ext whose body does
+    /// not decode.
+    MalformedOpenAck,
 }
 
 /// The SHM establishment challenge-response state machine — zenoh's `ShmFsm`
@@ -1283,6 +1301,11 @@ pub struct ShmAuthDispatch {
     /// from), and an unknown list admits every protocol, which is what a session did before the
     /// list was read.
     peer_protocols: Option<Vec<u32>>,
+    /// INITIATOR: the acceptor's InitAck carried an `Shm` ext, whatever became of it
+    /// (zenoh 1.10.2 `acceptor_offered_shm`, recorded before any check can decline the offer).
+    /// An acceptor that offered none did not ask for shared memory, and an `Shm` ext in its
+    /// OpenAck is then ignored, as an unpatched acceptor puts one in every OpenAck.
+    acceptor_offered: bool,
 }
 
 /// R3123 -- the means of acknowledging the shared-memory slices a LINK's peer sends, opened from
@@ -1368,6 +1391,10 @@ pub struct ShmOpenReceived {
     pub accepted: bool,
     /// What to do with the slot of the link the message arrived on.
     pub rx: ShmRxChange,
+    /// The message committed the peer to shared memory in a way this node cannot honour, so the
+    /// link is refused and the establishment fails, whatever `accepted` says. `None` for a
+    /// message that checked out and for one that merely was not shared memory's.
+    pub refusal: Option<ShmAuthError>,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -1400,6 +1427,7 @@ impl ShmAuthDispatch {
             peer_challenge: None,
             peer_segment: None,
             peer_protocols: None,
+            acceptor_offered: false,
         }
     }
 
@@ -1412,6 +1440,7 @@ impl ShmAuthDispatch {
             peer_challenge: None,
             peer_segment: None,
             peer_protocols: None,
+            acceptor_offered: false,
         }
     }
 
@@ -1423,6 +1452,7 @@ impl ShmAuthDispatch {
         self.peer_challenge = None;
         self.peer_segment = None;
         self.peer_protocols = None;
+        self.acceptor_offered = false;
     }
 
     /// R3065 -- record the peer's segment with the challenge read out of it, and the protocol
@@ -1449,16 +1479,22 @@ impl ShmAuthDispatch {
     /// R3040 -- open the handoff for the counter block the peer named, once the
     /// peer's segment is known. A block that names no counters (`Disabled`, which
     /// is what upstream sends for a best-effort link) opens none.
+    ///
+    /// `Err` is a block that names counters this node cannot open, which refuses the link
+    /// ([`ShmAuthError::HandoffRefused`]); `Ok(None)` is a peer that names none, or an
+    /// authenticator that writes none.
     fn open_handoff(
         &self,
         counters: ShmHandoffCounters,
-    ) -> Option<alloc::boxed::Box<dyn ShmHandoff>> {
+    ) -> Result<Option<alloc::boxed::Box<dyn ShmHandoff>>, ShmAuthError> {
         let ShmHandoffCounters::PerPriority(ids) = counters else {
-            return None;
+            return Ok(None);
         };
         match (self.authenticator.as_ref(), self.peer_segment) {
-            (Some(a), Some(segment)) => a.open_peer_handoff(segment, &ids),
-            _ => None,
+            (Some(a), Some(segment)) => a
+                .open_peer_handoff(segment, &ids)
+                .map_err(|ShmHandoffRefused| ShmAuthError::HandoffRefused),
+            _ => Ok(None),
         }
     }
 
@@ -1477,24 +1513,26 @@ impl ShmAuthDispatch {
     /// Step 2a, ACCEPTOR: open the initiator's segment and remember the
     /// challenge found inside. zenoh `recv_init_syn`.
     ///
-    /// `Ok(())` with nothing remembered covers both "the peer sent no `Shm`"
-    /// and "its segment could not be mapped" — upstream returns `Ok(None)` for
-    /// both, so the session continues without SHM. A body that does not DECODE
-    /// is the one hard error ([`ShmAuthError::MalformedInitSyn`]).
-    pub fn recv_init_syn(&mut self, extensions: &[ExtEntryOwned]) -> Result<(), ShmAuthError> {
+    /// Nothing is remembered when "the peer sent no `Shm`", its body does not
+    /// decode, or "its segment could not be mapped": upstream returns `Ok(None)` for
+    /// all three (`let Ok(init_syn) = .. else { trace; return Ok(()) }`), so the session
+    /// continues without SHM. This step never refuses the link; the Open messages do
+    /// ([`ShmAuthError`]).
+    pub fn recv_init_syn(&mut self, extensions: &[ExtEntryOwned]) {
         self.forget_peer();
         let Some(a) = self.authenticator.as_ref() else {
-            return Ok(());
+            return;
         };
         let Some(body) = peer_shm_zbuf_body(extensions) else {
-            return Ok(());
+            return;
         };
-        let alice_segment = decode_shm_init_syn_body(body).ok_or(ShmAuthError::MalformedInitSyn)?;
+        let Some(alice_segment) = decode_shm_init_syn_body(body) else {
+            return;
+        };
         self.peer_challenge = a.open_peer_challenge(alice_segment);
         // The segment is kept only with the challenge read out of it: a peer whose
         // memory this node could not map has no counters this node could write.
         self.record_peer(alice_segment);
-        Ok(())
     }
 
     /// Step 2b, ACCEPTOR: answer with the initiator's own challenge plus our
@@ -1526,6 +1564,9 @@ impl ShmAuthDispatch {
         let Some(body) = peer_shm_zbuf_body(extensions) else {
             return false;
         };
+        // Recorded before any check can decline the offer: the OpenAck's `Shm` ext is read
+        // against it ([`Self::recv_open_ack`]).
+        self.acceptor_offered = true;
         let Some((alice_challenge, bob_segment)) = decode_shm_init_ack_body(body) else {
             return false;
         };
@@ -1604,26 +1645,47 @@ impl ShmAuthDispatch {
     /// R3123 -- the handoff comes back in the result, for the LINK the message arrived on to keep
     /// ([`ShmRxSlot`]), and is not kept here: this dispatch is the session's, shared by every
     /// link of it.
+    ///
+    /// zenoh 1.10.2 REFUSES THE LINK where 1.10.1 declined and went on, once the initiator has
+    /// proposed shared memory over a segment this node mapped: an `Shm` ext that does not
+    /// decode, a challenge that is not ours, and counters that cannot be opened are each an
+    /// error ([`ShmAuthError`]), because an unpatched initiator enables shared memory from the
+    /// segment it mapped without waiting for the OpenAck and would send descriptors to a node
+    /// that runs plain. An OpenSyn with no `Shm` ext, or one over a segment this node never
+    /// mapped (no proposal it could have accepted), is not shared memory's and is ignored.
     pub fn recv_open_syn(&mut self, extensions: &[ExtEntryOwned]) -> ShmOpenReceived {
-        let refused = ShmOpenReceived {
+        let ignored = ShmOpenReceived {
             accepted: false,
             rx: None,
+            refusal: None,
+        };
+        let refuse = |why| ShmOpenReceived {
+            accepted: false,
+            rx: None,
+            refusal: Some(why),
         };
         let Some(a) = self.authenticator.as_ref() else {
-            return refused;
+            return ignored;
         };
         let Some(body) = peer_shm_zbuf_body(extensions) else {
-            return refused;
+            return ignored;
         };
+        if self.peer_segment.is_none() {
+            return ignored;
+        }
         let Some((bob_challenge, counters)) = decode_shm_open_syn_body(body) else {
-            return refused;
+            return refuse(ShmAuthError::MalformedOpenSyn);
         };
         if bob_challenge != a.local_challenge() {
-            return refused;
+            return refuse(ShmAuthError::ChallengeMismatch);
         }
-        ShmOpenReceived {
-            accepted: true,
-            rx: Some(self.open_handoff(counters)),
+        match self.open_handoff(counters) {
+            Ok(rx) => ShmOpenReceived {
+                accepted: true,
+                rx: Some(rx),
+                refusal: None,
+            },
+            Err(why) => refuse(why),
         }
     }
 
@@ -1674,23 +1736,47 @@ impl ShmAuthDispatch {
     /// `recv_init_ack` already mapped and checked.
     ///
     /// R3123 -- the handoff comes back in the result, as [`Self::recv_open_syn`]'s does.
+    ///
+    /// zenoh 1.10.2 reads the OpenAck against what the acceptor offered in its InitAck
+    /// ([`Self::recv_init_ack`]). An `Shm` ext from an acceptor that offered none is ignored (an
+    /// unpatched acceptor puts one in every OpenAck) and the session runs without shared
+    /// memory. After an offer the OpenAck commits the acceptor to shared memory, and one this
+    /// node cannot honour refuses the link ([`ShmAuthError`]) where 1.10.1 went on with
+    /// shared memory on the acceptor's side only: a segment this node did not map (so it
+    /// proposed nothing), a body that does not decode, counters that cannot be opened.
     pub fn recv_open_ack(&mut self, extensions: &[ExtEntryOwned]) -> ShmOpenReceived {
-        let refused = ShmOpenReceived {
+        let ignored = ShmOpenReceived {
             accepted: false,
             rx: None,
+            refusal: None,
+        };
+        let refuse = |why| ShmOpenReceived {
+            accepted: false,
+            rx: None,
+            refusal: Some(why),
         };
         if self.authenticator.is_none() {
-            return refused;
+            return ignored;
         }
         let Some(body) = peer_shm_zbuf_body(extensions) else {
-            return refused;
+            return ignored;
         };
+        if !self.acceptor_offered {
+            return ignored;
+        }
+        if self.peer_segment.is_none() {
+            return refuse(ShmAuthError::OpenAckNotHonoured);
+        }
         let Some(counters) = decode_shm_open_ack_body(body) else {
-            return refused;
+            return refuse(ShmAuthError::MalformedOpenAck);
         };
-        ShmOpenReceived {
-            accepted: true,
-            rx: Some(self.open_handoff(counters)),
+        match self.open_handoff(counters) {
+            Ok(rx) => ShmOpenReceived {
+                accepted: true,
+                rx: Some(rx),
+                refusal: None,
+            },
+            Err(why) => refuse(why),
         }
     }
 }
@@ -2044,7 +2130,7 @@ mod tests {
         /// Returns `(initiator_negotiated, acceptor_negotiated)`.
         fn drive(alice: &mut ShmAuthDispatch, bob: &mut ShmAuthDispatch) -> (bool, bool) {
             let init_syn: alloc::vec::Vec<_> = alice.send_init_syn().into_iter().collect();
-            bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
+            bob.recv_init_syn(&init_syn);
             let init_ack: alloc::vec::Vec<_> = bob.send_init_ack().into_iter().collect();
             // The initiator's InitAck result is not the verdict: it only says
             // it could map bob's segment. Its own flag is set at OpenAck.
@@ -2112,12 +2198,12 @@ mod tests {
                 &self,
                 peer_segment: u32,
                 counters: &[u16; SHM_PRIORITY_BANDS],
-            ) -> Option<Box<dyn ShmHandoff>> {
+            ) -> Result<Option<Box<dyn ShmHandoff>>, ShmHandoffRefused> {
                 self.opened
                     .lock()
                     .expect("opened")
                     .push((peer_segment, *counters));
-                Some(Box::new(BandLog(self.bands.clone())))
+                Ok(Some(Box::new(BandLog(self.bands.clone()))))
             }
         }
 
@@ -2227,7 +2313,7 @@ mod tests {
             assert!(!bob.peer_supports_protocol(100500));
             // A fresh InitSyn from a peer this node cannot map: nothing is kept.
             let stranger = encode_shm_zbuf_ext(&encode_shm_init_syn_body(9999)).expect("fits");
-            bob.recv_init_syn(&[stranger]).expect("well-formed");
+            bob.recv_init_syn(&[stranger]);
             assert!(
                 bob.peer_supports_protocol(100500),
                 "the old peer's list must not outlive its segment"
@@ -2262,7 +2348,7 @@ mod tests {
         fn accept_init_syn(bob: &mut ShmAuthDispatch) {
             let (alice, _, _) = handoff_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
             let init_syn: vec::Vec<_> = alice.send_init_syn().into_iter().collect();
-            bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
+            bob.recv_init_syn(&init_syn);
         }
 
         /// R3040 -- THE ACCEPTOR'S HANDOFF: the counters in the initiator's OpenSyn
@@ -2309,7 +2395,13 @@ mod tests {
                 ShmHandoffCounters::PerPriority(COUNTERS),
             ))
             .expect("fits");
-            assert!(!bob.recv_open_syn(&[forged]).accepted);
+            let refused = bob.recv_open_syn(&[forged]);
+            assert!(!refused.accepted);
+            assert_eq!(
+                refused.refusal,
+                Some(ShmAuthError::ChallengeMismatch),
+                "and the link is refused (zenoh 1.10.2), not merely run without shared memory"
+            );
             assert!(opened.lock().expect("opened").is_empty());
         }
 
@@ -2347,7 +2439,7 @@ mod tests {
                 handoff_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
             let (mut bob, _, _) = handoff_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
             let init_syn: vec::Vec<_> = alice.send_init_syn().into_iter().collect();
-            bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
+            bob.recv_init_syn(&init_syn);
             let init_ack: vec::Vec<_> = bob.send_init_ack().into_iter().collect();
             assert!(alice.recv_init_ack(&init_ack));
 
@@ -2433,7 +2525,7 @@ mod tests {
             let (mut alice, leases) = tx_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
             let (mut bob, _, _) = handoff_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
             let init_syn: vec::Vec<_> = alice.send_init_syn().into_iter().collect();
-            bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
+            bob.recv_init_syn(&init_syn);
             let init_ack: vec::Vec<_> = bob.send_init_ack().into_iter().collect();
             assert!(alice.recv_init_ack(&init_ack));
 
@@ -2484,7 +2576,7 @@ mod tests {
                 tx_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
             let (mut bob, _, _) = handoff_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
             let init_syn: vec::Vec<_> = alice.send_init_syn().into_iter().collect();
-            bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
+            bob.recv_init_syn(&init_syn);
             let init_ack: vec::Vec<_> = bob.send_init_ack().into_iter().collect();
             assert!(alice.recv_init_ack(&init_ack));
             let declaration = alice
@@ -2591,7 +2683,7 @@ mod tests {
         fn an_authenticator_that_cannot_open_counters_still_negotiates() {
             let (alice, mut bob) = pair();
             let init_syn: vec::Vec<_> = alice.send_init_syn().into_iter().collect();
-            bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
+            bob.recv_init_syn(&init_syn);
             // A real counter block, to an authenticator that keeps the default
             // `open_peer_handoff`: it is declined, and the proof is not.
             let open_syn = encode_shm_zbuf_ext(&encode_shm_open_syn_body(
@@ -2684,14 +2776,113 @@ mod tests {
             );
             assert!(alice.send_open_syn(true).is_none());
 
-            // And the acceptor side refuses a forged OpenSyn the same way.
-            let (_, mut bob) = pair();
+            // And the acceptor side refuses a forged OpenSyn the same way: over a segment it
+            // mapped, a wrong echo is not merely declined, it refuses the link (zenoh 1.10.2).
+            let (alice, mut bob) = pair();
+            let init_syn: alloc::vec::Vec<_> = alice.send_init_syn().into_iter().collect();
+            bob.recv_init_syn(&init_syn);
+            let forged = bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE ^ 1)]);
             assert!(
-                !bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE ^ 1)])
-                    .accepted,
+                !forged.accepted,
                 "a wrong echo on OpenSyn must not negotiate"
             );
+            assert_eq!(forged.refusal, Some(ShmAuthError::ChallengeMismatch));
             assert!(bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE)]).accepted);
+        }
+
+        /// zenoh 1.10.2, acceptor: an OpenSyn that carries an `Shm` ext whose body does not decode
+        /// refuses the link, over a segment this node mapped. One over a segment it never mapped
+        /// has no proposal behind it and is ignored, as is one with no `Shm` ext at all.
+        #[test]
+        fn an_acceptor_refuses_a_malformed_open_syn_only_over_a_segment_it_mapped() {
+            let (alice, mut bob) = pair();
+            let bad = encode_shm_zbuf_ext(&[]).expect("fits");
+
+            let unmapped = bob.recv_open_syn(core::slice::from_ref(&bad));
+            assert!(
+                !unmapped.accepted && unmapped.refusal.is_none(),
+                "no segment, no proposal"
+            );
+
+            let init_syn: alloc::vec::Vec<_> = alice.send_init_syn().into_iter().collect();
+            bob.recv_init_syn(&init_syn);
+            let absent = bob.recv_open_syn(&[]);
+            assert!(
+                !absent.accepted && absent.refusal.is_none(),
+                "no ext, not shared memory's"
+            );
+            let refused = bob.recv_open_syn(&[bad]);
+            assert!(!refused.accepted);
+            assert_eq!(refused.refusal, Some(ShmAuthError::MalformedOpenSyn));
+        }
+
+        /// zenoh 1.10.2, both roles: counters the peer names that this node cannot open are
+        /// `Handoff channel creation error`, which refuses the link where 1.10.1 went on with no
+        /// handoff. A block that names none is not an error, and neither is an authenticator that
+        /// writes none.
+        #[test]
+        fn counters_that_cannot_be_opened_refuse_the_link() {
+            #[derive(Clone)]
+            struct RefusesCounters(FakeAuth);
+            impl ShmAuthenticator for RefusesCounters {
+                fn local_segment_id(&self) -> u32 {
+                    self.0.local_segment_id()
+                }
+                fn local_challenge(&self) -> u64 {
+                    self.0.local_challenge()
+                }
+                fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
+                    self.0.open_peer_challenge(segment_id)
+                }
+                fn open_peer_handoff(
+                    &self,
+                    _peer_segment: u32,
+                    _counters: &[u16; SHM_PRIORITY_BANDS],
+                ) -> Result<Option<Box<dyn ShmHandoff>>, ShmHandoffRefused> {
+                    Err(ShmHandoffRefused)
+                }
+            }
+            let node = |id, challenge, sees: (u32, u64)| {
+                ShmAuthDispatch::install(Box::new(RefusesCounters(FakeAuth {
+                    id,
+                    challenge,
+                    visible: vec![sees],
+                })))
+            };
+            let mut alice = node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
+            let mut bob = node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
+            let init_syn: alloc::vec::Vec<_> = alice.send_init_syn().into_iter().collect();
+            bob.recv_init_syn(&init_syn);
+            let init_ack: alloc::vec::Vec<_> = bob.send_init_ack().into_iter().collect();
+            assert!(alice.recv_init_ack(&init_ack));
+
+            let named = |counters| {
+                encode_shm_zbuf_ext(&encode_shm_open_syn_body(BOB_CHALLENGE, counters))
+                    .expect("fits")
+            };
+            let refused = bob.recv_open_syn(&[named(ShmHandoffCounters::PerPriority(COUNTERS))]);
+            assert!(!refused.accepted);
+            assert_eq!(
+                refused.refusal,
+                Some(ShmAuthError::HandoffRefused),
+                "acceptor"
+            );
+            assert!(
+                bob.recv_open_syn(&[named(ShmHandoffCounters::Disabled)])
+                    .accepted,
+                "a block that names none opens none and is no error"
+            );
+
+            let ack = encode_shm_zbuf_ext(&encode_shm_open_ack_body(
+                ShmHandoffCounters::PerPriority(COUNTERS),
+            ))
+            .expect("fits");
+            let refused = alice.recv_open_ack(&[ack]);
+            assert_eq!(
+                refused.refusal,
+                Some(ShmAuthError::HandoffRefused),
+                "initiator"
+            );
         }
 
         /// The acceptor's ack is a COUNTER BLOCK, and the initiator accepts a
@@ -2709,27 +2900,79 @@ mod tests {
         ///     stricter than upstream's unconditional `send_open_ack`.
         #[test]
         fn the_open_ack_is_a_counter_block_and_absence_is_refused() {
-            let (mut alice, bob) = pair();
+            let (mut alice, mut bob) = pair();
             assert!(
                 bob.send_open_ack(false, true).is_none(),
                 "not negotiated, no ack"
             );
+            // The acceptor offered shared memory in its InitAck and the initiator mapped its
+            // segment, so its OpenAck commits it (zenoh 1.10.2).
+            let init_syn: alloc::vec::Vec<_> = alice.send_init_syn().into_iter().collect();
+            bob.recv_init_syn(&init_syn);
+            let init_ack: alloc::vec::Vec<_> = bob.send_init_ack().into_iter().collect();
+            assert!(alice.recv_init_ack(&init_ack));
             let ack = bob.send_open_ack(true, true).expect("negotiated").ext;
             assert!(alice.recv_open_ack(core::slice::from_ref(&ack)).accepted);
+            let absent = alice.recv_open_ack(&[]);
             assert!(
-                !alice.recv_open_ack(&[]).accepted,
-                "absence is not agreement"
+                !absent.accepted && absent.refusal.is_none(),
+                "absence is not agreement, and not an error either"
             );
             // A PerPrio block cut one byte short: present, right header, and
-            // still refused.
+            // refused, now the link and not only the shared memory.
             let full = encode_shm_open_ack_body(ShmHandoffCounters::PerPriority([1; 8]));
             let truncated = encode_shm_zbuf_ext(&full[..full.len() - 1]).expect("fits");
-            assert!(!alice.recv_open_ack(&[truncated]).accepted);
+            let refused = alice.recv_open_ack(&[truncated]);
+            assert!(!refused.accepted);
+            assert_eq!(refused.refusal, Some(ShmAuthError::MalformedOpenAck));
             // ...and the 1.5.0 ack, a bare z64 `1`, no longer parses as one:
             // its body is a single byte that the counter reader sees as a
             // PerPrio status with no block behind it.
             let legacy = encode_shm_zbuf_ext(&[0x01]).expect("fits");
-            assert!(!alice.recv_open_ack(&[legacy]).accepted);
+            let refused = alice.recv_open_ack(&[legacy]);
+            assert!(!refused.accepted);
+            assert_eq!(refused.refusal, Some(ShmAuthError::MalformedOpenAck));
+        }
+
+        /// zenoh 1.10.2 reads the OpenAck against what the acceptor OFFERED in its InitAck. An
+        /// acceptor that offered nothing did not ask for shared memory, and the `Shm` ext an
+        /// unpatched one puts in every OpenAck is ignored. One that offered, and whose OpenAck
+        /// commits it to shared memory over a segment this node did not map (so this node
+        /// proposed nothing), refuses the link, where 1.10.1 ran with shared memory on one side.
+        #[test]
+        fn an_open_ack_is_read_against_what_the_acceptor_offered() {
+            let well_formed = || {
+                encode_shm_zbuf_ext(&encode_shm_open_ack_body(ShmHandoffCounters::Disabled))
+                    .expect("fits")
+            };
+
+            // No offer: an InitAck without an `Shm` ext, then an OpenAck with one.
+            let (mut alice, _) = pair();
+            assert!(!alice.recv_init_ack(&[]));
+            let ignored = alice.recv_open_ack(&[well_formed()]);
+            assert!(!ignored.accepted, "no offer, so no shared memory");
+            assert!(
+                ignored.refusal.is_none(),
+                "and no error: the ack is ignored"
+            );
+
+            // An offer this node could not honour: the echo is right, the segment is not mappable.
+            let blind = FakeAuth {
+                id: ALICE_ID,
+                challenge: ALICE_CHALLENGE,
+                visible: vec![],
+            };
+            let mut alice = ShmAuthDispatch::install(Box::new(blind));
+            let offer = encode_shm_zbuf_ext(&encode_shm_init_ack_body(ALICE_CHALLENGE, BOB_ID))
+                .expect("fits");
+            assert!(!alice.recv_init_ack(&[offer]), "it cannot map the segment");
+            let refused = alice.recv_open_ack(&[well_formed()]);
+            assert!(!refused.accepted);
+            assert_eq!(
+                refused.refusal,
+                Some(ShmAuthError::OpenAckNotHonoured),
+                "the offer stands, the segment is unmapped, the ack commits the acceptor"
+            );
         }
 
         /// A node with no authenticator emits NOTHING and negotiates nothing —
@@ -2750,19 +2993,21 @@ mod tests {
             assert_eq!(drive(&mut alice, &mut empty), (false, false));
         }
 
-        /// A malformed InitSyn body is the ONE hard error: zenoh `bail!`s there
-        /// while every other failure degrades. Pinned so the asymmetry cannot be
-        /// "tidied" into uniform degradation.
+        /// A malformed InitSyn body is ignored, as the initiator's mirror of it is: zenoh 1.10.x
+        /// traces the decoding error and returns `Ok(())` (the `bail!` of 1.5.0 is gone), so the
+        /// session goes on without shared memory and nothing is remembered. The links are refused
+        /// later, by the Open messages, and only once a peer has committed ([`ShmAuthError`]).
         #[test]
-        fn a_malformed_init_syn_is_the_one_hard_error() {
+        fn a_malformed_init_syn_is_ignored() {
             let (_, mut bob) = pair();
             // An `Shm` ZBuf whose body is an empty (truncated) VLE.
             let bad = encode_shm_zbuf_ext(&[]).expect("fits");
-            assert_eq!(
-                bob.recv_init_syn(&[bad]),
-                Err(ShmAuthError::MalformedInitSyn)
+            bob.recv_init_syn(&[bad]);
+            assert!(
+                bob.send_init_ack().is_none(),
+                "nothing was remembered to echo"
             );
-            // Whereas the initiator's mirror of the same class merely says no.
+            // The initiator's mirror of the same class merely says no.
             let (mut alice, _) = pair();
             assert!(!alice.recv_init_ack(&[encode_shm_zbuf_ext(&[]).expect("fits")]));
         }

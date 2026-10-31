@@ -7089,7 +7089,12 @@ layer_c1af_cargo_test_shm() {
     # R3111 -- 36 -> 38, MEASURED by running this exact command: the two tests of what the Open
     # messages declare on a link that is not reliable (both messages declare Disabled and lease
     # nothing, and a declaration of Disabled withdraws the handoff an earlier one gave).
-    _runci_guarded_test C1af 37 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R4006 -- 37 -> 40, and 53 -> 56 below: zenoh 1.10.2's refusals in the Open messages (a
+    # malformed OpenSyn, counters that cannot be opened, an OpenAck read against the offer) are
+    # three tests of the dispatch, and `a_malformed_init_syn_is_the_one_hard_error` became
+    # `a_malformed_init_syn_is_ignored`. `shm_auth_segment` 24 -> 25 and 27 -> 28: the segment
+    # that cannot be mapped is refused. PRINTED by each command.
+    _runci_guarded_test C1af 40 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -7148,7 +7153,7 @@ layer_c1af_cargo_test_shm() {
     # Open messages as the leg above, which `session-extshm` brings here too.
     # R3111 -- 52 -> 54, MEASURED by running this exact command: the two tests of what the Open
     # messages declare on a link that is not reliable, as the leg above counts them.
-    _runci_guarded_test C1af 53 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    _runci_guarded_test C1af 56 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -7257,14 +7262,14 @@ layer_c1af_cargo_test_shm() {
     # R3122 -- 23 -> 24, MEASURED by running this exact command: the test that a link which
     # opens again lets go of the handoff it kept (the test that a handoff let go of returns its
     # counters replaced one that forgot a previous peer's debt, and does not move the count).
-    _runci_guarded_test C1af 24 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
+    _runci_guarded_test C1af 25 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
         || return 1
     # R3122 -- the same module WITH MULTILINK, which the leg above does not carry and so does not
     # select three tests: a second link of a session leases counters of its own and leaves the
     # first link's alone, the links of one session declare by their own reliability, and a
     # shared-memory publish is counted on the link it leaves on, read through the real publish.
     # TWENTY-SEVEN, MEASURED by running this exact command (the 24 above and the three).
-    _runci_guarded_test C1af 27 cargo test -p wz-runtime-tokio --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_auth_segment --quiet \
+    _runci_guarded_test C1af 28 cargo test -p wz-runtime-tokio --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_auth_segment --quiet \
         || return 1
     # R3123 -- the region-hat forwarder with a link joined to its first face, which compiles
     # only with the router hat, the extension, multilink and the push codec together and so is

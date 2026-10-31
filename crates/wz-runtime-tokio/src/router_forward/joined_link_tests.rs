@@ -159,11 +159,12 @@ mod shared_memory {
             &self,
             _peer_segment: u32,
             _counters: &[u16; SHM_PRIORITY_BANDS],
-        ) -> Option<Box<dyn ShmHandoff>> {
-            Some(Box::new(Recorder {
+        ) -> Result<Option<Box<dyn ShmHandoff>>, wz_session_core::extshm::ShmHandoffRefused>
+        {
+            Ok(Some(Box::new(Recorder {
                 peer: self.peer,
                 log: Arc::clone(&self.log),
-            }))
+            })))
         }
     }
 
@@ -177,15 +178,15 @@ mod shared_memory {
         actions.set_shm_offer(true);
         actions.negotiate_shm_against_peer(true);
         let init_syn = encode_shm_zbuf_ext(&encode_shm_init_syn_body(PEER_SEGMENT)).expect("fits");
-        actions
-            .shm_recv_init_syn(&[init_syn])
-            .expect("a well-formed InitSyn");
+        actions.shm_recv_init_syn(&[init_syn]);
         let open_syn = encode_shm_zbuf_ext(&encode_shm_open_syn_body(
             OWN_CHALLENGE,
             ShmHandoffCounters::PerPriority([1; SHM_PRIORITY_BANDS]),
         ))
         .expect("fits");
-        actions.shm_recv_open_syn(&[open_syn]);
+        actions
+            .shm_recv_open_syn(&[open_syn])
+            .expect("the proof stands");
         assert!(actions.is_shm(), "{peer}'s link negotiated shared memory");
     }
 
@@ -221,9 +222,7 @@ mod shared_memory {
         );
 
         let init_syn = encode_shm_zbuf_ext(&encode_shm_init_syn_body(PEER_SEGMENT)).expect("fits");
-        first
-            .shm_recv_init_syn(&[init_syn])
-            .expect("a well-formed InitSyn");
+        first.shm_recv_init_syn(&[init_syn]);
         assert!(
             matches!(first.shm_take_handoff_update(), Some(None)),
             "the next peer of the first link starts with no handoff, and the registry hears it"
