@@ -303840,6 +303840,36 @@
         "Phase 5b: a Request and a Response probed with the shared-memory handoff opened and given back; phase 6, the async conduit lock for chains"
       ]
     },
+    "Round 4059": {
+      "decision_summary": "The node's Local face no longer holds a node-wide ** token interest. Each liveliness subscriber is an interest of its own (ask_local_tokens, forget_local_tokens), as the session of a client sends one; the router answers the tokens alive at the ask and pushes the later ones under its tables lock, so which is history and which is new is not decided by the order of two queues. The face asks the current tokens whatever the history flag says and counts them per subscriber, telling them only to a subscriber that asked: the pure Future shape measured 8 of 30 failures of regression_3 on one core against 0 of 30 for main, a second source declaring a key alive before the ask. The liveliness get reads the tables (local_tokens_alive). TokenUp carries the interest it answers.",
+      "changes_bullets": [
+        "router_forward: LocalFaceEvent::TokenUp.interest, ask_local_tokens(id, key, current), forget_local_tokens, local_tokens_alive, interest_token_keys split from dump_interest_tokens, five tests. wz-capi-core local_face: per-subscriber awareness and history, interest registered in subscribe and ended in unsubscribe, twelve tests. router_node.rs no longer asks the node-wide interest. run-ci.sh C1ay token-tables arm 339."
+      ],
+      "verification_bullets": [
+        "regression_3 passed 30 of 30 on one core against a 30 of 30 control and an 8 of 30 failure of the Future-only shape. Z8 liveliness passed 46; zenoh liveliness lib tests 9; wz-capi-core lib 145; router_forward 339 in the token-tables arm; clippy of wz-capi-core and wz-runtime-tokio and cargo fmt clean; C1ay passed on the build host."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Read the next hosted run per job for Z8 liveliness. The router-mode Local face of other planes (subscribers, queryables) is unchanged."
+      ],
+      "publishable_decision_summary": "The node's Local face no longer holds a node-wide ** token interest. Each liveliness subscriber is an interest of its own (ask_local_tokens, forget_local_tokens), as the session of a client sends one; the router answers the tokens alive at the ask and pushes the later ones under its tables lock, so which is history and which is new is not decided by the order of two queues. The face asks the current tokens whatever the history flag says and counts them per subscriber, telling them only to a subscriber that asked: the pure Future shape measured 8 of 30 failures of regression_3 on one core against 0 of 30 for main, a second source declaring a key alive before the ask. The liveliness get reads the tables (local_tokens_alive). TokenUp carries the interest it answers.",
+      "publishable_changes_bullets": [
+        "router_forward: LocalFaceEvent::TokenUp.interest, ask_local_tokens(id, key, current), forget_local_tokens, local_tokens_alive, interest_token_keys split from dump_interest_tokens, five tests. wz-capi-core local_face: per-subscriber awareness and history, interest registered in subscribe and ended in unsubscribe, twelve tests. router_node.rs no longer asks the node-wide interest. run-ci.sh C1ay token-tables arm 339."
+      ],
+      "publishable_verification_bullets": [
+        "regression_3 passed 30 of 30 on one core against a 30 of 30 control and an 8 of 30 failure of the Future-only shape. Z8 liveliness passed 46; zenoh liveliness lib tests 9; wz-capi-core lib 145; router_forward 339 in the token-tables arm; clippy of wz-capi-core and wz-runtime-tokio and cargo fmt clean; C1ay passed on the build host."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the next hosted run per job for Z8 liveliness. The router-mode Local face of other planes (subscribers, queryables) is unchanged."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
