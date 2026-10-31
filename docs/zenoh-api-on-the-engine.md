@@ -1090,7 +1090,7 @@ Each lands whole with its surface lines, tests and faults in one round.
   `extshm.rs`. What a zenohd at 1.10.2 does show is that lenient half: a wz dialler in a mount
   namespace with no `/dev/shm` in common with it, and the zenohd, both go on without shared
   memory and the session establishes, where the same dial with the host's `/dev/shm` negotiates,
-  `a_dialler_that_shares_no_dev_shm_establishes_without_shm` and its control); (e) an
+  `wz_dialler_that_shares_no_dev_shm_establishes_with_a_zenohd_without_shm` and its control); (e) an
   unresponsive peer's pipelines are disabled at once and its transport is
   deleted and not closed with a frame (taken: the first half in round R4015, a session a
   congestion close was ordered of refuses every later send at once, `congestion_close_ordered`;

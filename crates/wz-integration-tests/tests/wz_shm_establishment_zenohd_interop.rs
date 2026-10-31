@@ -374,7 +374,7 @@ fn dial_the_shm_zenohd_from_a_namespace(
 /// the segments.
 #[test]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm + bwrap); Layer Z runs via --ignored"]
-fn a_dialler_that_shares_dev_shm_negotiates_through_a_namespace() {
+fn wz_dialler_that_shares_dev_shm_negotiates_with_a_zenohd_through_a_namespace() {
     let Some(zenohd) = zenohd_shm_binary() else {
         eprintln!("SKIP: no shared-memory zenohd at target/zenohd-shm/zenohd");
         return;
@@ -421,7 +421,7 @@ fn a_dialler_that_shares_dev_shm_negotiates_through_a_namespace() {
 /// undone.
 #[test]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm + bwrap); Layer Z runs via --ignored"]
-fn a_dialler_that_shares_no_dev_shm_establishes_without_shm() {
+fn wz_dialler_that_shares_no_dev_shm_establishes_with_a_zenohd_without_shm() {
     let Some(zenohd) = zenohd_shm_binary() else {
         eprintln!("SKIP: no shared-memory zenohd at target/zenohd-shm/zenohd");
         return;
