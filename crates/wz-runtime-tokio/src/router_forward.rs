@@ -382,7 +382,7 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::driver_loop::MulticastPeerId;
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::extbound::multicast_region_and_bound_of;
-use wz_session_core::extbound::{Bound, Region};
+use wz_session_core::extbound::{sends_initial_interest_final, Bound, Region, INITIAL_INTEREST_ID};
 use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
@@ -1711,6 +1711,14 @@ struct RouterFaceState {
     /// pass that takes its last gate away wakes it, once, with a stored permit, and no other
     /// face's release or link's room does.
     gate_wake: Arc<tokio::sync::Notify>,
+    /// Whether the face has ended its initial declarations: the `DeclareFinal` of
+    /// [`INITIAL_INTEREST_ID`] came in from it. Two peers that meet north-bound each push what
+    /// they hold when a face comes up and end it with that message (`zenoh/src/net/routing/hat/peer/mod.rs`
+    /// @ `let do_initial_interest =`), and a node's open waits for it from every peer it
+    /// connected to (`open/return_conditions/declares`), so that what the remote declared before
+    /// the link came up is held when the program can declare anything
+    /// ([`RouterForwarder::initial_declares_pending`]). Set by the arrival, never by a timer.
+    initial_final: bool,
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -2629,6 +2637,13 @@ pub struct RouterForwarder {
     /// scouting plane when a deploy runs both — see
     /// [`enable_autoconnect_into`](Self::enable_autoconnect_into).
     dial_tx: PlainMutex<Option<DialIntentSender>>,
+    /// The nodes an autoconnect intent was sent for and whose face has not come up yet: a node
+    /// that is being dialled is a connector the open still waits for, as upstream's start
+    /// conditions count the peers its gossip made it connect to
+    /// ([`RouterForwarder::initial_declares_pending`]). Taken out when a face to the node
+    /// registers. A dial that never connects leaves its node here, so the wait is bounded by
+    /// the window the open is given and not by this set.
+    pending_dials: PlainMutex<HashSet<Zid>>,
     /// EGRESS-only multicast group faces (zenoh `Tables.mcast_groups`,
     /// `dispatcher/tables.rs:79`) — a SEPARATE collection from `faces`, mirroring
     /// zenoh's separate `mcast_groups` Vec (the egress polymorphism is WHICH
@@ -3702,6 +3717,8 @@ router_entry_points! { on_tables:
     fn routers_net_node_count(&self) -> usize;
     fn linkstatepeers_net_node_count(&self) -> usize;
     fn ingested(&self) -> usize;
+    fn initial_declares_pending(&self) -> usize;
+    fn autoconnects_pending(&self) -> usize;
     fn data_seen(&self) -> usize;
     fn shed_registry(&self) -> Arc<ShedRegistry>;
     fn data_sent(&self) -> usize;
@@ -4190,6 +4207,7 @@ impl RouterForwarder {
             // enables autoconnect behaves byte-for-byte as before.
             autoconnect: PlainCell::new(AutoConnect::disabled(self_zid)),
             dial_tx: PlainMutex::new(None),
+            pending_dials: PlainMutex::new(HashSet::new()),
             #[cfg(feature = "router-multicast-faces")]
             mcast_groups: PlainRwLock::new(Vec::new()),
             #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
@@ -4421,11 +4439,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if let Some(tx) = self.dial_tx.guard().as_ref() {
                 // Unbounded, so this never blocks the sync ingest; an Err means
                 // the drive loop is gone (shutdown) and the intent is dropped.
-                let _ = tx.send(DialIntent {
-                    zid: zid.as_slice().to_vec(),
-                    locators: locators.to_vec(),
-                    origin: DialIntentOrigin::Gossip,
-                });
+                if tx
+                    .send(DialIntent {
+                        zid: zid.as_slice().to_vec(),
+                        locators: locators.to_vec(),
+                        origin: DialIntentOrigin::Gossip,
+                    })
+                    .is_ok()
+                {
+                    self.pending_dials.guard().insert(*zid);
+                }
             }
         }
     }
@@ -4622,6 +4645,43 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// held).
     pub fn ingested(&self) -> usize {
         self.ingested.get()
+    }
+
+    /// How many faces owe this node the end of their initial declarations: the peers that meet
+    /// it north-bound in a peer hat that replays, and from which the `DeclareFinal` of
+    /// [`INITIAL_INTEREST_ID`] has not come in. It is the start condition a peer's open holds
+    /// on when `open/return_conditions/declares` is set (upstream's `terminate_peer_connector_zid`
+    /// is called by that message), so that what the remote declared before the link came up is
+    /// held, and a subscriber declared after the open is told of what comes alive after it and
+    /// not of what was already there.
+    ///
+    /// The expectation is the sender's decision seen from the receiving end
+    /// ([`sends_initial_interest_final`] with the roles swapped), and it is zero on a node that is
+    /// not a peer and on a peer hat that runs wz's link-state extension, which neither sends nor
+    /// expects the message.
+    pub fn initial_declares_pending(&self) -> usize {
+        if self.tables.node_mode != WhatAmI::Peer {
+            return 0;
+        }
+        self.tables
+            .faces
+            .values()
+            .filter(|state| {
+                !state.initial_final
+                    && self.tables.face_based(state.tier)
+                    && sends_initial_interest_final(
+                        peer_whatami_routing(&state.actions),
+                        self.tables.node_mode,
+                        state.actions.peer_remote_bound(),
+                    )
+            })
+            .count()
+    }
+
+    /// How many nodes an autoconnect dial was sent for whose face has not come up
+    /// ([`pending_dials`](Self#structfield.pending_dials)).
+    pub fn autoconnects_pending(&self) -> usize {
+        self.pending_dials.guard().len()
     }
 
     /// Total data `Push` messages received across all faces — the data-plane
@@ -11735,6 +11795,40 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
+    /// End what [`replay_declarations_to_new_face`](Self::replay_declarations_to_new_face) sent a
+    /// new face with the `DeclareFinal` of [`INITIAL_INTEREST_ID`], as the pin's peer hat does:
+    /// "while no interest is sent on the network, peers act as if they received an interest
+    /// `CurrentFuture` with id `0` and send back a `DeclareFinal` with interest id `0`"
+    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `interest_id: Some(INITIAL_INTEREST_ID),`).
+    ///
+    /// That message is what the other end's open waits for, so that every declaration this node
+    /// held when the link came up has reached it before its program can declare anything. It is
+    /// sent where the replay is, in the same order on the same face, and by the same decision:
+    /// two peers that meet north-bound ([`sends_initial_interest_final`]) in a peer hat that
+    /// replays. A peer hat running wz's link-state extension replays nothing (the tree's
+    /// re-advertise tells the remote), so it ends nothing, and a router, a client and a pair that
+    /// is not mutually north-bound are in pull mode, where the remote asks and is answered.
+    fn end_initial_declarations(&self, face: FaceId, tier: Region) {
+        if self.tables.node_mode != WhatAmI::Peer || !self.tables.face_based(tier) {
+            return;
+        }
+        let Some(state) = self.tables.faces.get(&face) else {
+            return;
+        };
+        let remote = peer_whatami_routing(&state.actions);
+        if !sends_initial_interest_final(
+            self.tables.node_mode,
+            remote,
+            state.actions.peer_remote_bound(),
+        ) {
+            return;
+        }
+        self.send_one_to_face(
+            face,
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(INITIAL_INTEREST_ID))),
+        );
+    }
+
     fn send_one_to_face(&self, face: FaceId, msg: NetworkMessage) {
         let mut carrier = Some(msg);
         self.send_to_face(face, true, || {
@@ -11874,6 +11968,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
                 self.undeclare_token(id, tier, reliable, declare);
             }
+            // The end of a peer's initial declarations. The pin's dispatcher refuses a
+            // `DeclareFinal` from a south-bound face (`error!("Received DeclareFinal from
+            // south-bound face");`), and the only one this router acts on is the initial
+            // interest's: a router asks no interest of its own, so no other final has an
+            // interest of its to close.
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+                if declare.interest_id == Some(INITIAL_INTEREST_ID) && !tier.bound().is_south() =>
+            {
+                if let Some(face) = self.tables.faces.get_mut(&id) {
+                    face.initial_final = true;
+                }
+            }
             _ => {}
         }
     }
@@ -11943,6 +12049,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 keyexpr_table: hashbrown::HashMap::new(),
                 held: egress::Queues::default(),
                 gate_wake: Arc::new(tokio::sync::Notify::new()),
+                initial_final: false,
             },
         );
         self.shed_registry.add(id, actions.clone());
@@ -11960,6 +12067,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         let flood_done = Instant::now();
         self.replay_declarations_to_new_face(id, tier);
+        self.end_initial_declarations(id, tier);
+        // A node being dialled is connected: it is a face now, and the face is what is waited on.
+        if let Some(zid) = peer_zid_routing(actions) {
+            self.pending_dials.guard().remove(&zid);
+        }
         let replay_done = Instant::now();
         self.queue_face_event(FaceEventKind::Up, actions);
         let took = registering.elapsed();
@@ -13733,6 +13845,181 @@ mod tests {
             sink_asker.frame_count(),
             0,
             "the asker learns what its region declares over its own links"
+        );
+    }
+
+    /// What a face was sent, in the order it was sent.
+    fn sent_in_order(sink: &RecordingLinkDriver) -> Vec<super::peer_differential_tests::Seen> {
+        (0..sink.frame_count())
+            .flat_map(|i| super::peer_differential_tests::decode(&sink.frame_bytes(i)))
+            .map(|(seen, _)| seen)
+            .collect()
+    }
+
+    /// The end of the initial declarations: the `DeclareFinal` that answers the interest id `0`.
+    fn initial_final() -> super::peer_differential_tests::Seen {
+        super::peer_differential_tests::Seen::DeclareFinal {
+            answer_to: Some(INITIAL_INTEREST_ID),
+        }
+    }
+
+    /// Two peers that meet north-bound each push what they hold when the face comes up and end it
+    /// with the `DeclareFinal` of the initial interest, which is what the other end's open waits
+    /// for (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`). The order is the
+    /// whole of it: a final that came before a declaration would release the open with that
+    /// declaration still on its way, which is the race the message is there to close.
+    #[test]
+    fn a_peer_face_is_told_what_the_node_held_and_then_the_end_of_it() {
+        use super::peer_differential_tests::Seen;
+
+        let fwd = RouterForwarder::peer(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+
+        let (peer, sink) = face(zid(0xBB), WIRE_PEER);
+        sink.reset();
+        fwd.register(FaceId(1), &peer);
+
+        let sent = sent_in_order(&sink);
+        let ends: Vec<usize> = sent
+            .iter()
+            .enumerate()
+            .filter(|(_, seen)| **seen == initial_final())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            ends.len(),
+            1,
+            "one end of the initial declarations: {sent:?}"
+        );
+        let declared = sent
+            .iter()
+            .position(|seen| matches!(seen, Seen::DeclareSubscriber { .. }))
+            .unwrap_or_else(|| panic!("the replay did not reach the face: {sent:?}"));
+        assert!(
+            declared < ends[0],
+            "the declaration comes before the end of them: {sent:?}"
+        );
+        assert_eq!(
+            ends[0],
+            sent.len() - 1,
+            "and nothing the replay sends comes after the end: {sent:?}"
+        );
+    }
+
+    /// A router, a client, and a pair that is not mutually north-bound are in pull mode, where the
+    /// remote asks with an interest and is answered: none of them is sent the end of declarations
+    /// it did not ask for, and a router node sends it to no one.
+    #[test]
+    fn only_a_peer_that_meets_a_peer_is_sent_the_end_of_initial_declarations() {
+        let peer_node = RouterForwarder::peer(zid(0x01));
+        let (router, router_sink) = face(zid(0xCC), WIRE_ROUTER);
+        let (client, client_sink) = face(zid(0xAA), WIRE_CLIENT);
+        peer_node.register(FaceId(0), &router);
+        peer_node.register(FaceId(1), &client);
+        for sink in [&router_sink, &client_sink] {
+            assert!(
+                !sent_in_order(sink).contains(&initial_final()),
+                "a peer node does not push to a router or a client"
+            );
+        }
+
+        let router_node = RouterForwarder::new(zid(0x01));
+        let (peer, peer_sink) = face(zid(0xBB), WIRE_PEER);
+        router_node.register(FaceId(0), &peer);
+        assert!(
+            !sent_in_order(&peer_sink).contains(&initial_final()),
+            "a router node holds a peer in a south region and answers it when it asks"
+        );
+    }
+
+    /// A node's open holds on the peers that owe it the end of their declarations: one is counted
+    /// from the moment its face is up, and is met by the `DeclareFinal` of the initial interest and
+    /// by no other. A router, a client, and a router node, which owe none, are never counted.
+    #[test]
+    fn a_peer_face_owes_its_end_of_declarations_until_it_comes_in() {
+        let fwd = RouterForwarder::peer(zid(0x01));
+        assert_eq!(fwd.initial_declares_pending(), 0, "no face, nothing owed");
+        let (router, _rs) = face(zid(0xCC), WIRE_ROUTER);
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        assert_eq!(
+            fwd.initial_declares_pending(),
+            0,
+            "a router and a client are asked, and owe nothing unasked"
+        );
+
+        let (peer, _ps) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(2), &peer);
+        assert_eq!(fwd.initial_declares_pending(), 1, "the peer owes its end");
+
+        // A final that answers another interest ends that interest and not the initial one.
+        forward_one(
+            &fwd,
+            FaceId(2),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(7))),
+        );
+        assert_eq!(
+            fwd.initial_declares_pending(),
+            1,
+            "only the initial interest's final is the end of the initial declarations"
+        );
+
+        forward_one(
+            &fwd,
+            FaceId(2),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(INITIAL_INTEREST_ID))),
+        );
+        assert_eq!(fwd.initial_declares_pending(), 0, "the end came in");
+
+        let router_node = RouterForwarder::new(zid(0x01));
+        let (peer, _ps) = face(zid(0xBB), WIRE_PEER);
+        router_node.register(FaceId(0), &peer);
+        assert_eq!(
+            router_node.initial_declares_pending(),
+            0,
+            "a router node's peer is answered when it asks, and sends no end"
+        );
+    }
+
+    /// A node that is being dialled is a connector the open still waits for: it is counted when
+    /// the autoconnect intent is sent and not any more when its face is up. A node that is never
+    /// dialled, because the matcher does not name it, is never counted.
+    #[test]
+    fn a_node_being_dialled_is_waited_for_until_its_face_is_up() {
+        use wz_routing_graph::AutoConnectStrategy;
+
+        let fwd = RouterForwarder::peer(zid(0x01));
+        let policy = AutoConnect::new(
+            zid(0x01),
+            wz_codecs::whatami::WhatAmIMatcher::empty().router().peer(),
+            AutoConnectStrategy::Always,
+        );
+        let _rx = fwd.enable_autoconnect(policy);
+        assert_eq!(fwd.autoconnects_pending(), 0);
+        let (via, _s) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &via);
+        let oam = build_linkstate_oam_owned(&list(vec![
+            entry(0, 1, 0x01, &[]),
+            entry_with_locators(12, 5, 0xDD, &[1], &["tcp/10.0.0.187:7447"]),
+            entry(1, 5, 0xAA, &[0, 12]),
+        ]))
+        .expect("build oam");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Oam(oam));
+        assert_eq!(
+            fwd.autoconnects_pending(),
+            1,
+            "0xDD was told to the dialler and has no face"
+        );
+
+        let (dialled, _d) = face(zid(0xDD), WIRE_PEER);
+        fwd.register(FaceId(1), &dialled);
+        assert_eq!(
+            fwd.autoconnects_pending(),
+            0,
+            "its face is up, and the face is what is waited on from here"
         );
     }
 

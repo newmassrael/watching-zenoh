@@ -1563,7 +1563,17 @@ fn scenes() -> Vec<(&'static str, Vec<Step>)> {
 /// peer sent over all scenes in `mode`: a gate whose scenes send nothing
 /// compares nothing.
 fn data_messages_sent(mode: Mode) -> usize {
-    messages_sent(mode, |_| true)
+    // The end of a peer's initial declarations carries no data, and gossip sends one to each peer
+    // that comes up where the extension's tree sends none: counting it would make the two planes
+    // look alike for a reason that has nothing to do with relaying.
+    messages_sent(mode, |s| {
+        !matches!(
+            s,
+            Seen::DeclareFinal {
+                answer_to: Some(wz_session_core::extbound::INITIAL_INTEREST_ID)
+            }
+        )
+    })
 }
 
 /// How many of the data messages the region-hat peer sent over all scenes in

@@ -1,5 +1,6 @@
 === a hosted queryable beside a client's
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -40,6 +41,7 @@
   data face 0: ResponseFinal { request_id: 23 }
 === queriers declare themselves
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -77,6 +79,7 @@
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
 === a node hosts
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -129,12 +132,14 @@
   data face 1: Request { keyexpr: "demo/q/z", target: None, timeout_ms: None, body: "None None" }
 === a node publishes
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 187, Peer)
+  data face 1: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([187, 187, 187, 187], [])] }
   topology face 1: LinkState { entries: 3, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], []), ([187, 187, 187, 187], [])] }
   graph face 0: Graph { nodes: 3, edges: 0 }
@@ -188,6 +193,7 @@
   data face 2: Push { keyexpr: "demo/c/x", payload: None }
 === a timeout shorter than the default
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -213,6 +219,7 @@
 12: Final(1)
 === two replies under each consolidation mode
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -252,6 +259,7 @@
   data face 0: ResponseFinal { request_id: 62 }
 === finals and replies in every order
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -288,6 +296,7 @@
 19: ReplyAfterFinal(1, "demo/o", [97, 102, 116, 101, 114, 32, 98, 111, 116, 104])
 === what a querier asks for
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -382,6 +391,7 @@
 49: Final(2)
 === an error reply and a timeout
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -419,6 +429,7 @@
 17: Final(2)
 === a query across a recompute
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -454,12 +465,14 @@
   data face 2: ResponseFinal { request_id: 32 }
 === queries between peers, clients and a router
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 204, Peer)
+  data face 1: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([204, 204, 204, 204], [])] }
   topology face 1: LinkState { entries: 3, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], []), ([204, 204, 204, 204], [])] }
   graph face 0: Graph { nodes: 3, edges: 0 }
@@ -523,6 +536,7 @@
   admin face 0: Admin { leg: "queryable", keyexpr: "demo/q", routers: [], peers: ["1010101"], clients: ["dddddddd"] }
   counters face 0: Counters([0, 1, 0, 0, 0])
 2: Up(1, 170, Peer)
+  data face 1: DeclareFinal { answer_to: Some(0) }
   data face 1: DeclareQueryable { keyexpr: "demo/q", complete: true, answer_to: None }
   topology face 1: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
@@ -551,6 +565,7 @@
   data face 2: ResponseFinal { request_id: 6 }
 === a queryable face goes down mid-query
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -572,12 +587,14 @@
   counters face 0: Counters([0, 0, 0, 0, 0])
 === two peers
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 187, Peer)
+  data face 1: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([187, 187, 187, 187], [])] }
   topology face 1: LinkState { entries: 3, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], []), ([187, 187, 187, 187], [])] }
   graph face 0: Graph { nodes: 3, edges: 0 }
@@ -593,6 +610,7 @@
 6: Put(0, "demo/data", [112, 97, 121, 108, 111, 97, 100])
 === a peer, a router and a client
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -631,6 +649,7 @@
   counters face 0: Counters([1, 0, 0, 0, 0])
 2: Up(1, 170, Peer)
   data face 1: DeclareSubscriber { keyexpr: "demo/**", answer_to: None }
+  data face 1: DeclareFinal { answer_to: Some(0) }
   topology face 1: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
@@ -650,6 +669,7 @@
   data face 0: Push { keyexpr: "demo/late", payload: Some([102, 114, 111, 109, 32, 116, 104, 101, 32, 112, 101, 101, 114]) }
 === withdrawn and gone
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -686,6 +706,7 @@
   counters face 0: Counters([0, 0, 0, 0, 0])
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
 1: Up(1, 170, Peer)
+  data face 1: DeclareFinal { answer_to: Some(0) }
   topology face 1: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
@@ -717,6 +738,7 @@
   data face 3: Push { keyexpr: "demo/data", payload: Some([102, 114, 111, 109, 32, 97, 32, 99, 108, 105, 101, 110, 116]) }
 === a client asks what peers declared
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -770,6 +792,7 @@
   admin face 0: Admin { leg: "queryable", keyexpr: "demo/r", routers: [], peers: ["aaaaaaaa"], clients: [] }
 === a peer and a router ask what a client declared
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
@@ -816,6 +839,7 @@
   counters face 0: Counters([2, 1, 0, 0, 0])
 === liveliness tokens
 0: Up(0, 170, Peer)
+  data face 0: DeclareFinal { answer_to: Some(0) }
   topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
