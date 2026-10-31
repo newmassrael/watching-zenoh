@@ -301382,6 +301382,34 @@
         "Z8 shm was not re-run with the raised limit; if it still hangs the facts step prints the limit. The multicast text baseline follows hosted, the build host reads about 400 bytes higher. The connect_manager mcu test seen in run 41109911837 was not in this run's failures and was not reproduced."
       ]
     },
+    "Round 3996": {
+      "decision_summary": "The acknowledgement row of hosted run 41140796607, written before round 3995, named round 3994, which another session filed first. The row now carries 3995 in both of its round cells. No code changed.",
+      "changes_bullets": [
+        "docs/hosted-red-acks.md: the round cell of one row."
+      ],
+      "verification_bullets": [
+        "The row was read against the ledger: round 3995 is the one filed for the push that repaired that run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "None."
+      ],
+      "publishable_decision_summary": "The acknowledgement row of hosted run 41140796607, written before round 3995, named round 3994, which another session filed first. The row now carries 3995 in both of its round cells. No code changed.",
+      "publishable_changes_bullets": [
+        "docs/hosted-red-acks.md: the round cell of one row."
+      ],
+      "publishable_verification_bullets": [
+        "The row was read against the ledger: round 3995 is the one filed for the push that repaired that run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "None."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
