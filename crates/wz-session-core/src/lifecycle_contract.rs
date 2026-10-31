@@ -30,7 +30,7 @@
 //! names.
 
 use crate::credential_identity::CREDENTIAL_ZID_BYTES;
-use crate::lifecycle_wire::OpenOutcome;
+use crate::lifecycle_wire::{OpenMode, OpenOutcome};
 
 /// How many times each request is made. Twice, because the contract's idempotency (decision D6)
 /// is that asking again gets the same answer, which a transport that cannot tell whether its
@@ -69,6 +69,8 @@ pub struct Case {
     pub outcome: OpenOutcome,
     /// The peer, spelled as a key carries a zid.
     pub peer_text: &'static str,
+    /// How the request holds the peer: dialled, or waited for (decision D10).
+    pub mode: OpenMode,
     /// What the transport must answer.
     pub answer: Answer,
     /// The zid the opener must be asked for, each time, or `None` when it must not be asked.
@@ -76,6 +78,24 @@ pub struct Case {
 }
 
 impl Case {
+    /// The chunk a key carries before the peer for this case's mode: `passive/`, or none
+    /// (decision D10).
+    pub const fn key_mode_chunk(&self) -> &'static str {
+        match self.mode {
+            OpenMode::Dial => "",
+            OpenMode::Passive => "passive/",
+        }
+    }
+
+    /// The word a control line carries before the peer for this case's mode: `passive `, or
+    /// none (decision D10).
+    pub const fn line_mode_word(&self) -> &'static str {
+        match self.mode {
+            OpenMode::Dial => "",
+            OpenMode::Passive => "passive ",
+        }
+    }
+
     /// Whether a node that was built for no peer by their zid, which is what a real node of the
     /// host binary is, can be seen to answer this case: it permits, it is asked, and it has no
     /// room.
@@ -115,8 +135,17 @@ const fn bound(
         permitted: true,
         outcome,
         peer_text: text,
+        mode: OpenMode::Dial,
         answer: Answer::Is(answer),
         asked_for,
+    }
+}
+
+/// The same node and request as [`bound`], in the passive mode (decision D10).
+const fn passive(case: Case) -> Case {
+    Case {
+        mode: OpenMode::Passive,
+        ..case
     }
 }
 
@@ -176,21 +205,42 @@ pub const CASES: &[Case] = &[
         UNVERIFIABLE,
         Some(zid(0x1f)),
     ),
+    // Decision D10: the passive form is the same open in another mode, answered in the same
+    // words, asked of the node in its mode, and permitted by the same permit.
+    passive(bound(
+        "a passive open is taken like any other and asks the node in its mode",
+        OpenOutcome::Accepted,
+        "1f",
+        OPENING,
+        Some(zid(0x1f)),
+    )),
     Case {
         name: "a node that does not permit is never asked",
         binding: Binding::Bound,
         permitted: false,
         outcome: OpenOutcome::Accepted,
         peer_text: "1f",
+        mode: OpenMode::Dial,
         answer: Answer::Is(NOT_PERMITTED),
         asked_for: None,
     },
+    passive(Case {
+        name: "a passive open the node does not permit is never asked",
+        binding: Binding::Bound,
+        permitted: false,
+        outcome: OpenOutcome::Accepted,
+        peer_text: "1f",
+        mode: OpenMode::Dial,
+        answer: Answer::Is(NOT_PERMITTED),
+        asked_for: None,
+    }),
     Case {
         name: "the permit is judged before the spelling of the peer",
         binding: Binding::Bound,
         permitted: false,
         outcome: OpenOutcome::Accepted,
         peer_text: "0abc",
+        mode: OpenMode::Dial,
         answer: Answer::Is(NOT_PERMITTED),
         asked_for: None,
     },
@@ -207,6 +257,7 @@ pub const CASES: &[Case] = &[
         permitted: false,
         outcome: OpenOutcome::NoRoom,
         peer_text: "1f",
+        mode: OpenMode::Dial,
         answer: Answer::SilentOr(NOT_PERMITTED),
         asked_for: None,
     },
@@ -249,11 +300,12 @@ pub fn judge_answers(case: &Case, answers: &[Option<&str>]) -> Result<(), Violat
 /// Whether what the node's opener was asked is what the contract says of `case`: asked for the
 /// peer on every request that reached it, and not at all when the request must not. `asked` is
 /// how many times the opener was asked over the [`REPEATS`] requests, and `last` the zid, in its
-/// sixteen-byte form, it was last asked for.
+/// sixteen-byte form, it was last asked for, in the mode `last_mode`.
 pub fn judge_asking(
     case: &Case,
     asked: u32,
     last: [u8; CREDENTIAL_ZID_BYTES],
+    last_mode: OpenMode,
 ) -> Result<(), Violation> {
     let fail = |what| {
         Err(Violation {
@@ -267,6 +319,7 @@ pub fn judge_asking(
             fail("did not ask the opener once for each request")
         }
         Some(peer) if last != peer => fail("asked the opener for another peer"),
+        Some(_) if last_mode != case.mode => fail("asked the opener in another mode"),
         _ => Ok(()),
     }
 }
@@ -641,10 +694,27 @@ mod tests {
         assert!(judge_answers(silent, &[Some(NOT_PERMITTED), None]).is_ok());
         assert!(judge_answers(silent, &[Some(OPENING), None]).is_err());
 
-        assert!(judge_asking(case, 0, zid(0)).is_err(), "never asked");
-        assert!(judge_asking(case, 2, zid(0x1f)).is_ok());
-        assert!(judge_asking(case, 2, zid(0x2f)).is_err(), "another peer");
-        assert!(judge_asking(case, 3, zid(0x1f)).is_err(), "asked too often");
+        let dial = OpenMode::Dial;
+        assert!(judge_asking(case, 0, zid(0), dial).is_err(), "never asked");
+        assert!(judge_asking(case, 2, zid(0x1f), dial).is_ok());
+        assert!(
+            judge_asking(case, 2, zid(0x2f), dial).is_err(),
+            "another peer"
+        );
+        assert!(
+            judge_asking(case, 3, zid(0x1f), dial).is_err(),
+            "asked too often"
+        );
+        assert!(
+            judge_asking(case, 2, zid(0x1f), OpenMode::Passive).is_err(),
+            "asked in another mode"
+        );
+        let passive_case = CASES
+            .iter()
+            .find(|c| c.mode == OpenMode::Passive && c.asked_for.is_some())
+            .expect("a passive case that asks the opener");
+        assert!(judge_asking(passive_case, 2, zid(0x1f), OpenMode::Passive).is_ok());
+        assert!(judge_asking(passive_case, 2, zid(0x1f), dial).is_err());
     }
 
     /// The verb table is held to what the wire can say, as the open table is: every verdict word

@@ -26,7 +26,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use wz_session_core::lifecycle_wire::{OpenOutcome, RefusedReason};
+use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome, RefusedReason};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
@@ -125,7 +125,7 @@ impl NodeOpening for Recording {
         self.permitted
     }
 
-    fn open(&self, zid: &[u8; 16]) -> OpenOutcome {
+    fn open(&self, zid: &[u8; 16], _mode: OpenMode) -> OpenOutcome {
         self.asked.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().expect("the lock") = *zid;
         *self.outcome.lock().expect("the lock")
@@ -315,7 +315,11 @@ fn the_in_band_query_conforms_to_the_contract_every_transport_is_held_to() {
     use wz_session_mcu::contract::{self, Binding, CASES, REPEATS};
 
     for case in CASES {
-        let key = format!("@/a1b2/peer/session/open/{}", case.peer_text);
+        let key = format!(
+            "@/a1b2/peer/session/open/{}{}",
+            case.key_mode_chunk(),
+            case.peer_text
+        );
         let opener: &'static contract::Recording =
             Box::leak(Box::new(contract::Recording::for_case(case)));
         let answers: Vec<Option<String>> = (0..REPEATS)
@@ -499,8 +503,8 @@ mod verbs {
         fn permits(&self, verb: Verb) -> bool {
             self.inner.permits(verb)
         }
-        fn open(&self, peer: &Zid) -> OpenOutcome {
-            self.inner.open(peer)
+        fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
+            self.inner.open(peer, mode)
         }
         fn withdraw(&self, peer: &Zid) {
             self.inner.withdraw(peer);

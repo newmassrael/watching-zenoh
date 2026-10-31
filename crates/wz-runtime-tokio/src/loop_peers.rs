@@ -155,6 +155,41 @@ impl LoopPeers {
         self.open(PeerKey::Node(zid), cx, next_id)
     }
 
+    /// `open` in its passive form for the node `zid` (decision D10): the loop waits for the
+    /// node's own session and dials nothing. A node already held or being reached is unchanged.
+    pub fn open_node_passive(
+        &mut self,
+        zid: DirectoryZid,
+        cx: &PeerContext<'_>,
+        next_id: &mut u64,
+    ) -> Vec<PeerAction> {
+        let key = PeerKey::Node(zid);
+        let (opened, actions) = self.plan(cx, |planner, ports, emit| {
+            planner.open_passive(key.clone(), ports, next_id, emit)
+        });
+        if let Err(why) = opened {
+            log::warn!("loop peers: no room to hold {key} ({why:?}); refusing the open");
+        }
+        actions
+    }
+
+    /// The node `zid` opened a session to this loop, held as face `id`: a node waiting under a
+    /// passive intent holds it from now on (decision D10). Nothing else changes, and a session
+    /// of a node the loop is not waiting for is no concern of the planner's.
+    pub fn inbound_up(
+        &mut self,
+        zid: DirectoryZid,
+        id: FaceId,
+        cx: &PeerContext<'_>,
+        next_id: &mut u64,
+    ) -> Vec<PeerAction> {
+        let key = PeerKey::Node(zid);
+        let (_, actions) = self.plan(cx, |planner, ports, emit| {
+            planner.inbound_up(key.clone(), id, ports, next_id, emit)
+        });
+        actions
+    }
+
     /// A source gave the directory a hint for the node `zid`. A node that was opened before
     /// anything could be dialled for it waits in `NoLocator`, which only a start leaves
     /// (decision D15), so it starts again here with no second `open`. A node in any other
@@ -575,6 +610,46 @@ mod tests {
             other.state(&NODE),
             None,
             "a node nobody asked for is not held"
+        );
+    }
+
+    /// Decision D10: a node opened in the passive form is dialled by nobody, though the
+    /// directory holds a hint for it, and holds the session the node opens; a session of a node
+    /// the loop does not wait for is none of its machines'.
+    #[test]
+    fn a_passive_node_is_waited_for_and_holds_the_session_it_opens() {
+        let directory = directory_with(&["tcp/127.0.0.1:7204"]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy::constant(1000));
+        let mut next_id = 0;
+        assert!(
+            peers.open_node_passive(A, &cx, &mut next_id).is_empty(),
+            "a hint is there, and nothing is dialled"
+        );
+        assert_eq!(peers.state(&NODE), Some(S::Passive));
+        assert!(peers
+            .inbound_up([0xee; 16], FaceId(3), &cx, &mut next_id)
+            .is_empty());
+        assert_eq!(peers.state(&PeerKey::Node([0xee; 16])), None);
+
+        assert!(peers.inbound_up(A, FaceId(3), &cx, &mut next_id).is_empty());
+        assert_eq!(peers.state(&NODE), Some(S::PassiveUp));
+        assert!(
+            !peers.dials_a_node(FaceId(3)),
+            "the face is the node's own session, and no dial of the loop's"
+        );
+        let lost = peers.face_down(FaceId(3), &cx, &mut next_id).expect("held");
+        assert!(lost.is_empty(), "waited for again, with no retry armed");
+        assert_eq!(peers.state(&NODE), Some(S::Passive));
+
+        let dial = peers.open_node(A, &cx, &mut next_id);
+        assert_eq!(
+            the_dial(&dial).1.expected_zid,
+            Some(A),
+            "the other start event dials"
         );
     }
 

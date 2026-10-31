@@ -16,7 +16,7 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
-use wz_session_core::lifecycle_wire::OpenOutcome;
+use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome};
 
 pub use wz_session_core::lifecycle_contract::{
     judge_answers, Answer, Binding, Case, Violation, CASES, REPEATS,
@@ -32,6 +32,8 @@ pub struct Recording {
     outcome: OpenOutcome,
     asked: AtomicU32,
     last: [AtomicU64; 2],
+    /// The mode it was last asked in: 0 dialling, 1 passive.
+    last_mode: AtomicU32,
 }
 
 impl Recording {
@@ -42,6 +44,7 @@ impl Recording {
             outcome,
             asked: AtomicU32::new(0),
             last: [AtomicU64::new(0), AtomicU64::new(0)],
+            last_mode: AtomicU32::new(0),
         }
     }
 
@@ -53,6 +56,15 @@ impl Recording {
     /// How many times it was asked.
     pub fn asked(&self) -> u32 {
         self.asked.load(Ordering::SeqCst)
+    }
+
+    /// The mode it was last asked in (decision D10).
+    pub fn last_mode(&self) -> OpenMode {
+        if self.last_mode.load(Ordering::SeqCst) == 0 {
+            OpenMode::Dial
+        } else {
+            OpenMode::Passive
+        }
     }
 
     /// The zid it was last asked for.
@@ -69,7 +81,9 @@ impl NodeOpening for Recording {
         self.permitted
     }
 
-    fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES]) -> OpenOutcome {
+    fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES], mode: OpenMode) -> OpenOutcome {
+        self.last_mode
+            .store(u32::from(mode == OpenMode::Passive), Ordering::SeqCst);
         let mut low = [0u8; 8];
         let mut high = [0u8; 8];
         low.copy_from_slice(&zid[..8]);
@@ -83,7 +97,12 @@ impl NodeOpening for Recording {
 
 /// Whether what `opener` was asked is what the contract says of `case`.
 pub fn judge_asking(case: &Case, opener: &Recording) -> Result<(), Violation> {
-    wz_session_core::lifecycle_contract::judge_asking(case, opener.asked(), opener.last())
+    wz_session_core::lifecycle_contract::judge_asking(
+        case,
+        opener.asked(),
+        opener.last(),
+        opener.last_mode(),
+    )
 }
 
 #[cfg(test)]
@@ -116,8 +135,12 @@ mod tests {
         conforms(|case, opener| {
             let mut out = FixedText::<192>::new();
             match case.binding {
-                Binding::Bound => open_verdict(opener, case.peer_text).write_json(&mut out),
-                Binding::Unbound => open_verdict(&NoOpening, case.peer_text).write_json(&mut out),
+                Binding::Bound => {
+                    open_verdict(opener, case.peer_text, case.mode).write_json(&mut out)
+                }
+                Binding::Unbound => {
+                    open_verdict(&NoOpening, case.peer_text, case.mode).write_json(&mut out)
+                }
             }
             Some(out.prefix().to_string())
         });
@@ -127,7 +150,7 @@ mod tests {
     #[test]
     fn the_control_port_conforms() {
         conforms(|case, opener| {
-            let line = std::format!("open {}", case.peer_text);
+            let line = std::format!("open {}{}", case.line_mode_word(), case.peer_text);
             let mut out = FixedText::<192>::new();
             match case.binding {
                 Binding::Bound => control_port::answer(&OpeningOnly(opener), None, &line, &mut out),
@@ -148,11 +171,13 @@ mod tests {
         assert!(judge_asking(case, &opener).is_err(), "never asked");
         let mut zid = [0u8; CREDENTIAL_ZID_BYTES];
         zid[0] = 0x1f;
-        opener.open(&zid);
-        opener.open(&zid);
+        opener.open(&zid, OpenMode::Dial);
+        opener.open(&zid, OpenMode::Dial);
         assert!(judge_asking(case, &opener).is_ok());
+        opener.open(&zid, OpenMode::Passive);
+        assert!(judge_asking(case, &opener).is_err(), "another mode");
         zid[0] = 0x2f;
-        opener.open(&zid);
+        opener.open(&zid, OpenMode::Dial);
         assert!(judge_asking(case, &opener).is_err());
     }
 }

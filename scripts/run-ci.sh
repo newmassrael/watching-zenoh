@@ -11817,9 +11817,10 @@ layer_c1m_session_lwip() {
     # none with it), so the four tests of those verbs run in a leg of their own after "peer nodes":
     # the fixed node held to the table of every verb, a reset that dials again and a close that does
     # not, the order of requests made outside the loop, and the record of generations (26).
-    _runci_guarded_test "C1m mcu default" 19 \
+    # 19 -> 20: the mode a request carries reaches the node's opener (decision D10).
+    _runci_guarded_test "C1m mcu default" 20 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 20 \
+    _runci_guarded_test "C1m mcu unicast app layer" 21 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -11827,23 +11828,26 @@ layer_c1m_session_lwip() {
     # (`45f821db`); the hosted run of 017e3c71 printed 48.
     # 48 -> 49: an open for a node nothing can be dialled for takes a row and waits for a hint
     # (decision D15), and a close removes it: the one test of the refusal it replaces became two.
-    _runci_guarded_test "C1m mcu adminspace-write" 49 \
+    # 49 -> 52: the mode test above, and two of the passive form (decision D10): a node waited
+    # for and not dialled, and an opener whose dialling open changes a passive node.
+    _runci_guarded_test "C1m mcu adminspace-write" 52 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 23 \
+    _runci_guarded_test "C1m mcu peer nodes" 25 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu lifecycle verbs" 27 \
+    _runci_guarded_test "C1m mcu lifecycle verbs" 29 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
         connect_manager --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 23 \
+    _runci_guarded_test "C1m mcu adminspace-core" 24 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
     # the build host.
     # 58 -> 59: the same test D15 added (a close removes the row of a node with no locator).
-    _runci_guarded_test "C1m mcu adminspace read+write" 59 \
+    # 59 -> 62: the same three as the adminspace-write leg (decision D10).
+    _runci_guarded_test "C1m mcu adminspace read+write" 62 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

@@ -48,6 +48,7 @@ use wz_runtime_coop::ClockSource;
 use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef};
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
+use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::locator_directory::{DirectoryRefusal, DirectoryZid, Lifetime, LocatorSource};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::FixedText;
@@ -280,9 +281,32 @@ where
         self.ensure_listening();
         self.accepted.retain(|session| !session.is_finished());
         self.admit();
+        self.report_inbound(now_ms);
         self.manager.tick(now_ms);
         self.declare_on_new_sessions();
         self.report(now_ms);
+    }
+
+    /// Tell the connect manager which nodes have a session of their own here whose key proved
+    /// their zid (decision D10), so a node waited for under a passive intent holds it. A session
+    /// whose peer only claims a zid is not that peer's, and is left out.
+    fn report_inbound(&mut self, now_ms: u64) {
+        // As many as the node accepts at once, which the array is sized by.
+        let mut verified: [DirectoryZid; LANES] = [[0; CREDENTIAL_ZID_BYTES]; LANES];
+        let mut count = 0;
+        for session in self.accepted.iter() {
+            let actions = session.actions();
+            if !actions.peer_identity_verified() {
+                continue;
+            }
+            if let Some(zid) = actions.peer_zid_array() {
+                if count < LANES {
+                    verified[count] = zid;
+                    count += 1;
+                }
+            }
+        }
+        self.manager.inbound_sessions(&verified[..count], now_ms);
     }
 
     /// Bind the node's port and hand the socket to the listener, once. A bind that

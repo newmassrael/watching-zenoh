@@ -28,6 +28,7 @@
 //! that lost a reply may send it again.
 
 use wz_session_core::lifecycle_node::{lifecycle_verdict, Command as Asked, LifecycleNode};
+use wz_session_core::lifecycle_wire::{OpenMode, PASSIVE_CHUNK};
 use wz_session_core::text_out::TextOut;
 
 /// The word that asks the node to hold a peer.
@@ -54,8 +55,9 @@ const LINE_TOO_LONG: &str = "line-too-long";
 /// What a line asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command<'a> {
-    /// Hold this peer, spelled as a key spells it.
-    Open(&'a str),
+    /// Hold this peer, spelled as a key spells it: dial it, or (`open passive <peer>`, decision
+    /// D10) wait for its own session.
+    Open(&'a str, OpenMode),
     /// Close the sessions with this peer and take it out of the intent.
     Close(&'a str),
     /// Close the sessions with this peer once for this generation, leaving the intent.
@@ -125,7 +127,10 @@ pub fn parse(line: &str) -> Result<Command<'_>, Malformed> {
     let first = words.next();
     let (one, two, three) = (words.next(), words.next(), words.next());
     match (first, one, two, three) {
-        (Some(OPEN_COMMAND), Some(peer), None, _) => Ok(Command::Open(peer)),
+        (Some(OPEN_COMMAND), Some(PASSIVE_CHUNK), Some(peer), None) => {
+            Ok(Command::Open(peer, OpenMode::Passive))
+        }
+        (Some(OPEN_COMMAND), Some(peer), None, _) => Ok(Command::Open(peer, OpenMode::Dial)),
         (Some(OPEN_COMMAND), ..) => Err(Malformed::OpenTakesOnePeer),
         (Some(CLOSE_COMMAND), Some(peer), None, _) => Ok(Command::Close(peer)),
         (Some(CLOSE_COMMAND), ..) => Err(Malformed::CloseTakesOnePeer),
@@ -150,7 +155,7 @@ where
     W: TextOut + ?Sized,
 {
     let command = match parse(line) {
-        Ok(Command::Open(peer)) => Asked::Open { peer },
+        Ok(Command::Open(peer, mode)) => Asked::Open { peer, mode },
         Ok(Command::Close(peer)) => Asked::Close { peer },
         Ok(Command::Reset(peer, generation)) => Asked::Reset { peer, generation },
         Ok(Command::Status(peer)) => Asked::Status { peer },
@@ -191,7 +196,7 @@ mod tests {
         fn permitted(&self) -> bool {
             self.permit
         }
-        fn open(&self, _zid: &[u8; CREDENTIAL_ZID_BYTES]) -> OpenOutcome {
+        fn open(&self, _zid: &[u8; CREDENTIAL_ZID_BYTES], _mode: OpenMode) -> OpenOutcome {
             self.opened.set(self.opened.get() + 1);
             self.outcome
         }
@@ -214,8 +219,20 @@ mod tests {
 
     #[test]
     fn a_line_is_read_as_a_command_and_nothing_else_is() {
-        assert_eq!(parse("open abc"), Ok(Command::Open("abc")));
-        assert_eq!(parse("  open\tabc \r\n"), Ok(Command::Open("abc")));
+        assert_eq!(parse("open abc"), Ok(Command::Open("abc", OpenMode::Dial)));
+        assert_eq!(
+            parse("  open\tabc \r\n"),
+            Ok(Command::Open("abc", OpenMode::Dial))
+        );
+        assert_eq!(
+            parse("open passive abc"),
+            Ok(Command::Open("abc", OpenMode::Passive))
+        );
+        assert_eq!(
+            parse("open passive"),
+            Ok(Command::Open("passive", OpenMode::Dial))
+        );
+        assert_eq!(parse("open passive a b"), Err(Malformed::OpenTakesOnePeer));
         assert_eq!(parse("close abc"), Ok(Command::Close("abc")));
         assert_eq!(parse("reset abc 7"), Ok(Command::Reset("abc", "7")));
         assert_eq!(parse("status abc"), Ok(Command::Status("abc")));

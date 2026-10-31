@@ -91,8 +91,8 @@ use crate::lifecycle_node::{
     lifecycle_verdict, Command, Generation, LifecycleNode, Verb, Verdict, Zid,
 };
 pub use crate::lifecycle_wire::{
-    write_verbs_json, CloseOrder, CloseVerdict, MachineReport, OpenOutcome, OpenVerdict,
-    RefusedReason, ResetVerdict, SessionLinks, StatusVerdict, VERBS,
+    write_verbs_json, CloseOrder, CloseVerdict, MachineReport, OpenMode, OpenOutcome, OpenVerdict,
+    RefusedReason, ResetVerdict, SessionLinks, StatusVerdict, PASSIVE_CHUNK, VERBS,
 };
 use crate::lifecycle_wire::{CLOSE_VERB, OPEN_VERB, RESET_VERB, STATUS_VERB};
 use crate::query_sink::{QueryView, ReplyError, ReplyOut};
@@ -200,15 +200,16 @@ pub trait PeerOpener {
     const BOUND: bool = true;
 
     /// Ask the node to hold the peer whose zid is `peer_zid` (wire bytes, any
-    /// trailing zero bytes). A peer already held is unchanged.
-    fn open(&self, peer_zid: &[u8]) -> OpenOutcome;
+    /// trailing zero bytes), by dialling it or, in the passive mode, by waiting
+    /// for its own session (decision D10). A peer already held is unchanged.
+    fn open(&self, peer_zid: &[u8], mode: OpenMode) -> OpenOutcome;
 }
 
 impl<O: PeerOpener + ?Sized> PeerOpener for &O {
     const BOUND: bool = O::BOUND;
 
-    fn open(&self, peer_zid: &[u8]) -> OpenOutcome {
-        (**self).open(peer_zid)
+    fn open(&self, peer_zid: &[u8], mode: OpenMode) -> OpenOutcome {
+        (**self).open(peer_zid, mode)
     }
 }
 
@@ -220,7 +221,7 @@ pub struct NoOpener;
 impl PeerOpener for NoOpener {
     const BOUND: bool = false;
 
-    fn open(&self, _peer_zid: &[u8]) -> OpenOutcome {
+    fn open(&self, _peer_zid: &[u8], _mode: OpenMode) -> OpenOutcome {
         OpenOutcome::OpenerGone
     }
 }
@@ -238,6 +239,7 @@ pub fn query_patterns(zid_hex: &str, whatami: &str, open_bound: bool) -> Vec<Str
     ]);
     if open_bound {
         patterns.push(alloc::format!("{root}/{OPEN_VERB}/*"));
+        patterns.push(alloc::format!("{root}/{OPEN_VERB}/{PASSIVE_CHUNK}/*"));
     }
     patterns.push(alloc::format!("{root}/verbs"));
     patterns
@@ -412,6 +414,11 @@ where
             // of this node's and nothing is replied.
             OPEN_VERB if O::BOUND => Command::Open {
                 peer: parsed.peer_zid,
+                // The grammar admits no argument of an open but `passive`.
+                mode: match OpenMode::of_argument(parsed.argument) {
+                    Some(mode) => mode,
+                    None => return Answered::Unserved,
+                },
             },
             _ => return Answered::Unserved,
         };
@@ -464,8 +471,8 @@ where
         }
     }
 
-    fn open(&self, peer: &Zid) -> OpenOutcome {
-        self.queries.opener.open(canonical_zid(peer))
+    fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
+        self.queries.opener.open(canonical_zid(peer), mode)
     }
 
     fn withdraw(&self, peer: &Zid) {
@@ -993,6 +1000,7 @@ mod tests {
                 "@/a1b2/peer/session/reset/*/*",
                 "@/a1b2/peer/session/status/*",
                 "@/a1b2/peer/session/open/*",
+                "@/a1b2/peer/session/open/passive/*",
                 "@/a1b2/peer/session/verbs",
             ]
         );
@@ -1001,6 +1009,7 @@ mod tests {
     /// An opener that records each peer it is asked to hold and answers as told.
     struct Opener {
         asked: RefCell<Vec<Vec<u8>>>,
+        modes: RefCell<Vec<OpenMode>>,
         outcome: OpenOutcome,
     }
 
@@ -1008,16 +1017,42 @@ mod tests {
         fn answering(outcome: OpenOutcome) -> Self {
             Self {
                 asked: RefCell::new(Vec::new()),
+                modes: RefCell::new(Vec::new()),
                 outcome,
             }
         }
     }
 
     impl PeerOpener for Opener {
-        fn open(&self, peer_zid: &[u8]) -> OpenOutcome {
+        fn open(&self, peer_zid: &[u8], mode: OpenMode) -> OpenOutcome {
             self.asked.borrow_mut().push(peer_zid.to_vec());
+            self.modes.borrow_mut().push(mode);
             self.outcome
         }
+    }
+
+    /// Decision D10 — a key with the literal `passive` before the peer is the same open in its
+    /// passive mode, and any other chunk there is no query of this node's.
+    #[test]
+    fn a_passive_open_is_the_same_open_in_the_passive_mode() {
+        let node = node(true, Vec::new()).with_opener(Opener::answering(OpenOutcome::Accepted));
+        let passive = alloc::format!("@/{ME}/peer/session/open/passive/{PEER_A}");
+        let (answered, replies) = ask(&node, &passive);
+        assert_eq!(answered, Answered::Open(OpenVerdict::Opening));
+        assert_eq!(replies[0].1, "{\"verdict\":\"opening\"}");
+        let plain = alloc::format!("@/{ME}/peer/session/open/{PEER_A}");
+        assert_eq!(ask(&node, &plain).0, Answered::Open(OpenVerdict::Opening));
+        assert_eq!(
+            *node.opener.modes.borrow(),
+            vec![OpenMode::Passive, OpenMode::Dial]
+        );
+        let other = alloc::format!("@/{ME}/peer/session/open/active/{PEER_A}");
+        assert_eq!(ask(&node, &other).0, Answered::Unserved);
+        assert_eq!(
+            node.opener.asked.borrow().len(),
+            2,
+            "the other asked nothing"
+        );
     }
 
     /// Decision D6 — an open asks the node's machines to hold the peer and says the
@@ -1117,7 +1152,11 @@ mod tests {
         use crate::lifecycle_contract::{judge_answers, judge_asking, Binding, CASES, REPEATS};
 
         for case in CASES {
-            let key = alloc::format!("@/{ME}/peer/session/open/{}", case.peer_text);
+            let key = alloc::format!(
+                "@/{ME}/peer/session/open/{}{}",
+                case.key_mode_chunk(),
+                case.peer_text
+            );
             let bound =
                 node(case.permitted, Vec::new()).with_opener(Opener::answering(case.outcome));
             let bare = node(case.permitted, Vec::new());
@@ -1141,7 +1180,15 @@ mod tests {
                     .last()
                     .and_then(|zid| zid_from_wire(zid))
                     .unwrap_or([0; crate::credential_identity::CREDENTIAL_ZID_BYTES]);
-                judge_asking(case, asked.len() as u32, last).unwrap_or_else(|v| panic!("{v:?}"));
+                let mode = bound
+                    .opener
+                    .modes
+                    .borrow()
+                    .last()
+                    .copied()
+                    .unwrap_or_default();
+                judge_asking(case, asked.len() as u32, last, mode)
+                    .unwrap_or_else(|v| panic!("{v:?}"));
             }
         }
     }

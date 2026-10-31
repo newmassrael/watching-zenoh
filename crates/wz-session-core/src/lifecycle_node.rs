@@ -26,8 +26,8 @@
 
 use crate::credential_identity::{zid_from_key_text, CREDENTIAL_ZID_BYTES};
 use crate::lifecycle_wire::{
-    CloseOrder, CloseVerdict, MachineReport, OpenOutcome, OpenVerdict, RefusedReason, ResetVerdict,
-    SessionLinks, StatusVerdict,
+    CloseOrder, CloseVerdict, MachineReport, OpenMode, OpenOutcome, OpenVerdict, RefusedReason,
+    ResetVerdict, SessionLinks, StatusVerdict,
 };
 use crate::text_out::TextOut;
 
@@ -59,6 +59,8 @@ pub enum Command<'a> {
     Open {
         /// The peer, spelled as a key carries a zid.
         peer: &'a str,
+        /// Dial it, or wait for its own session (decision D10).
+        mode: OpenMode,
     },
     /// Close every session with the peer and withdraw it from the intent.
     Close {
@@ -114,9 +116,10 @@ pub trait LifecycleNode {
     /// asked anything else.
     fn permits(&self, verb: Verb) -> bool;
 
-    /// Ask the node to hold the peer. Accepted, not completed: how the dial ends is read in the
+    /// Ask the node to hold the peer, by dialling it or, in the passive mode, by waiting for its
+    /// own session (decision D10). Accepted, not completed: how the dial ends is read in the
     /// status. Asking again for a peer already held changes nothing and is accepted again.
-    fn open(&self, peer: &Zid) -> OpenOutcome;
+    fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome;
 
     /// Take the peer out of the node's intent: no machine dials it again until an open or a
     /// configuration edit names it again.
@@ -161,8 +164,8 @@ where
     W: TextOut + ?Sized,
 {
     match command {
-        Command::Open { peer } => {
-            let verdict = open_verdict(node, peer);
+        Command::Open { peer, mode } => {
+            let verdict = open_verdict(node, peer, mode);
             verdict.write_json(out);
             Verdict::Open(verdict)
         }
@@ -185,12 +188,16 @@ where
 ///
 /// Public so that a node which binds only this verb (the fixed-memory in-band query asks nothing
 /// else) decides it with the same function, and no profile owns a copy of the order of checks.
-pub fn open_verdict<N: LifecycleNode + ?Sized>(node: &N, peer: &str) -> OpenVerdict {
+pub fn open_verdict<N: LifecycleNode + ?Sized>(
+    node: &N,
+    peer: &str,
+    mode: OpenMode,
+) -> OpenVerdict {
     if !node.permits(Verb::Open) {
         return OpenVerdict::Refused(RefusedReason::OpenNotPermitted);
     }
     match zid_from_key_text(peer) {
-        Some(peer) => OpenVerdict::of(node.open(&peer)),
+        Some(peer) => OpenVerdict::of(node.open(&peer, mode)),
         None => OpenVerdict::Refused(RefusedReason::PeerNotAZid),
     }
 }
@@ -298,8 +305,11 @@ mod tests {
         fn permits(&self, verb: Verb) -> bool {
             self.permit[verb as usize]
         }
-        fn open(&self, _peer: &Zid) -> OpenOutcome {
-            self.note("open");
+        fn open(&self, _peer: &Zid, mode: OpenMode) -> OpenOutcome {
+            self.note(match mode {
+                OpenMode::Dial => "open",
+                OpenMode::Passive => "open_passive",
+            });
             OpenOutcome::Accepted
         }
         fn withdraw(&self, _peer: &Zid) {
@@ -336,7 +346,10 @@ mod tests {
     }
 
     const EVERY: [fn(&str) -> Command<'_>; 4] = [
-        |peer| Command::Open { peer },
+        |peer| Command::Open {
+            peer,
+            mode: OpenMode::Dial,
+        },
         |peer| Command::Close { peer },
         |peer| Command::Reset {
             peer,
@@ -386,6 +399,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Decision D10: an open carries its mode to the node, and a passive open has the same permit
+    /// and the same spelling as any other.
+    #[test]
+    fn an_open_carries_its_mode_to_the_node() {
+        for (mode, said) in [
+            (OpenMode::Dial, "open"),
+            (OpenMode::Passive, "open_passive"),
+        ] {
+            let node = Recording::new(true);
+            let (verdict, doc) = run(&node, Command::Open { peer: "1", mode });
+            assert_eq!(verdict, Verdict::Open(OpenVerdict::Opening));
+            assert_eq!(doc, "{\"verdict\":\"opening\"}");
+            assert_eq!(*node.asked.borrow(), [said]);
+        }
+        let node = Recording::new(false);
+        let (_, doc) = run(
+            &node,
+            Command::Open {
+                peer: "1",
+                mode: OpenMode::Passive,
+            },
+        );
+        assert!(doc.contains("does not permit"), "{doc}");
+        assert!(node.asked.borrow().is_empty());
     }
 
     #[test]

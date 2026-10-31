@@ -47,9 +47,9 @@ use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEnt
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 #[cfg(feature = "lifecycle-verbs")]
 use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Verb, Zid};
-use wz_session_core::lifecycle_wire::OpenOutcome;
 #[cfg(feature = "lifecycle-verbs")]
 use wz_session_core::lifecycle_wire::{CloseOrder, MachineReport, SessionLinks};
+use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome};
 use wz_session_core::locator_directory::{
     DirectoryRefusal, DirectoryZid, Lifetime, LocatorDirectory, LocatorSource,
 };
@@ -248,6 +248,9 @@ pub enum NodeState {
         /// When the next dial is due, in the manager's clock.
         at_ms: u64,
     },
+    /// The node is waited for under a passive intent (decision D10): nothing is dialled, and its
+    /// own session is held when it arrives.
+    Passive,
     /// The directory has no live hint of it that this build can dial: it is dialled again when a
     /// source confirms one.
     NoHint,
@@ -259,6 +262,7 @@ pub enum NodeState {
 /// Where one peer stands, before it is said as an endpoint's or a node's.
 enum Standing {
     Live,
+    Passive,
     Waiting { at_ms: u64 },
     NoLocator,
     Mismatched,
@@ -360,6 +364,22 @@ impl NodeOpener {
     /// Ask the manager to hold the node `zid`. A node already held, or already asked for, is
     /// unchanged, and says the same.
     pub fn open(&self, zid: &DirectoryZid) -> Result<(), NodeRefusal> {
+        self.open_in(zid, OpenMode::Dial)
+    }
+
+    /// Ask the manager to hold the node `zid` in its passive form (decision D10): it waits for
+    /// the node's own session and dials nothing. A node already held or asked for is unchanged.
+    pub fn open_passive(&self, zid: &DirectoryZid) -> Result<(), NodeRefusal> {
+        self.open_in(zid, OpenMode::Passive)
+    }
+
+    /// Ask the manager to hold the node `zid` in `mode`. The one request both forms make.
+    ///
+    /// A node that is held or asked for is unchanged, with one exception: an `open` that dials,
+    /// asked of a node whose intent is passive, is the other start event and changes it, so the
+    /// node is dialled as well (the passive intent is the weaker, and a second `open` of the
+    /// same mode changes nothing).
+    pub fn open_in(&self, zid: &DirectoryZid, mode: OpenMode) -> Result<(), NodeRefusal> {
         self.store.with(|t| {
             if !t.verifies_nodes {
                 return Err(NodeRefusal::Unverifiable);
@@ -370,6 +390,9 @@ impl NodeOpener {
             let leaving = false;
             // A node that is held or asked for, and is not on its way out, is unchanged.
             if t.knows(zid) && !leaving {
+                if mode == OpenMode::Dial {
+                    return t.dial_a_passive_node(zid);
+                }
                 return Ok(());
             }
             // Written so that it holds for any value of the limit, none included. A node that
@@ -382,11 +405,12 @@ impl NodeOpener {
                 // Asked again after a close: taken again once the close has run.
                 if let Some(at) = t.pending_at(zid) {
                     t.requests[at].reopen = true;
+                    t.requests[at].passive = mode == OpenMode::Passive;
                 }
                 return Ok(());
             }
             t.requests
-                .push(Pending::asked(*zid))
+                .push(Pending::asked(*zid, mode))
                 .map_err(|_| NodeRefusal::NoRoom)
         })
     }
@@ -416,6 +440,11 @@ impl NodeDesk {
     /// Ask the manager to hold the node `zid` ([`NodeOpener::open`]).
     pub fn open(&self, zid: &DirectoryZid) -> Result<(), NodeRefusal> {
         NodeOpener::in_store(self.store).open(zid)
+    }
+
+    /// Ask the manager to hold the node `zid` in `mode` ([`NodeOpener::open_in`]).
+    pub fn open_in(&self, zid: &DirectoryZid, mode: OpenMode) -> Result<(), NodeRefusal> {
+        NodeOpener::in_store(self.store).open_in(zid, mode)
     }
 
     /// Take the node out of the intent: it is dialled no more once the manager's next tick has
@@ -590,8 +619,8 @@ impl<P: LifecyclePermits> LifecycleNode for StoreNode<P> {
         self.binds(verb) && self.permits.permits(verb)
     }
 
-    fn open(&self, peer: &Zid) -> OpenOutcome {
-        match self.desk.open(peer) {
+    fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
+        match self.desk.open_in(peer, mode) {
             Ok(()) => OpenOutcome::Accepted,
             Err(refusal) => refusal.into(),
         }
@@ -658,8 +687,8 @@ impl crate::admin_fixed::NodeOpening for ControlledOpener {
         self.permit.write_permit()
     }
 
-    fn open(&self, zid: &DirectoryZid) -> OpenOutcome {
-        match self.opener.open(zid) {
+    fn open(&self, zid: &DirectoryZid, mode: OpenMode) -> OpenOutcome {
+        match self.opener.open_in(zid, mode) {
             Ok(()) => OpenOutcome::Accepted,
             Err(refusal) => refusal.into(),
         }
@@ -755,6 +784,9 @@ type Classify = fn(&str) -> Result<(), DialRefused>;
 #[derive(Debug, Clone, Copy)]
 struct HeldNode {
     zid: DirectoryZid,
+    /// The node's intent is the passive form of `open` (decision D10): it is waited for, and
+    /// an `open` that dials is a change to make.
+    passive: bool,
     /// Sessions the row holds: one while there is a session, none while it waits to dial again.
     /// A session an endpoint's dial reached is the endpoint's row, not counted here.
     #[cfg(feature = "lifecycle-verbs")]
@@ -768,6 +800,8 @@ struct HeldNode {
 #[derive(Debug, Clone, Copy)]
 struct Pending {
     zid: DirectoryZid,
+    /// The node is asked for in the passive form (decision D10): it is waited for, not dialled.
+    passive: bool,
     /// The node was asked for and the manager holds no row for it yet.
     #[cfg(feature = "lifecycle-verbs")]
     open: bool,
@@ -784,9 +818,10 @@ struct Pending {
 
 impl Pending {
     /// An entry for a node asked for, which the next tick takes.
-    const fn asked(zid: DirectoryZid) -> Self {
+    const fn asked(zid: DirectoryZid, mode: OpenMode) -> Self {
         Self {
             zid,
+            passive: matches!(mode, OpenMode::Passive),
             #[cfg(feature = "lifecycle-verbs")]
             open: true,
             #[cfg(feature = "lifecycle-verbs")]
@@ -803,6 +838,7 @@ impl Pending {
     const fn held(zid: DirectoryZid) -> Self {
         Self {
             zid,
+            passive: false,
             open: false,
             withdraw: false,
             closing: false,
@@ -812,6 +848,31 @@ impl Pending {
 }
 
 impl Tables {
+    /// An `open` that dials, asked of a node the manager holds or was asked for (decision D10):
+    /// a passive intent becomes one that dials, as BGP's other start event does to a peer that
+    /// was started passive. A node whose intent already dials is left as it is.
+    fn dial_a_passive_node(&mut self, zid: &DirectoryZid) -> Result<(), NodeRefusal> {
+        if let Some(at) = self.requests.iter().position(|p| p.zid == *zid) {
+            self.requests[at].passive = false;
+            #[cfg(feature = "lifecycle-verbs")]
+            {
+                self.requests[at].open = true;
+            }
+            return Ok(());
+        }
+        if self
+            .held
+            .iter()
+            .any(|node| node.zid == *zid && node.passive)
+        {
+            return self
+                .requests
+                .push(Pending::asked(*zid, OpenMode::Dial))
+                .map_err(|_| NodeRefusal::NoRoom);
+        }
+        Ok(())
+    }
+
     /// Whether the node holds `zid` or was asked to.
     #[cfg(not(feature = "lifecycle-verbs"))]
     fn knows(&self, zid: &DirectoryZid) -> bool {
@@ -924,7 +985,19 @@ impl PeerStore {
         links: u32,
         state: PeerConnectionState,
     ) -> bool {
-        self.with(|t| t.held.push(HeldNode { zid, links, state }).is_ok())
+        self.with(|t| {
+            t.held
+                .push(HeldNode {
+                    zid,
+                    passive: matches!(
+                        state,
+                        PeerConnectionState::Passive | PeerConnectionState::PassiveUp
+                    ),
+                    links,
+                    state,
+                })
+                .is_ok()
+        })
     }
 }
 
@@ -1187,7 +1260,8 @@ impl<D: Dialer> ConnectManager<D> {
                 Standing::Waiting { at_ms } => SlotState::Waiting { at_ms },
                 Standing::NoLocator => SlotState::Refused(self.refusal(row, endpoint)),
                 // An endpoint names no node, so no dial of it can find another one answering.
-                Standing::Live | Standing::Mismatched => SlotState::Live,
+                // An endpoint is dialled and never waited for, so it is never passive.
+                Standing::Live | Standing::Mismatched | Standing::Passive => SlotState::Live,
             };
             Some((endpoint, state))
         })
@@ -1201,6 +1275,7 @@ impl<D: Dialer> ConnectManager<D> {
             };
             let state = match self.standing(row) {
                 Standing::Live => NodeState::Live,
+                Standing::Passive => NodeState::Passive,
                 Standing::Waiting { at_ms } => NodeState::Waiting { at_ms },
                 Standing::NoLocator => NodeState::NoHint,
                 Standing::Mismatched => NodeState::Mismatched,
@@ -1217,6 +1292,7 @@ impl<D: Dialer> ConnectManager<D> {
                 at_ms: row.due.map_or(0, |due| due.at_ms),
             },
             Some(PeerConnectionState::IdentityMismatch) => Standing::Mismatched,
+            Some(PeerConnectionState::Passive) => Standing::Passive,
             // The manager tells a machine that a session came up, that a dial failed, or that
             // another node answered, so no other refusal is a state a peer is in.
             _ => Standing::Live,
@@ -1325,7 +1401,7 @@ impl<D: Dialer> ConnectManager<D> {
             let Some(asked) = next else {
                 return;
             };
-            let _ = self.open_node(asked.zid, now_ms);
+            let _ = self.start_node(asked.zid, asked.passive, now_ms);
         }
     }
 
@@ -1350,12 +1426,12 @@ impl<D: Dialer> ConnectManager<D> {
             if cfg!(feature = "lifecycle-close") && asked.withdraw {
                 self.close_node(&asked.zid, now_ms);
                 if asked.reopen {
-                    let _ = self.open_node(asked.zid, now_ms);
+                    let _ = self.start_node(asked.zid, asked.passive, now_ms);
                 }
                 continue;
             }
             if asked.open {
-                let _ = self.open_node(asked.zid, now_ms);
+                let _ = self.start_node(asked.zid, asked.passive, now_ms);
             }
             #[cfg(feature = "lifecycle-reset")]
             if asked.closing {
@@ -1372,7 +1448,11 @@ impl<D: Dialer> ConnectManager<D> {
             for row in self.rows.iter() {
                 if let Key::Node(zid) = &row.key {
                     // As many rows for nodes as the limit, which the mirror is sized by.
-                    let _ = t.held.push(HeldNode { zid: *zid });
+                    let passive = matches!(
+                        t.planner.state(&row.key),
+                        Some(PeerConnectionState::Passive | PeerConnectionState::PassiveUp)
+                    );
+                    let _ = t.held.push(HeldNode { zid: *zid, passive });
                 }
             }
         });
@@ -1388,6 +1468,10 @@ impl<D: Dialer> ConnectManager<D> {
                 if let Key::Node(zid) = &row.key {
                     let node = HeldNode {
                         zid: *zid,
+                        passive: matches!(
+                            t.planner.state(&row.key),
+                            Some(PeerConnectionState::Passive | PeerConnectionState::PassiveUp)
+                        ),
                         links: u32::from(row.held.is_some()),
                         #[cfg(feature = "lifecycle-status")]
                         state: t
@@ -1414,6 +1498,38 @@ impl<D: Dialer> ConnectManager<D> {
     /// refused, and takes no row, when its dial could not be told from one to another node, or
     /// when the node holds as many as it was built for.
     pub fn open_node(&mut self, zid: DirectoryZid, now_ms: u64) -> Result<(), NodeRefusal> {
+        self.hold_node(zid, OpenMode::Dial, now_ms)
+    }
+
+    /// Hold the node `zid` in the passive form of `open` (decision D10): the node's own session
+    /// is waited for and nothing is dialled. A node already held is unchanged; one held for
+    /// dialling is not made passive, since a dialling intent is the stronger.
+    pub fn open_node_passive(&mut self, zid: DirectoryZid, now_ms: u64) -> Result<(), NodeRefusal> {
+        self.hold_node(zid, OpenMode::Passive, now_ms)
+    }
+
+    /// Hold the node `zid` as a request made outside the loop asked: dialling it, or waiting
+    /// for it.
+    fn start_node(
+        &mut self,
+        zid: DirectoryZid,
+        passive: bool,
+        now_ms: u64,
+    ) -> Result<(), NodeRefusal> {
+        let mode = if passive {
+            OpenMode::Passive
+        } else {
+            OpenMode::Dial
+        };
+        self.hold_node(zid, mode, now_ms)
+    }
+
+    fn hold_node(
+        &mut self,
+        zid: DirectoryZid,
+        mode: OpenMode,
+        now_ms: u64,
+    ) -> Result<(), NodeRefusal> {
         if !D::VERIFIES_NODES {
             return Err(NodeRefusal::Unverifiable);
         }
@@ -1437,8 +1553,13 @@ impl<D: Dialer> ConnectManager<D> {
         self.mirror_held();
         self.drive(now_ms, &mut |planner, ports, next_id, emit| {
             // The table holds as many peers as the rows do.
-            let _ = planner.open(key, ports, next_id, emit);
+            let _ = match mode {
+                OpenMode::Dial => planner.open(key, ports, next_id, emit),
+                OpenMode::Passive => planner.open_passive(key, ports, next_id, emit),
+            };
         });
+        // The mirror says whether the node is waited for, which the machine has just decided.
+        self.mirror_held();
         Ok(())
     }
 
@@ -1512,6 +1633,39 @@ impl<D: Dialer> ConnectManager<D> {
                     planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
                 }
             });
+        }
+        self.mirror_held();
+    }
+
+    /// Say which nodes have a session of their own to this node whose key proved their zid, as
+    /// of now (decision D10): `zids` is every such node, from the sessions the node accepted. A
+    /// node waiting under a passive intent whose zid is among them holds that session, and one
+    /// that held it and is not among them goes back to waiting. A node in any other state is
+    /// left as it is: the accept policy admitted or refused the session before this was asked.
+    pub fn inbound_sessions(&mut self, zids: &[DirectoryZid], now_ms: u64) {
+        for at in 0..self.rows.len() {
+            let Key::Node(zid) = self.rows[at].key else {
+                continue;
+            };
+            let key = Key::Node(zid);
+            let present = zids.contains(&zid);
+            match self.store.get().with(|t| t.planner.state(&key)) {
+                Some(PeerConnectionState::Passive) if present => {
+                    self.drive(now_ms, &mut |planner, ports, next_id, emit| {
+                        // A face of the planner's own numbering, as a dial is given: the
+                        // planner holds the session by it until the session is gone.
+                        let id = *next_id;
+                        *next_id += 1;
+                        planner.inbound_up(key, id, ports, next_id, emit);
+                    });
+                }
+                Some(PeerConnectionState::PassiveUp) if !present => {
+                    self.drive(now_ms, &mut |planner, ports, next_id, emit| {
+                        planner.inbound_down(&key, ports, next_id, emit);
+                    });
+                }
+                _ => {}
+            }
         }
         self.mirror_held();
     }
@@ -2454,6 +2608,89 @@ mod tests {
         );
     }
 
+    /// Decision D10: a node held under the passive form of `open` is waited for and not dialled,
+    /// though a hint is there; the session it opens is held, its loss is waited out, and a
+    /// dialling `open` is the other start event and dials it.
+    #[test]
+    fn a_passive_node_is_waited_for_and_a_dialling_open_dials_it_as_well() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        std::assert_eq!(m.open_node_passive(NODE_A, 0), Ok(()));
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Passive);
+        m.tick(1_000);
+        std::assert!(
+            m.dialer().dials_for.borrow().is_empty(),
+            "a hint is there, and nothing is dialled"
+        );
+
+        m.inbound_sessions(&[NODE_B], 2_000);
+        std::assert_eq!(
+            m.node_states().next().unwrap().1,
+            NodeState::Passive,
+            "another node's session is not this node's"
+        );
+        m.inbound_sessions(&[NODE_A], 2_000);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+        m.inbound_sessions(&[], 3_000);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Passive);
+        std::assert!(m.dialer().dials_for.borrow().is_empty());
+
+        std::assert_eq!(m.open_node(NODE_A, 4_000), Ok(()));
+        let made: Vec<(String, DirectoryZid)> =
+            m.dialer().dials_for.borrow_mut().drain(..).collect();
+        std::assert_eq!(made, [(String::from("udp/10.0.0.9:7447"), NODE_A)]);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+
+        // A node dialled is not made passive by a passive open, and a session the peer opens
+        // changes nothing of a node whose intent dials.
+        std::assert_eq!(m.open_node_passive(NODE_A, 5_000), Ok(()));
+        m.inbound_sessions(&[NODE_A], 5_000);
+        m.inbound_sessions(&[], 6_000);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+        std::assert!(m.dialer().dials_for.borrow().is_empty());
+    }
+
+    /// Decision D10: the opener a request is made through takes the passive form, and a dialling
+    /// `open` of a node held that way is the one that changes it; asked twice, either is the same.
+    #[test]
+    fn the_opener_takes_a_passive_open_and_a_dialling_open_changes_it() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        let opener = m.node_opener().expect("a static store has an opener");
+        if !nodes_asked_for() {
+            return;
+        }
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        std::assert_eq!(opener.open_passive(&NODE_A), Ok(()));
+        std::assert_eq!(opener.open_passive(&NODE_A), Ok(()));
+        std::assert_eq!(m.node_states().count(), 0, "nothing is held until the tick");
+        m.tick(1);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Passive);
+        std::assert!(m.dialer().dials_for.borrow().is_empty());
+        std::assert_eq!(opener.open_passive(&NODE_A), Ok(()));
+        m.tick(2);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Passive);
+
+        std::assert_eq!(opener.open(&NODE_A), Ok(()));
+        m.tick(3);
+        std::assert_eq!(
+            m.dialer().dials_for.borrow().len(),
+            1,
+            "the other start event"
+        );
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+        std::assert_eq!(opener.open_passive(&NODE_A), Ok(()));
+        m.tick(4);
+        std::assert_eq!(m.dialer().dials_for.borrow().len(), 1);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+    }
+
     /// A dialer that does not hold a session to the node it was made for is not asked to dial one:
     /// the session would be to whichever node answered the hint.
     #[test]
@@ -2726,8 +2963,8 @@ mod tests {
             fn permits(&self, verb: Verb) -> bool {
                 self.inner.permits(verb)
             }
-            fn open(&self, peer: &Zid) -> OpenOutcome {
-                self.inner.open(peer)
+            fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
+                self.inner.open(peer, mode)
             }
             fn withdraw(&self, peer: &Zid) {
                 self.inner.withdraw(peer);

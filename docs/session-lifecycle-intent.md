@@ -1176,6 +1176,26 @@ neither widens nor narrows that. Two ends that both dial are the connection
 collision `link_admission` already resolves (RFC 4271 section 6.8: compare
 the two zids, keep the link the lower one opened), so this adds no new rule.
 
+Built (Round 4046). The machine gains `Passive` and `PassiveUp` and the events
+`manual.start_passive` and `inbound.established`; a passive peer arms no retry and
+dials nothing, the peer's session is held under it, and its loss goes back to
+`Passive` and not to `Backoff`. A dialling `open` of a passive peer is the other
+start event and dials as well; a passive `open` of a peer already dialled changes
+nothing, since the dialling intent is the stronger. The key reader of every
+profile (`LifecycleKey`, `OpenKey`, `VerbKey`) has one tail reader, which admits
+`passive` before the peer of an open and nothing else there. The control port
+spells it `open passive <peer>`, the status read says `passive` for the waiting
+state and `established` with the cause `passive` for a held session, and the
+contract table has two cases, one taken and one refused by the permit, both
+judged on the mode the opener was asked in. AP: the opener sends
+`AddNodePassive`, the loop's peers wait, and an accepted session whose key proved
+the peer's zid is claimed by the waiting peer (an unverified claim of the zid is
+not). Fixed profile: `ConnectManager::open_node_passive`, and `inbound_sessions`,
+which the slot node calls each tick with the verified accepted sessions' zids.
+Witnessed by the machine, planner, manager and loop tests; not yet witnessed over
+a real secure channel with a peer that connects in, which needs a verified
+inbound session (carried).
+
 **D11. One atom.** `session-close-ingress` stays one atom, PARTIAL while it has
 residuals. A second atom would carry a second cargo feature gating the same
 verbs, the phantom split of catalog invariant 1 that Round 3450 declined when
@@ -1244,9 +1264,7 @@ is refused as `NoRoom` on the fixed profile; on the AP the table's refusal is
 the loop's and is logged, because the opener answers before the loop sees the
 request (carried).
 
-What the rulings leave to build, in order: D10 (the SCXML event and the intent's
-`passive` attribute, the key chunk, the control port's word, the status field and
-two cases in the contract's table); D12 (the commander in the permit port, the
+What the rulings leave to build, in order: D12 (the commander in the permit port, the
 `commander` role, the image that binds the verbs); D14 (the lane's step on
 the image). D11 and D13 change what the atom is graded against and need no code.
 

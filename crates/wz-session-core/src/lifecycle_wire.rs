@@ -23,6 +23,54 @@ use crate::text_out::TextOut;
 /// The verb the open query carries in its key.
 pub const OPEN_VERB: &str = "open";
 
+/// The chunk before the peer that makes an open passive (decision D10):
+/// `@/<zid>/<whatami>/session/open/passive/<peer-zid>`. A zid is lower-case hex, so the word
+/// cannot be taken for one, and `reset` already carries its generation in the same place.
+pub const PASSIVE_CHUNK: &str = "passive";
+
+/// How an open holds the peer (decision D10): BGP's two administrative start events, the same
+/// machine started either to dial or to wait for the remote's own session
+/// (RFC 4271, section 8.1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenMode {
+    /// Dial the peer: `ManualStart`.
+    #[default]
+    Dial,
+    /// Wait for the peer's session and dial nothing: `ManualStart_with_PassiveTcpEstablishment`.
+    Passive,
+}
+
+impl OpenMode {
+    /// The mode an open key's argument chunk names, or `None` for a chunk that is no mode.
+    pub fn of_argument(argument: Option<&str>) -> Option<Self> {
+        match argument {
+            None => Some(Self::Dial),
+            Some(PASSIVE_CHUNK) => Some(Self::Passive),
+            Some(_) => None,
+        }
+    }
+}
+
+/// The chunks after the verb of a lifecycle key: the verb's argument, for the verbs that take one
+/// (`reset`'s generation, `open`'s `passive`), and the peer. `None` when the verb has the wrong
+/// number of chunks, or `open` carries a chunk that is not `passive`.
+pub(crate) fn tail_of<'a>(
+    verb: &str,
+    mut chunks: core::str::Split<'a, char>,
+) -> Option<(Option<&'a str>, &'a str)> {
+    let first = chunks.next()?;
+    let second = chunks.next();
+    if chunks.next().is_some() {
+        return None;
+    }
+    match (verb, second) {
+        (RESET_VERB, Some(peer)) => Some((Some(first), peer)),
+        (OPEN_VERB, Some(peer)) if first == PASSIVE_CHUNK => Some((Some(first), peer)),
+        (RESET_VERB, None) | (_, Some(_)) => None,
+        (_, None) => Some((None, first)),
+    }
+}
+
 /// What a node's opener made of a request to hold a peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenOutcome {
@@ -452,33 +500,34 @@ pub struct OpenKey<'a> {
     pub whatami: &'a str,
     /// The peer the node is asked to hold, as the key spells it.
     pub peer_zid: &'a str,
+    /// How the peer is held (decision D10): dialled, or waited for.
+    pub mode: OpenMode,
 }
 
 impl<'a> OpenKey<'a> {
     /// The open key `keyexpr` is, or `None` when it is not one.
     ///
-    /// Exactly six chunks, `@` first, `session` fourth and `open` fifth, none empty, and no
-    /// wildcard in the node, the role or the peer: a wildcard open would be "hold every
-    /// peer that matches", and a key that merely intersects this one is not a target the
-    /// caller meant (`lifecycle_query`'s module documentation gives the reason for every
-    /// verb that acts).
+    /// Six chunks, `@` first, `session` fourth and `open` fifth, or seven with the literal
+    /// `passive` between the verb and the peer (decision D10), none empty, and no wildcard in
+    /// the node, the role or the peer: a wildcard open would be "hold every peer that
+    /// matches", and a key that merely intersects this one is not a target the caller meant
+    /// (`lifecycle_query`'s module documentation gives the reason for every verb that acts).
     pub fn parse(keyexpr: &'a str) -> Option<Self> {
         let mut chunks = keyexpr.split('/');
-        let (at, node_zid, whatami, session, verb, peer_zid) = (
-            chunks.next()?,
+        let (at, node_zid, whatami, session, verb) = (
             chunks.next()?,
             chunks.next()?,
             chunks.next()?,
             chunks.next()?,
             chunks.next()?,
         );
-        if chunks.next().is_some()
-            || at != "@"
-            || session != "session"
-            || verb != OPEN_VERB
-            || [node_zid, whatami, peer_zid]
-                .iter()
-                .any(|chunk| chunk.is_empty() || chunk.contains(['*', '$']))
+        if at != "@" || session != "session" || verb != OPEN_VERB {
+            return None;
+        }
+        let (argument, peer_zid) = tail_of(verb, chunks)?;
+        if [node_zid, whatami, peer_zid]
+            .iter()
+            .any(|chunk| chunk.is_empty() || chunk.contains(['*', '$']))
         {
             return None;
         }
@@ -486,6 +535,7 @@ impl<'a> OpenKey<'a> {
             node_zid,
             whatami,
             peer_zid,
+            mode: OpenMode::of_argument(argument)?,
         })
     }
 
@@ -511,7 +561,8 @@ pub struct VerbKey<'a> {
     pub whatami: &'a str,
     /// The verb: one of [`VERBS`].
     pub verb: &'a str,
-    /// A reset's generation as the key spells it; `None` for every other verb.
+    /// The verb's argument as the key spells it: a reset's generation, or the `passive` of an
+    /// open (decision D10); `None` for every other key.
     pub generation: Option<&'a str>,
     /// The peer, as the key spells it.
     pub peer_zid: &'a str,
@@ -533,14 +584,7 @@ impl<'a> VerbKey<'a> {
         if at != "@" || session != "session" || !VERBS.contains(&verb) {
             return None;
         }
-        let (generation, peer_zid) = if verb == RESET_VERB {
-            (Some(chunks.next()?), chunks.next()?)
-        } else {
-            (None, chunks.next()?)
-        };
-        if chunks.next().is_some() {
-            return None;
-        }
+        let (generation, peer_zid) = tail_of(verb, chunks)?;
         let named = [node_zid, whatami, peer_zid]
             .into_iter()
             .chain(generation)
@@ -606,6 +650,41 @@ mod tests {
         }
         let not_a_zid = OpenKey::parse("@/aa/peer/session/open/01").expect("still an open key");
         assert_eq!(not_a_zid.peer(), None, "a leading zero is no zid");
+    }
+
+    /// Decision D10: the chunk `passive` before the peer makes an open passive, and no other
+    /// chunk there is a mode; every reader of a lifecycle key reads it the same way.
+    #[test]
+    fn a_passive_open_key_carries_the_literal_chunk_before_the_peer() {
+        let key = OpenKey::parse("@/aa/peer/session/open/passive/1f").expect("a passive open");
+        assert_eq!((key.peer_zid, key.mode), ("1f", OpenMode::Passive));
+        let key = OpenKey::parse("@/aa/peer/session/open/1f").expect("an open");
+        assert_eq!(key.mode, OpenMode::Dial);
+        for refused in [
+            "@/aa/peer/session/open/active/1f",
+            "@/aa/peer/session/open/*/1f",
+            "@/aa/peer/session/open/passive/*",
+            "@/aa/peer/session/open/passive/1f/x",
+            "@/aa/peer/session/open//1f",
+            "@/aa/peer/session/close/passive/1f",
+            "@/aa/peer/session/status/passive/1f",
+        ] {
+            assert_eq!(OpenKey::parse(refused), None, "{refused}");
+        }
+        // The mode word alone is six chunks, an open of a peer named `passive`, which is no zid.
+        let named = OpenKey::parse("@/aa/peer/session/open/passive").expect("an open key");
+        assert_eq!((named.mode, named.peer()), (OpenMode::Dial, None));
+        let verb = VerbKey::parse("@/aa/peer/session/open/passive/1f").expect("a verb key");
+        assert_eq!(
+            (verb.verb, verb.generation, verb.peer_zid),
+            ("open", Some("passive"), "1f")
+        );
+        assert_eq!(VerbKey::parse("@/aa/peer/session/close/passive/1f"), None);
+        assert_eq!(
+            OpenMode::of_argument(Some("passive")),
+            Some(OpenMode::Passive)
+        );
+        assert_eq!(OpenMode::of_argument(Some("7")), None);
     }
 
     #[test]

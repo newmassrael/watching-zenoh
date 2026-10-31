@@ -45,7 +45,7 @@ use std::sync::Arc;
 use wz_routing_graph::Zid;
 use wz_session_core::credential_identity::zid_from_wire;
 use wz_session_core::drive::{LifecycleKey, SessionOpener};
-use wz_session_core::lifecycle_query::{OpenOutcome, PeerOpener};
+use wz_session_core::lifecycle_query::{OpenMode, OpenOutcome, PeerOpener};
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
 use crate::accept_loop::{ConnectReconcile, ReconcileSender};
@@ -129,7 +129,7 @@ impl LinkstateOpener {
     /// refusal is the loop's and not this opener's guess about reachability. The
     /// refusals left are the facts this opener can tell: a target that is not a zid
     /// at all, and a face loop that is gone.
-    fn ask(&self, peer_zid: &[u8]) -> OpenOutcome {
+    fn ask(&self, peer_zid: &[u8], mode: OpenMode) -> OpenOutcome {
         let name = wz_session_core::zid_hex::zid_to_zenoh_hex(peer_zid);
         let Some(expected) = zid_from_wire(peer_zid) else {
             log::warn!(
@@ -137,6 +137,21 @@ impl LinkstateOpener {
             );
             return OpenOutcome::NotAZid;
         };
+        // The passive form dials nothing (decision D10), so it needs no locator and reads none.
+        if mode == OpenMode::Passive {
+            if self
+                .reconcile
+                .send(ConnectReconcile::AddNodePassive { zid: expected })
+                .is_err()
+            {
+                log::warn!(
+                    "LinkstateOpener: the face loop is gone, so the passive request for \
+                     `{name}` reached nobody."
+                );
+                return OpenOutcome::OpenerGone;
+            }
+            return OpenOutcome::Accepted;
+        }
         let zid = Zid::from_slice(peer_zid);
 
         let advertised = self.locators.of(&zid).unwrap_or_default();
@@ -196,13 +211,17 @@ impl SessionOpener for LinkstateOpener {
             );
             return false;
         };
-        self.ask(&bytes) == OpenOutcome::Accepted
+        // The grammar admits no argument of an open but `passive`; a key with another is no open.
+        let Some(mode) = OpenMode::of_argument(key.argument) else {
+            return false;
+        };
+        self.ask(&bytes, mode) == OpenOutcome::Accepted
     }
 }
 
 impl PeerOpener for LinkstateOpener {
-    fn open(&self, peer_zid: &[u8]) -> OpenOutcome {
-        self.ask(peer_zid)
+    fn open(&self, peer_zid: &[u8], mode: OpenMode) -> OpenOutcome {
+        self.ask(peer_zid, mode)
     }
 }
 
@@ -361,7 +380,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let opener = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
-        assert_eq!(opener.open(PEER_ZID), OpenOutcome::Accepted);
+        assert_eq!(opener.open(PEER_ZID, OpenMode::Dial), OpenOutcome::Accepted);
         match rx.try_recv().expect("a reconcile request was sent") {
             ConnectReconcile::AddNode { zid, locators } => {
                 assert_eq!(Some(zid), zid_from_wire(PEER_ZID));
@@ -370,7 +389,7 @@ mod tests {
             other => panic!("open must ADD the node to the connect set, got {other:?}"),
         }
         assert_eq!(
-            opener.open(&[0xff, 0xff]),
+            opener.open(&[0xff, 0xff], OpenMode::Dial),
             OpenOutcome::Accepted,
             "a zid nobody advertised is asked for with no locator"
         );
@@ -382,7 +401,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let garbled = LinkstateOpener::new(seeded(&["no-such-scheme/1.2.3.4:5"]), tx);
         assert_eq!(
-            garbled.open(PEER_ZID),
+            garbled.open(PEER_ZID, OpenMode::Dial),
             OpenOutcome::Accepted,
             "locators the node advertised, none of which parses, are none to dial"
         );
@@ -394,7 +413,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let opener = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
         assert_eq!(
-            opener.open(&[0u8; 17]),
+            opener.open(&[0u8; 17], OpenMode::Dial),
             OpenOutcome::NotAZid,
             "more bytes than a zid has"
         );
@@ -403,7 +422,51 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let orphaned = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
         drop(rx);
-        assert_eq!(orphaned.open(PEER_ZID), OpenOutcome::OpenerGone);
+        assert_eq!(
+            orphaned.open(PEER_ZID, OpenMode::Dial),
+            OpenOutcome::OpenerGone
+        );
+    }
+
+    /// Decision D10: the passive form asks the loop to wait for the node, with no locator and
+    /// without reading the graphs, and the in-band key carries the same request.
+    #[test]
+    fn a_passive_open_asks_the_loop_to_wait_for_the_node() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let opener = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
+        assert_eq!(
+            opener.open(PEER_ZID, OpenMode::Passive),
+            OpenOutcome::Accepted
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ConnectReconcile::AddNodePassive { zid }) if Some(zid) == zid_from_wire(PEER_ZID)
+        ));
+
+        let raw = format!(
+            "@/0100/peer/session/open/passive/{}",
+            zid_to_zenoh_hex(PEER_ZID)
+        );
+        let key = LifecycleKey::parse(&raw).expect("a passive open key");
+        assert!(opener.request_open(&key));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ConnectReconcile::AddNodePassive { .. })
+        ));
+
+        let bad = format!(
+            "@/0100/peer/session/open/active/{}",
+            zid_to_zenoh_hex(PEER_ZID)
+        );
+        assert!(
+            LifecycleKey::parse(&bad).is_none(),
+            "no other mode is a key"
+        );
+        assert_eq!(
+            opener.open(&[0u8; 17], OpenMode::Passive),
+            OpenOutcome::NotAZid
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     /// The whole join in one arm, the query form: a GET on the open key, answered by
@@ -499,7 +562,7 @@ mod tests {
         let peers = seeded(&[ADVERTISED, "tcp/127.0.0.1:7448"]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let opener = LinkstateOpener::over(NodeLocators::new(vec![routers, peers]), tx);
-        opener.open(PEER_ZID);
+        opener.open(PEER_ZID, OpenMode::Dial);
         match rx.try_recv().expect("a reconcile request was sent") {
             ConnectReconcile::AddNode { locators, .. } => assert_eq!(
                 locators,

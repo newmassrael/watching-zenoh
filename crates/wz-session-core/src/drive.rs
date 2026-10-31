@@ -2557,10 +2557,11 @@ pub struct LifecycleKey<'a> {
     pub whatami: &'a str,
     /// The verb: `close`, and later its siblings.
     pub verb: &'a str,
-    /// The verb's argument, for the one verb that takes one: `reset`'s
+    /// The verb's argument, for the verbs that take one: `reset`'s
     /// generation, `@/<zid>/<whatami>/session/reset/<generation>/<peer-zid>`
-    /// (decision D6 of `docs/session-lifecycle-intent.md`). `None` for every
-    /// other verb.
+    /// (decision D6 of `docs/session-lifecycle-intent.md`), and the `passive`
+    /// of an open, `.../session/open/passive/<peer-zid>` (decision D10).
+    /// `None` for every other key.
     pub argument: Option<&'a str>,
     /// WHICH session the verb acts on — the `<peer-zid>` chunk, and the reason
     /// the target is in the key instead of the payload.
@@ -2597,15 +2598,7 @@ impl<'a> LifecycleKey<'a> {
         let whatami = chunks.next()?;
         let session = chunks.next()?;
         let verb = chunks.next()?;
-        let argument = if verb == RESET_VERB {
-            Some(chunks.next()?)
-        } else {
-            None
-        };
-        let peer_zid = chunks.next()?;
-        if chunks.next().is_some() {
-            return None;
-        }
+        let (argument, peer_zid) = crate::lifecycle_wire::tail_of(verb, chunks)?;
         if at != "@" || session != "session" {
             return None;
         }

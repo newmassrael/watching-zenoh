@@ -597,7 +597,7 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
     if parsed.node_zid != zid_hex || parsed.whatami != whatami {
         return;
     }
-    let verdict = open_verdict(opener, parsed.peer_zid);
+    let verdict = open_verdict(opener, parsed.peer_zid, parsed.mode);
     // The key's own tail, `session/open/<peer>`: it follows `@/<zid>/<whatami>/`, which the
     // parse has just held to name this node. A reply the arena refuses is counted there; the
     // open has happened either way, as the heap profile's reply says.
@@ -664,7 +664,15 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
     // A verb the build did not compile in is no query of this node's: nothing is replied, as for a
     // node that binds no opener.
     let (verb, command) = match parsed.verb {
-        OPEN_VERB => (Verb::Open, Command::Open { peer }),
+        OPEN_VERB => {
+            // The grammar admits no argument of an open but `passive` (VerbKey has read it).
+            let Some(mode) =
+                wz_session_core::lifecycle_wire::OpenMode::of_argument(parsed.generation)
+            else {
+                return;
+            };
+            (Verb::Open, Command::Open { peer, mode })
+        }
         CLOSE_VERB => (Verb::Close, Command::Close { peer }),
         RESET_VERB => (
             Verb::Reset,

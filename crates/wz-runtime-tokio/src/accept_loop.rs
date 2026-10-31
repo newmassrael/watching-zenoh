@@ -483,6 +483,15 @@ pub enum ConnectReconcile {
         /// The locators the graph holds for the node, as the node advertised them.
         locators: Vec<String>,
     },
+    /// Decision D10 — hold a NODE by the passive form of `open`: its machine is
+    /// started to wait for the node's own session and dials nothing. The node's
+    /// locators are not needed, so none travel; a later `open` of the node dials
+    /// it at whatever the loop's directory then holds for it.
+    #[cfg(feature = "session-close-ingress")]
+    AddNodePassive {
+        /// The node's zid in its sixteen-byte form.
+        zid: DirectoryZid,
+    },
     /// Decision D6 — take a NODE out of the intent: a lifecycle `close`. Every
     /// machine that holds it is stopped — its own, and each configured
     /// endpoint's whose last session reached it — so no session to it is
@@ -579,6 +588,12 @@ pub enum ConnectPlan {
         /// The locators the graph holds for the node, as the node advertised them.
         locators: Vec<String>,
     },
+    /// A node held by the passive form of `open` (decision D10).
+    #[cfg(feature = "session-close-ingress")]
+    NodePassive {
+        /// The node's zid in its sixteen-byte form.
+        zid: DirectoryZid,
+    },
     /// A node out of the intent (decision D6).
     #[cfg(feature = "session-close-ingress")]
     Withdraw {
@@ -613,6 +628,8 @@ pub fn fold_connect_reconcile(
         ConnectReconcile::AddNode { zid, locators } => {
             return ConnectPlan::Node { zid, locators };
         }
+        #[cfg(feature = "session-close-ingress")]
+        ConnectReconcile::AddNodePassive { zid } => return ConnectPlan::NodePassive { zid },
         #[cfg(feature = "session-close-ingress")]
         ConnectReconcile::Withdraw { zid } => return ConnectPlan::Withdraw { zid },
     };
@@ -3674,6 +3691,31 @@ where
                             #[cfg(feature = "session-close-ingress")]
                             peer_sessions.insert(id, opened.actions.clone());
                         }
+                        // Decision D10 — a session the node accepted, from a peer whose key
+                        // proved its zid: a node waiting for that peer under a passive intent
+                        // holds it. The admission is the accept policy's, which this neither
+                        // widens nor narrows; only a peer the node already waits for is
+                        // affected, and an unverified claim of its zid is not the peer.
+                        #[cfg(all(
+                            feature = "router-connect-reconcile",
+                            feature = "session-close-ingress"
+                        ))]
+                        if !peer_dial && !face.dialed && opened.actions.peer_identity_verified() {
+                            if let Some(zid) = face
+                                .peer_zid
+                                .as_deref()
+                                .and_then(wz_session_core::credential_identity::zid_from_wire)
+                            {
+                                let cx = peer_cx!();
+                                let actions = peers.inbound_up(zid, id, &cx, &mut next_id);
+                                if peers.state(&crate::loop_peers::PeerKey::Node(zid))
+                                    == Some(wz_session_core::peer_connection::PeerConnectionState::PassiveUp)
+                                {
+                                    peer_sessions.insert(id, opened.actions.clone());
+                                }
+                                take_peer_actions!(actions);
+                            }
+                        }
                         faces.insert(id, face.peer_zid.clone());
                         collisions.admitted(id, face.dialed);
                         summary.established += 1;
@@ -4222,6 +4264,14 @@ where
                             );
                             let cx = peer_cx!();
                             let actions = peers.open_node(zid, &cx, &mut next_id);
+                            take_peer_actions!(actions);
+                        }
+                        // Decision D10 — the passive form of `open`: the node's
+                        // machine waits for the node's own session.
+                        #[cfg(feature = "session-close-ingress")]
+                        ConnectPlan::NodePassive { zid } => {
+                            let cx = peer_cx!();
+                            let actions = peers.open_node_passive(zid, &cx, &mut next_id);
                             take_peer_actions!(actions);
                         }
                         // Decision D6 — a lifecycle `close`: every machine that
@@ -4827,7 +4877,9 @@ mod tests {
                     peers.set_endpoints(targets, replace, &cx, next_id)
                 }
                 #[cfg(feature = "session-close-ingress")]
-                ConnectPlan::Node { .. } | ConnectPlan::Withdraw { .. } => {
+                ConnectPlan::Node { .. }
+                | ConnectPlan::NodePassive { .. }
+                | ConnectPlan::Withdraw { .. } => {
                     panic!("an endpoint request plans no node")
                 }
             }
@@ -4922,10 +4974,18 @@ mod tests {
                 assert_eq!(targets[0].key, MeshDialKey::Ip(addr));
                 assert_eq!(targets[0].expected_zid, None, "a locator names no node");
             }
-            ConnectPlan::Node { .. } | ConnectPlan::Withdraw { .. } => {
+            ConnectPlan::Node { .. }
+            | ConnectPlan::NodePassive { .. }
+            | ConnectPlan::Withdraw { .. } => {
                 panic!("an add of locators plans no node")
             }
         }
+
+        // Decision D10 — the passive form is its own plan, carrying no locators.
+        let passive = fold_connect_reconcile(ConnectReconcile::AddNodePassive { zid }, |_| {
+            panic!("nothing is folded here")
+        });
+        assert_eq!(passive, ConnectPlan::NodePassive { zid });
 
         let handed = fold_connect_reconcile(
             ConnectReconcile::AddNode {

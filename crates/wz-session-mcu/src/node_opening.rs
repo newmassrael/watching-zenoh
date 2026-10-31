@@ -14,7 +14,7 @@
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::lifecycle_node::{self, Generation, LifecycleNode, Verb, Zid};
 use wz_session_core::lifecycle_wire::{
-    CloseOrder, MachineReport, OpenOutcome, OpenVerdict, SessionLinks,
+    CloseOrder, MachineReport, OpenMode, OpenOutcome, OpenVerdict, SessionLinks,
 };
 
 /// What an open request asks of the node: whether it may be asked, and to hold a peer by its zid
@@ -42,7 +42,7 @@ pub trait NodeOpening {
     /// in the node's connection status. Asking again for a peer already held changes nothing
     /// and is accepted again, so a transport that cannot tell whether its request arrived may
     /// repeat it.
-    fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES]) -> OpenOutcome;
+    fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES], mode: OpenMode) -> OpenOutcome;
 }
 
 /// The opener of a node that binds no in-band verb: the third value of decision D7, where the
@@ -58,7 +58,7 @@ impl NodeOpening for NoOpening {
         false
     }
 
-    fn open(&self, _zid: &[u8; CREDENTIAL_ZID_BYTES]) -> OpenOutcome {
+    fn open(&self, _zid: &[u8; CREDENTIAL_ZID_BYTES], _mode: OpenMode) -> OpenOutcome {
         // Not reached: the answer never asks an opener that is not `BOUND`. Were it reached, a
         // node that binds no verb takes no peer by request, which is `NoRoom`'s meaning.
         OpenOutcome::NoRoom
@@ -71,8 +71,12 @@ impl NodeOpening for NoOpening {
 ///
 /// Decided by `lifecycle_node::open_verdict`, the function every verb of every profile is decided
 /// by, over [`OpeningOnly`]: a node that binds this verb alone.
-pub fn open_verdict<O: NodeOpening + ?Sized>(opener: &O, peer_text: &str) -> OpenVerdict {
-    lifecycle_node::open_verdict(&OpeningOnly(opener), peer_text)
+pub fn open_verdict<O: NodeOpening + ?Sized>(
+    opener: &O,
+    peer_text: &str,
+    mode: OpenMode,
+) -> OpenVerdict {
+    lifecycle_node::open_verdict(&OpeningOnly(opener), peer_text, mode)
 }
 
 /// A node that binds the open verb alone, as the fixed in-band query and the first control port
@@ -88,8 +92,8 @@ impl<O: NodeOpening + ?Sized> LifecycleNode for OpeningOnly<'_, O> {
         matches!(verb, Verb::Open) && self.0.permitted()
     }
 
-    fn open(&self, zid: &Zid) -> OpenOutcome {
-        self.0.open(zid)
+    fn open(&self, zid: &Zid, mode: OpenMode) -> OpenOutcome {
+        self.0.open(zid, mode)
     }
 
     fn withdraw(&self, _zid: &Zid) {}
@@ -122,6 +126,7 @@ mod tests {
         permit: bool,
         outcome: OpenOutcome,
         asked: Cell<Option<[u8; CREDENTIAL_ZID_BYTES]>>,
+        mode: Cell<Option<OpenMode>>,
         times: Cell<u32>,
     }
 
@@ -131,6 +136,7 @@ mod tests {
                 permit,
                 outcome,
                 asked: Cell::new(None),
+                mode: Cell::new(None),
                 times: Cell::new(0),
             }
         }
@@ -140,8 +146,9 @@ mod tests {
         fn permitted(&self) -> bool {
             self.permit
         }
-        fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES]) -> OpenOutcome {
+        fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES], mode: OpenMode) -> OpenOutcome {
             self.asked.set(Some(*zid));
+            self.mode.set(Some(mode));
             self.times.set(self.times.get() + 1);
             self.outcome
         }
@@ -151,7 +158,7 @@ mod tests {
     fn a_node_that_does_not_permit_is_never_asked() {
         let node = Counting::new(false, OpenOutcome::Accepted);
         assert_eq!(
-            open_verdict(&node, "abc"),
+            open_verdict(&node, "abc", OpenMode::Dial),
             OpenVerdict::Refused(RefusedReason::OpenNotPermitted)
         );
         assert_eq!(node.times.get(), 0);
@@ -162,7 +169,7 @@ mod tests {
         let node = Counting::new(true, OpenOutcome::Accepted);
         for text in ["", "0abc", "xyz", "00000000000000000000000000000000f"] {
             assert_eq!(
-                open_verdict(&node, text),
+                open_verdict(&node, text, OpenMode::Dial),
                 OpenVerdict::Refused(RefusedReason::PeerNotAZid),
                 "{text:?}"
             );
@@ -174,7 +181,10 @@ mod tests {
     fn a_zid_is_read_as_the_key_text_reads_it_and_asked_again_is_accepted_again() {
         let node = Counting::new(true, OpenOutcome::Accepted);
         for _ in 0..2 {
-            assert_eq!(open_verdict(&node, "abc"), OpenVerdict::Opening);
+            assert_eq!(
+                open_verdict(&node, "abc", OpenMode::Dial),
+                OpenVerdict::Opening
+            );
         }
         let mut expected = [0u8; CREDENTIAL_ZID_BYTES];
         expected[0] = 0xbc;
@@ -192,7 +202,20 @@ mod tests {
             (OpenOutcome::Unverifiable, RefusedReason::Unverifiable),
         ] {
             let node = Counting::new(true, outcome);
-            assert_eq!(open_verdict(&node, "1"), OpenVerdict::Refused(reason));
+            assert_eq!(
+                open_verdict(&node, "1", OpenMode::Dial),
+                OpenVerdict::Refused(reason)
+            );
+        }
+    }
+
+    /// Decision D10: the mode a request carries is the mode the node is asked in.
+    #[test]
+    fn the_mode_of_a_request_reaches_the_node() {
+        let node = Counting::new(true, OpenOutcome::Accepted);
+        for mode in [OpenMode::Dial, OpenMode::Passive] {
+            assert_eq!(open_verdict(&node, "1", mode), OpenVerdict::Opening);
+            assert_eq!(node.mode.get(), Some(mode));
         }
     }
 
@@ -200,7 +223,7 @@ mod tests {
     fn a_node_that_binds_no_verb_permits_nothing() {
         const { assert!(!NoOpening::BOUND) };
         assert_eq!(
-            open_verdict(&NoOpening, "1"),
+            open_verdict(&NoOpening, "1", OpenMode::Dial),
             OpenVerdict::Refused(RefusedReason::OpenNotPermitted)
         );
     }

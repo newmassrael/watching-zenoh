@@ -103,10 +103,11 @@ pub enum PeerTableRefusal {
 /// state names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StateWords {
-    /// `idle`, `resolving`, `connecting`, `established`, `backoff` or `refused`.
+    /// `idle`, `resolving`, `connecting`, `established`, `passive`, `backoff` or `refused`.
     pub state: &'static str,
     /// For `refused`, why: `no_locator`, `no_slot`, `identity_mismatch` or
-    /// `authority_refused`.
+    /// `authority_refused`; for `established`, `passive` when the session is the peer's own under
+    /// a passive intent (decision D10).
     pub cause: Option<&'static str>,
 }
 
@@ -120,6 +121,8 @@ impl PeerConnectionState {
             Self::Resolving => ("resolving", None),
             Self::Connecting => ("connecting", None),
             Self::Established => ("established", None),
+            Self::Passive => ("passive", None),
+            Self::PassiveUp => ("established", Some("passive")),
             Self::Backoff => ("backoff", None),
             Self::Refused => ("refused", None),
             Self::NoLocator => ("refused", Some("no_locator")),
@@ -289,6 +292,17 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
             None => self.take_entry(key)?,
         };
         Ok(self.entries[at].drive(event))
+    }
+
+    /// `open` in its passive form (decision D10, BGP's `ManualStart_with_PassiveTcpEstablishment`):
+    /// the node holds the peer and waits for the peer's own session, and dials nothing. A peer the
+    /// node already holds, or is working to hold, is unchanged: an active intent is the stronger.
+    pub fn open_passive(&mut self, key: K) -> Result<PeerDuties, PeerTableRefusal> {
+        let at = match self.position(&key) {
+            Some(at) => at,
+            None => self.take_entry(key)?,
+        };
+        Ok(self.entries[at].drive(PeerConnectionEvent::ManualStartPassive))
     }
 
     /// `close` for `key`: the node no longer holds the peer, and its session is
@@ -556,5 +570,87 @@ mod tests {
         let closed = table.state(&B).unwrap();
         assert_eq!(closed.words().state, "idle");
         assert!(!closed.in_intent(), "a closed peer is out of the intent");
+    }
+
+    /// Decision D10: the passive form of `open` holds the peer and asks the host for nothing,
+    /// the peer's own session is held under it, and its loss is waited out, not dialled.
+    #[test]
+    fn a_passive_peer_asks_for_nothing_holds_the_peers_session_and_waits_again_when_it_is_lost() {
+        let mut table = PeerTable::<DirectoryZid, 2>::new();
+        assert!(table.open_passive(A).unwrap().is_empty(), "nothing to dial");
+        assert_eq!(table.state(&A), Some(S::Passive));
+        assert_eq!(table.state(&A).unwrap().words().state, "passive");
+        assert!(table.state(&A).unwrap().in_intent());
+
+        assert!(table.report(&A, E::InboundEstablished).is_empty());
+        assert_eq!(table.state(&A), Some(S::PassiveUp));
+        assert_eq!(
+            table.state(&A).unwrap().words(),
+            StateWords {
+                state: "established",
+                cause: Some("passive")
+            }
+        );
+
+        let lost = table.report(&A, E::SessionLost);
+        assert!(
+            lost.is_empty(),
+            "a passive peer arms no retry and dials nothing"
+        );
+        assert_eq!(table.state(&A), Some(S::Passive));
+
+        table.report(&A, E::InboundEstablished);
+        assert!(
+            table.close(&A).close_session(),
+            "a close closes the session"
+        );
+        assert_eq!(table.state(&A), Some(S::Idle));
+    }
+
+    /// Decision D10: the two start events. A dialling `open` of a passive peer is the other
+    /// start event and dials; a passive `open` of a peer already dialled changes nothing; both
+    /// leave a refusal by the next start.
+    #[test]
+    fn the_two_start_events_meet_in_the_stronger() {
+        let mut table = PeerTable::<DirectoryZid, 2>::new();
+        table.open_passive(A).unwrap();
+        assert!(
+            table.open(A, true).unwrap().resolve(),
+            "an open dials it as well"
+        );
+        assert_eq!(table.state(&A), Some(S::Resolving));
+
+        assert!(table.open_passive(A).unwrap().is_empty());
+        assert_eq!(table.state(&A), Some(S::Resolving), "passive is the weaker");
+
+        table.report(&A, E::ResolveFound);
+        table.report(&A, E::DialEstablished);
+        table.open_passive(A).unwrap();
+        assert_eq!(table.state(&A), Some(S::Established));
+
+        table.open_passive(B).unwrap();
+        table.report(&B, E::InboundEstablished);
+        let again = table.open(B, true).unwrap();
+        assert!(
+            again.reset_retry(),
+            "its session is the dialling intent's from now on"
+        );
+        assert_eq!(table.state(&B), Some(S::Established));
+        assert!(
+            table.report(&B, E::SessionLost).arm_retry(),
+            "and its loss is waited out on the retry schedule, then dialled"
+        );
+        assert_eq!(table.state(&B), Some(S::Backoff));
+
+        let mut table = PeerTable::<DirectoryZid, 2>::new();
+        table.open(A, true).unwrap();
+        table.report(&A, E::ResolveEmpty);
+        assert_eq!(table.state(&A), Some(S::NoLocator));
+        table.open_passive(A).unwrap();
+        assert_eq!(
+            table.state(&A),
+            Some(S::Passive),
+            "a refusal leaves by a start"
+        );
     }
 }

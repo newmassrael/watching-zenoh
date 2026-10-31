@@ -15,6 +15,9 @@
 
   States:
     Idle        — no intent to hold the peer (the initial state).
+    Passive     — the passive intent (decision D10): the peer is held, the node
+                  waits for the peer's session and dials nothing.
+    PassiveUp   — the peer's session is up under a passive intent.
     Resolving   — find the peer's candidate locators (decision D3's directory).
     Connecting  — a session slot is taken and the candidates are dialled for the
                   peer's zid (decision D4).
@@ -61,6 +64,8 @@
 
   Events raised by the host:
     manual.start    — `open`: the authority admitted it.
+    manual.start_passive — `open` in its passive form (decision D10).
+    inbound.established — the peer's own session is up (a passive intent).
     manual.refused  — `open`: the authority refused it.
     manual.stop     — `close`.
     resolve.found   — the directory holds at least one candidate.
@@ -91,7 +96,28 @@
 
   <state id="Idle">
     <transition event="manual.start" target="Resolving"/>
+    <transition event="manual.start_passive" target="Passive"/>
     <transition event="manual.refused" target="AuthorityRefused"/>
+  </state>
+
+  <!-- The passive form of the intent (decision D10): the peer is held, and the
+       node waits for the peer's own session and dials nothing. BGP's
+       ManualStart_with_PassiveTcpEstablishment (RFC 4271, section 8.1.2). An
+       `open` while passive is the other start event: the node dials as well. -->
+  <state id="Passive">
+    <transition event="inbound.established" target="PassiveUp"/>
+    <transition event="manual.start" target="Resolving"/>
+    <transition event="manual.stop" target="Idle"/>
+  </state>
+
+  <!-- The peer's session is up and the intent is passive: when it is lost the
+       node goes back to waiting, not to dialling. -->
+  <state id="PassiveUp">
+    <transition event="session.lost" target="Passive"/>
+    <transition event="manual.start" target="Established"/>
+    <transition event="manual.stop" target="Idle">
+      <sce:action name="close_session" effect="duty"/>
+    </transition>
   </state>
 
   <state id="Resolving">
@@ -146,6 +172,7 @@
     <state id="IdentityMismatch"/>
     <state id="AuthorityRefused"/>
     <transition event="manual.start" target="Resolving"/>
+    <transition event="manual.start_passive" target="Passive"/>
     <transition event="manual.refused" target="AuthorityRefused"/>
     <transition event="manual.stop" target="Idle"/>
   </state>

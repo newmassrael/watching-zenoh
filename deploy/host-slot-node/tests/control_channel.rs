@@ -127,7 +127,7 @@ fn the_channel_conforms_to_the_contract_on_the_cases_a_node_with_no_room_can_sho
         .iter()
         .filter(|c| c.reachable_on_a_node_with_no_room())
     {
-        let line = format!("open {}", case.peer_text);
+        let line = format!("open {}{}", case.line_mode_word(), case.peer_text);
         let answers: Vec<String> = (0..REPEATS).map(|_| agent.ask(&line)).collect();
         let seen: Vec<Option<&str>> = answers.iter().map(|a| Some(a.as_str())).collect();
         judge_answers(case, &seen).unwrap_or_else(|v| panic!("{v:?}: {seen:?}"));

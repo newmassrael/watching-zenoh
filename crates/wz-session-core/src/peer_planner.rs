@@ -255,6 +255,62 @@ where
         Ok(())
     }
 
+    /// `open` in its passive form (decision D10): the peer is held and nothing is dialled. The
+    /// node waits for the peer's own session, which the host reports with [`Self::inbound_up`].
+    /// A peer already held or being reached is unchanged. `Err` when the table has no room.
+    pub fn open_passive<P: PeerPorts<K>>(
+        &mut self,
+        key: K,
+        ports: &mut P,
+        next_id: &mut u64,
+        emit: &mut dyn FnMut(PeerAction<K, I, P::Target>),
+    ) -> Result<(), PeerTableRefusal> {
+        let duties = self.table.open_passive(key.clone())?;
+        self.perform(key, duties, false, ports, next_id, emit);
+        Ok(())
+    }
+
+    /// The peer `key` opened a session to this node, which the host holds as face `id`. A peer
+    /// whose intent is passive and waiting holds it from now on: the session is its own, so its
+    /// loss is [`Self::face_down`]'s and a `close` closes it. A peer in any other state is left
+    /// as it is, and `false` says the session is no concern of the planner's.
+    pub fn inbound_up<P: PeerPorts<K>>(
+        &mut self,
+        key: K,
+        id: I,
+        ports: &mut P,
+        next_id: &mut u64,
+        emit: &mut dyn FnMut(PeerAction<K, I, P::Target>),
+    ) -> bool {
+        if self.table.state(&key) != Some(PeerConnectionState::Passive) {
+            return false;
+        }
+        self.hold(&key, id);
+        let duties = self.table.report(&key, E::InboundEstablished);
+        self.perform(key, duties, false, ports, next_id, emit);
+        true
+    }
+
+    /// The session the peer `key` opened (held by [`Self::inbound_up`]) is gone, and the host
+    /// has no face to name it by: a peer under a passive intent goes back to waiting and is
+    /// dialled by nobody. `false` for a peer in any other state, whose loss is
+    /// [`Self::face_down`]'s.
+    pub fn inbound_down<P: PeerPorts<K>>(
+        &mut self,
+        key: &K,
+        ports: &mut P,
+        next_id: &mut u64,
+        emit: &mut dyn FnMut(PeerAction<K, I, P::Target>),
+    ) -> bool {
+        if self.table.state(key) != Some(PeerConnectionState::PassiveUp) {
+            return false;
+        }
+        drop_row(&mut self.held, key);
+        let duties = self.table.report(key, E::SessionLost);
+        self.perform(key.clone(), duties, false, ports, next_id, emit);
+        true
+    }
+
     /// The retry timer `generation` of `key` fired. A timer whose arming is no
     /// longer the peer's changes nothing.
     pub fn retry_due<P: PeerPorts<K>>(
@@ -678,6 +734,59 @@ mod tests {
         assert!(
             !plan.face_down(Face(9), &mut host, &mut next_id, &mut |_| {}),
             "a face no peer is held by"
+        );
+    }
+
+    /// Decision D10: a passive peer is dialled by nobody, holds the face of the session the peer
+    /// opened, waits again when it is lost, and a close closes it. A peer not waiting claims no
+    /// session.
+    #[test]
+    fn a_passive_peer_holds_the_session_the_peer_opened_and_dials_nothing() {
+        let mut host = Host {
+            candidates: Vector::from([1]),
+            ..Host::default()
+        };
+        let mut plan = Plan::new();
+        let mut next_id = 0;
+
+        let none = actions(|e| plan.open_passive(1, &mut host, &mut next_id, e).unwrap());
+        assert!(
+            none.is_empty(),
+            "a candidate is there, and nothing is dialled"
+        );
+        assert_eq!(plan.state(&1), Some(S::Passive));
+        assert!(
+            !plan.inbound_up(2, Face(7), &mut host, &mut next_id, &mut |_| {}),
+            "a peer the planner does not wait for claims no session"
+        );
+
+        assert!(plan.inbound_up(1, Face(7), &mut host, &mut next_id, &mut |_| {}));
+        assert_eq!(plan.state(&1), Some(S::PassiveUp));
+        assert!(
+            !plan.inbound_up(1, Face(8), &mut host, &mut next_id, &mut |_| {}),
+            "a second session of a peer already held is not claimed"
+        );
+
+        let lost = actions(|e| assert!(plan.face_down(Face(7), &mut host, &mut next_id, e)));
+        assert!(
+            lost.is_empty(),
+            "no retry is armed for a peer that is waited for"
+        );
+        assert_eq!(plan.state(&1), Some(S::Passive));
+
+        assert!(plan.inbound_up(1, Face(9), &mut host, &mut next_id, &mut |_| {}));
+        let closed = actions(|e| plan.stop(&1, &mut host, &mut next_id, e));
+        assert_eq!(closed, [PeerAction::Close { id: Face(9) }]);
+        assert_eq!(plan.state(&1), Some(S::Idle));
+
+        plan.open_passive(1, &mut host, &mut next_id, &mut |_| {})
+            .unwrap();
+        plan.inbound_up(1, Face(10), &mut host, &mut next_id, &mut |_| {});
+        assert!(plan.inbound_down(&1, &mut host, &mut next_id, &mut |_| {}));
+        assert_eq!(plan.state(&1), Some(S::Passive));
+        assert!(
+            !plan.inbound_down(&1, &mut host, &mut next_id, &mut |_| {}),
+            "a peer that holds no session has none to lose"
         );
     }
 
