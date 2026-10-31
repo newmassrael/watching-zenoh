@@ -2054,31 +2054,21 @@ impl LinkstateNetwork {
                     // a cleared bit clears it
                     // (`zenoh/src/net/protocol/network.rs` @ `*is_gateway = ls.is_gateway;`).
                     node.is_gateway = ls.is_gateway;
-                    // Backfill the role of a node first seen as a link TARGET (a
-                    // whatami-less `ensure_node` placeholder) when its own
-                    // link-state arrives via this update path. ONLY when the
-                    // stored role is still `None`: a known role is never
-                    // overwritten, so a re-advertisement that OMITS the W field
-                    // (which `convert_to_local_link_states` defaults to Router)
-                    // cannot flip an established Peer to Router.
-                    //
-                    // A wz-LOCAL divergence, NOT zenoh parity: zenoh 1.10.2 restates
-                    // the role on every newer link-state
-                    // (`zenoh/src/net/protocol/network.rs` @ `*whatami = Some(ls.whatami);`),
-                    // where 1.10.1's update path never touched `whatami`; wz fills
-                    // it only while it is unknown, and adopting 1.10.2's unconditional
-                    // write is open (it would let a re-advertisement that omits the
-                    // W field flip an established Peer to Router, which 1.10.2
-                    // accepts). Upstream's gossip reads the role off the incoming
-                    // ENTRY (`ls.whatami`), not the graph node.
-                    // wz's autoconnect emit reads `node.whatami` back from the
-                    // graph (the `Changes` it gets carry only zids), so wz must
-                    // keep a placeholder's stored role correct here. The textbook
-                    // alternative — thread the entry whatami through `Changes` so
-                    // the emit never reads the graph — is the larger follow-up.
-                    if node.whatami.is_none() {
-                        node.whatami = Some(ls.whatami);
-                    }
+                    // A newer link-state restates the node's role, known or not
+                    // (zenoh 1.10.2, `zenoh/src/net/protocol/network.rs` @
+                    // `*whatami = Some(ls.whatami);`; 1.10.1's update path never
+                    // touched `whatami`). That also fills the role of a node first
+                    // seen as a link TARGET (a whatami-less `ensure_node`
+                    // placeholder) when its own link-state arrives here. An entry
+                    // that OMITS the W field reads as Router
+                    // (`convert_to_local_link_states`, as upstream's
+                    // `link_state.whatami.unwrap_or(WhatAmI::Router)`), so it
+                    // restates an established Peer as Router, which the pin accepts.
+                    // wz's autoconnect emit reads `node.whatami` back from the graph
+                    // (the `Changes` it gets carry only zids), so the stored role is
+                    // what the emit sees; threading the entry's role through
+                    // `Changes` instead is the larger follow-up.
+                    node.whatami = Some(ls.whatami);
                     // preserve-on-None: a links-only re-advertisement (no `L`
                     // field) keeps the locators learned when the node was new;
                     // only an entry that actually carries locators overwrites
@@ -3110,6 +3100,60 @@ mod tests {
             net.get_node(&zid(0xDD)).and_then(|n| n.whatami),
             Some(WhatAmI::Router),
             "D's role from its own entry, though it was placeholder'd first",
+        );
+    }
+
+    #[test]
+    fn a_newer_linkstate_restates_a_known_role() {
+        // zenoh 1.10.2 writes `*whatami = Some(ls.whatami)` on every newer link-state, so a node
+        // whose role was recorded is restated by the next advertisement, and an entry that
+        // omits the role reads as Router (1.10.1 left the stored role alone).
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                relay(1, &[10]),
+                entry(10, 5, Some(&zid(0xAA)), Some(WhatAmI::Peer.to_api()), &[]),
+            ]),
+        );
+        assert_eq!(
+            net.get_node(&zid(0xAA)).and_then(|n| n.whatami),
+            Some(WhatAmI::Peer)
+        );
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(
+                10,
+                6,
+                None,
+                Some(WhatAmI::Router.to_api()),
+                &[],
+            )]),
+        );
+        assert_eq!(
+            net.get_node(&zid(0xAA)).and_then(|n| n.whatami),
+            Some(WhatAmI::Router),
+            "a newer entry restates the role it carries"
+        );
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(10, 7, None, Some(WhatAmI::Peer.to_api()), &[])]),
+        );
+        net.ingest_linkstate_list(link, list(vec![entry(10, 8, None, None, &[])]));
+        assert_eq!(
+            net.get_node(&zid(0xAA)).and_then(|n| n.whatami),
+            Some(WhatAmI::Router),
+            "an entry without the role reads as Router"
+        );
+        // A stale entry restates nothing.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(10, 8, None, Some(WhatAmI::Peer.to_api()), &[])]),
+        );
+        assert_eq!(
+            net.get_node(&zid(0xAA)).and_then(|n| n.whatami),
+            Some(WhatAmI::Router)
         );
     }
 
