@@ -302080,6 +302080,36 @@
         "The lesson of the two corrections of this test: a bound in a test that every feature row builds has to be proved over every row that selects the crate, and the table names them (scripts/lib/nondefault-tests-gate.sh), not only the one leg that went red. The Layer C1bzr docs ledger of the last completed hosted run is with the ci-red session. Read the hosted run of the current tree, which is the first that carries the router_forward counts, the held-lane test gate and this correction together."
       ]
     },
+    "Round 4011": {
+      "decision_summary": "The seeded spawn of the group session, which the two-session image on target takes, now has a host test: a fifth scenario of the two-session baseline spawns the group session from a MulticastSeed (the dispatcher built in the task), admits a member, hears two puts beside the client session, stops on its flag and leaves the client answering. The fixture's spawn takes either form (spawn_with, seeded or built), and the four scenarios before it still run from a built MulticastSession, so both spawn paths are held on the host.",
+      "changes_bullets": [
+        "`crates/wz-session-lwip/src/two_session_tests.rs`: `TwoSessions::spawn_with(.., seeded)`, `spawn` delegating with `false`, and the scenario `a_seeded_group_session_runs_beside_the_client_session`.",
+        "`scripts/run-ci.sh`: the `C1m two sessions` leg counts 27, not 26."
+      ],
+      "verification_bullets": [
+        "On a build host: the five two-session tests pass (ran=5, the new one among them), the C1m two-sessions leg's own command prints 27 passed, and clippy -D warnings with the leg's features is clean for wz-session-lwip. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the stack chain of frt2 has no committed peak (it reads about 4,000 bytes with calls through a register not followed); hosted CI per job is unread."
+      ],
+      "publishable_decision_summary": "The seeded spawn of the group session, which the two-session image on target takes, now has a host test: a fifth scenario of the two-session baseline spawns the group session from a MulticastSeed (the dispatcher built in the task), admits a member, hears two puts beside the client session, stops on its flag and leaves the client answering. The fixture's spawn takes either form (spawn_with, seeded or built), and the four scenarios before it still run from a built MulticastSession, so both spawn paths are held on the host.",
+      "publishable_changes_bullets": [
+        "`crates/wz-session-lwip/src/two_session_tests.rs`: `TwoSessions::spawn_with(.., seeded)`, `spawn` delegating with `false`, and the scenario `a_seeded_group_session_runs_beside_the_client_session`.",
+        "`scripts/run-ci.sh`: the `C1m two sessions` leg counts 27, not 26."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the five two-session tests pass (ran=5, the new one among them), the C1m two-sessions leg's own command prints 27 passed, and clippy -D warnings with the leg's features is clean for wz-session-lwip. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the stack chain of frt2 has no committed peak (it reads about 4,000 bytes with calls through a register not followed); hosted CI per job is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
