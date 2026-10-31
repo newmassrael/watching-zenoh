@@ -60,6 +60,8 @@ The original captures are not kept anywhere.
 | `zenoh-mixed-c1-10-1-r1-10-2-*.pcap` | zenoh | TCP, UDP unicast | the 1.10.1 examples against a zenohd built from the 1.10.2 tag |
 | `zenoh-mixed-c1-10-2-r1-9-0-*.pcap`, and the same for router 1.8.0 and 1.7.2 | zenoh | TCP, UDP unicast | a 1.10.2 client against the eclipse/zenoh router of that release |
 | `zenoh-matched-1-3-1-*.pcap`, and the same for 1.3.2, 1.3.3, 1.6.0, 1.7.0 and 1.7.1 | zenoh | TCP, UDP unicast | router and clients both built from the release's tag |
+| `zenoh-matched-1-0-3-*.pcap`, and the same for 1.0.4, 1.2.3 and 1.5.1 | zenoh | TCP, UDP unicast | router and clients both built from the release's tag; 1.0.x and 1.2.x with the rest plugin switched off |
+| `zenoh-mixed-c1-10-2-r1-6-2-*.pcap`, and the same for router 1.5.0, 1.3.4 and 1.0.2 | zenoh | TCP, UDP unicast | a 1.10.2 client against a zenohd built from that tag |
 | `zenoh-tunnel-loaded-udp-20pub.pcap` | zenoh | UDP | the tunnelled path of `zenoh-tunnel-udp-20pub.pcap` with a paced UDP load of 150 Mbit/s over it, which made it lose 1.8% of the load's datagrams |
 | `zenoh-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients |
 | `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |

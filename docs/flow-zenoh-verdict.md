@@ -279,17 +279,19 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 44624 units; 0 framings lost in 532 directions held from
-  their start; 0 differing cookies in 557 echoes; 0 Init pairs of one kind in
-  559; 0 other versions in 1118 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 47398 units; 0 framings lost in 564 directions held from
+  their start; 0 differing cookies in 589 echoes; 0 Init pairs of one kind in
+  591; 0 other versions in 1182 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), 1.7.2, 1.8.0 and 1.9.0
   routers with the clients built from the same release, 1.10.0 and 1.9.0
   routers with older clients (1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2 against
-  1.10.0 as well), 1.0.0, 1.0.1, 1.0.2, 1.1.0, 1.1.1, 1.2.0, 1.2.1, 1.3.0,
-  1.3.4, 1.4.0, 1.5.0, 1.6.1, 1.6.2 and 1.10.2 routers with clients of their
-  own release (built from the tags), a 1.10.2 client against a 1.10.0 router
-  and a 1.10.1 one against a 1.10.2 router, zenoh-pico 1.10.1 clients,
+  1.10.0 as well), every plain 1.x release from 1.0.0 to 1.10.2 except 1.10.0
+  with clients of its own release (1.7.2, 1.8.0 and 1.9.0 against the
+  eclipse/zenoh images, the others against routers built from the tags), a
+  1.10.2 client against routers of 1.0.2, 1.3.4, 1.5.0, 1.6.2, 1.7.2, 1.8.0,
+  1.9.0 and 1.10.0 and a 1.10.1 one against a 1.10.2 router, zenoh-pico 1.10.1
+  clients,
   240 short sessions captured for their handshakes, links that drop 1%, 5%,
   10% and 20% of the packets each way (UDP; TCP at 1% and 5%), that reorder
   a quarter of them or duplicate 5% (TCP and UDP), a real
@@ -305,16 +307,16 @@ the weights by `model_weights_are_their_stated_probabilities`):
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
 | unit read whole | +966 | +3546 | +2603 |
-| unit residual | -13863 | -12444 | -6745 |
-| unit undecoded | -13863 | -12974 | -7000 |
+| unit residual | -13950 | -12531 | -6745 |
+| unit undecoded | -13950 | -13061 | -7000 |
 | stream framing held | +2838 | +6453 | (none) |
-| stream framing lost | -7476 | -7460 | (none) |
-| cookie matched (8 bytes) | +63992 | +63992 | +63999 |
-| cookie differing | -7543 | -7543 | -10000 |
-| Inits of opposite kinds | +992 | +992 | +999 |
-| Inits of one kind | -6548 | -6548 | -9000 |
+| stream framing lost | -7560 | -7544 | (none) |
+| cookie matched (8 bytes) | +63993 | +63993 | +63999 |
+| cookie differing | -7623 | -7623 | -10000 |
+| Inits of opposite kinds | +993 | +993 | +999 |
+| Inits of one kind | -6628 | -6628 | -9000 |
 | version of this reader | +7996 | +7996 | +8000 |
-| another version | -8540 | -8540 | (none) |
+| another version | -8620 | -8620 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
@@ -430,9 +432,9 @@ crossing rested on the unit weight the real mDNS beats.
 
 Every zenoh capture added since (the links above and the releases below) moved
 the counts and with them the weights, and the null captures moved with them. A
-residual or undecoded unit now weighs -13863 on the `yes` sum, and -12444 or
--12974 on the `no` sum: two units that no codec of this reader reads whole
-weigh -24888 or more there, past the threshold, where three were needed at
+residual or undecoded unit now weighs -13950 on the `yes` sum, and -12531 or
+-13061 on the `no` sum: two units that no codec of this reader reads whole
+weigh -25062 or more there, past the threshold, where three were needed at
 first (and two undecoded ones, but not two residual ones, after the SSH
 capture). So a flow of two such units, and nothing else weighed, reads `no`.
 `lan-dns` went from 2 `no` and 185 `undecided` to 174 `no` and 13 `undecided`,
@@ -503,7 +505,17 @@ their tags as the others were (those up to 1.2.0 start only with the rest
 plugin switched off), and a 1.8.0 client was put against the 1.10.0 router.
 Twenty captures, two `yes` flows each, none of their 2298 SN steps broke; they
 add 3575 units and 40 handshakes. 1.0.0 puts about 220 units into its minute
-where the others put about 173; why was not looked into.
+where the others put about 173. The extra units are KeepAlives: 1.0.0's
+transport task sends one on a fixed period on every session, whatever else it
+sends (the transmit loop of the unicast link in the `zenoh-transport` crate at
+the 1.0.0 tag selects on a timer that ticks every period), and 1.0.1 sends one
+only after the period has passed with nothing sent (the same loop at the 1.0.1
+tag wraps its pull of the next batch in a timeout of one period and sends the
+KeepAlive when it fires). Those are two tags older than the pin, so they are
+read here and not cited as the pin's lines. In the UDP minute that is 94
+datagrams of 9 bytes against 46, and the 48 between them are the 48 datagrams
+by which the two captures differ. A KeepAlive carries no SN, so the SN steps
+are the same in both (115 against 114).
 
 **More patch releases, and clients newer than the router.** Router and clients
 of 1.3.1, 1.3.2, 1.3.3, 1.6.0, 1.7.0 and 1.7.1 were built from their tags
@@ -527,6 +539,17 @@ follow are 90%). The load stopped at the ceiling; a path losing more than
 this one was not tried, because making it lose means pressing a network that
 other people use.
 
-Still open after model 2: the patch releases not named in this section, a
-client newer than its router by more than four releases, a path that loses
-more than 1.8%, and the null side only on the protocols the corpus holds.
+**The last four tags, and clients ten minor lines newer.** Four plain 1.x
+release tags were not yet in the corpus: 1.0.3, 1.0.4, 1.2.3 and 1.5.1. Router
+and clients of each were built from the tag and captured, so every plain 1.x
+release tag (29 of them, 1.0.0 to 1.10.2) now has a router in the corpus, and
+all of them but 1.10.0 clients of their own release. And the 1.10.2 client was
+put against routers built from the 1.6.2, 1.5.0,
+1.3.4 and 1.0.2 tags: a client four, five, seven and ten minor lines newer than
+its router. All sixteen captures read two `yes` flows and none of their 1830 SN
+steps broke. They add 2774 units and 32 handshakes.
+
+Still open after model 2: clients of 1.10.0 beside its own router, tags other
+than the plain releases (release candidates and builds that are not releases),
+a path that loses more than 1.8%, and the null side only on the protocols the
+corpus holds.
