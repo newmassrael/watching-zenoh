@@ -55,7 +55,9 @@ The original captures are not kept anywhere.
 | `zenoh-tunnel-udp-20pub.pcap`, `zenoh-tunnel-tcp-20pub.pcap` | zenoh | UDP, TCP | a real path (Wi-Fi and a Tailscale tunnel to the router's host): a zenohd 1.10.1, one subscriber and twenty publishers, taken inside the tunnel with a fixed Ethernet header added to its raw IP frames |
 | `zenoh-jitter-tcp-20pub.pcap`, `zenoh-jitter-udp-20pub.pcap` | zenoh | TCP, UDP | an eclipse/zenoh 1.10.0 router, a 1.10.1 subscriber and twenty publishers on a veth pair whose delay varies per packet (100 ms plus or minus 90 ms each way, netem), so packets overtake each other; the UDP run adds the delay after the subscription is up |
 | `zenoh-matched-1-1-1-*.pcap`, `zenoh-matched-1-2-1-*.pcap` | zenoh | TCP, UDP unicast | as the other `zenoh-matched` files, for 1.1.1 and 1.2.1 (rest plugin off) |
-| `zenoh-mixed-c1-0-2-r1-10-0-*.pcap`, and the same for client 1.3.4, 1.4.0, 1.5.0, 1.6.2 | zenoh | TCP, UDP unicast | a client built from that tag against the eclipse/zenoh 1.10.0 router |
+| `zenoh-mixed-c1-0-2-r1-10-0-*.pcap`, and the same for client 1.3.4, 1.4.0, 1.5.0, 1.6.2, 1.8.0 and 1.10.2 | zenoh | TCP, UDP unicast | a client built from that tag against the eclipse/zenoh 1.10.0 router |
+| `zenoh-matched-1-10-2-*.pcap`, and the same for 1.6.1, 1.3.0, 1.2.0, 1.1.0, 1.0.1 and 1.0.0 | zenoh | TCP, UDP unicast | router and clients both built from the release's tag; 1.0.0 to 1.2.0 with the rest plugin switched off |
+| `zenoh-mixed-c1-10-1-r1-10-2-*.pcap` | zenoh | TCP, UDP unicast | the 1.10.1 examples against a zenohd built from the 1.10.2 tag |
 | `zenoh-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients |
 | `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |
 | `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
@@ -90,14 +92,12 @@ The original captures are not kept anywhere.
 
 ## What it does not hold yet
 
-On the zenoh side versions other than
-1.10.1, 1.10.0, 1.9.0, 1.8.0, 1.7.2 and 1.5.0 (with 1.10.1 clients, and with
-clients of the router's own release for 1.9.0, 1.8.0 and 1.7.2, and with
-older clients for 1.10.0 and 1.9.0, and 1.0.2, 1.1.1, 1.2.1, 1.3.4, 1.4.0,
-1.5.0 and 1.6.2 with their own, and 1.0.2, 1.3.4 to 1.6.2 and 1.7.2 against
-1.10.0) and
-links other than loopback, emulated ones that lose (1% to 20%), reorder or
-duplicate packets, and one office Wi-Fi link.
+On the zenoh side releases other than the ones the tables above name (a
+router of a release is held with a client of its own, and for some with an
+older one; `docs/flow-zenoh-verdict.md` section 6.2 lists which), and links
+other than loopback, emulated ones that lose (1% to 20%), reorder, delay with
+jitter or duplicate packets, one office Wi-Fi link and one tunnelled path. A
+link that really loses packets is not held.
 Each is added the same way: captured from the real
 implementation, a parser in the anonymiser where a payload of other devices can
 carry an identity, and the measured tally pinned beside the others. QUIC needed
