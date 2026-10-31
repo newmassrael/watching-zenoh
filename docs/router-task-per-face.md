@@ -347,25 +347,34 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    wake list of a destination is not built.
 
    **4a, what it measured.** Layer E7s on pc2, the one tree built with each value in turn (the policy is a
-   build value, so the build changes and nothing else), alternating, two runs each, `one-task` first; six of six
-   pass in all four. Figures are `one-task` runs | `task-per-face` runs.
+   build value, so the build changes and nothing else), alternating, three runs each (the third pair later the
+   same day, `task-per-face` first); six of six pass in all six. Figures are `one-task` runs | `task-per-face`
+   runs.
 
    | E7s figure | `one-task` | `task-per-face` |
    |---|---|---|
-   | us per message, 256 / 1024 / 2048 subscribers, no churn | 21.5, 24.2, 24.6; 18.5, 20.9, 20.3 | 9.1, 13.1, 13.8; 26.1, 16.4, 17.6 |
-   | us per message, 256 / 1024 with churn | 20.5, 23.3; 30.2, 37.3 | 12.7, 15.8; 25.9, 24.3 |
-   | starved router (one shared core), forwarded of 40 000/s | 6 400; 5 535 | 8 932; 7 916 |
-   | told 1.32 % of a core, 32 hogs, forwarded per second | 565; 401 | 962; 973 |
-   | keepalive lateness at 1024 / 1536 / 2048 sessions, ms | 1849, 4651, 8083; 2821, 5428, 8352 | 1353, 2867, 6300; 2223, 3781, 6312 |
-   | sessions ended at 2048 | 404; 646 | 37; 102 |
-   | faces DOWN at 32 hogs; at 64 hogs | 1, 0; 0, 0 | 0, 0; 3, 1 |
+   | us per message, 256 / 1024 / 2048 subscribers, no churn | 21.5, 24.2, 24.6; 18.5, 20.9, 20.3; 12.8, 17.5, 14.9 | 9.1, 13.1, 13.8; 26.1, 16.4, 17.6; 13.1, 16.8, 17.9 |
+   | us per message, 256 / 1024 with churn | 20.5, 23.3; 30.2, 37.3; 23.6, 21.9 | 12.7, 15.8; 25.9, 24.3; 13.8, 24.5 |
+   | starved router (one shared core), forwarded of 40 000/s | 6 400; 5 535; 6 536 | 8 932; 7 916; 8 914 |
+   | told 1.32 % of a core, 32 hogs, forwarded per second | 565; 401; 346 | 962; 973; 413 |
+   | keepalive lateness at 1024 / 1536 / 2048 sessions, ms | 1849, 4651, 8083; 2821, 5428, 8352; 2125, 2913, 6311 | 1353, 2867, 6300; 2223, 3781, 6312; 1344, 3388, 11851 |
+   | sessions ended at 2048 | 404; 646; 73 | 37; 102; 1051 |
+   | faces DOWN at 32 hogs; at 64 hogs | 1, 0; 0, 0; 83, 22 | 0, 0; 3, 1; 75, 8 |
 
-   Read as: the starved and told-a-share router forwards more (by about 40 per cent on one shared core and
-   about twice at 32 hogs) and serves its keepalives sooner, which is where section 7 expected a task per face to
-   show, and both runs agree. The microseconds per message of the uncontended table do not: the first
-   `task-per-face` run read about half of the control and the second read above it at 256 subscribers, so no
-   direction is claimed for it. The faces DOWN under the share tests (which assert the population and not these
-   counts) are recorded and not attributed: the control had one too, and two runs do not separate the two.
+   Read as: the router on one shared core forwards about 37 per cent more in all three pairs, which is where
+   section 7 expected a task per face to show. At 32 hogs and at 1024 sessions of the lateness table the
+   `task-per-face` run is the better of each pair, but the spreads of the two values overlap, so it is recorded
+   and not claimed. The uncontended microseconds per message, the lateness at 1536 and 2048 sessions and the
+   sessions ended at 2048 go either way between pairs; no direction is claimed for them.
+
+   The faces DOWN are not lost leases. Every DOWN the router logs ends in the one outcome a production drive
+   has (`DriverOutcome::Terminated`; `IterationLimit` is for a capped test loop), whether the lease ran out, the peer closed or the router closed the session itself (a probe that
+   counted DOWN lines by outcome read `Terminated` for all 75 of the third `task-per-face` run, and was not kept).
+   What separates a lost lease is the client's side, which the share tests assert: no client session ended that
+   the router did not close (`ended <= shed`, 963 of 963 in every run), and no DOWN past the router's own closes
+   (`down <= shed`). Both held in all six runs. The count of DOWN lines in the window is how many of the router's
+   own 963 closes its drives logged before the window ended, and it moved from 0 to 83 under `one-task` as well,
+   so it is a property of the host's load and not of the value.
 5. **The reservation.** A face task awaits `poll_reserve` for the destination's lane and sends under the
    conduit's lock with the permit (7.6), which is the first consumer of the session core's opaque permit; the
    thread park (`ParkBudget`, `wait_for_room`) leaves the router's path.
