@@ -279,9 +279,9 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 47744 units; 0 framings lost in 568 directions held from
-  their start; 0 differing cookies in 593 echoes; 0 Init pairs of one kind in
-  595; 0 other versions in 1190 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 48625 units; 0 framings lost in 576 directions held from
+  their start; 0 differing cookies in 601 echoes; 0 Init pairs of one kind in
+  603; 0 other versions in 1206 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), 1.7.2, 1.8.0 and 1.9.0
   routers with the clients built from the same release, 1.10.0 and 1.9.0
@@ -307,16 +307,16 @@ the weights by `model_weights_are_their_stated_probabilities`):
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
 | unit read whole | +966 | +3546 | +2603 |
-| unit residual | -13960 | -12542 | -6745 |
-| unit undecoded | -13960 | -13072 | -7000 |
+| unit residual | -13987 | -12568 | -6745 |
+| unit undecoded | -13987 | -13098 | -7000 |
 | stream framing held | +2838 | +6453 | (none) |
-| stream framing lost | -7571 | -7554 | (none) |
+| stream framing lost | -7591 | -7574 | (none) |
 | cookie matched (8 bytes) | +63993 | +63993 | +63999 |
-| cookie differing | -7633 | -7633 | -10000 |
+| cookie differing | -7652 | -7652 | -10000 |
 | Inits of opposite kinds | +993 | +993 | +999 |
-| Inits of one kind | -6637 | -6637 | -9000 |
+| Inits of one kind | -6657 | -6657 | -9000 |
 | version of this reader | +7996 | +7996 | +8000 |
-| another version | -8630 | -8630 | (none) |
+| another version | -8649 | -8649 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
@@ -432,9 +432,9 @@ crossing rested on the unit weight the real mDNS beats.
 
 Every zenoh capture added since (the links above and the releases below) moved
 the counts and with them the weights, and the null captures moved with them. A
-residual or undecoded unit now weighs -13960 on the `yes` sum, and -12542 or
--13072 on the `no` sum: two units that no codec of this reader reads whole
-weigh -25084 or more there, past the threshold, where three were needed at
+residual or undecoded unit now weighs -13987 on the `yes` sum, and -12568 or
+-13098 on the `no` sum: two units that no codec of this reader reads whole
+weigh -25136 or more there, past the threshold, where three were needed at
 first (and two undecoded ones, but not two residual ones, after the SSH
 capture). So a flow of two such units, and nothing else weighed, reads `no`.
 `lan-dns` went from 2 `no` and 185 `undecided` to 174 `no` and 13 `undecided`,
@@ -556,7 +556,16 @@ of their 114 SN steps broke. With them all 29 plain 1.x release tags have a
 router and clients of their own release in the corpus. They add 346 units, 4
 handshakes, and the weights above.
 
+**Release candidates.** Of the tags that are not plain releases, the two
+latest of the 1.0.0 line were built and captured as the plain ones were:
+1.0.0-rc.1 and 1.0.0-rc.2, router and clients of one tag, over TCP and UDP.
+All four read two `yes` flows and none of their 459 SN steps broke, so a
+release candidate of the 1.0.0 line speaks the wire this reader reads. They
+add 881 units and 8 handshakes.
+
 Still open after model 2: tags other
-than the plain releases (release candidates and builds that are not releases),
+than the plain releases and these two (the alpha and beta tags of 1.0.0, and
+the 0.x tags, whose wire may differ, which makes them a test of the foreign
+version weight and not of the `yes` side),
 a path that loses more than 1.8%, and the null side only on the protocols the
 corpus holds.
