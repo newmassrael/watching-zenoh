@@ -303654,6 +303654,40 @@
         "Phases 5 (room reservation) and 6 (async conduit lock) of the router with a task per face are next; phase 6 must keep the shm relay pass out of any await"
       ]
     },
+    "Round 4054": {
+      "decision_summary": "O4 (h), the Timestamp ZID bound, was reported to the SCE session and answered: the decode of a bounded length-ref field is meant to refuse a length past sce:max-size, because the largest encoded size of a codec is computed from that bound and a decode that accepts more produces a value that breaks it; the generator is wrong and the generated documentation is right. Only the C11 arm of the generator's length-ref decode compares the length with the bound; the Rust, C++, Kotlin, Go and Python arms and the string variant do not, and the same gap holds for sce:max-count on the heap-backed repeat decode and on the encode side. wz therefore adds no check of its own in a wrapper and does not change the generated documentation: the fix is the generator's and wz regenerates out/** when the SCE session says it landed. The item stays open until then; this round records the answer so the carry names what it waits for.",
+      "changes_bullets": [
+        "docs/zenoh-api-on-the-engine.md: O4 (h) states the SCE answer, the scope of the gap and what wz waits for."
+      ],
+      "verification_bullets": [
+        "The report was written from the committed generated code and the pinned upstream tree: out/wz-codecs/timestamp.rs decode_into slices zid_len bytes with no comparison with 16, and the upstream Timestamp read returns an error for a size past uhlc::ID::MAX_SIZE; nothing was run.",
+        "The SCE session confirmed in the generator's source (read, not run) that only the C11 arm enforces the bound.",
+        "reason_review_pin_gate --check OK after the edit. A document only.",
+        "Not run: the hosted run of this tip; any decode of a zid_len of 17 (waits for the regeneration)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4 (h): waits for the SCE generator fix and its regeneration; then test a zid_len of 17 on the Timestamp view decode. Also carried: the kit hardware measurement, the mold 2.30.0 link abort, and the hosted verdict of tips after round 4029."
+      ],
+      "publishable_decision_summary": "O4 (h), the Timestamp ZID bound, was reported to the SCE session and answered: the decode of a bounded length-ref field is meant to refuse a length past sce:max-size, because the largest encoded size of a codec is computed from that bound and a decode that accepts more produces a value that breaks it; the generator is wrong and the generated documentation is right. Only the C11 arm of the generator's length-ref decode compares the length with the bound; the Rust, C++, Kotlin, Go and Python arms and the string variant do not, and the same gap holds for sce:max-count on the heap-backed repeat decode and on the encode side. wz therefore adds no check of its own in a wrapper and does not change the generated documentation: the fix is the generator's and wz regenerates out/** when the SCE session says it landed. The item stays open until then; this round records the answer so the carry names what it waits for.",
+      "publishable_changes_bullets": [
+        "docs/zenoh-api-on-the-engine.md: O4 (h) states the SCE answer, the scope of the gap and what wz waits for."
+      ],
+      "publishable_verification_bullets": [
+        "The report was written from the committed generated code and the pinned upstream tree: out/wz-codecs/timestamp.rs decode_into slices zid_len bytes with no comparison with 16, and the upstream Timestamp read returns an error for a size past uhlc::ID::MAX_SIZE; nothing was run.",
+        "The SCE session confirmed in the generator's source (read, not run) that only the C11 arm enforces the bound.",
+        "reason_review_pin_gate --check OK after the edit. A document only.",
+        "Not run: the hosted run of this tip; any decode of a zid_len of 17 (waits for the regeneration)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4 (h): waits for the SCE generator fix and its regeneration; then test a zid_len of 17 on the Timestamp view decode. Also carried: the kit hardware measurement, the mold 2.30.0 link abort, and the hosted verdict of tips after round 4029."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
