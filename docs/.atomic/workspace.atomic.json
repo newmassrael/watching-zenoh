@@ -302896,6 +302896,46 @@
         "Owed: the whatami a link state restates; the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 4033": {
+      "decision_summary": "Round 4014's carry on the faces DOWN of the E7s share tests is closed by measurement: a third alternating pair on pc2 put 83 and 22 DOWN under one-task and 75 and 8 under task-per-face, so the count follows the host's load and not the routing-face-drive value. A DOWN line cannot say why a face fell (every production drive ends Terminated), and what does separate a lost lease, ended <= shed and down <= shed on the client and router sides, held in all six runs. The one-core gain is three of three (about 37 per cent). Separately, the hosted run of 3aa35fbb57 reddened C1y: a peer's commit fd2ff0a389 added an accept_loop test without moving the guard; it moves 21 to 22.",
+      "changes_bullets": [
+        "docs/router-task-per-face.md 4a: the E7s table holds three runs of each value, and the reading says why the faces DOWN are the router's own closes and not lost leases",
+        "run-ci.sh: the C1y accept_loop guard moves 21 to 22 with its reason (the gossip re-dial test of fd2ff0a389)"
+      ],
+      "verification_bullets": [
+        "Hosted run 41192748568 (head 3aa35fbb57, which holds round 4019): C1y printed 22 passed against a guard of 21; the other nine red jobs (A4, C0, C1 census, Z8, C1bn, three C1bzr shards on wz-tls-mbedtls and multicast_params links, the C1bzr settle) name files this round and 4014 did not touch",
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop on the build host at 925109f3ee: 22 passed, 734 filtered out",
+        "Layer E7s on pc2, task-per-face then one-task: six of six pass in both; one shared core 8914 against 6536 forwarded per second; DOWN 75 and 8 against 83 and 22; ended 963 of 963 shed in each share test",
+        "A probe that counted DOWN lines by outcome read Terminated for all 75 of the task-per-face run; it was reverted as it cannot separate causes"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Phase 4 remainder: the destination wake list; then the section 7 tests (deregister mid-fan-out, multicast ingress beside the face tasks, shm relay guard across an await); then phases 5 and 6",
+        "The nine other red jobs of hosted run 41192748568 are not this round's and are owed by their owners or the next round that takes them",
+        "The session behind fd2ff0a389 was not identified and was not told; this entry is the notice"
+      ],
+      "publishable_decision_summary": "Round 4014's carry on the faces DOWN of the E7s share tests is closed by measurement: a third alternating pair on pc2 put 83 and 22 DOWN under one-task and 75 and 8 under task-per-face, so the count follows the host's load and not the routing-face-drive value. A DOWN line cannot say why a face fell (every production drive ends Terminated), and what does separate a lost lease, ended <= shed and down <= shed on the client and router sides, held in all six runs. The one-core gain is three of three (about 37 per cent). Separately, the hosted run of 3aa35fbb57 reddened C1y: a peer's commit fd2ff0a389 added an accept_loop test without moving the guard; it moves 21 to 22.",
+      "publishable_changes_bullets": [
+        "docs/router-task-per-face.md 4a: the E7s table holds three runs of each value, and the reading says why the faces DOWN are the router's own closes and not lost leases",
+        "run-ci.sh: the C1y accept_loop guard moves 21 to 22 with its reason (the gossip re-dial test of fd2ff0a389)"
+      ],
+      "publishable_verification_bullets": [
+        "Hosted run 41192748568 (head 3aa35fbb57, which holds round 4019): C1y printed 22 passed against a guard of 21; the other nine red jobs (A4, C0, C1 census, Z8, C1bn, three C1bzr shards on wz-tls-mbedtls and multicast_params links, the C1bzr settle) name files this round and 4014 did not touch",
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop on the build host at 925109f3ee: 22 passed, 734 filtered out",
+        "Layer E7s on pc2, task-per-face then one-task: six of six pass in both; one shared core 8914 against 6536 forwarded per second; DOWN 75 and 8 against 83 and 22; ended 963 of 963 shed in each share test",
+        "A probe that counted DOWN lines by outcome read Terminated for all 75 of the task-per-face run; it was reverted as it cannot separate causes"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 4 remainder: the destination wake list; then the section 7 tests (deregister mid-fan-out, multicast ingress beside the face tasks, shm relay guard across an await); then phases 5 and 6",
+        "The nine other red jobs of hosted run 41192748568 are not this round's and are owed by their owners or the next round that takes them",
+        "The session behind fd2ff0a389 was not identified and was not told; this entry is the notice"
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
