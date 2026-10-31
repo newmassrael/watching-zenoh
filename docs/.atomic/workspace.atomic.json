@@ -301772,6 +301772,44 @@
         "Two hosted reds are not explained. Layer Z8 read `shm: expected pass, measured timeout (0 passed)`. The cross-impl job restored the zenohd cache of the pin 1.10.2 and found no zenoh-src under it, while the same clone has both files the step tests for on the build machine, so the restored entry is the suspect: a cache is re-saved only on a miss, and an entry made without the source stays. A key moved with the widened path is the repair the step's own comment names. A third red, the verdict-leg mutation gate, said its unmutated tree was red, which the others above explain."
       ]
     },
+    "Round 4001": {
+      "decision_summary": "The stats golden is named for what it holds (zenoh_stats.golden), not for a version, and a text-only check reads its provenance line against oracles/Cargo.lock in Layer C0 and pre-push. Round 3976 moved the pin and the golden kept saying 1.10.1 under a 1_10_1 name; only Layer E17, a build of the oracle on a hosted job, could see it. The reds of hosted run 41140796607 were repaid in parallel by rounds 3994 to 4000 (counts, memory lock, text baselines, the protocol leg, the struct lookup, the joined-link gate); this round carries only what those did not: the name and the check.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/stats_registry/zenoh_stats.golden: the golden renamed from zenoh_1_10_1.golden, same bytes; its readers (tests.rs, stats_registry.rs, the oracle's doc) follow.",
+        "scripts/lib/zenoh_stats_golden.py: GOLDEN names the new file; new modes --header (the provenance line against oracles/Cargo.lock, no build) and --header-selftest.",
+        "scripts/run-ci.sh (Layer C0) and .githooks/pre-push run both modes."
+      ],
+      "verification_bullets": [
+        "zenoh_stats_golden.py --header-selftest and --header pass here; --check on a build host matched 8 scenarios of the pinned zenoh-stats.",
+        "cargo test -p wz-session-core --lib stats_registry: 9 passed against the renamed file.",
+        "Measured against the reds of run 41140796607 before the peers' rounds landed: the C1ay legs after router_forward (only retry_period moved), the router_forward arms, the narrow multilink clippy combo, the kind-table test, the zenoh-protocol internal tests, and the Z8 shm cause (RLIMIT_MEMLOCK 8192 KB on the runner).",
+        "Not run: Layer C0mut (bx's compiler cache refuses CARGO_INCREMENTAL=1, an environment fact), the later two legs of C1cn, C1bzr, Z8 and Q at the tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of the tip once at the next round start. Carried unchanged: docs/zenoh-api-on-the-engine.md O4 (a) to (h), the pico comparison image measured on the kit at 1.10.2, and the mold 2.30.0 link abort on a machine whose global cargo config selects it (GNU ld links the test)."
+      ],
+      "publishable_decision_summary": "The stats golden is named for what it holds (zenoh_stats.golden), not for a version, and a text-only check reads its provenance line against oracles/Cargo.lock in Layer C0 and pre-push. Round 3976 moved the pin and the golden kept saying 1.10.1 under a 1_10_1 name; only Layer E17, a build of the oracle on a hosted job, could see it. The reds of hosted run 41140796607 were repaid in parallel by rounds 3994 to 4000 (counts, memory lock, text baselines, the protocol leg, the struct lookup, the joined-link gate); this round carries only what those did not: the name and the check.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/stats_registry/zenoh_stats.golden: the golden renamed from zenoh_1_10_1.golden, same bytes; its readers (tests.rs, stats_registry.rs, the oracle's doc) follow.",
+        "scripts/lib/zenoh_stats_golden.py: GOLDEN names the new file; new modes --header (the provenance line against oracles/Cargo.lock, no build) and --header-selftest.",
+        "scripts/run-ci.sh (Layer C0) and .githooks/pre-push run both modes."
+      ],
+      "publishable_verification_bullets": [
+        "zenoh_stats_golden.py --header-selftest and --header pass here; --check on a build host matched 8 scenarios of the pinned zenoh-stats.",
+        "cargo test -p wz-session-core --lib stats_registry: 9 passed against the renamed file.",
+        "Measured against the reds of run 41140796607 before the peers' rounds landed: the C1ay legs after router_forward (only retry_period moved), the router_forward arms, the narrow multilink clippy combo, the kind-table test, the zenoh-protocol internal tests, and the Z8 shm cause (RLIMIT_MEMLOCK 8192 KB on the runner).",
+        "Not run: Layer C0mut (bx's compiler cache refuses CARGO_INCREMENTAL=1, an environment fact), the later two legs of C1cn, C1bzr, Z8 and Q at the tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of the tip once at the next round start. Carried unchanged: docs/zenoh-api-on-the-engine.md O4 (a) to (h), the pico comparison image measured on the kit at 1.10.2, and the mold 2.30.0 link abort on a machine whose global cargo config selects it (GNU ld links the test)."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
