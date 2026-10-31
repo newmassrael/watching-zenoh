@@ -1079,8 +1079,13 @@ declare -A BASELINE_MC_TEXT=(
     # `multicast_tx_emit` 3676 (3734 at an earlier pin). The codecs that hold a wireexpr or a
     # chain keep their count until the list bounds and the gate normal form land in the SCE
     # tree. data is 4 and bss 270120 on both. Old: 71812/71828.
-    ["thumbv7m-none-eabi"]=71556
-    ["thumbv7em-none-eabihf"]=71592
+    #
+    # 2026-10-31 -- thumbv7m 71556 -> 71148, thumbv7em-hf 71592 -> 71228 (-408 / -364), read by
+    # hosted Layer Q on run 41140796607 (main's c27afce985, the same SCE pin 11e90bcd77), whose
+    # bss is 270112 against 270120 above: the two readings were on different machines, and the
+    # hosted one is the one that grades. The size is not attributed to a commit. Old: 71556/71592.
+    ["thumbv7m-none-eabi"]=71148
+    ["thumbv7em-none-eabihf"]=71228
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
