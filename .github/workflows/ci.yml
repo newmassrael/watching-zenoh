@@ -2191,8 +2191,17 @@ jobs:
           cat /sys/fs/cgroup/memory.max 2>/dev/null || true
           ulimit -a
 
+      # THE CAUSE, read from the facts above (run 41140796607): a hosted runner's soft and hard
+      # `RLIMIT_MEMLOCK` is 8192 KB, and a POSIX shm segment is `mlock`ed whole
+      # (`wz-zenoh-shm/src/shm/unix.rs`, upstream's own call), so a pool of a session's size
+      # answers ENOMEM (`OS error 12`) on the runner and not on the build host, where the limit
+      # is the machine's memory. The runner lets root raise it, so the suite is run by a shell
+      # whose limit has been.
       - name: Layer Z8 — upstream's own tests against the patched graph
-        run: bash scripts/run-ci.sh --layer Z8
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          ulimit -l
+          bash scripts/run-ci.sh --layer Z8
 
       - name: Machine facts for the shm file (after)
         if: always()
