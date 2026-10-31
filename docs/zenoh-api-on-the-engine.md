@@ -1083,7 +1083,14 @@ Each lands whole with its surface lines, tests and faults in one round.
   ran without it (taken in round R4015: an acceptor's challenge mismatch, a malformed OpenSyn
   and counters that cannot be opened refuse the link, an initiator reads the OpenAck against
   the offer in the InitAck, an unmappable segment refuses it, and a malformed InitSyn is
-  ignored, which 1.10.x has done since the `bail!` of 1.5.0 went; `ShmAuthError`); (e) an
+  ignored, which 1.10.x has done since the `bail!` of 1.5.0 went; `ShmAuthError`. A stock zenohd
+  cannot be made to provoke these refusals: it commits only at the OpenSyn and the OpenAck, after
+  both ends have opened each other's segment, and a segment that cannot be opened at the InitSyn
+  or the InitAck is traced and the step goes on plain, so they stay held by the tests of
+  `extshm.rs`. What a zenohd at 1.10.2 does show is that lenient half: a wz dialler in a mount
+  namespace with no `/dev/shm` in common with it, and the zenohd, both go on without shared
+  memory and the session establishes, where the same dial with the host's `/dev/shm` negotiates,
+  `a_dialler_that_shares_no_dev_shm_establishes_without_shm` and its control); (e) an
   unresponsive peer's pipelines are disabled at once and its transport is
   deleted and not closed with a frame (taken: the first half in round R4015, a session a
   congestion close was ordered of refuses every later send at once, `congestion_close_ordered`;

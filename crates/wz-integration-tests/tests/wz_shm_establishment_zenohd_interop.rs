@@ -277,3 +277,179 @@ fn wz_answers_a_real_zenohd_shm_challenge_when_zenohd_dials() {
     );
     let _ = read_captured(&mut wz_log);
 }
+
+/// What the dial of a shared-memory zenohd left behind.
+struct SandboxedDial {
+    /// The wz demo's captured log.
+    wz: String,
+    /// Whether the wz demo ended on its own before the window closed.
+    wz_exited: bool,
+    /// zenohd's captured log.
+    zenohd: String,
+}
+
+/// Whether `bwrap` can hide `/dev/shm` here. A leg that needs it SKIPs where it
+/// cannot, as the namespace legs of Layers M, Z and C1cc do.
+fn bwrap_can_hide_dev_shm() -> bool {
+    Command::new("bwrap")
+        .args(["--bind", "/", "/", "--tmpfs", "/dev/shm", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// wz DIALS the shared-memory zenohd from inside a mount namespace, the same one
+/// in both calls but for the one thing asked: whether `/dev/shm` is replaced by
+/// an empty tmpfs there. zenohd stays outside, so the segment it names in its
+/// InitAck is on the host's `/dev/shm`, which the dialer then can or cannot open.
+fn dial_the_shm_zenohd_from_a_namespace(
+    zenohd: &std::path::Path,
+    hide_dev_shm: bool,
+) -> SandboxedDial {
+    let port = PortReservation::pick();
+    let addr = format!("127.0.0.1:{}", port.port());
+
+    let (mut zd_log, zd_w) = tempfile_pair();
+    let zd_w2 = zd_w.try_clone().expect("dup zenohd handle");
+    let mut zd = ChildGuard::wrap(
+        "zenohd (shared-memory oracle)",
+        Command::new(zenohd)
+            .args(["-l", &format!("tcp/{addr}")])
+            .args(["--no-multicast-scouting", "--rest-http-port", "none"])
+            .env("RUST_LOG", "z=debug")
+            .stdout(Stdio::from(zd_w))
+            .stderr(Stdio::from(zd_w2))
+            .spawn()
+            .expect("spawn shm zenohd"),
+    );
+    if let Err(c) = wait_for_substring(&mut zd_log, ZENOHD_LISTENER_LINE, Duration::from_secs(20)) {
+        panic!("the shm zenohd never announced its listener within 20s\n--- zenohd ---\n{c}");
+    }
+    drop(port);
+
+    let (mut wz_log, wz_w) = tempfile_pair();
+    let mut bwrap = Command::new("bwrap");
+    bwrap.args(["--bind", "/", "/", "--dev-bind", "/dev", "/dev"]);
+    if hide_dev_shm {
+        bwrap.args(["--tmpfs", "/dev/shm"]);
+    }
+    bwrap
+        .arg(wz_ap_demo_binary())
+        .args(["--connect", &addr, "--shm", "--key", "demo/shm"])
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(wz_w));
+    let mut wz = ChildGuard::wrap(
+        "wz-ap-demo in a namespace (--connect --shm)",
+        bwrap.spawn().expect("spawn bwrap"),
+    );
+
+    let window = std::time::Instant::now() + Duration::from_secs(12);
+    let mut wz_exited = false;
+    while std::time::Instant::now() < window {
+        if wz.child_mut().try_wait().ok().flatten().is_some() {
+            wz_exited = true;
+            break;
+        }
+        if read_captured(&mut wz_log).contains(SHM_WITNESS) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = wz.child_mut().kill();
+    let _ = wz.child_mut().wait();
+    let _ = zd.child_mut().kill();
+    let _ = zd.child_mut().wait();
+    SandboxedDial {
+        wz: read_captured(&mut wz_log),
+        wz_exited,
+        zenohd: read_captured(&mut zd_log),
+    }
+}
+
+/// Leg 3 (the control) — the namespace changes nothing but the mount table, so a
+/// dialler that still sees the host's `/dev/shm` negotiates and establishes as in
+/// leg 1. Without this the next leg's plain session could be the sandbox and not
+/// the segments.
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm + bwrap); Layer Z runs via --ignored"]
+fn a_dialler_that_shares_dev_shm_negotiates_through_a_namespace() {
+    let Some(zenohd) = zenohd_shm_binary() else {
+        eprintln!("SKIP: no shared-memory zenohd at target/zenohd-shm/zenohd");
+        return;
+    };
+    if !bwrap_can_hide_dev_shm() {
+        eprintln!("SKIP: bwrap cannot build a mount namespace here");
+        return;
+    }
+    let run = dial_the_shm_zenohd_from_a_namespace(&zenohd, false);
+    assert_shm_was_built(&run.wz);
+    assert!(
+        negotiated(&run.wz),
+        "the control must negotiate SHM\n--- wz ---\n{}\n--- zenohd ---\n{}",
+        run.wz,
+        run.zenohd
+    );
+    assert!(
+        run.wz.contains("session Established"),
+        "the control must reach Established\n--- wz ---\n{}",
+        run.wz
+    );
+    assert!(
+        run.zenohd.contains("New transport opened") && !run.zenohd.contains("shm: None"),
+        "zenohd must have opened the transport with SHM\n--- zenohd ---\n{}",
+        run.zenohd
+    );
+}
+
+/// Leg 4 — a dialler that shares no `/dev/shm` with zenohd establishes without
+/// shared memory, and so does zenohd.
+///
+/// What a real zenohd can and cannot show of the refusals of O4 (d). Upstream's
+/// InitSyn and InitAck steps are lenient: a segment that cannot be opened is
+/// traced and the step returns `Ok`, so that side goes on without shared memory
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `RXAuthSegment::open(init_ack.bob_segment)`).
+/// The refusals sit at the OpenSyn (`Challenge mismatch`) and the OpenAck
+/// (`Unexpected SHM acknowledgement`), which a peer reaches only after both ends
+/// have opened each other's segment, so a zenohd cannot be made to provoke them:
+/// they need a peer that forges the challenge or the extension, and
+/// `extshm.rs`'s own tests are where wz's refusals are held. What this leg holds
+/// is the lenient half agreeing: neither end can open the other's segment (the
+/// two are on different `/dev/shm`), both go on plain, and the session
+/// establishes. The control above is the same dial with the one difference
+/// undone.
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm + bwrap); Layer Z runs via --ignored"]
+fn a_dialler_that_shares_no_dev_shm_establishes_without_shm() {
+    let Some(zenohd) = zenohd_shm_binary() else {
+        eprintln!("SKIP: no shared-memory zenohd at target/zenohd-shm/zenohd");
+        return;
+    };
+    if !bwrap_can_hide_dev_shm() {
+        eprintln!("SKIP: bwrap cannot build a mount namespace here");
+        return;
+    }
+    let run = dial_the_shm_zenohd_from_a_namespace(&zenohd, true);
+    assert_shm_was_built(&run.wz);
+    assert!(
+        !run.wz_exited,
+        "the dialler ended on its own\n--- wz ---\n{}\n--- zenohd ---\n{}",
+        run.wz, run.zenohd
+    );
+    assert!(
+        !negotiated(&run.wz),
+        "a dialler that cannot open zenohd's segment must not negotiate SHM\n--- wz ---\n{}",
+        run.wz
+    );
+    assert!(
+        run.wz.contains("session Established"),
+        "the lenient steps let the session establish plain\n--- wz ---\n{}",
+        run.wz
+    );
+    assert!(
+        run.zenohd.contains("shm: None"),
+        "zenohd must have opened the transport without SHM\n--- zenohd ---\n{}",
+        run.zenohd
+    );
+}
