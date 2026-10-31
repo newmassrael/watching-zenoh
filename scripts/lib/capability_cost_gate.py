@@ -224,7 +224,15 @@ CASES: tuple[Case, ...] = (
     # budgets again and have them back. Five grew for good, by the hosted reading of that run
     # plus 3,500, to the hundred: -unstable 1,053,690 (old 1,049,400), -connectivity 1,124,750
     # (1,123,900), -admin-space 1,297,697 (1,289,900), -query 1,239,868 (1,231,200) and
-    # -local-queryable 1,258,240 (1,248,500). Which commits grew those five is not attributed.
+    # -local-queryable 1,258,240 (1,248,500). BISECTED on pc2 over the 104 commits that touch the
+    # crates these images link, with `-query` (`engine-coop,link-udp,query,queryable`) as the
+    # witness: 1,227,388 at `04d21adb3`, 1,225,064 at `62c3339c18`, then 1,248,756 at the very next
+    # commit that touches them, `69bc0b0e0b` (the SCE pin b1ede72108, which declares which codecs
+    # may refuse to encode: +23,692), and 1,239,572 at the head, the later pins having given 9,184
+    # of it back. The five are the ones whose images encode through the codecs that now return a
+    # Result, which is why the base `coop` image (937,467 to 940,971) hardly moved. What is left
+    # (+12,184 over the baseline) is that refusal path, until the SCE tree lands the list bounds
+    # and the gate normal form its pin note says are due.
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
          941_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
