@@ -302110,6 +302110,34 @@
         "Open: the stack chain of frt2 has no committed peak (it reads about 4,000 bytes with calls through a register not followed); hosted CI per job is unread."
       ]
     },
+    "Round 4012": {
+      "decision_summary": "Step T2 of L6. The dial and the accept of the secure channel under both policies, as the stream link's StreamDial and StreamListen, so the stream link runs over either unchanged. A chain stream offers NO credential zid: a router's zid is its own, not its key's, so the session takes the zid the peer states and the chain was the proof; a pinned stream is unchanged. The name a stream dial has is the address, so verify_name matches it against the IP SAN. A mutual policy missing its identity or roots is Unsupported and never connects. The listener never blocks on the network: one inbound handshake runs at a time (the arena holds one inbound session), each accept advances it, and a handshake that outlasts the deploy's clock budget, fails, or comes from a non-TLS or untrusted peer is dropped without failing the listener. The coop crate gains StreamListen for Box<L>.",
+      "changes_bullets": [
+        "crates/wz-tls-mbedtls: stream.rs gains ChainTrust, AcceptBudget, TlsDial::chain, TlsDial::with_accept, TlsDial::listener, TlsListener and the StreamDial::listen override; TlsStream::peer_zid is now Option and peer_credential_zid is None for a chain stream; tests/common (shared PKI and rustls peers) and tests/stream_policy.rs (9 tests) added, chain_trust.rs uses the shared module. crates/wz-runtime-coop: stream_link.rs gains StreamListen for Box<L>. docs/capi-pico-on-coop-engine.md records T2."
+      ],
+      "verification_bullets": [
+        "On pc2: cargo test -p wz-tls-mbedtls --features vendored: 2 + 11 + 3 + 9 passed, 0 failed. The nine new tests drive each role against rustls 0.23 on its own thread (the arena has no lock): a chain dial verifies the server, checks the name only when asked, refuses a stranger's root, presents a client chain under mutual TLS and refuses a half-configured mutual policy; a chain listener presents its chain, requires a vouched client chain under mutual TLS and is not wedged by a refused one, a stalled peer or junk; a pinned listener names the client by its key zid. clippy -D warnings clean with --all-targets and with the slot profile (--no-default-features --features session-slot --lib); cargo fmt clean. Not proved here: two ends of the channel on one thread (T3)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "L6 T3 to T5: the engine tls/ link (dial then listen, two ends on one thread), the ABI with one resolution of pico's keys for both engines and the engine selection, zenohd in Layer Z. Open: hostname locators for the name check, TLS 1.2 need of a real zenoh-pico, key and signature types of real certificates, pico's time source, arena beyond a two-link chain. Hosted results of earlier pushes still unread."
+      ],
+      "publishable_decision_summary": "Step T2 of L6. The dial and the accept of the secure channel under both policies, as the stream link's StreamDial and StreamListen, so the stream link runs over either unchanged. A chain stream offers NO credential zid: a router's zid is its own, not its key's, so the session takes the zid the peer states and the chain was the proof; a pinned stream is unchanged. The name a stream dial has is the address, so verify_name matches it against the IP SAN. A mutual policy missing its identity or roots is Unsupported and never connects. The listener never blocks on the network: one inbound handshake runs at a time (the arena holds one inbound session), each accept advances it, and a handshake that outlasts the deploy's clock budget, fails, or comes from a non-TLS or untrusted peer is dropped without failing the listener. The coop crate gains StreamListen for Box<L>.",
+      "publishable_changes_bullets": [
+        "crates/wz-tls-mbedtls: stream.rs gains ChainTrust, AcceptBudget, TlsDial::chain, TlsDial::with_accept, TlsDial::listener, TlsListener and the StreamDial::listen override; TlsStream::peer_zid is now Option and peer_credential_zid is None for a chain stream; tests/common (shared PKI and rustls peers) and tests/stream_policy.rs (9 tests) added, chain_trust.rs uses the shared module. crates/wz-runtime-coop: stream_link.rs gains StreamListen for Box<L>. docs/capi-pico-on-coop-engine.md records T2."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: cargo test -p wz-tls-mbedtls --features vendored: 2 + 11 + 3 + 9 passed, 0 failed. The nine new tests drive each role against rustls 0.23 on its own thread (the arena has no lock): a chain dial verifies the server, checks the name only when asked, refuses a stranger's root, presents a client chain under mutual TLS and refuses a half-configured mutual policy; a chain listener presents its chain, requires a vouched client chain under mutual TLS and is not wedged by a refused one, a stalled peer or junk; a pinned listener names the client by its key zid. clippy -D warnings clean with --all-targets and with the slot profile (--no-default-features --features session-slot --lib); cargo fmt clean. Not proved here: two ends of the channel on one thread (T3)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "L6 T3 to T5: the engine tls/ link (dial then listen, two ends on one thread), the ABI with one resolution of pico's keys for both engines and the engine selection, zenohd in Layer Z. Open: hostname locators for the name check, TLS 1.2 need of a real zenoh-pico, key and signature types of real certificates, pico's time source, arena beyond a two-link chain. Hosted results of earlier pushes still unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
