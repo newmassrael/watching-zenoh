@@ -303550,6 +303550,44 @@
         "The Local face still learns every token the forwarder learns instead of answering a per-subscriber token interest as upstream does; it is a fidelity gap and not the cause of this race. Read the next hosted run per job to confirm Z8 liveliness."
       ]
     },
+    "Round 4051": {
+      "decision_summary": "Layer C0 was red at the tip after decisions D10 and D15: reason-review-pins named three files the atom session-close-ingress cites (accept_loop.rs, session_lifecycle_open.rs, wz-session-core drive.rs) that had changed since their pins. They were re-read against the reason, and the reason was found out of date in one place: its clauses about open (a peer the graphs do not hold is refused at the opener and takes no entry of the bounded peer table; the refusals name no locator or none dialable; the R2721 witness arms that refuse an unknown peer and a peer advertising nothing) describe the opener before D15, which now asks for every well-formed zid with no locator and keeps only the refusals NotAZid and OpenerGone. A correction clause states that and the passive form of open (D10) and the key grammar's passive argument; the history above it is left as it was written. The three pins moved to the read blobs. The grade does not move. The finding came from running the C0 lane on a build host at the tip: hosted CI has given no verdict since round 4029, because each push cancels the previous run.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (typed primitive set-inventory-status): the reason of session-close-ingress gains one CORRECTION clause for D10 and D15, nothing above it changed.",
+        "docs/reason-review-pins.md: the rows of accept_loop.rs, session_lifecycle_open.rs and wz-session-core drive.rs at the read blobs."
+      ],
+      "verification_bullets": [
+        "Layer C0 run on a build host at tip 99d47cd71a: reason-review-pins FAIL on exactly those three files; the other C0 content passed, and lanes A, A3, A4 (rerun after a memory-reservation end), A5, C0s, C0b, C0f passed there.",
+        "The three diffs were read in full (D10 passive open, D15 locator-less open, the key grammar's passive argument) against the reason.",
+        "After the change: reason_review_pin_gate --check OK, store_reason_citation_gate --check OK, reason_citation_gate --check OK; the three needles of the new clause exist in their files.",
+        "The owning session was told before the edit and had not answered; the tip had not moved on these files.",
+        "Not run: the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Carried: O4 (h) timestamp ZID bound (the SCE owner's); the kit hardware measurement and the mold 2.30.0 link abort; the hosted verdict of tips after round 4029, which concurrent pushes keep cancelling."
+      ],
+      "publishable_decision_summary": "Layer C0 was red at the tip after decisions D10 and D15: reason-review-pins named three files the atom session-close-ingress cites (accept_loop.rs, session_lifecycle_open.rs, wz-session-core drive.rs) that had changed since their pins. They were re-read against the reason, and the reason was found out of date in one place: its clauses about open (a peer the graphs do not hold is refused at the opener and takes no entry of the bounded peer table; the refusals name no locator or none dialable; the R2721 witness arms that refuse an unknown peer and a peer advertising nothing) describe the opener before D15, which now asks for every well-formed zid with no locator and keeps only the refusals NotAZid and OpenerGone. A correction clause states that and the passive form of open (D10) and the key grammar's passive argument; the history above it is left as it was written. The three pins moved to the read blobs. The grade does not move. The finding came from running the C0 lane on a build host at the tip: hosted CI has given no verdict since round 4029, because each push cancels the previous run.",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (typed primitive set-inventory-status): the reason of session-close-ingress gains one CORRECTION clause for D10 and D15, nothing above it changed.",
+        "docs/reason-review-pins.md: the rows of accept_loop.rs, session_lifecycle_open.rs and wz-session-core drive.rs at the read blobs."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C0 run on a build host at tip 99d47cd71a: reason-review-pins FAIL on exactly those three files; the other C0 content passed, and lanes A, A3, A4 (rerun after a memory-reservation end), A5, C0s, C0b, C0f passed there.",
+        "The three diffs were read in full (D10 passive open, D15 locator-less open, the key grammar's passive argument) against the reason.",
+        "After the change: reason_review_pin_gate --check OK, store_reason_citation_gate --check OK, reason_citation_gate --check OK; the three needles of the new clause exist in their files.",
+        "The owning session was told before the edit and had not answered; the tip had not moved on these files.",
+        "Not run: the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried: O4 (h) timestamp ZID bound (the SCE owner's); the kit hardware measurement and the mold 2.30.0 link abort; the hosted verdict of tips after round 4029, which concurrent pushes keep cancelling."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
