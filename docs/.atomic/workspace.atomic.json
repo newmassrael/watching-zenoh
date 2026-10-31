@@ -303794,6 +303794,52 @@
         "The 1 KiB cell is 310 k against 360 k: 14 percent is unread. The sender and the writer share one SMT pair under the default pinning, and a reading that gives wz the same CPU budget in physical cores (not threads) is not made. Not measured with this change: the batched row, sizes between 64 and 1024 bytes, latency of a request and reply, the pooled queue of the zero-copy build (`take_next_packed` hands it `take_next`, so its writes are not widened), a peer other than pico, and any host but pc3. The bound of four frames is a stated minimum, not a fitted number; a measured curve over frame sizes would say whether it is the right one."
       ]
     },
+    "Round 4058": {
+      "decision_summary": "Phase 5a of the router with a task per face. A route is a synchronous call under the tables' guard, so a router that had a permit to await would still have to keep the message and send it later, which is the credit stage of phase 4. What still parked a face's thread was the messages the stage did not take: the session core now probes a Declare, an Interest and a ResponseFinal as it probes a Push and a link-state message, each arm gated as its arm of the waiting send, and the router holds one that finds no room in the destination's data lane, behind what it holds, whoever sent it. A declaration can no longer reach a peer before held data that came first. A Request and a Response keep the waiting send (a shared-memory payload's handoff is not opened and given back by a probe yet), as does the session core's own permit for publish and the C ABI.",
+      "changes_bullets": [
+        "session_actions.rs: dispatch_declare, dispatch_interest and dispatch_response_final become wrappers of dispatch_declare_at, dispatch_interest_at and dispatch_response_final_at, which take a DispatchStage and borrow the message; try_send_network_message_qos probes the three kinds under the same gates as the waiting send's arms",
+        "egress.rs: held_lane holds a reliable Declare, Interest or ResponseFinal whose QoS may not drop it in the data lane, whoever sent it (held_unless_droppable); module doc says what is held and what is not",
+        "egress_tests.rs: a declaration, an interest and a final are probed and come back whole on a full link; a declaration for a destination that holds a Put is held behind it and reaches the link after it",
+        "run-ci.sh: the nine C1AY router_forward guards move +2",
+        "docs/router-task-per-face.md: phase 5a, why it is the credit stage and not a permit, and what is not done"
+      ],
+      "verification_bullets": [
+        "Mutations: holding no Declare fails the order test (held 1, expected 2); dispatching a Declare Fresh in the probe fails the probe test (Ok where NoRoom was expected); both restored",
+        "On the build host: router_forward::egress 31 and 34 (with transport-qos); wz-session-core lib 835; clippy -D warnings of wz-session-core default and with no default features plus alloc and each of declare-interest, codec-response-final, declare-subscriber, codec-declare+codec-linkstate+codec-push, codec-request, liveliness-token; wz-runtime-tokio routing-router-hat; cargo fmt clean",
+        "guarded_count_gate over the commit: 33 reached, the nine router_forward guards moved to what was printed, the other 24 OK",
+        "Layer E7m 13 of 13, live pair 1200 of 1200",
+        "wz_router_hat_mesh 7 of 8: federates_data_across_two_routers fails, and fails identically without this commit; bisected to 09ad137ffb (round 4042), whose parent 694f228eef passes 2 of 2 and which fails 2 of 2"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "A peer's regression is owed: wz_router_hat_mesh federates_data_across_two_routers (Layer E7) fails since 09ad137ffb (a south peer is told only what it asked for); the peer-pub likely sends no subscriber interest. The two sessions named Zenoh protocol next-session prompt were told; this round did not fix it",
+        "Phase 5b: a Request and a Response probed with the shared-memory handoff opened and given back; phase 6, the async conduit lock for chains"
+      ],
+      "publishable_decision_summary": "Phase 5a of the router with a task per face. A route is a synchronous call under the tables' guard, so a router that had a permit to await would still have to keep the message and send it later, which is the credit stage of phase 4. What still parked a face's thread was the messages the stage did not take: the session core now probes a Declare, an Interest and a ResponseFinal as it probes a Push and a link-state message, each arm gated as its arm of the waiting send, and the router holds one that finds no room in the destination's data lane, behind what it holds, whoever sent it. A declaration can no longer reach a peer before held data that came first. A Request and a Response keep the waiting send (a shared-memory payload's handoff is not opened and given back by a probe yet), as does the session core's own permit for publish and the C ABI.",
+      "publishable_changes_bullets": [
+        "session_actions.rs: dispatch_declare, dispatch_interest and dispatch_response_final become wrappers of dispatch_declare_at, dispatch_interest_at and dispatch_response_final_at, which take a DispatchStage and borrow the message; try_send_network_message_qos probes the three kinds under the same gates as the waiting send's arms",
+        "egress.rs: held_lane holds a reliable Declare, Interest or ResponseFinal whose QoS may not drop it in the data lane, whoever sent it (held_unless_droppable); module doc says what is held and what is not",
+        "egress_tests.rs: a declaration, an interest and a final are probed and come back whole on a full link; a declaration for a destination that holds a Put is held behind it and reaches the link after it",
+        "run-ci.sh: the nine C1AY router_forward guards move +2",
+        "docs/router-task-per-face.md: phase 5a, why it is the credit stage and not a permit, and what is not done"
+      ],
+      "publishable_verification_bullets": [
+        "Mutations: holding no Declare fails the order test (held 1, expected 2); dispatching a Declare Fresh in the probe fails the probe test (Ok where NoRoom was expected); both restored",
+        "On the build host: router_forward::egress 31 and 34 (with transport-qos); wz-session-core lib 835; clippy -D warnings of wz-session-core default and with no default features plus alloc and each of declare-interest, codec-response-final, declare-subscriber, codec-declare+codec-linkstate+codec-push, codec-request, liveliness-token; wz-runtime-tokio routing-router-hat; cargo fmt clean",
+        "guarded_count_gate over the commit: 33 reached, the nine router_forward guards moved to what was printed, the other 24 OK",
+        "Layer E7m 13 of 13, live pair 1200 of 1200",
+        "wz_router_hat_mesh 7 of 8: federates_data_across_two_routers fails, and fails identically without this commit; bisected to 09ad137ffb (round 4042), whose parent 694f228eef passes 2 of 2 and which fails 2 of 2"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A peer's regression is owed: wz_router_hat_mesh federates_data_across_two_routers (Layer E7) fails since 09ad137ffb (a south peer is told only what it asked for); the peer-pub likely sends no subscriber interest. The two sessions named Zenoh protocol next-session prompt were told; this round did not fix it",
+        "Phase 5b: a Request and a Response probed with the shared-memory handoff opened and given back; phase 6, the async conduit lock for chains"
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
