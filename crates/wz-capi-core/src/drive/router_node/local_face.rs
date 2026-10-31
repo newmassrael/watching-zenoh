@@ -10,13 +10,19 @@
 //! that owns the state of the face, so that no lock is held when a callback runs and a callback
 //! may call back into the node.
 //!
+//! Each subscriber is an interest of the face in the router's tables, as the session of a client
+//! sends one for each liveliness subscriber it declares: the router answers the tokens alive when
+//! the interest is made, if it asks for history, and pushes the ones that come alive after. Which
+//! of the two a token is is decided by the router, under the lock its tables are written under,
+//! and the face tells a subscriber what the router told it for its interest.
+//!
 //! The state is what the face has been told: the tokens of the other faces by the id the router
-//! numbers them, the tokens the program declared, and for each key how many of them are alive. A
-//! subscriber is told of a key when the first token comes alive on it and of its going when the
-//! last is gone, as a client of a router is told by the router's one declaration per key, and the
-//! tokens already alive are told first when the subscriber asks for its history.
+//! numbers them, the tokens the program declared (the router is not told of them for the face),
+//! and for each subscriber the keys it counts alive and the tokens it counts on each. A subscriber
+//! is told of a key when the first token it counts comes alive on it and of its going when the
+//! last is gone, as a client of a router is told by the router's one declaration per key.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -93,29 +99,99 @@ enum Command {
     Stop,
 }
 
+/// A token the face knows of: one the router told it, by the id the router numbers it, or one the
+/// program declared, by the id the router holds it under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Token {
+    Remote(u64),
+    Own(u64),
+}
+
+impl Token {
+    fn id(self) -> u64 {
+        match self {
+            Self::Remote(id) | Self::Own(id) => id,
+        }
+    }
+}
+
+/// A key a subscriber counts alive.
+struct Alive {
+    /// The id of the token that brought the key alive to the subscriber: what it was told the key
+    /// under, and what its retraction carries.
+    told: u64,
+    /// The tokens the subscriber counts on the key. The key goes when the last of them does.
+    tokens: HashSet<Token>,
+}
+
 struct Subscriber {
     id: u64,
     pattern: String,
+    /// Whether the subscriber asked to be told the tokens that were alive when it asked.
+    history: bool,
     handler: LivelinessHandler,
+    /// The keys the subscriber counts alive, each with the tokens it counts on it. The tokens
+    /// that were alive when it asked are counted whether or not it asked to be told them: a key
+    /// that was alive then is not one that comes alive when another token is declared on it.
+    alive: HashMap<String, Alive>,
 }
 
-/// A key with tokens alive on it.
-struct Alive {
-    /// The id of the token that brought the key alive: what every subscriber was told it under,
-    /// and what its history and its retraction carry.
-    told: u64,
-    holders: usize,
+impl Subscriber {
+    /// `token` is alive on `key`, which the subscriber meets: it counts it, and is told of the key
+    /// when this is the first token it counts on it and `tell` is set (the tokens alive when it
+    /// asked are told only to a subscriber that asked for them).
+    fn learn(&mut self, token: Token, key: &str, tell: bool) {
+        let held = self.alive.entry(key.to_owned()).or_insert_with(|| Alive {
+            told: token.id(),
+            tokens: HashSet::new(),
+        });
+        let first = held.tokens.is_empty();
+        if held.tokens.insert(token) && first && tell {
+            let told = held.told;
+            (self.handler)(LivelinessSample {
+                kind: LivelinessSampleKind::Put,
+                keyexpr: key,
+                token_id: told,
+            });
+        }
+    }
+
+    /// `gone` are no longer alive on `key`, which the subscriber meets: it is told the key is gone
+    /// when it counts no token on it any more, under the id it was told the key under. A
+    /// subscriber that was never told of the key is told it is gone all the same, under
+    /// `fallback`: it asked for no history, so the token went that it never heard of, which is
+    /// what a session is told by upstream's retraction of a token it was never declared.
+    fn forget(&mut self, gone: &[Token], key: &str, fallback: u64) {
+        let (kind, told) = match self.alive.get_mut(key) {
+            Some(held) => {
+                for token in gone {
+                    held.tokens.remove(token);
+                }
+                if !held.tokens.is_empty() {
+                    return;
+                }
+                let told = held.told;
+                self.alive.remove(key);
+                (LivelinessSampleKind::Delete, told)
+            }
+            None => (LivelinessSampleKind::Delete, fallback),
+        };
+        (self.handler)(LivelinessSample {
+            kind,
+            keyexpr: key,
+            token_id: told,
+        });
+    }
 }
 
 struct State {
     /// When the face started: the clock the deadlines of its queries are on.
     started: std::time::Instant,
-    /// The tokens of the other faces, by the id the router numbers them.
+    /// The tokens of the other faces the router has told, by the id it numbers them: the key a
+    /// retraction by id is about.
     remote: HashMap<u64, String>,
     /// The tokens the program declared, by the id the router holds them under.
     own: HashMap<u64, String>,
-    /// The keys alive, each with the id it was told under and how many tokens, of either, hold it.
-    alive: HashMap<String, Alive>,
     subscribers: Vec<Subscriber>,
     /// The queries the program asked that have not ended, by the request id it gave them: a
     /// reply the router tells the face is handed to the query it answers, and the end of the
@@ -151,7 +227,6 @@ impl State {
             started: std::time::Instant::now(),
             remote: HashMap::new(),
             own: HashMap::new(),
-            alive: HashMap::new(),
             subscribers: Vec::new(),
             queries: ReplyRegistry::new(),
             watches: Vec::new(),
@@ -234,17 +309,22 @@ impl State {
                     move |_| on_final(),
                 );
             }
-            Command::Told(LocalFaceEvent::TokenUp { id, keyexpr }) => {
+            Command::Told(LocalFaceEvent::TokenUp {
+                id,
+                keyexpr,
+                interest,
+            }) => {
                 // The first announcement of an id wins, as a session's table of remote tokens
-                // does: a repeat neither counts again nor rebinds the id to another key.
-                if let std::collections::hash_map::Entry::Vacant(slot) = self.remote.entry(id) {
-                    slot.insert(keyexpr.clone());
-                    self.up(&keyexpr, id);
+                // does: a repeat neither rebinds the id to another key nor is counted twice (a
+                // subscriber counts a token once).
+                let bound = self.remote.entry(id).or_insert_with(|| keyexpr.clone());
+                if *bound == keyexpr {
+                    self.learn(Token::Remote(id), &keyexpr, interest);
                 }
             }
             Command::Told(LocalFaceEvent::TokenDown { id, keyexpr }) => {
                 if let Some(held) = self.remote.remove(&id) {
-                    self.down(&held);
+                    self.forget(&[Token::Remote(id)], &held, id);
                 } else if let Some(keyexpr) = keyexpr {
                     // The router says nothing of the other faces backs the key any more, to a
                     // face it never numbered the token for: every token of theirs on it is gone.
@@ -254,54 +334,70 @@ impl State {
                         .filter(|(_, held)| **held == keyexpr)
                         .map(|(id, _)| *id)
                         .collect();
-                    for id in gone {
-                        self.remote.remove(&id);
-                        self.down(&keyexpr);
+                    for id in &gone {
+                        self.remote.remove(id);
                     }
+                    let gone: Vec<Token> = gone.into_iter().map(Token::Remote).collect();
+                    self.forget(&gone, &keyexpr, id);
                 }
             }
             Command::OwnUp { id, keyexpr } => {
                 self.own.insert(id, keyexpr.clone());
-                self.up(&keyexpr, id);
+                self.learn(Token::Own(id), &keyexpr, None);
             }
             Command::OwnDown(id) => {
                 if let Some(keyexpr) = self.own.remove(&id) {
-                    self.down(&keyexpr);
+                    self.forget(&[Token::Own(id)], &keyexpr, id);
                 }
             }
             Command::Subscribe {
                 id,
                 pattern,
                 history,
-                mut handler,
+                handler,
             } => {
-                if history {
-                    for (keyexpr, key) in self
-                        .alive
-                        .iter()
-                        .filter(|(key, _)| keyexpr_intersects_text(&pattern, key))
-                    {
-                        handler(LivelinessSample {
-                            kind: LivelinessSampleKind::Put,
-                            keyexpr,
-                            token_id: key.told,
-                        });
-                    }
-                }
-                self.subscribers.push(Subscriber {
+                let mut sub = Subscriber {
                     id,
                     pattern,
+                    history,
                     handler,
-                });
+                    alive: HashMap::new(),
+                };
+                // The tokens of the program are the face's own to tell: the router answers the
+                // history of the others'. The subscriber counts them, and is told them if it
+                // asked for history.
+                let mut own: Vec<(&u64, &String)> = self.own.iter().collect();
+                own.sort();
+                for (token, key) in own {
+                    if keyexpr_intersects_text(&sub.pattern, key) {
+                        sub.learn(Token::Own(*token), key, history);
+                    }
+                }
+                self.subscribers.push(sub);
             }
-            Command::Unsubscribe(id) => self.subscribers.retain(|sub| sub.id != id),
+            Command::Unsubscribe(id) => {
+                self.subscribers.retain(|sub| sub.id != id);
+                // The router forgets what it told the face when the face has no interest left,
+                // and numbers what it tells it again from the start: a token it told before is
+                // not one it will retract.
+                if self.subscribers.is_empty() {
+                    self.remote.clear();
+                }
+            }
             Command::Alive { pattern, answer } => {
-                let keys = self
-                    .alive
-                    .keys()
-                    .filter(|key| keyexpr_intersects_text(&pattern, key))
-                    .cloned()
-                    .collect();
+                let mut keys = self
+                    .router
+                    .upgrade()
+                    .map(|router| router.local_tokens_alive(&pattern))
+                    .unwrap_or_default();
+                keys.extend(
+                    self.own
+                        .values()
+                        .filter(|key| keyexpr_intersects_text(&pattern, key))
+                        .cloned(),
+                );
+                keys.sort();
+                keys.dedup();
                 let _ = answer.send(keys);
             }
             Command::Stop => return false,
@@ -309,40 +405,32 @@ impl State {
         true
     }
 
-    fn up(&mut self, keyexpr: &str, token_id: u64) {
-        let key = self.alive.entry(keyexpr.to_owned()).or_insert(Alive {
-            told: token_id,
-            holders: 0,
-        });
-        key.holders += 1;
-        if key.holders == 1 {
-            self.tell(LivelinessSampleKind::Put, keyexpr, token_id);
-        }
-    }
-
-    /// One token of `keyexpr` is gone. The key is retracted under the id it was told under, which
-    /// is not that of the token that was the last to go: a subscriber counts the key alive by that
-    /// id, and a retraction under another would leave it alive.
-    fn down(&mut self, keyexpr: &str) {
-        let Some(key) = self.alive.get_mut(keyexpr) else {
-            return;
-        };
-        key.holders -= 1;
-        if key.holders == 0 {
-            let told = key.told;
-            self.alive.remove(keyexpr);
-            self.tell(LivelinessSampleKind::Delete, keyexpr, told);
-        }
-    }
-
-    fn tell(&mut self, kind: LivelinessSampleKind, keyexpr: &str, token_id: u64) {
+    /// `token` is alive on `key`. A token the router pushes, or the program declares, is counted
+    /// and told by every subscriber that meets the key. One the router answers the current
+    /// tokens of an interest with (`interest`) is the answer of that subscriber alone, which
+    /// counts it and is told it only if it asked for history: it was alive before the
+    /// subscriber, whoever asks.
+    fn learn(&mut self, token: Token, key: &str, interest: Option<u64>) {
         for sub in &mut self.subscribers {
-            if keyexpr_intersects_text(&sub.pattern, keyexpr) {
-                (sub.handler)(LivelinessSample {
-                    kind,
-                    keyexpr,
-                    token_id,
-                });
+            if !keyexpr_intersects_text(&sub.pattern, key) {
+                continue;
+            }
+            match interest {
+                None => sub.learn(token, key, true),
+                Some(asked) if asked == sub.id => sub.learn(token, key, sub.history),
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// `gone` are no longer alive on `key`: each subscriber that meets the key stops counting them.
+    /// A key is retracted under the id it was told under, which is not that of the token that was
+    /// the last to go: a subscriber counts the key alive by that id, and a retraction under
+    /// another would leave it alive.
+    fn forget(&mut self, gone: &[Token], key: &str, fallback: u64) {
+        for sub in &mut self.subscribers {
+            if keyexpr_intersects_text(&sub.pattern, key) {
+                sub.forget(gone, key, fallback);
             }
         }
     }
@@ -351,6 +439,10 @@ impl State {
 /// The face of a router node for liveliness: the program's side of it.
 pub struct LocalLiveliness {
     commands: mpsc::Sender<Command>,
+    /// The router the subscribers ask for the tokens they are told: each subscriber is an
+    /// interest of the face in the router's tables, as the session of a client sends one for each
+    /// liveliness subscriber it declares. Gone when the node is.
+    router: Weak<RouterForwarder>,
     next_subscriber: AtomicU64,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -362,6 +454,7 @@ impl LocalLiveliness {
     /// ([`Self::watch`]); a face started over none watches nothing.
     pub(super) fn start(router: Weak<RouterForwarder>) -> std::io::Result<(Self, LocalFaceSink)> {
         let (commands, received) = mpsc::channel::<Command>();
+        let asked = router.clone();
         let thread = std::thread::Builder::new()
             .name("wz-router-local".to_owned())
             .spawn(move || {
@@ -409,6 +502,7 @@ impl LocalLiveliness {
         Ok((
             Self {
                 commands,
+                router: asked,
                 next_subscriber: AtomicU64::new(1),
                 thread: Mutex::new(Some(thread)),
             },
@@ -419,6 +513,16 @@ impl LocalLiveliness {
     /// Be told of the tokens that meet `pattern`: first those already alive when `history` asks,
     /// then each key as its first token comes alive and as its last goes. The handler runs on the
     /// face's thread. The id answered ends the subscription ([`Self::unsubscribe`]).
+    ///
+    /// The subscriber is held by the face first, and the router is asked for its tokens after:
+    /// what the router then tells arrives behind the subscriber on the face's queue, and which of
+    /// the tokens are history and which come after is decided by the router's tables, where the
+    /// interest is stored and answered under one lock, and not by the order two queues are read.
+    /// A token declared before the call that returns is history: the subscriber counts it, and is
+    /// told it only when `history` asks. One declared after is told. The router is asked for the
+    /// current tokens whatever `history` says, so that the subscriber knows which keys were alive
+    /// when it asked: a token declared on one of them by another node later is not a key that
+    /// comes alive.
     pub fn subscribe(&self, pattern: &str, history: bool, handler: LivelinessHandler) -> u64 {
         let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
         let _ = self.commands.send(Command::Subscribe {
@@ -427,12 +531,21 @@ impl LocalLiveliness {
             history,
             handler,
         });
+        if let Some(router) = self.router.upgrade() {
+            router.ask_local_tokens(id, pattern, true);
+        }
         id
     }
 
     /// End the subscription `id`. The handler is not called again once this has returned to a
     /// caller that waits on the face (a later [`Self::alive`] does).
+    ///
+    /// The router is told first: it tells the face nothing for the interest from then on, so what
+    /// it told before is ahead of the subscriber's end on the face's queue.
     pub fn unsubscribe(&self, id: u64) {
+        if let Some(router) = self.router.upgrade() {
+            router.forget_local_tokens(id);
+        }
         let _ = self.commands.send(Command::Unsubscribe(id));
     }
 
@@ -563,16 +676,21 @@ mod tests {
                 sample.kind, sample.keyexpr, sample.token_id
             ));
         });
+        face.subscribe("k", false, handler);
         up(&face, &sink, 5, "k");
         up(&face, &sink, 6, "k");
-        // The history carries the id the key came alive under, and so does the retraction, though
+        // The key was told under the id it came alive under, and so is its retraction, though
         // the token that goes last is the other one.
-        face.subscribe("k", true, handler);
         sink(down(5));
         sink(down(6));
-        assert!(face.alive("k").is_empty());
+        settle(&face);
         assert_eq!(*told.lock().unwrap(), ["Put k 5", "Delete k 5"]);
         face.stop();
+    }
+
+    /// Wait for the face's thread to have read what it was sent so far.
+    fn settle(face: &LocalLiveliness) {
+        let _ = face.alive("**");
     }
 
     /// The router tells the face that the token it numbered `id` is gone.
@@ -605,6 +723,16 @@ mod tests {
         sink(LocalFaceEvent::TokenUp {
             id,
             keyexpr: keyexpr.to_owned(),
+            interest: None,
+        });
+    }
+
+    /// The router answers the history of the interest `interest` with a token.
+    fn answer(sink: &LocalFaceSink, interest: u64, id: u64, keyexpr: &str) {
+        sink(LocalFaceEvent::TokenUp {
+            id,
+            keyexpr: keyexpr.to_owned(),
+            interest: Some(interest),
         });
     }
 
@@ -617,9 +745,10 @@ mod tests {
         up(&face, &sink, 2, "a/b");
         sink(down(1));
         // Not told: another token holds the key.
-        assert_eq!(face.alive("a/**"), vec!["a/b".to_owned()]);
+        settle(&face);
+        assert_eq!(*seen.lock().unwrap(), ["Put a/b"]);
         sink(down(2));
-        assert!(face.alive("a/**").is_empty());
+        settle(&face);
         assert_eq!(*seen.lock().unwrap(), ["Put a/b", "Delete a/b"]);
         face.stop();
     }
@@ -627,16 +756,100 @@ mod tests {
     #[test]
     fn the_tokens_of_the_program_count_with_the_others_and_history_lists_them() {
         let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
-        up(&face, &sink, 7, "k/remote");
         face.own_up(100, "k/own");
         let (handler, seen) = recorder();
-        face.subscribe("k/*", true, handler);
-        assert_eq!(face.alive("k/*").len(), 2);
+        let asked = face.subscribe("k/*", true, handler);
+        // The router answers the history of the others' tokens, to the subscriber that asked.
+        answer(&sink, asked, 7, "k/remote");
+        assert_eq!(face.alive("k/*"), vec!["k/own".to_owned()]);
         let mut told = seen.lock().unwrap().clone();
         told.sort();
         assert_eq!(told, ["Put k/own", "Put k/remote"]);
         face.own_down(100);
-        assert_eq!(face.alive("k/*"), vec!["k/remote".to_owned()]);
+        settle(&face);
+        assert_eq!(seen.lock().unwrap().last().unwrap(), "Delete k/own");
+        face.stop();
+    }
+
+    #[test]
+    fn a_key_the_program_and_the_router_both_hold_is_told_once() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        face.own_up(100, "k");
+        let (handler, seen) = recorder();
+        let asked = face.subscribe("k", true, handler);
+        answer(&sink, asked, 7, "k");
+        face.own_down(100);
+        settle(&face);
+        // The router's token still holds the key.
+        assert_eq!(*seen.lock().unwrap(), ["Put k"]);
+        sink(down(7));
+        settle(&face);
+        assert_eq!(*seen.lock().unwrap(), ["Put k", "Delete k"]);
+        face.stop();
+    }
+
+    #[test]
+    fn the_answer_to_an_interest_is_history_told_only_to_a_subscriber_that_asked_for_it() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        let (without, seen_without) = recorder();
+        let (with, seen_with) = recorder();
+        let plain = face.subscribe("**", false, without);
+        let asked = face.subscribe("**", true, with);
+        // Each subscriber is its own interest, and the router answers each of them with what was
+        // alive when it asked.
+        answer(&sink, plain, 1, "x");
+        answer(&sink, asked, 1, "x");
+        up(&face, &sink, 2, "y");
+        // Another token on a key that was alive when the subscribers asked does not bring it alive.
+        up(&face, &sink, 3, "x");
+        settle(&face);
+        assert_eq!(*seen_without.lock().unwrap(), ["Put y"]);
+        assert_eq!(*seen_with.lock().unwrap(), ["Put x", "Put y"]);
+        face.stop();
+    }
+
+    #[test]
+    fn an_answer_to_one_interest_is_not_the_answer_of_another() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        let (first, seen_first) = recorder();
+        let (second, seen_second) = recorder();
+        let one = face.subscribe("**", true, first);
+        face.subscribe("**", true, second);
+        answer(&sink, one, 1, "x");
+        settle(&face);
+        assert_eq!(*seen_first.lock().unwrap(), ["Put x"]);
+        assert!(seen_second.lock().unwrap().is_empty());
+        face.stop();
+    }
+
+    #[test]
+    fn a_key_alive_when_a_subscriber_asked_is_told_gone_to_it_whatever_its_history() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        let (without, seen_without) = recorder();
+        let (with, seen_with) = recorder();
+        let plain = face.subscribe("**", false, without);
+        let asked = face.subscribe("**", true, with);
+        answer(&sink, plain, 1, "x");
+        answer(&sink, asked, 1, "x");
+        sink(down(1));
+        settle(&face);
+        assert_eq!(*seen_without.lock().unwrap(), ["Delete x"]);
+        assert_eq!(*seen_with.lock().unwrap(), ["Put x", "Delete x"]);
+        face.stop();
+    }
+
+    #[test]
+    fn a_retraction_by_key_reaches_a_subscriber_that_never_counted_the_token() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        let (handler, seen) = recorder();
+        face.subscribe("**", false, handler);
+        // Upstream tells a session that a token it was never declared is gone.
+        sink(LocalFaceEvent::TokenDown {
+            id: 0,
+            keyexpr: Some("x".to_owned()),
+        });
+        settle(&face);
+        assert_eq!(*seen.lock().unwrap(), ["Delete x"]);
         face.stop();
     }
 
@@ -649,7 +862,7 @@ mod tests {
         up(&face, &sink, 1, "x");
         sink(down(99));
         sink(down(1));
-        assert!(face.alive("**").is_empty());
+        settle(&face);
         assert_eq!(*seen.lock().unwrap(), ["Put x", "Delete x"]);
         face.stop();
     }
@@ -662,8 +875,25 @@ mod tests {
         up(&face, &sink, 1, "x");
         face.unsubscribe(id);
         up(&face, &sink, 2, "y");
-        assert_eq!(face.alive("**").len(), 2);
+        settle(&face);
         assert_eq!(*seen.lock().unwrap(), ["Put x"]);
+        face.stop();
+    }
+
+    #[test]
+    fn a_face_with_no_subscriber_left_binds_the_ids_the_router_numbers_afresh() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        let (first, _seen_first) = recorder();
+        let id = face.subscribe("**", false, first);
+        up(&face, &sink, 1, "old");
+        face.unsubscribe(id);
+        // The router numbers from the start again once the face has no interest: an id it used
+        // for one key is a later key's, and the face does not hold the earlier binding to it.
+        let (second, seen_second) = recorder();
+        face.subscribe("**", false, second);
+        up(&face, &sink, 1, "new");
+        settle(&face);
+        assert_eq!(*seen_second.lock().unwrap(), ["Put new"]);
         face.stop();
     }
 }

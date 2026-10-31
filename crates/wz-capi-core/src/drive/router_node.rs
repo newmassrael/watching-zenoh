@@ -469,14 +469,14 @@ pub(crate) fn open_router_blocking(
     }
     #[cfg(not(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey")))]
     let _ = auth;
-    // The node's own face, told of the tokens of the others from the first.
+    // The node's own face, told of the tokens of the others its liveliness subscribers ask for:
+    // each subscriber is an interest the router answers (`LocalLiveliness::subscribe`).
     let (liveliness, face_sink) =
         LocalLiveliness::start(Arc::downgrade(&forwarder)).map_err(|error| {
             log_open_failure("the face of the router node", &error);
             OpenError::DriveFailed
         })?;
     forwarder.attach_local_face(face_sink);
-    forwarder.ask_local_tokens();
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Result<Vec<String>, OpenError>>();

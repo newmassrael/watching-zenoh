@@ -2526,8 +2526,15 @@ pub(crate) struct Tables {
 /// answers to a query the face asked ([`RouterForwarder::local_get`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalFaceEvent {
-    /// A token is alive on `keyexpr`.
-    TokenUp { id: u64, keyexpr: String },
+    /// A token is alive on `keyexpr`. `interest` is the id of the interest the face asked it
+    /// under ([`RouterForwarder::ask_local_tokens`]) when the router tells it as the answer to
+    /// that interest's history, and `None` when the router pushes it of its own accord: a push
+    /// is for every interest of the face that meets the key, an answer for the one that asked.
+    TokenUp {
+        id: u64,
+        keyexpr: String,
+        interest: Option<u64>,
+    },
     /// The token the router numbered `id` is gone. The router also tells a face that asked and
     /// was never told of a token that it is gone, by a retraction that names the key and no id
     /// (upstream's `maybe_unpropagate_token`, its second arm): `keyexpr` is then the key.
@@ -2579,6 +2586,7 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
                     LocalFaceEvent::TokenUp {
                         id: token.id,
                         keyexpr,
+                        interest: declare.interest_id,
                     }
                 })
             }
@@ -3671,7 +3679,9 @@ router_entry_points! { on_tables_mut:
     fn unhost_queryable(&self, id: u64) -> bool;
     fn attach_local_face(&self, sink: LocalFaceSink);
     #[cfg(feature = "routing-token-tables")]
-    fn ask_local_tokens(&self);
+    fn ask_local_tokens(&self, interest_id: u64, keyexpr: &str, current: bool);
+    #[cfg(feature = "routing-token-tables")]
+    fn forget_local_tokens(&self, interest_id: u64) -> bool;
     #[cfg(feature = "routing-token-tables")]
     fn host_token(&self, keyexpr: &str) -> u64;
     #[cfg(feature = "routing-token-tables")]
@@ -3690,6 +3700,8 @@ router_entry_points! { on_tables:
         keyexpr: &str,
         locality: wz_session_core::locality::Locality,
     ) -> bool;
+    #[cfg(feature = "routing-token-tables")]
+    fn local_tokens_alive(&self, keyexpr: &str) -> Vec<String>;
     fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut));
     fn release_held(&self, record: &HeldRecord);
     fn north_net_node_count(&self) -> usize;
@@ -7256,16 +7268,62 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
-        // R2614 — `target: None` is an UNRESTRICTED interest (the wire's `R` flag clear: no
-        // keyexpr, which the protocol defines as asking for all key expressions,
-        // `commons/zenoh-protocol/src/network/interest.rs` @ `then the interest is restricted to the matching key expression, else it is for all key expressions`).
-        // Upstream answers it with the whole table, because its matcher treats an absent
-        // resource as matching everything (`zenoh/src/net/routing/hat/peer/token.rs` @
-        // `res.is_none_or`). Neither reference emits one (zenoh derives `R` from
-        // `wire_expr.is_some()` and its liveliness GET always supplies one; pico sets
-        // `_Z_INTEREST_FLAG_RESTRICTED` at both of its liveliness sites), so it is reachable
-        // only from a peer that builds the message itself, but wz is a drop-in for the node
-        // that ANSWERS.
+        let per_ke = self.interest_token_keys(inbound, target, self_zid);
+        // An unrestricted interest cannot aggregate: the aggregate reply is keyed on the
+        // interest's own keyexpr, which it does not carry. Upstream never aggregates a token
+        // dump (its peer hat emits one `DeclareToken` per match,
+        // `zenoh/src/net/routing/hat/peer/interests.rs` @ `fn send_current_tokens`).
+        let aggregate = aggregate && target.is_some();
+        let mut replies = Vec::new();
+        emit_current_interest_replies(
+            interest_id,
+            target.unwrap_or(""),
+            aggregate,
+            per_ke,
+            |a, _b| a,
+            // A FUTURE (C+F) interest's current reply carries a NON-ZERO id interned
+            // per (face, reply ke) so it is REUSED on the later FUTURE push and dedups
+            // (mirror of the sub future branch); a CURRENT-only interest keeps id 0.
+            |id, ke, ()| {
+                if future {
+                    let token_id = self
+                        .tables
+                        .future_tokens
+                        .intern_current_reply(inbound, ke, ());
+                    build_declare_token_reply_with_id(id, token_id, ke)
+                } else {
+                    build_declare_token_reply(id, ke)
+                }
+            },
+            |msg| replies.push(msg),
+        );
+        for msg in replies {
+            self.send_one_to_face(inbound, msg);
+        }
+    }
+
+    /// The keys of the liveliness tokens the face `inbound` is answered when it asks for the
+    /// tokens that meet `target`: what the CURRENT-dump leg
+    /// ([`dump_interest_tokens`](Self::dump_interest_tokens)) tells it, read and not told. The
+    /// node's own session reads its liveliness get from it.
+    ///
+    /// R2614 — `target: None` is an UNRESTRICTED interest (the wire's `R` flag clear: no
+    /// keyexpr, which the protocol defines as asking for all key expressions,
+    /// `commons/zenoh-protocol/src/network/interest.rs` @ `then the interest is restricted to the matching key expression, else it is for all key expressions`).
+    /// Upstream answers it with the whole table, because its matcher treats an absent
+    /// resource as matching everything (`zenoh/src/net/routing/hat/peer/token.rs` @
+    /// `res.is_none_or`). Neither reference emits one (zenoh derives `R` from
+    /// `wire_expr.is_some()` and its liveliness GET always supplies one; pico sets
+    /// `_Z_INTEREST_FLAG_RESTRICTED` at both of its liveliness sites), so it is reachable
+    /// only from a peer that builds the message itself, but wz is a drop-in for the node
+    /// that ANSWERS.
+    #[cfg(feature = "routing-token-tables")]
+    fn interest_token_keys(
+        &self,
+        inbound: FaceId,
+        target: Option<&str>,
+        self_zid: &Zid,
+    ) -> HashMap<String, ()> {
         let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let inbound_zid = self.tables.faces.get(&inbound).and_then(|s| s.peer_zid);
         let mut per_ke: HashMap<String, ()> = HashMap::new();
@@ -7315,37 +7373,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         {
             per_ke.retain(|ke, ()| self.self_advertises_token_into(region, ke));
         }
-        // An unrestricted interest cannot aggregate: the aggregate reply is keyed on the
-        // interest's own keyexpr, which it does not carry. Upstream never aggregates a token
-        // dump (its peer hat emits one `DeclareToken` per match,
-        // `zenoh/src/net/routing/hat/peer/interests.rs` @ `fn send_current_tokens`).
-        let aggregate = aggregate && target.is_some();
-        let mut replies = Vec::new();
-        emit_current_interest_replies(
-            interest_id,
-            target.unwrap_or(""),
-            aggregate,
-            per_ke,
-            |a, _b| a,
-            // A FUTURE (C+F) interest's current reply carries a NON-ZERO id interned
-            // per (face, reply ke) so it is REUSED on the later FUTURE push and dedups
-            // (mirror of the sub future branch); a CURRENT-only interest keeps id 0.
-            |id, ke, ()| {
-                if future {
-                    let token_id = self
-                        .tables
-                        .future_tokens
-                        .intern_current_reply(inbound, ke, ());
-                    build_declare_token_reply_with_id(id, token_id, ke)
-                } else {
-                    build_declare_token_reply(id, ke)
-                }
-            },
-            |msg| replies.push(msg),
-        );
-        for msg in replies {
-            self.send_one_to_face(inbound, msg);
-        }
+        per_ke
     }
 
     /// Re-flood a clean sourced declaration WITHIN `tier` to the source's
@@ -9723,20 +9751,51 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.local_face_sink = Some(sink);
     }
 
-    /// Ask, as the `Local` face, for the liveliness tokens the router knows of, those already alive
-    /// and each that comes alive or goes after: an interest in every key, current and future, as
-    /// the face of a session sends it. The answers go to the face's sink, as declarations of
-    /// tokens and their retractions. The face's own tokens are not among them.
+    /// Ask, as the `Local` face, for the liveliness tokens that meet `keyexpr`, as the session of
+    /// a client does for each liveliness subscriber it declares: an interest of its own under
+    /// `interest_id`, that tells the tokens that come alive and go from then on, and, when
+    /// `current` is set, first those already alive, as answers to the interest (upstream's
+    /// `CurrentFuture` against `Future`). The interest is stored and answered under the tables the
+    /// declarations are written under, so a token is either already alive when it is asked, and
+    /// answered, or comes alive after it, and is pushed: never both, and never neither. What was
+    /// answered is what the router remembers telling the face, so a later declaration of the same
+    /// key from another node is not pushed as a key that came alive. The answers go to the face's
+    /// sink as declarations of tokens and their retractions; the face's own tokens are not among
+    /// them. `keyexpr` is the session's: under its namespace, if it has one, the router names it.
     #[cfg(feature = "routing-token-tables")]
-    pub fn ask_local_tokens(&mut self)
+    pub fn ask_local_tokens(&mut self, interest_id: u64, keyexpr: &str, current: bool)
     where
         T: std::ops::DerefMut,
     {
         let self_zid = *self.north_net().self_zid();
+        let target = self.fwd.wire_key(keyexpr).into_owned();
         self.tables
             .future_tokens
-            .store_interest(LOCAL_FACE, 0, "**".to_owned(), false);
-        self.dump_interest_tokens(LOCAL_FACE, Some("**"), false, &self_zid, 0, true);
+            .store_interest(LOCAL_FACE, interest_id, target.clone(), false);
+        if current {
+            self.dump_interest_tokens(
+                LOCAL_FACE,
+                Some(&target),
+                false,
+                &self_zid,
+                interest_id,
+                true,
+            );
+        }
+    }
+
+    /// End the interest `interest_id` the `Local` face asked tokens under
+    /// ([`ask_local_tokens`](Self::ask_local_tokens)): no token is told for it from then on, and
+    /// once the face has no interest left what the router remembered telling it goes. `false`
+    /// for an id the face holds no interest under.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn forget_local_tokens(&mut self, interest_id: u64) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        self.tables
+            .future_tokens
+            .remove_interest(LOCAL_FACE, interest_id)
     }
 
     /// Declare a liveliness token of the router itself, as its `Local` face does: the router
@@ -10563,6 +10622,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .into_iter()
             .filter_map(|(_, state)| FaceSnapshot::of_actions(&state.actions))
             .collect()
+    }
+
+    /// The keys of the liveliness tokens alive on the others' faces and in the mesh that meet
+    /// `keyexpr`, as the node's own session names them: what an interest of its `Local` face for
+    /// `keyexpr` is answered with ([`ask_local_tokens`](Self::ask_local_tokens)), read and not
+    /// told, so that a liveliness get is answered from the tables at the moment it is asked. The
+    /// tokens of the session itself are not among them, and a key under another namespace is not
+    /// the session's.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn local_tokens_alive(&self, keyexpr: &str) -> Vec<String> {
+        let self_zid = *self.north_net().self_zid();
+        let target = self.fwd.wire_key(keyexpr);
+        let mut keys: Vec<String> = self
+            .interest_token_keys(LOCAL_FACE, Some(&target), &self_zid)
+            .into_keys()
+            .filter_map(|key| self.fwd.relative_key(&key).map(str::to_owned))
+            .collect();
+        keys.sort();
+        keys
     }
 
     /// Whether anything `plane` counts matches `keyexpr` among the declarations `locality`
@@ -19728,7 +19806,7 @@ mod tests {
         let told = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = told.clone();
         fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
-        fwd.ask_local_tokens();
+        fwd.ask_local_tokens(1, "**", false);
         forward_one(
             &fwd,
             FaceId(0),
@@ -19758,6 +19836,172 @@ mod tests {
             )),
             "a token outside is not the session's: {told:?}"
         );
+    }
+
+    /// What the node's own session is told of the tokens its liveliness subscribers ask for,
+    /// by what the router held when each asked: the history of an interest that asks for it is
+    /// the tokens alive then, answered under its id; a token that came alive after is pushed to
+    /// every interest it meets. A token alive before an interest that asks for no history is told
+    /// to it by neither.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn the_nodes_own_session_is_told_history_to_the_interest_that_asked_and_a_later_token_to_all() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        let declare = |id: u64, key: &str| {
+            forward_one(
+                &fwd,
+                FaceId(0),
+                NetworkMessage::Declare(Box::new(
+                    build_declare_token(id, 0, Some(key)).expect("token"),
+                )),
+            );
+        };
+        declare(3, "demo/t/before");
+        fwd.ask_local_tokens(1, "demo/t/*", false);
+        fwd.ask_local_tokens(2, "demo/t/*", true);
+        declare(4, "demo/t/after");
+        let told: Vec<(String, Option<u64>)> = told
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                LocalFaceEvent::TokenUp {
+                    keyexpr, interest, ..
+                } => Some((keyexpr.clone(), *interest)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            told,
+            [
+                ("demo/t/before".to_owned(), Some(2)),
+                ("demo/t/after".to_owned(), None)
+            ],
+            "the history of the interest that asked for it, then the push for all of them"
+        );
+    }
+
+    /// Two interests of the node's own session on one key are told a token that comes alive once,
+    /// as a client that declared two liveliness subscribers is, and the session tells each.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn two_interests_of_the_nodes_own_session_share_the_push_of_a_token() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        fwd.ask_local_tokens(1, "demo/t/*", true);
+        fwd.ask_local_tokens(2, "demo/t/**", true);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_token(3, 0, Some("demo/t/x")).expect("token"),
+            )),
+        );
+        let pushes = told
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, LocalFaceEvent::TokenUp { interest: None, .. }))
+            .count();
+        assert_eq!(
+            pushes, 1,
+            "one push for the face, not one for each interest"
+        );
+    }
+
+    /// A key the router answered an interest with is not pushed again when another node declares
+    /// a token on it: the face was told the key alive, so the second declaration is not a key that
+    /// came alive.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_second_token_on_a_key_the_nodes_own_session_was_answered_is_not_pushed() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _first_sink) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _second_sink) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.tick();
+        let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        let declare = |face: u64, id: u64, key: &str| {
+            forward_one(
+                &fwd,
+                FaceId(face),
+                NetworkMessage::Declare(Box::new(
+                    build_declare_token(id, 0, Some(key)).expect("token"),
+                )),
+            );
+        };
+        declare(0, 3, "demo/t/x");
+        fwd.ask_local_tokens(1, "demo/t/x", true);
+        declare(1, 4, "demo/t/x");
+        let pushes = told
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, LocalFaceEvent::TokenUp { interest: None, .. }))
+            .count();
+        assert_eq!(pushes, 0, "the key was alive when it was asked");
+    }
+
+    /// An interest that is ended is told nothing more, and an id that was never asked under is
+    /// not ended.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn an_interest_of_the_nodes_own_session_that_is_forgotten_is_told_nothing_more() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        fwd.ask_local_tokens(1, "demo/t/*", false);
+        assert!(fwd.forget_local_tokens(1));
+        assert!(!fwd.forget_local_tokens(1), "it was ended already");
+        assert!(!fwd.forget_local_tokens(9), "it was never asked");
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_token(3, 0, Some("demo/t/x")).expect("token"),
+            )),
+        );
+        assert!(told.lock().unwrap().is_empty());
+    }
+
+    /// The tokens alive for a key are read from the tables as the others' and the mesh's, sorted,
+    /// and not the node's own.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn the_tokens_alive_for_the_nodes_own_session_are_the_others_and_not_its_own() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        for (id, key) in [(3, "demo/t/b"), (4, "demo/t/a"), (5, "other/t")] {
+            forward_one(
+                &fwd,
+                FaceId(0),
+                NetworkMessage::Declare(Box::new(
+                    build_declare_token(id, 0, Some(key)).expect("token"),
+                )),
+            );
+        }
+        fwd.host_token("demo/t/own");
+        assert_eq!(fwd.local_tokens_alive("demo/t/*"), ["demo/t/a", "demo/t/b"]);
     }
 
     /// A client holds a complete and an incomplete queryable on one key, and a second client waits
