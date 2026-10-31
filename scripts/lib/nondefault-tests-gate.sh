@@ -151,6 +151,13 @@ LEGS=(
     # `zenoh_config::` is the module the two instruments live in; the filter is
     # the module path so a test ADDED there is covered without touching this row.
     "wz-runtime-tokio|hook|zenoh-config|zenoh_config::"
+    # ── the empty endpoint and locator ──
+    #
+    # Two tests of `zenoh-protocol` (`core::endpoint::empty_endpoint_address` and
+    # `empty_locator_address`) are behind its `internal` feature, which the family keeps as
+    # upstream does: off by default, and no leg built it, so the census (Layer C1cn) found them
+    # claimed by nothing. The filter is their shared prefix.
+    "zenoh-protocol|hook|internal|core::endpoint::empty_"
     # ── R2678 — session-close-ingress ──
     #
     # This row is REQUIRED for the atom's grade to mean anything, and the
