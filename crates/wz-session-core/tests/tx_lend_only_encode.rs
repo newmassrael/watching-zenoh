@@ -84,10 +84,7 @@ fn chain() -> Vec<ExtEntryOwned> {
 fn oracle_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
     let mut out = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
-        let mut bytes = entry
-            .as_borrowed()
-            .encode_to_vec()
-            .expect("an oracle entry encodes");
+        let mut bytes = entry.as_borrowed().encode_to_vec();
         if i + 1 == entries.len() {
             bytes[0] &= !0x80;
         } else {
