@@ -302444,6 +302444,50 @@
         "Owed: the whatami a link state restates (upstream 1.10.2 network.rs sets it on every newer link state, wz-routing-graph only while unknown); the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 4021": {
+      "decision_summary": "The 1.10.2 item (b) of O4 is taken: a multicast group honours transport/multicast/compression/enabled, which zenoh 1.10.1 never read. A compressing group carries every datagram as a batch, the one-byte BatchHeader in front and the payload lz4-compressed when that is smaller: the JOIN beacon, each frame and each fragment of a chain, framed to the batch less the header so no datagram passes the group's batch size. Multicast has no handshake to switch the wrap on, so members must state the same, and a build without transport_compression refuses the open of a node that joins a group with the key set. Item (a) is recorded as measured: the same wire, so wz is unchanged.",
+      "changes_bullets": [
+        "crates/wz-session-core: MulticastParams.compression and frame_budget; enqueue_wire (multicast_tx.rs) wraps each datagram, encode_join (multicast_join.rs) the beacon, and the receive walk (multicast_rx.rs) unwraps before it walks; the lend path is skipped for a compressing group.",
+        "crates/wz-runtime-tokio, wz-capi-core, wz-capi-c: ZenohNodeConfig.multicast_compression is read and emitted and the key moves from the unhonoured lists to C_ABI_SESSION_HONOURED_KEYS; GroupProfile and RouterGroupProfile carry it; OpenRefusal::MulticastCompressionNotInBuild.",
+        "every other MulticastParams literal (about 50, tests and the demos) states compression: false.",
+        "scripts/run-ci.sh: C1p 78 becomes 79; a Layer M line for compressing_group_delivers_a_compressed_publish.",
+        "docs/zenoh-api-on-the-engine.md: O4 (a) and (b) recorded."
+      ],
+      "verification_bullets": [
+        "wz-session-core with all features: the multicast and compression filter ran 144, all pass, including the frame budget, the batch a frame becomes, the chain at the header-reduced budget (and the frame that fits the batch exactly, which now fragments), the receive of a batched datagram, a beacon, a header-less and an empty datagram, and the compressing beacon.",
+        "Over a real UDP group, compressing_group_delivers_a_compressed_publish passes (1 test, built with transport-multicast and transport-compression).",
+        "zenoh_config tests with zenoh-config: 81 pass, including the key's read and round trip; wz-capi-core open_plan: 29 pass, including the refusal arm.",
+        "The three C1p arms print 49, 79 and 6; the unhonoured-kind, runtime-mutable, key-fixture, citation-anchor gates pass; clippy -D warnings on wz-session-core, wz-runtime-tokio and wz-capi-core is clean.",
+        "Not run: a compressing group against a zenoh 1.10.2 node; the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (e) the transport deleted without a Close frame (the statechart's tx.congestion.exhaust arm goes through Closing and sends one), (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the refusals against a zenohd, and the interop of a compressing multicast group against a zenoh 1.10.2 node, which is the proof that the header and the compressed block are read as upstream reads them; the demo's groups state no compression switch."
+      ],
+      "publishable_decision_summary": "The 1.10.2 item (b) of O4 is taken: a multicast group honours transport/multicast/compression/enabled, which zenoh 1.10.1 never read. A compressing group carries every datagram as a batch, the one-byte BatchHeader in front and the payload lz4-compressed when that is smaller: the JOIN beacon, each frame and each fragment of a chain, framed to the batch less the header so no datagram passes the group's batch size. Multicast has no handshake to switch the wrap on, so members must state the same, and a build without transport_compression refuses the open of a node that joins a group with the key set. Item (a) is recorded as measured: the same wire, so wz is unchanged.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: MulticastParams.compression and frame_budget; enqueue_wire (multicast_tx.rs) wraps each datagram, encode_join (multicast_join.rs) the beacon, and the receive walk (multicast_rx.rs) unwraps before it walks; the lend path is skipped for a compressing group.",
+        "crates/wz-runtime-tokio, wz-capi-core, wz-capi-c: ZenohNodeConfig.multicast_compression is read and emitted and the key moves from the unhonoured lists to C_ABI_SESSION_HONOURED_KEYS; GroupProfile and RouterGroupProfile carry it; OpenRefusal::MulticastCompressionNotInBuild.",
+        "every other MulticastParams literal (about 50, tests and the demos) states compression: false.",
+        "scripts/run-ci.sh: C1p 78 becomes 79; a Layer M line for compressing_group_delivers_a_compressed_publish.",
+        "docs/zenoh-api-on-the-engine.md: O4 (a) and (b) recorded."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core with all features: the multicast and compression filter ran 144, all pass, including the frame budget, the batch a frame becomes, the chain at the header-reduced budget (and the frame that fits the batch exactly, which now fragments), the receive of a batched datagram, a beacon, a header-less and an empty datagram, and the compressing beacon.",
+        "Over a real UDP group, compressing_group_delivers_a_compressed_publish passes (1 test, built with transport-multicast and transport-compression).",
+        "zenoh_config tests with zenoh-config: 81 pass, including the key's read and round trip; wz-capi-core open_plan: 29 pass, including the refusal arm.",
+        "The three C1p arms print 49, 79 and 6; the unhonoured-kind, runtime-mutable, key-fixture, citation-anchor gates pass; clippy -D warnings on wz-session-core, wz-runtime-tokio and wz-capi-core is clean.",
+        "Not run: a compressing group against a zenoh 1.10.2 node; the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (e) the transport deleted without a Close frame (the statechart's tx.congestion.exhaust arm goes through Closing and sends one), (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the refusals against a zenohd, and the interop of a compressing multicast group against a zenoh 1.10.2 node, which is the proof that the header and the compressed block are read as upstream reads them; the demo's groups state no compression switch."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
