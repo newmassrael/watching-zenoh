@@ -159,7 +159,20 @@ impl BoxedLinkDriver for RecordingLinkDriver {
 /// joined to a session (`router_forward::joined_link_tests`, which needs `transport-multilink`
 /// alone, so a build with that feature and nothing else must still find this), and (R3111) the
 /// auth segment's test of what a session declares on a link of each kind.
-#[cfg(any(feature = "transport-multilink", feature = "session-extshm"))]
+///
+/// The gate is the union of those three consumers' own gates, each spelled as its module and
+/// test spell it: wider, and a build that compiles none of them (`transport-multilink` without
+/// `transport-qos` or the router, the multilink lanes of Layer C1) fails on dead code.
+#[cfg(any(
+    all(
+        feature = "transport-multilink",
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ),
+    all(feature = "transport-multilink", feature = "routing-router-hat"),
+    all(feature = "session-extshm", unix)
+))]
 pub(crate) fn recording_actions_over(
     kind: wz_session_core::link::LinkKind,
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
@@ -175,7 +188,16 @@ pub(crate) fn recording_actions_over(
 /// The recorder [`recording_actions_over`] builds its session on, alone, for a
 /// test that puts another driver layer in front of it (a lending one, in
 /// `multilink`'s batch tests). Gated as that function is, its first caller.
-#[cfg(any(feature = "transport-multilink", feature = "session-extshm"))]
+#[cfg(any(
+    all(
+        feature = "transport-multilink",
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ),
+    all(feature = "transport-multilink", feature = "routing-router-hat"),
+    all(feature = "session-extshm", unix)
+))]
 pub(crate) fn recording_driver_over(
     kind: wz_session_core::link::LinkKind,
 ) -> Arc<RecordingLinkDriver> {
