@@ -2541,6 +2541,9 @@ pub struct RouterForwarder {
     /// Behind an `Rc` so that the capacity report, whose handler is stored inside this forwarder
     /// and so cannot capture it, can read what is held ([`Self::egress_view`]).
     credit: Arc<egress::Credit>,
+    /// This node's own zid, which every line the router logs names it by (`node=`), so that the
+    /// lines of the several nodes of one process, or of one log collector, can be told apart.
+    own_zid: Zid,
     /// The sessions this router holds, as far as closing the newest of them for capacity needs
     /// them (see [`shed`]). Behind a lock and not in [`faces`](Self#structfield.faces), so that
     /// the capacity control, a task of the control runtime, can shed while the loop is starved.
@@ -2983,6 +2986,34 @@ impl RouterForwarder {
 /// end spins with bounded memory and bounded work for each delivery.
 const SELF_ECHO_QUEUE_CAP: usize = 256;
 
+/// How long a wait for the routing tables, or for the room a send needs, is before the router logs
+/// it. The tables are held for one route or one change, which is microseconds to a few
+/// milliseconds; a wait this long means a holder was kept from letting go, and was 5 s when a send
+/// waited for a link's room inside them (measured, `docs/router-task-per-face.md`).
+const SLOW_TABLES_WAIT: Duration = Duration::from_millis(250);
+
+/// How a log line names the remote node of a face: its zid as zenoh prints it, or `-` for a face
+/// whose peer has not told one (a client that never surfaced an id).
+fn peer_label(zid: Option<Zid>) -> String {
+    zid.map_or_else(|| "-".to_owned(), |zid| zid.to_string())
+}
+
+/// What a log line calls a message by: the kind of network message, which is what tells a wait on a
+/// put from a wait on a declaration or on the router's own topology.
+fn kind_label(msg: &NetworkMessage) -> &'static str {
+    match msg {
+        NetworkMessage::Push(_) => "push",
+        NetworkMessage::Request(_) => "request",
+        NetworkMessage::Response(_) => "response",
+        NetworkMessage::ResponseFinal(_) => "response-final",
+        NetworkMessage::Declare(_) => "declare",
+        NetworkMessage::Interest(_) => "interest",
+        NetworkMessage::Oam(_) => "link-state",
+        #[allow(unreachable_patterns)]
+        _ => "other",
+    }
+}
+
 /// A delivery to hosted subscribers this thread is inside of: counted, so that the queue of
 /// refused samples is drained by the outermost one, and counted back however the delivery ends.
 struct HostedDispatch {
@@ -3329,10 +3360,20 @@ impl RouterForwarder {
     /// thread that holds them for writing must not take them again for any use, which is why
     /// the methods that write take `&mut self` and call the readers through it.
     fn on_tables_mut(&self) -> OnTables<'_, WrittenTables<'_>> {
+        let began = Instant::now();
+        let guard = self.tables.write();
+        let waited = began.elapsed();
+        if waited >= SLOW_TABLES_WAIT {
+            log::warn!(
+                "router: node={} waited {waited:?} for the routing tables, so a holder was kept \
+                 from letting them go (a face coming up, a topology list and the tick wait with it)",
+                self.own_zid
+            );
+        }
         OnTables {
             fwd: self,
             tables: WrittenTables {
-                guard: Some(self.tables.write()),
+                guard: Some(guard),
                 fwd: self,
             },
         }
@@ -4043,6 +4084,7 @@ impl RouterForwarder {
                 timestamping,
             ),
             credit: Arc::new(egress::Credit::default()),
+            own_zid: self_zid,
             shed_registry: Arc::default(),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
             // enables autoconnect behaves byte-for-byte as before.
@@ -4573,6 +4615,32 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// shared-memory descriptor in it is mapped for the peer it is sent to (see
     /// [`crate::shm_relay`]). Whether the message was sent.
     fn send_to_face_actions(
+        &self,
+        actions: &SessionLinkActions,
+        msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
+        // The one place every send of the router that may wait goes through, so the one place
+        // that can say which kind of message waited and for how long: a wait here is a loop that
+        // served no face meanwhile (measured at 5 s).
+        let kind = kind_label(&msg);
+        let began = Instant::now();
+        let sent = self.send_to_face_unmeasured(actions, msg, reliable, express, priority);
+        let took = began.elapsed();
+        if took >= SLOW_TABLES_WAIT {
+            log::warn!(
+                "router: node={} a {kind} send waited {took:?} for room on its destination's \
+                 link and was {}",
+                self.own_zid,
+                if sent { "sent" } else { "refused" }
+            );
+        }
+        sent
+    }
+
+    fn send_to_face_unmeasured(
         &self,
         actions: &SessionLinkActions,
         msg: NetworkMessage,
@@ -11486,6 +11554,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // `new_transport_unicast_face` whatami branch): a Router/Peer face with
         // a routing zid joins the matching net; a Client face — or one whose
         // zid never surfaced — is HELD without a graph link (it routes nothing).
+        let registering = Instant::now();
         let whatami = peer_whatami_routing(actions);
         // A face the rules cannot place was refused by `refuses_face` before it got
         // here; a caller that registers one anyway holds it in the `Local` region,
@@ -11544,6 +11613,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             },
         );
         self.shed_registry.add(id, actions.clone());
+        let graph_done = Instant::now();
         // Self gained a routing link in this tier's net (its link-state changed):
         // bootstrap the new face + delta the existing same-tier faces NOW
         // (event-driven), and SCHEDULE that net's recompute (coalesced onto the
@@ -11555,8 +11625,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 dirty.set(true);
             }
         }
+        let flood_done = Instant::now();
         self.replay_declarations_to_new_face(id, tier);
+        let replay_done = Instant::now();
         self.queue_face_event(FaceEventKind::Up, actions);
+        let took = registering.elapsed();
+        let (own, peer) = (self.own_zid, peer_label(peer_zid_routing(actions)));
+        if took >= SLOW_TABLES_WAIT {
+            log::warn!(
+                "router: node={own} face={} up peer={peer} role={whatami:?} region={tier:?} took \
+                 {took:?} to register (graph {:?}, flood {:?}, replay {:?}, event {:?})",
+                id.0,
+                graph_done.duration_since(registering),
+                flood_done.duration_since(graph_done),
+                replay_done.duration_since(flood_done),
+                replay_done.elapsed()
+            );
+        } else {
+            log::info!(
+                "router: node={own} face={} up peer={peer} role={whatami:?} region={tier:?}",
+                id.0
+            );
+        }
     }
 
     fn deregister(&mut self, id: FaceId)
@@ -11566,6 +11656,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // Read before the face is dropped from the tables, while its links are still known.
         if let Some(state) = self.tables.faces.get(&id) {
             self.queue_face_event(FaceEventKind::Down, &state.actions);
+            log::info!(
+                "router: node={} face={} down peer={} region={:?}",
+                self.own_zid,
+                id.0,
+                peer_label(state.peer_zid),
+                state.tier
+            );
         }
         self.shed_registry.remove(id);
         self.tables.mesh_ids.forget_face(id);

@@ -3647,7 +3647,20 @@ where
                     }
                     Err(cause) => {
                         // R2951 — an accept that never opened leaves no mark behind.
-                        accepted_ids.remove(&id);
+                        let was_accept = accepted_ids.remove(&id);
+                        // A link that did not open is worth a line, with the way it did not: a
+                        // handshake window that ran out, a peer that answered as another node, a
+                        // refusal. Nothing else says so, since the event below goes to the host
+                        // and not to a log. A dial is this node's own act and warns; an accept is
+                        // a stranger's and informs.
+                        if was_accept {
+                            log::info!("accept: face={} from {peer} did not open: {cause:?}", id.0);
+                        } else {
+                            log::warn!(
+                                "accept: dial face={} to {peer} did not open: {cause:?}",
+                                id.0
+                            );
+                        }
                         // Decision D5 — a peer's dial that did not open: another
                         // node answered (D4), or the peer was not reached. Its
                         // machine backs off and dials again, so the link the dial
@@ -3848,6 +3861,12 @@ where
                         // channel now, and a single counter would credit whichever
                         // atom the reader happened to be asking about; see
                         // `DialIntentOrigin`.
+                        log::debug!(
+                            "autoconnect: dialing node {:02x?} at {target:?} as face={} ({:?})",
+                            intent.zid,
+                            id.0,
+                            intent.origin
+                        );
                         match intent.origin {
                             DialIntentOrigin::Gossip => summary.gossip_dialed += 1,
                             DialIntentOrigin::MulticastScout => summary.scout_dialed += 1,

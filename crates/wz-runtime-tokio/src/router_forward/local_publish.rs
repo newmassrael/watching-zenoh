@@ -58,13 +58,23 @@ pub(super) struct Owed {
 impl Owed {
     /// Make the send, waiting for room as long as the message's congestion control allows.
     pub(super) fn send(self) {
-        // What it answers was never read: a put does not report a destination that closed.
-        let _ = self.actions.send_network_message_qos(
+        let began = std::time::Instant::now();
+        let sent = self.actions.send_network_message_qos(
             self.msg,
             self.reliable,
             self.express,
             self.priority,
         );
+        // What it answers is not reported to the publisher: a put does not report a destination
+        // that closed. The wait is what backpressure on a publisher costs it, which is worth a
+        // line when it was long, and a refusal is worth one at any length.
+        let took = began.elapsed();
+        if took >= super::SLOW_TABLES_WAIT || sent.is_err() {
+            log::debug!(
+                "router: a local put waited {took:?} for room on a destination's link and was {}",
+                if sent.is_ok() { "sent" } else { "refused" }
+            );
+        }
     }
 }
 

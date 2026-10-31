@@ -89,7 +89,7 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::session_actions::Unsent;
 
-use super::{OnTables, RouterFaceState, RouterForwarder, Tables};
+use super::{peer_label, OnTables, RouterFaceState, RouterForwarder, Tables};
 use crate::accept_loop::FaceId;
 use crate::counter::{Counter, Gauge};
 use crate::sync::PlainMutex;
@@ -524,6 +524,13 @@ impl RouterForwarder {
                 cost,
             });
             if first {
+                log::debug!(
+                    "router: node={} destination={} peer={} holds its first {lane:?} message \
+                     ({cost} bytes): its link has no room",
+                    self.own_zid,
+                    dest.0,
+                    peer_label(state.peer_zid)
+                );
                 // The link tells the router when it has room, for as long as it holds something.
                 // Room may have been made between the probe that found none and this call, which
                 // the link cannot have told it of, so the loop is woken once to look.
@@ -552,14 +559,31 @@ impl RouterForwarder {
         // [`Credit`]), and what the queue held a moment ago is what the gate is asserted from.
         let budget = self.credit.budget;
         let mut gated = self.credit.gated.guard();
-        if source != dest && destination_bytes >= budget.per_destination_bytes {
-            gated
+        if source != dest
+            && destination_bytes >= budget.per_destination_bytes
+            && gated
                 .entry(source)
                 .or_default()
-                .insert(GateOn::Destination(dest));
+                .insert(GateOn::Destination(dest))
+        {
+            log::debug!(
+                "router: node={} face={} is not read until destination={} drains: it holds \
+                 {destination_bytes} of {} bytes",
+                self.own_zid,
+                source.0,
+                dest.0,
+                budget.per_destination_bytes
+            );
         }
-        if pool_bytes >= budget.pool_bytes {
-            gated.entry(source).or_default().insert(GateOn::Pool);
+        if pool_bytes >= budget.pool_bytes && gated.entry(source).or_default().insert(GateOn::Pool)
+        {
+            log::warn!(
+                "router: node={} face={} is not read: the messages held for all destinations \
+                 reached {pool_bytes} of {} bytes",
+                self.own_zid,
+                source.0,
+                budget.pool_bytes
+            );
         }
     }
 }
@@ -587,6 +611,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             took |= self.drain_queue(state, &mut data);
             took |= self.drain_queue(state, &mut control);
             if data.is_empty() && control.is_empty() {
+                log::debug!(
+                    "router: node={} destination={} peer={} drained: its link has room again",
+                    self.own_zid,
+                    id.0,
+                    peer_label(state.peer_zid)
+                );
                 self.credit.holding.guard().remove(&id);
                 // Nothing held, so nothing to be told: the writer stops paying for the call.
                 state.actions.watch_link_room(None);
@@ -649,7 +679,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                         self.credit.abandoned.bump();
                     }
                 }
-                Err(Unsent::Failed(_)) => {
+                Err(Unsent::Failed(e)) => {
+                    log::debug!(
+                        "router: node={} destination peer={} dropped a held message its \
+                         session could not send: {e:?}",
+                        self.own_zid,
+                        peer_label(state.peer_zid)
+                    );
                     self.credit.held.sub(1);
                     self.credit.held_bytes.sub(cost);
                     self.credit.abandoned.bump();
@@ -686,6 +722,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let ((data_dropped, data_bytes), (control_dropped, control_bytes)) =
                 (data.clear(), control.clear());
             let (dropped, bytes) = (data_dropped + control_dropped, data_bytes + control_bytes);
+            log::warn!(
+                "router: node={} closing destination={} peer={}: its link took none of {dropped} \
+                 held message(s) ({bytes} bytes, {control_dropped} of them control) in {:?}, the \
+                 limit being {:?}",
+                self.own_zid,
+                id.0,
+                peer_label(state.peer_zid),
+                now.saturating_duration_since(oldest),
+                state.actions.wait_before_close()
+            );
             self.credit.held.sub(dropped);
             self.credit.held_bytes.sub(bytes);
             self.credit.abandoned.add(dropped);
@@ -776,6 +822,13 @@ impl RouterForwarder {
         let (control_dropped, control_bytes) = state.held.control.guard().clear();
         let (dropped, bytes) = (data_dropped + control_dropped, data_bytes + control_bytes);
         if dropped > 0 {
+            log::warn!(
+                "router: node={} destination={} peer={} left holding {dropped} message(s) \
+                 ({bytes} bytes, {control_dropped} of them control): they are dropped with it",
+                self.own_zid,
+                id.0,
+                peer_label(state.peer_zid)
+            );
             self.credit.held.sub(dropped);
             self.credit.held_bytes.sub(bytes);
             self.credit.abandoned.add(dropped);
