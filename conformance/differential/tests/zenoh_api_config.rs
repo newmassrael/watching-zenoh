@@ -610,13 +610,13 @@ fn the_example_of_the_documentation_is_upstreams_file() {
         .expect("a cargo home");
     let mut found = None;
     for index in fs::read_dir(home.join("registry/src")).expect("the registry sources") {
-        let p = index.unwrap().path().join("zenoh-1.10.1/DEFAULT_CONFIG.json5");
+        let p = index.unwrap().path().join("zenoh-1.10.2/DEFAULT_CONFIG.json5");
         if p.is_file() {
             found = Some(p);
             break;
         }
     }
-    let theirs = fs::read(found.expect("zenoh-1.10.1 in the registry, which up_zenoh builds from"))
+    let theirs = fs::read(found.expect("zenoh-1.10.2 in the registry, which up_zenoh builds from"))
         .unwrap();
     assert_eq!(ours.len(), theirs.len(), "the copy differs in length");
     assert!(ours == theirs, "the copy differs in content");
