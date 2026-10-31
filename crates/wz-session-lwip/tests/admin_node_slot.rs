@@ -547,8 +547,10 @@ fn a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported() {
     static B: Statics<N> = Statics::new();
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link: LinkRef = Box::leak(Box::new(link));
-    let mut a = rig(&A, link, 0xa1, 7611);
-    let mut b = rig(&B, link, 0xb2, 7612);
+    // Ports of their own: the loopback is one for the whole process, and a test that took the
+    // ones another test binds would be answered by that test's sockets.
+    let mut a = rig(&A, link, 0xa1, 7621);
+    let mut b = rig(&B, link, 0xb2, 7622);
     let a_zid = wz_session_core::credential_identity::zid_from_wire(&[0xa1; 4])
         .expect("four bytes spell a zid");
 
@@ -566,7 +568,7 @@ fn a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported() {
         .for_each_node(|zid, state| waiting.push((*zid, state)));
     assert_eq!(waiting, vec![(a_zid, NodeState::NoHint)]);
     b.node
-        .declare_node(a_zid, "udp/127.0.0.1:7611", 0)
+        .declare_node(a_zid, "udp/127.0.0.1:7621", 0)
         .expect("the directory has room for a hint");
     assert_eq!(
         b.node.open_node(a_zid, 0),
