@@ -47,11 +47,13 @@ use crate::Reliability;
 /// channel, or the *no-emit* half of a typed-reject contract
 /// (`frame_count() == 0` — "no wire bytes leave on Err").
 pub(crate) struct RecordingLinkDriver {
-    frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
-    /// R2919 — the priority each frame arrived at, index-aligned with
-    /// `frames`: what `send_prioritized` was handed, or `Priority::DEFAULT`
-    /// for a bare `send_blocking`.
-    priorities: Mutex<Vec<wz_session_core::qos::Priority>>,
+    /// Every frame, in the order it was handed over, each with its channel and
+    /// (R2919) the priority it arrived at: what `send_prioritized` was handed,
+    /// or `Priority::DEFAULT` for a bare `send_blocking`. One entry under one
+    /// lock, so a thread that counts the frames while another records one sees
+    /// the frame whole or not at all; the priorities were a second vector once,
+    /// and a count taken between the two pushes found them unequal.
+    frames: Mutex<Vec<(Vec<u8>, Reliability, wz_session_core::qos::Priority)>>,
     /// R2943 — the link this recorder stands for, when a test needs one:
     /// egress selection reads a link's intrinsic reliability class off its
     /// kind. `None` (the default) is a driver that names no kind.
@@ -66,18 +68,10 @@ pub(crate) struct RecordingLinkDriver {
 impl RecordingLinkDriver {
     /// Number of frames observed via `send_blocking` so far.
     pub(crate) fn frame_count(&self) -> usize {
-        let frames = self
-            .frames
+        self.frames
             .lock()
             .expect("recording driver mutex poisoned")
-            .len();
-        let priorities = self
-            .priorities
-            .lock()
-            .expect("recording driver mutex poisoned")
-            .len();
-        assert_eq!(frames, priorities, "each recorded frame has its priority");
-        frames
+            .len()
     }
 
     /// Wire bytes of the `idx`-th recorded frame (panics if absent), so
@@ -100,9 +94,7 @@ impl RecordingLinkDriver {
     /// (panics if absent): the key the link's writer queues it by.
     #[cfg(feature = "transport-qos")]
     pub(crate) fn frame_priority(&self, idx: usize) -> wz_session_core::qos::Priority {
-        self.priorities
-            .lock()
-            .expect("recording driver mutex poisoned")[idx]
+        self.frames.lock().expect("recording driver mutex poisoned")[idx].2
     }
 
     /// Discard all recorded frames — lets a test ignore set-up emits (e.g. a
@@ -113,10 +105,6 @@ impl RecordingLinkDriver {
     #[cfg(feature = "routing-router-hat")]
     pub(crate) fn reset(&self) {
         self.frames
-            .lock()
-            .expect("recording driver mutex poisoned")
-            .clear();
-        self.priorities
             .lock()
             .expect("recording driver mutex poisoned")
             .clear();
@@ -136,11 +124,7 @@ impl BoxedLinkDriver for RecordingLinkDriver {
         self.frames
             .lock()
             .expect("recording driver mutex poisoned")
-            .push((bytes.to_vec(), reliability));
-        self.priorities
-            .lock()
-            .expect("recording driver mutex poisoned")
-            .push(priority);
+            .push((bytes.to_vec(), reliability, priority));
         LinkSendOutcome::Sent
     }
     fn open_blocking(&self) {}
@@ -203,7 +187,6 @@ pub(crate) fn recording_driver_over(
 ) -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
-        priorities: Mutex::new(Vec::new()),
         subject: Some(wz_session_core::link::LinkSubject {
             kind: Some(kind),
             ..wz_session_core::link::LinkSubject::UNKNOWN
@@ -241,7 +224,6 @@ pub(crate) fn recording_actions_with_params(
 pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
-        priorities: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: false,
     })
@@ -256,7 +238,6 @@ pub(crate) fn recording_actions_length_prefixed(
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let driver = Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
-        priorities: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: true,
     });
