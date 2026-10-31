@@ -1229,7 +1229,7 @@ second open. The table is bounded, so a flood of opens is refused by `NoRoom`
 and not by the opener's guess about reachability, and a `close` removes the
 row. This replaces the refusal at the opener of step 6c.
 
-Built (Round 4043). Both openers take the intent: `NodeOpener::open` and
+Built (Round 4044). Both openers take the intent: `NodeOpener::open` and
 `ConnectManager::open_node` on the fixed profile, `LinkstateOpener::ask` on the
 AP, which sends the node with no locators when the graphs hold none. The open
 vocabulary lost `peer_unknown` and `no_dialable_locator`, which were facts about
