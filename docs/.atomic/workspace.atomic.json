@@ -302642,6 +302642,48 @@
         "Open: the patch releases that were not built (for instance 1.3.1 to 1.3.3), a client newer than its router by more than two patch releases, and a link that really loses packets (the tunnelled path lost none in 300 pings; making one lose needs cross traffic on a shared network and was not done). A weights round must follow the null members and the counts together; the weights tool lives in the worktree's target directory and is gone with it. The old release binaries are on the build host only; build one tag at a time."
       ]
     },
+    "Round 4026": {
+      "decision_summary": "The second half of item (e) of O4 is taken, and a build error of the held-lane tests is repaired. A session whose blocking message found no room within wait_before_close now ends as zenoh 1.10.2 ends the transport: tx.congestion.exhaust goes to Closed and no Close frame is written, where it went through Closing and wrote one with reason UNRESPONSIVE; the sessions a node closes for capacity or for a replacing link, which write their own Close first, no longer write a second one behind it. The held-lane tests read a field that only a transport-qos build has, so the router_forward arms of the hosted run did not compile; the QoS twin is gated and the nine arm counts are set to what they print. Item (e) is complete, and (b) stays as filed.",
+      "changes_bullets": [
+        "sources/session/session_fsm_unicast.scxml: the exhaust arm targets Closed and states no action; out/wz-session-core regenerated (the unicast machine's tables and trait, and the source hash line of the six others).",
+        "crates/wz-session-core: set_close_reason_unresponsive removed from the binding; comments of the congestion close follow.",
+        "crates/wz-runtime-tokio tests: session_congestion_close asserts the terminal state, the released link and that no byte is written after the request; session_fsm_coverage and session_glue_dispatch follow.",
+        "crates/wz-runtime-tokio/src/router_forward/egress_tests.rs: the QoS twin and its helper line are transport-qos only; scripts/run-ci.sh: the nine C1AY router_forward counts are the measured ones.",
+        "docs/zenoh-api-on-the-engine.md: O4 (e) recorded as taken."
+      ],
+      "verification_bullets": [
+        "The workspace checks with default features; session_congestion_close 1, session_glue_dispatch 1, session_fsm_coverage 12, the session_glue lib filter 106 and the session-core lib 2912 pass; clippy -D warnings on wz-session-core with all features is clean.",
+        "The shed tests, which close sessions for capacity and write their own Close first, pass: the filter ran 16, five of them shed_tests (routing-router-hat, routing-accept, transport-keepalive, session-close-ingress, transport-link-tls).",
+        "The nine C1AY router_forward commands, run as the lane runs them, print 269, 273, 294, 277, 280, 321, 269, 271 and 281 and pass; before the gate the first of them did not compile (E0609, `is_qos` on the session).",
+        "Not run: a zenohd leg of the end of a congested session; the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the refusals against a zenohd, and the earlier ledger entries that name tx.congestion.exhaust as going to Closing, which are frozen and are corrected by this entry."
+      ],
+      "publishable_decision_summary": "The second half of item (e) of O4 is taken, and a build error of the held-lane tests is repaired. A session whose blocking message found no room within wait_before_close now ends as zenoh 1.10.2 ends the transport: tx.congestion.exhaust goes to Closed and no Close frame is written, where it went through Closing and wrote one with reason UNRESPONSIVE; the sessions a node closes for capacity or for a replacing link, which write their own Close first, no longer write a second one behind it. The held-lane tests read a field that only a transport-qos build has, so the router_forward arms of the hosted run did not compile; the QoS twin is gated and the nine arm counts are set to what they print. Item (e) is complete, and (b) stays as filed.",
+      "publishable_changes_bullets": [
+        "sources/session/session_fsm_unicast.scxml: the exhaust arm targets Closed and states no action; out/wz-session-core regenerated (the unicast machine's tables and trait, and the source hash line of the six others).",
+        "crates/wz-session-core: set_close_reason_unresponsive removed from the binding; comments of the congestion close follow.",
+        "crates/wz-runtime-tokio tests: session_congestion_close asserts the terminal state, the released link and that no byte is written after the request; session_fsm_coverage and session_glue_dispatch follow.",
+        "crates/wz-runtime-tokio/src/router_forward/egress_tests.rs: the QoS twin and its helper line are transport-qos only; scripts/run-ci.sh: the nine C1AY router_forward counts are the measured ones.",
+        "docs/zenoh-api-on-the-engine.md: O4 (e) recorded as taken."
+      ],
+      "publishable_verification_bullets": [
+        "The workspace checks with default features; session_congestion_close 1, session_glue_dispatch 1, session_fsm_coverage 12, the session_glue lib filter 106 and the session-core lib 2912 pass; clippy -D warnings on wz-session-core with all features is clean.",
+        "The shed tests, which close sessions for capacity and write their own Close first, pass: the filter ran 16, five of them shed_tests (routing-router-hat, routing-accept, transport-keepalive, session-close-ingress, transport-link-tls).",
+        "The nine C1AY router_forward commands, run as the lane runs them, print 269, 273, 294, 277, 280, 321, 269, 271 and 281 and pass; before the gate the first of them did not compile (E0609, `is_qos` on the session).",
+        "Not run: a zenohd leg of the end of a congested session; the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried in docs/zenoh-api-on-the-engine.md O4: (h) timestamp ZID bound (the generator's). Also carried: the shared-memory interop of the refusals against a zenohd, and the earlier ledger entries that name tx.congestion.exhaust as going to Closing, which are frozen and are corrected by this entry."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
