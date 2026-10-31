@@ -1665,7 +1665,7 @@ struct RouterFaceState {
     /// The messages this face, as a DESTINATION, has not taken yet: held in order until its link
     /// has room, so that a face that stopped reading costs the faces that do not feed it
     /// nothing (see [`egress`]).
-    held: PlainMutex<egress::EgressQueue>,
+    held: egress::Queues,
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -5439,8 +5439,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let was_push = matches!(msg, NetworkMessage::Push(_));
         // A message that may not be dropped does not wait for room inside the loop that serves
         // every other face: it leaves now, or it is held for this destination and the face that
-        // fed it is not read until the destination has room (see [`egress`]).
-        if self.is_credited(&msg, reliable) {
+        // fed it, when it has one, is not read until the destination has room (see [`egress`]).
+        if self.held_lane(&msg, reliable).is_some() {
             return match self.credited_send(id, state, msg, reliable, express, priority) {
                 egress::Credited::Sent => {
                     self.note_sent(was_push);
@@ -11553,7 +11553,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 peer_zid: peer_zid_routing(actions),
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
-                held: PlainMutex::new(egress::EgressQueue::default()),
+                held: egress::Queues::default(),
             },
         );
         self.shed_registry.add(id, actions.clone());

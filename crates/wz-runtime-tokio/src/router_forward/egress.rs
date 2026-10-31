@@ -39,6 +39,23 @@
 //! it had, which waits `wait_before_drop` (1 ms) once and is then dropped at once while the
 //! lane's congested mark stands, and was not what stalled the loop.
 //!
+//! ## The control lane
+//!
+//! A reliable link-state message is held the same way, in a queue of its own beside the data
+//! queue of the destination ([`Lane`]). The router sends it from a change of its own tables (a
+//! face coming up, a topology list taken in, the tick), on the loop that serves every face, and
+//! no face can be told to slow down for it, so a send that waited for room there stopped the
+//! loop for as long as it waited. Measured on a peer node whose own puts kept a link's queue full:
+//! seventy-one link-state sends of 4.9 to 5.0 s over 960 recipes of upstream's routing test, all
+//! on the node's loop, each holding the registration of a face, the topology a peer had sent and
+//! the dial that answered it, and every recipe that lost its subscriber lost it there.
+//!
+//! The control lane differs from the data lane in two things. It is its own queue, so a control
+//! message does not wait behind a data message that the link has no room for. And it gates no
+//! face: topology must keep flowing, and two routers that each stopped reading the other for the
+//! other's full control lane would wait on each other for ever. What bounds it is the age of its
+//! oldest message, past which the destination is closed as unresponsive, as for the data lane.
+//!
 //! ## What is bounded, and by what
 //!
 //! Credit is counted in BYTES, the memory a held message really occupies: the size of the held
@@ -59,6 +76,9 @@
 //! A message whose payload is in shared memory is sent through the relay, whose mapping of the
 //! payload for the destination cannot be undone and retried, and keeps the waiting send. A
 //! declaration, a query and a reply are rare and are not held here.
+//!
+//! A put of the node's own session is not held either: its publisher is the one to slow down,
+//! and waits for room outside the tables ([`super::local_publish`]).
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -200,6 +220,51 @@ impl EgressQueue {
     }
 }
 
+/// The lane a held message waits in. A destination's link has a lane for its control messages
+/// beside the lanes of its data (upstream's transport has a queue for each priority), and a
+/// control message that waited behind a data message the link has no room for would wait for a
+/// lane that is not its own: head-of-line blocking, which the lanes exist to avoid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Lane {
+    Data,
+    Control,
+}
+
+impl Lane {
+    /// The lane a message leaves on: a link-state message is control, everything else the router
+    /// holds is data.
+    fn of(msg: &NetworkMessage) -> Self {
+        match msg {
+            NetworkMessage::Oam(_) => Self::Control,
+            _ => Self::Data,
+        }
+    }
+}
+
+/// What a destination face holds, a queue for each [`Lane`].
+pub(super) struct Queues {
+    data: PlainMutex<EgressQueue>,
+    control: PlainMutex<EgressQueue>,
+}
+
+impl Default for Queues {
+    fn default() -> Self {
+        Self {
+            data: PlainMutex::new(EgressQueue::default()),
+            control: PlainMutex::new(EgressQueue::default()),
+        }
+    }
+}
+
+impl Queues {
+    fn lane(&self, lane: Lane) -> &PlainMutex<EgressQueue> {
+        match lane {
+            Lane::Data => &self.data,
+            Lane::Control => &self.control,
+        }
+    }
+}
+
 /// The forwarder's flow-control state: which faces are gated on which destinations, and what is
 /// held. (The face being routed from is not here: it is a property of the thread that routes it,
 /// see [`Credit::source`].)
@@ -208,7 +273,8 @@ impl EgressQueue {
 /// phase 3), so each field is a lock or an atomic of its own. The locks are taken in ONE order, and
 /// no thread holds one while it waits for another that comes before it:
 ///
-/// 1. a destination's queue (`RouterFaceState::held`), the outermost;
+/// 1. a destination's queues (`RouterFaceState::held`), the outermost; a pass that needs both of
+///    one destination's takes the data queue first and the control queue second;
 /// 2. [`holding`](Self::holding), a leaf under a queue;
 /// 3. [`gated`](Self::gated), which no thread holds while it takes a queue: a pass that has to read
 ///    the queues reads them first and takes `gated` after.
@@ -356,24 +422,34 @@ pub(super) enum Credited {
 }
 
 impl RouterForwarder {
-    /// Whether a message goes through the credit stage: a reliable `Push` whose congestion control
-    /// may not drop it, sent on behalf of a face that can be gated, and not carrying shared
-    /// memory.
-    pub(super) fn is_credited(&self, msg: &NetworkMessage, reliable: bool) -> bool {
-        if !reliable || self.credit.source().is_none() {
-            return false;
+    /// The lane a message is held in when it goes through the credit stage, or `None` when it
+    /// keeps its send:
+    ///
+    /// - data: a reliable `Push` whose congestion control may not drop it, sent on behalf of a
+    ///   face that can be gated, and not carrying shared memory;
+    /// - control: a reliable link-state message, whoever it is sent for. Nobody can be told to
+    ///   slow down for it (the router makes it, from a change of its own tables, on the loop that
+    ///   serves every face), so the wait that would have stopped that loop is the whole of what
+    ///   holding spares.
+    pub(super) fn held_lane(&self, msg: &NetworkMessage, reliable: bool) -> Option<Lane> {
+        if !reliable {
+            return None;
         }
-        let NetworkMessage::Push(push) = msg else {
-            return false;
+        let push = match msg {
+            NetworkMessage::Oam(_) => return Some(Lane::Control),
+            NetworkMessage::Push(push) => push,
+            _ => return None,
         };
+        self.credit.source()?;
         #[cfg(feature = "transport-shm")]
         if let wz_session_core::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body {
             if !wz_session_core::put_payload::shm_descriptors(put).is_empty() {
-                return false;
+                return None;
             }
         }
-        wz_session_core::declare_ext_qos::read_push_qos(push).congestion()
-            != CongestionControl::Drop
+        (wz_session_core::declare_ext_qos::read_push_qos(push).congestion()
+            != CongestionControl::Drop)
+            .then_some(Lane::Data)
     }
 }
 
@@ -388,9 +464,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         express: bool,
         priority: Priority,
     ) -> Credited {
-        // Behind what the destination already holds, whatever room it has now: a message that
-        // went past its predecessors would put one source's messages out of order.
-        if !state.held.guard().is_empty() {
+        // Behind what the destination already holds in the message's lane, whatever room it has
+        // now: a message that went past its predecessors would put one source's messages out of
+        // order.
+        if !state.held.lane(Lane::of(&msg)).guard().is_empty() {
             self.hold(dest, state, msg, reliable, express, priority);
             return Credited::Held;
         }
@@ -429,8 +506,9 @@ impl RouterForwarder {
         priority: Priority,
     ) {
         let cost = message_cost(&msg);
+        let lane = Lane::of(&msg);
         let (destination_bytes, pool_bytes) = {
-            let mut queue = state.held.guard();
+            let mut queue = state.held.lane(lane).guard();
             let first = queue.is_empty();
             // Counted before the message can be taken out by a pass that drains this queue, which
             // cannot start until the queue is let go: a gauge is never subtracted from before the
@@ -457,6 +535,14 @@ impl RouterForwarder {
             self.credit.holding.guard().insert(dest);
             (queue.bytes(), pool_bytes)
         };
+        // A control message gates no face. What it holds back is topology, which every face
+        // needs to keep flowing, and two routers that each stopped reading the other because
+        // the other's control lane was full would wait on each other for ever; the age of its
+        // oldest message closes a destination that does not take it (see
+        // [`Self::sweep_egress`]), which is what bounds it.
+        if lane == Lane::Control {
+            return;
+        }
         // The face whose message this is waits on what is full, so that what it had already read
         // is all the router holds past a budget for it. A face is not gated on itself.
         let Some(source) = self.credit.source() else {
@@ -493,67 +579,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 self.credit.holding.guard().remove(&id);
                 continue;
             };
-            let mut queue = state.held.guard();
-            while let Some(held) = queue.pop_front() {
-                let Held {
-                    msg,
-                    reliable,
-                    express,
-                    priority,
-                    since,
-                    cost,
-                } = held;
-                match state
-                    .actions
-                    .try_send_network_message_qos(msg, reliable, express, priority)
-                {
-                    Ok(()) => {
-                        self.credit.held.sub(1);
-                        self.credit.held_bytes.sub(cost);
-                        self.credit.released.bump();
-                        self.note_sent(true);
-                        took = true;
-                    }
-                    Err(Unsent::NoRoom(msg)) => {
-                        queue.push_front(Held {
-                            msg,
-                            reliable,
-                            express,
-                            priority,
-                            since,
-                            cost,
-                        });
-                        break;
-                    }
-                    // A message held behind others, and so not probed when it came, turns out to
-                    // be a chain. It is the head of its destination's queue, so sending it now,
-                    // waiting inside the send, keeps the order; what it costs the loop is what it
-                    // cost before anything was held back.
-                    Err(Unsent::Chain(msg)) => {
-                        self.credit.held.sub(1);
-                        self.credit.held_bytes.sub(cost);
-                        if self.send_to_face_actions(
-                            &state.actions,
-                            msg,
-                            reliable,
-                            express,
-                            priority,
-                        ) {
-                            self.credit.released.bump();
-                            self.note_sent(true);
-                            took = true;
-                        } else {
-                            self.credit.abandoned.bump();
-                        }
-                    }
-                    Err(Unsent::Failed(_)) => {
-                        self.credit.held.sub(1);
-                        self.credit.held_bytes.sub(cost);
-                        self.credit.abandoned.bump();
-                    }
-                }
-            }
-            if queue.is_empty() {
+            // Both lanes, data first (see [`Credit`]), and both taken until the face is let go of
+            // below: a message held for it between a check of one lane and a check of the other
+            // would otherwise find the face gone from `holding` and never be offered room.
+            let mut data = state.held.data.guard();
+            let mut control = state.held.control.guard();
+            took |= self.drain_queue(state, &mut data);
+            took |= self.drain_queue(state, &mut control);
+            if data.is_empty() && control.is_empty() {
                 self.credit.holding.guard().remove(&id);
                 // Nothing held, so nothing to be told: the writer stops paying for the call.
                 state.actions.watch_link_room(None);
@@ -563,6 +596,67 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if took {
             self.credit.wake.notify_waiters();
         }
+    }
+
+    /// Offer one lane of a destination the room it may have now, oldest first, until it has none.
+    /// Whether anything left.
+    fn drain_queue(&self, state: &RouterFaceState, queue: &mut EgressQueue) -> bool {
+        let mut took = false;
+        while let Some(held) = queue.pop_front() {
+            let Held {
+                msg,
+                reliable,
+                express,
+                priority,
+                since,
+                cost,
+            } = held;
+            let was_push = matches!(msg, NetworkMessage::Push(_));
+            match state
+                .actions
+                .try_send_network_message_qos(msg, reliable, express, priority)
+            {
+                Ok(()) => {
+                    self.credit.held.sub(1);
+                    self.credit.held_bytes.sub(cost);
+                    self.credit.released.bump();
+                    self.note_sent(was_push);
+                    took = true;
+                }
+                Err(Unsent::NoRoom(msg)) => {
+                    queue.push_front(Held {
+                        msg,
+                        reliable,
+                        express,
+                        priority,
+                        since,
+                        cost,
+                    });
+                    break;
+                }
+                // A message held behind others, and so not probed when it came, turns out to be
+                // a chain. It is the head of its destination's queue, so sending it now, waiting
+                // inside the send, keeps the order; what it costs the loop is what it cost
+                // before anything was held back.
+                Err(Unsent::Chain(msg)) => {
+                    self.credit.held.sub(1);
+                    self.credit.held_bytes.sub(cost);
+                    if self.send_to_face_actions(&state.actions, msg, reliable, express, priority) {
+                        self.credit.released.bump();
+                        self.note_sent(was_push);
+                        took = true;
+                    } else {
+                        self.credit.abandoned.bump();
+                    }
+                }
+                Err(Unsent::Failed(_)) => {
+                    self.credit.held.sub(1);
+                    self.credit.held_bytes.sub(cost);
+                    self.credit.abandoned.bump();
+                }
+            }
+        }
+        took
     }
 
     /// Close every destination whose oldest held message has waited its `wait_before_close`, as
@@ -579,14 +673,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let Some(state) = faces.get(&id) else {
                 continue;
             };
-            let mut queue = state.held.guard();
-            let Some(oldest) = queue.oldest() else {
-                continue;
+            let mut data = state.held.data.guard();
+            let mut control = state.held.control.guard();
+            let oldest = match (data.oldest(), control.oldest()) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => continue,
             };
             if now.saturating_duration_since(oldest) < state.actions.wait_before_close() {
                 continue;
             }
-            let (dropped, bytes) = queue.clear();
+            let ((data_dropped, data_bytes), (control_dropped, control_bytes)) =
+                (data.clear(), control.clear());
+            let (dropped, bytes) = (data_dropped + control_dropped, data_bytes + control_bytes);
             self.credit.held.sub(dropped);
             self.credit.held_bytes.sub(bytes);
             self.credit.abandoned.add(dropped);
@@ -627,7 +726,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let held: HashMap<FaceId, Option<usize>> = destinations
             .into_iter()
             .map(|dest| {
-                let bytes = faces.get(&dest).map(|state| state.held.guard().bytes());
+                // The data lane only: a face is gated on what a destination holds of the
+                // messages that come from faces, and control gates none.
+                let bytes = faces
+                    .get(&dest)
+                    .map(|state| state.held.data.guard().bytes());
                 (dest, bytes)
             })
             .collect();
@@ -669,7 +772,9 @@ impl RouterForwarder {
 
     /// A face left: what it held is gone with it, and no face waits on it or for it.
     pub(super) fn forget_egress_of(&self, id: FaceId, state: &RouterFaceState) {
-        let (dropped, bytes) = state.held.guard().clear();
+        let (data_dropped, data_bytes) = state.held.data.guard().clear();
+        let (control_dropped, control_bytes) = state.held.control.guard().clear();
+        let (dropped, bytes) = (data_dropped + control_dropped, data_bytes + control_bytes);
         if dropped > 0 {
             self.credit.held.sub(dropped);
             self.credit.held_bytes.sub(bytes);

@@ -39,6 +39,9 @@ pub(super) struct RoomLink {
     stalls: AtomicBool,
     /// Whether an ask is blocked now.
     waiting: AtomicBool,
+    /// Whether the control lane has room while the link is full, as a link whose lanes are
+    /// queues of their own has: the data lanes are full and the control lane is not.
+    control_open: AtomicBool,
     /// Whether the stalled ask may go on, and the signal that says so.
     released: (Mutex<bool>, Condvar),
 }
@@ -52,8 +55,14 @@ impl RoomLink {
             waker: Mutex::new(None),
             stalls: AtomicBool::new(false),
             waiting: AtomicBool::new(false),
+            control_open: AtomicBool::new(false),
             released: (Mutex::new(false), Condvar::new()),
         })
+    }
+
+    /// From now the control lane has room whether the data lanes do or not.
+    fn open_control_lane(&self) {
+        self.control_open.store(true, Ordering::SeqCst);
     }
 
     /// From now an ask that waits blocks until [`Self::release`].
@@ -119,7 +128,7 @@ impl BoxedLinkDriver for RoomLink {
     fn watch_room(&self, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
         *self.waker.lock().expect("waker") = waker;
     }
-    fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+    fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> RoomAnswer {
         if self.stalls.load(Ordering::SeqCst) {
             if let RoomWait::Block { wait_us } = wait {
                 if wait_us > 0 {
@@ -137,7 +146,9 @@ impl BoxedLinkDriver for RoomLink {
                 }
             }
         }
-        RoomAnswer::at_once(if self.full.load(Ordering::SeqCst) {
+        let control_has_room =
+            priority == Priority::Control && self.control_open.load(Ordering::SeqCst);
+        RoomAnswer::at_once(if self.full.load(Ordering::SeqCst) && !control_has_room {
             LinkRoom::Congested
         } else {
             LinkRoom::Free
@@ -488,26 +499,238 @@ fn a_destination_that_leaves_takes_what_it_held_and_releases_the_faces_gated_on_
 }
 
 /// Only a message sent on behalf of a face that can be gated, reliable, with a congestion control
-/// that blocks, goes through the stage: anything else keeps its send.
+/// that blocks, goes through the stage as data, and a reliable link-state message as control,
+/// whoever it is sent for: anything else keeps its send.
 #[test]
-fn only_a_reliable_blocking_put_from_a_face_goes_through_the_credit_stage() {
+fn only_a_reliable_blocking_put_from_a_face_or_a_link_state_message_goes_through_the_stage() {
+    use super::egress::Lane;
+
     let rig = Rig::new(false);
     let block = blocking_put(b"x");
     let drop = droppable_put(b"x");
-    assert!(
-        !rig.fwd.is_credited(&block, true),
-        "a message with no face behind it cannot gate anything, so it keeps its send"
+    let oam = || NetworkMessage::Oam(empty_link_state());
+    assert_eq!(
+        rig.fwd.held_lane(&block, true),
+        None,
+        "a put with no face behind it cannot gate anything, so it keeps its send"
+    );
+    assert_eq!(
+        rig.fwd.held_lane(&oam(), true),
+        Some(Lane::Control),
+        "a link-state message needs no face behind it: nobody could be told to slow down for it"
+    );
+    assert_eq!(
+        rig.fwd.held_lane(&oam(), false),
+        None,
+        "and only a reliable one is held"
     );
     let _routing = rig.fwd.credit.routing_from(SOURCE);
-    assert!(rig.fwd.is_credited(&block, true));
-    assert!(
-        !rig.fwd.is_credited(&block, false),
+    assert_eq!(rig.fwd.held_lane(&block, true), Some(Lane::Data));
+    assert_eq!(
+        rig.fwd.held_lane(&block, false),
+        None,
         "best effort is droppable"
     );
-    assert!(
-        !rig.fwd.is_credited(&drop, true),
+    assert_eq!(
+        rig.fwd.held_lane(&drop, true),
+        None,
         "so is congestion control Drop"
     );
+}
+
+/// A link-state message with nothing in it, which is all these tests need of one.
+fn empty_link_state() -> wz_codecs::oam::OamOwned {
+    use wz_codecs::linkstate_list::LinkstateListOwned;
+
+    wz_session_core::linkstate_oam::build_linkstate_oam_owned(&LinkstateListOwned {
+        num_link_states: 0,
+        link_states: Vec::new(),
+    })
+    .expect("build an empty link-state message")
+}
+
+/// Send `msg` to `DEST` as the router's own egress does, from a change of its tables and so on
+/// behalf of no face. Whether it was accepted.
+fn egress_to_dest(rig: &Rig, msg: NetworkMessage, priority: Priority) -> bool {
+    let on = rig.fwd.on_tables();
+    let state = on.tables.faces.get(&DEST).expect("the destination face");
+    on.egress_to_face(DEST, state, msg, true, false, priority, None)
+}
+
+/// A link-state message that finds no room does not wait for it, here, on the loop that serves
+/// every face: it is held, whole, and leaves when the destination has room. The wait it would have
+/// made was up to `wait_before_close` (5 s, measured), with the tables held for writing.
+#[test]
+fn a_link_state_message_that_finds_no_room_is_held_and_leaves_when_there_is_room() {
+    let rig = Rig::new(true);
+    rig.link.stall_waits();
+    assert!(
+        egress_to_dest(
+            &rig,
+            NetworkMessage::Oam(empty_link_state()),
+            Priority::Control
+        ),
+        "it is accepted"
+    );
+    assert!(
+        !rig.link.is_waiting(),
+        "and nothing waited for the room it did not find"
+    );
+    assert_eq!(
+        rig.link.sent(),
+        rig.baseline,
+        "nothing left a link with no room"
+    );
+    assert_eq!(rig.fwd.egress_held(), 1, "it is held");
+    assert!(
+        rig.link.is_watched(),
+        "and the link tells the router when it has room"
+    );
+
+    rig.link.set_full(false);
+    rig.fwd.on_tables().drain_egress();
+    assert_eq!(
+        rig.link.sent(),
+        rig.baseline + 1,
+        "it left when there was room"
+    );
+    assert_eq!(rig.fwd.egress_held(), 0);
+    assert_eq!(rig.fwd.egress_released(), 1);
+    assert_eq!(rig.fwd.egress_abandoned(), 0, "and nothing was lost");
+    assert!(
+        !rig.link.is_watched(),
+        "a destination that holds nothing is not watched"
+    );
+}
+
+/// A control message goes behind what its destination already holds in its own lane, whatever
+/// room there is now, as a data message does: one that went past its predecessors would put
+/// the router's topology messages to one face out of order.
+#[test]
+fn a_link_state_message_keeps_its_place_behind_the_one_held_before_it() {
+    let rig = Rig::new(true);
+    assert!(egress_to_dest(
+        &rig,
+        NetworkMessage::Oam(empty_link_state()),
+        Priority::Control
+    ));
+    assert_eq!(rig.fwd.egress_held(), 1);
+
+    rig.link.set_full(false);
+    assert!(egress_to_dest(
+        &rig,
+        NetworkMessage::Oam(empty_link_state()),
+        Priority::Control
+    ));
+    assert_eq!(
+        (rig.link.sent(), rig.fwd.egress_held()),
+        (rig.baseline, 2),
+        "the second waits for the first, though the link has room for it"
+    );
+
+    rig.fwd.on_tables().drain_egress();
+    assert_eq!(
+        rig.link.sent(),
+        rig.baseline + 2,
+        "both left, in the order they came"
+    );
+    assert_eq!(rig.fwd.egress_held(), 0);
+}
+
+/// A control message does not wait behind a data message that its link has no room for: the two
+/// lanes are two queues, and the control lane's room is its own.
+#[test]
+fn a_link_state_message_is_not_held_behind_a_put_the_data_lane_has_no_room_for() {
+    let rig = Rig::new(true);
+    // Only a session that negotiated QoS routes a message on the lane of its priority; without
+    // it every message goes on the one lane, which is the data lane.
+    TokioRuntime::with_mutex_mut(&rig.dest.is_qos, |qos| *qos = true);
+    forward_frame(&rig.fwd, SOURCE, vec![blocking_put(b"data")]);
+    assert_eq!(
+        rig.fwd.egress_held(),
+        1,
+        "the put is held for the data lane"
+    );
+
+    rig.link.open_control_lane();
+    assert!(egress_to_dest(
+        &rig,
+        NetworkMessage::Oam(empty_link_state()),
+        Priority::Control
+    ));
+    assert_eq!(
+        rig.link.sent(),
+        rig.baseline + 1,
+        "the link-state message left at once, past the put"
+    );
+    assert_eq!(rig.fwd.egress_held(), 1, "and the put is still held");
+}
+
+/// A control message gates no face, whatever the destination holds of them: topology has to keep
+/// flowing, and two routers that each stopped reading the other would wait on each other for
+/// ever. The same count of data messages gates the face that fed them.
+#[test]
+fn a_held_link_state_message_gates_no_face_and_a_held_put_does() {
+    let budget = EgressBudget {
+        per_destination_bytes: 1,
+        pool_bytes: usize::MAX / 2,
+    };
+    let rig = Rig::with_budget(true, budget);
+    {
+        let _routing = rig.fwd.credit.routing_from(SOURCE);
+        for _ in 0..4 {
+            assert!(egress_to_dest(
+                &rig,
+                NetworkMessage::Oam(empty_link_state()),
+                Priority::Control
+            ));
+        }
+    }
+    assert_eq!(rig.fwd.egress_held(), 4);
+    assert_eq!(
+        rig.fwd.egress_gated_faces(),
+        0,
+        "four control messages are past the budget and gate nothing"
+    );
+
+    forward_frame(&rig.fwd, SOURCE, vec![blocking_put(b"data")]);
+    assert_eq!(
+        rig.fwd.egress_gated_faces(),
+        1,
+        "one put past the same budget gates the face that fed it"
+    );
+}
+
+/// A destination that does not take its oldest link-state message in time is closed, as one that
+/// does not take a data message is: what bounds the control lane is the age of what it holds.
+#[test]
+fn a_destination_that_does_not_take_a_link_state_message_in_time_is_closed() {
+    let rig = Rig::new(true);
+    assert!(egress_to_dest(
+        &rig,
+        NetworkMessage::Oam(empty_link_state()),
+        Priority::Control
+    ));
+    let deadline = rig.dest.wait_before_close();
+
+    rig.advance(deadline - Duration::from_millis(1));
+    rig.fwd.tick();
+    assert!(
+        !rig.dest.take_congestion_close(),
+        "a millisecond short of the deadline it is not"
+    );
+    assert_eq!(rig.fwd.egress_held(), 1);
+
+    rig.advance(Duration::from_millis(2));
+    rig.fwd.tick();
+    assert!(
+        rig.dest.take_congestion_close(),
+        "past it the destination is closed"
+    );
+    assert_eq!(rig.fwd.egress_held(), 0);
+    assert_eq!(rig.fwd.egress_held_bytes(), 0, "and the pool is given back");
+    assert_eq!(rig.fwd.egress_abandoned(), 1);
+    assert_eq!(rig.fwd.egress_destinations_closed(), 1);
 }
 
 /// A link over a REAL outbound queue, the one every unicast driver of the runtime writes
@@ -977,6 +1200,47 @@ fn a_blocking_local_put_waits_for_room_without_the_tables() {
         rig.link.sent() > rig.baseline,
         "the put left once the link had room: the wait was moved, not dropped"
     );
+}
+
+/// A link-state message can be probed: the flood a router makes when a face comes up goes out
+/// inside its tables, and a send that waits there for a full queue held everything that needs them
+/// for as long as it waited (up to 5 s, measured). Sent to a link with no room it comes back whole
+/// and nothing is written; sent to one with room it leaves.
+#[test]
+fn a_link_state_message_is_probed_and_comes_back_whole_when_there_is_no_room() {
+    use wz_session_core::session_actions::Unsent;
+
+    let oam = empty_link_state;
+
+    let full = RoomLink::new(true);
+    let actions = client_over(&full, zid(0xCC));
+    full.stall_waits();
+    let outcome = actions.try_send_network_message_qos(
+        NetworkMessage::Oam(oam()),
+        true,
+        false,
+        Priority::DEFAULT,
+    );
+    assert!(
+        matches!(&outcome, Err(Unsent::NoRoom(NetworkMessage::Oam(_)))),
+        "a link-state message that finds no room is the caller's again"
+    );
+    assert!(
+        !full.is_waiting(),
+        "the probe asked once and did not wait for room"
+    );
+    assert_eq!(full.sent(), 0, "nothing was written to a link with no room");
+
+    let open = RoomLink::new(false);
+    let actions = client_over(&open, zid(0xCD));
+    let outcome = actions.try_send_network_message_qos(
+        NetworkMessage::Oam(oam()),
+        true,
+        false,
+        Priority::DEFAULT,
+    );
+    assert!(outcome.is_ok(), "a link with room is given the message");
+    assert!(open.sent() > 0, "and it was written");
 }
 
 /// A put that finds room does not wait at all, and the same put to a link that is full and does

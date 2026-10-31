@@ -11065,6 +11065,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// has room, and owns what upstream's sender does with a message that waited its deadline
     /// out (a droppable one is dropped, a blocking one closes the session as unresponsive).
     ///
+    /// A link-state message (`Oam`) is probed the same way, since the flood a router makes when a
+    /// face comes up is sent inside its tables and a wait there stops everything that needs them.
+    ///
     /// Any other message is sent as [`Self::send_network_message_qos`] sends it, which waits.
     /// The data plane is where a full queue is the common case, and where one message is not
     /// worth a stalled loop; a declaration or a reply to a queryable is rare, and is not made to
@@ -11131,6 +11134,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 Ok(Dispatched::Chain) => Err(Unsent::Chain(
                     crate::network_message::NetworkMessage::Push(push),
                 )),
+                Err(e) => Err(Unsent::Failed(e)),
+            };
+        }
+        // A link-state message is probed too: the flood a router makes when a face comes up goes
+        // out under the tables of the node, and a send that waits there for a full queue holds
+        // everything that needs them for as long as it waits.
+        #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+        if let crate::network_message::NetworkMessage::Oam(oam) = &msg {
+            return match self.dispatch_oam_at(DispatchStage::Probe, oam, reliable) {
+                Ok(Dispatched::Sent) => Ok(()),
+                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
+                #[cfg(feature = "transport-fragmentation")]
+                Ok(Dispatched::Chain) => Err(Unsent::Chain(msg)),
                 Err(e) => Err(Unsent::Failed(e)),
             };
         }
@@ -11487,14 +11503,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         oam: wz_codecs::oam::OamOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        self.dispatch_network_message(
+        self.dispatch_oam_at(DispatchStage::Fresh, &oam, reliable)
+            // Only a probe can end in `NoRoom`, and this is not one.
+            .map(|_| ())
+    }
+
+    /// [`Self::dispatch_oam`] at a stage, borrowing the message so that a probe that finds no room
+    /// leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+    #[cfg(feature = "alloc")]
+    fn dispatch_oam_at(
+        &self,
+        stage: DispatchStage,
+        oam: &wz_codecs::oam::OamOwned,
+        reliable: bool,
+    ) -> Result<Dispatched, SendWireError> {
+        let encode_body = crate::frame_encode::oam_body(oam);
+        self.dispatch_network_message_at(
+            stage,
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
             Priority::Control,
             reliable,
-            crate::declare_ext_qos::read_oam_qos(&oam),
+            crate::declare_ext_qos::read_oam_qos(oam),
             wz_codecs::oam::Oam::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
-            crate::frame_encode::oam_body(&oam),
+            as_encoder(&encode_body),
         )
     }
 
