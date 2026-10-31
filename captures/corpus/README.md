@@ -51,6 +51,8 @@ The original captures are not kept anywhere.
 | `zenoh-v1-7-2-tcp-full.pcap`, `zenoh-v1-7-2-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.7.2 |
 | `zenoh-matched-1-7-2-tcp.pcap`, `zenoh-matched-1-7-2-udp.pcap`, and the same for 1.8.0 and 1.9.0 | zenoh | TCP, UDP unicast | the eclipse/zenoh router of that release with the `z_pub` and `z_sub` examples built from the same tag as clients, a minute on a link that loses nothing |
 | `zenoh-mixed-c1-7-2-r1-10-0-*.pcap`, `zenoh-mixed-c1-9-0-r1-10-0-*.pcap`, `zenoh-mixed-c1-7-2-r1-9-0-*.pcap` | zenoh | TCP, UDP unicast | the same with clients (`c`) older than the router (`r`): 1.7.2 against 1.10.0 and 1.9.0, 1.9.0 against 1.10.0 |
+| `zenoh-matched-1-0-2-*.pcap`, and the same for 1.3.4, 1.4.0, 1.5.0 and 1.6.2 | zenoh | TCP, UDP unicast | router and clients both built from the release's tag (no image of it was at hand), the same link; 1.0.2's zenohd runs with its rest plugin switched off |
+| `zenoh-tunnel-udp-20pub.pcap`, `zenoh-tunnel-tcp-20pub.pcap` | zenoh | UDP, TCP | a real path (Wi-Fi and a Tailscale tunnel to the router's host): a zenohd 1.10.1, one subscriber and twenty publishers, taken inside the tunnel with a fixed Ethernet header added to its raw IP frames |
 | `zenoh-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients |
 | `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |
 | `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
@@ -88,7 +90,8 @@ The original captures are not kept anywhere.
 On the zenoh side versions other than
 1.10.1, 1.10.0, 1.9.0, 1.8.0, 1.7.2 and 1.5.0 (with 1.10.1 clients, and with
 clients of the router's own release for 1.9.0, 1.8.0 and 1.7.2, and with
-older clients for 1.10.0 and 1.9.0) and
+older clients for 1.10.0 and 1.9.0, and 1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2
+with their own) and
 links other than loopback, emulated ones that lose (1% to 20%), reorder or
 duplicate packets, and one office Wi-Fi link.
 Each is added the same way: captured from the real

@@ -301,6 +301,18 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("zenoh-mixed-c1-9-0-r1-10-0-udp.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-mixed-c1-7-2-r1-9-0-tcp.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-mixed-c1-7-2-r1-9-0-udp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-tunnel-udp-20pub.pcap", (21, 0, 0), (21, 0, 0)),
+    ("zenoh-tunnel-tcp-20pub.pcap", (21, 0, 0), (21, 0, 0)),
+    ("zenoh-matched-1-5-0-tcp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-5-0-udp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-6-2-tcp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-6-2-udp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-4-0-tcp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-4-0-udp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-3-4-tcp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-3-4-udp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-0-2-tcp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-matched-1-0-2-udp.pcap", (2, 0, 0), (2, 0, 0)),
     // A real link between two machines (an office Wi-Fi, 2026-10-27): the same
     // 1.10.1 router and clients, and zenoh-pico clients, off the loopback.
     ("link-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
@@ -308,7 +320,7 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("link-tcp-midsession.pcap", (2, 0, 0), (2, 0, 0)),
     ("link-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
     ("link-pico-tcp.pcap", (2, 0, 0), (2, 0, 0)),
-    ("lan-dns.pcap", (0, 159, 28), (0, 159, 28)),
+    ("lan-dns.pcap", (0, 174, 13), (0, 174, 13)),
     ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
     ("lan-ssdp.pcap", (0, 2, 0), (0, 2, 0)),
     // The real implementations of three protocols that run beside zenoh, in
@@ -334,7 +346,7 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // `yes`; NTP's 94 flows stay `undecided`, each a pair of 48-byte
     // datagrams, which leaves too little to say `no` at 2^-20.
     ("busylan-dhcp.pcap", (0, 21, 2), (0, 21, 2)),
-    ("busylan-ntp.pcap", (0, 0, 94), (0, 0, 94)),
+    ("busylan-ntp.pcap", (0, 89, 5), (0, 89, 5)),
     ("busylan-wsd.pcap", (0, 8, 0), (0, 8, 0)),
     // Structured TCP, the first stream protocols besides MQTT (2026-10-27):
     // HTTP/1.1, plain and over TLS 1.2 and 1.3, 34 connections each. The

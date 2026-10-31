@@ -251,11 +251,11 @@ leave bytes over and 40 do not decode, it loses the framing in all 34
 directions, and 29 of its SN steps break and none follow. SMTP frames no unit,
 loses the framing in all 20 directions and reads 10 `undecided`. SSH's whole
 units raise the null side's share of a unit read whole, so that unit's `no`
-weight fell from +3983 to +3545, and a unit read whole on a broken step now
-sums to -449 on the `no` sum (it was -11): a flow of such frames leans toward
+weight fell from +3983 to +3546, and a unit read whole on a broken step now
+sums to -448 on the `no` sum (it was -11): a flow of such frames leans toward
 `no` a little instead of staying level. The `yes` weight of a unit read whole
 is still mDNS's bound. The held framing's `yes` weight fell from +4032 to
-+2831, since SSH's 0 held in 34 directions is a looser bound than
++2835, since SSH's 0 held in 34 directions is a looser bound than
 PostgreSQL's 0 in 48. No other capture changed word.
 
 Still to come for step 2: further zenoh versions and links on the zenoh side.
@@ -279,18 +279,21 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 8154 units; 0 framings lost in 324 directions held from
-  their start; 0 differing cookies in 328 echoes; 0 Init pairs of one kind in
-  330; 0 other versions in 660 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 19389 units; 0 framings lost in 386 directions held from
+  their start; 0 differing cookies in 390 echoes; 0 Init pairs of one kind in
+  392; 0 other versions in 784 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), 1.7.2, 1.8.0 and 1.9.0
   routers with the clients built from the same release, 1.10.0 and 1.9.0
-  routers with older clients, zenoh-pico 1.10.1 clients,
+  routers with older clients, 1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2 routers
+  with clients of their own release (built from the tags), zenoh-pico 1.10.1
+  clients,
   240 short sessions captured for their handshakes, links that drop 1%, 5%,
   10% and 20% of the packets each way (UDP; TCP at 1% and 5%), that reorder
-  a quarter of them or duplicate 5% (TCP and UDP), and a real
+  a quarter of them or duplicate 5% (TCP and UDP), a real
   link between two machines (an office Wi-Fi: TCP with small and 3000-byte
-  samples, joined mid-session, UDP, and zenoh-pico);
+  samples, joined mid-session, UDP, and zenoh-pico), and a real tunnelled
+  path with twenty publishers (TCP and UDP);
 - the `yes` sum's null chance of an outcome is the largest such upper bound
   over the null protocols (a unit read whole: mDNS, 13 of 36 units, bound
   0.51; a framing held: PostgreSQL, 0 of 48 directions, bound 0.060);
@@ -299,17 +302,17 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +966 | +3545 | +2603 |
-| unit residual | -11411 | -9992 | -6745 |
-| unit undecoded | -11411 | -10522 | -7000 |
-| stream framing held | +2832 | +6447 | (none) |
-| stream framing lost | -6764 | -6747 | (none) |
-| cookie matched (8 bytes) | +63987 | +63987 | +63999 |
-| cookie differing | -6781 | -6781 | -10000 |
-| Inits of opposite kinds | +987 | +987 | +999 |
-| Inits of one kind | -5790 | -5790 | -9000 |
-| version of this reader | +7993 | +7993 | +8000 |
-| another version | -7781 | -7781 | (none) |
+| unit read whole | +966 | +3546 | +2603 |
+| unit residual | -12660 | -11242 | -6745 |
+| unit undecoded | -12660 | -11772 | -7000 |
+| stream framing held | +2835 | +6450 | (none) |
+| stream framing lost | -7015 | -6999 | (none) |
+| cookie matched (8 bytes) | +63989 | +63989 | +63999 |
+| cookie differing | -7030 | -7030 | -10000 |
+| Inits of opposite kinds | +989 | +989 | +999 |
+| Inits of one kind | -6037 | -6037 | -9000 |
+| version of this reader | +7994 | +7994 | +8000 |
+| another version | -8029 | -8029 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
@@ -384,7 +387,7 @@ that capture alone do not say it.
 
 A frame that repeats its SN never counts toward `yes`: a unit read whole
 (+966) and a broken step (-3994) sum to -3028. On the `no` sum the two largely
-cancel (+3545 and -3994: the null side reads a unit whole about one time in
+cancel (+3546 and -3994: the null side reads a unit whole about one time in
 twelve and a step breaks nearly always, a zenoh flow breaks a step one time in
 sixteen), a frame that does both being 1.4 times as likely under the null as
 under zenoh. A flow of such frames is never read `yes` and leans, slowly,
@@ -397,7 +400,7 @@ first: a unit framed (held) or a desynchronisation this reader inferred
 capture holds from its SYN: a tap that joins a zenoh stream later lands inside
 a unit nearly always and loses the framing too, so there the observation says
 how the capture began and not what the bytes are. Held from the start, zenoh
-never lost it (0 in 324). The forty short MQTT connections lose it in both
+never lost it (0 in 386). The forty short MQTT connections lose it in both
 directions and read `undecided` still: twenty-odd bytes a direction are too
 few to say `no` at 2^-20, and that is the honest word.
 
@@ -407,16 +410,17 @@ raweth capture moved from `yes` to `undecided`: a version header, seven units
 read whole and one SN break come to about ten and a half bits, and model 1's
 crossing rested on the unit weight the real mDNS beats.
 
-Adding the six captures above (2100 units, 12 handshakes) moved the counts and
-with them the weights, and three null captures moved. A residual or undecoded
-unit now weighs -11411 on the `yes` sum (after the matched and mixed release
-captures below), and on the `no` sum two undecoded units weigh -21044, past the
-threshold: a flow of two units no codec of this reader decodes, and nothing
-else weighed, reads `no`, where it needed three. Two residual units weigh
--19984 and do not, 16 millibits short.
-`lan-dns` went from 2 `no` and 185 `undecided` to 159 `no` and 28 `undecided`,
+Every zenoh capture added since (the links above and the releases below) moved
+the counts and with them the weights, and the null captures moved with them. A
+residual or undecoded unit now weighs -12660 on the `yes` sum, and -11242 or
+-11772 on the `no` sum: two units that no codec of this reader reads whole
+weigh -22484 or more there, past the threshold, where three were needed at
+first (and two undecoded ones, but not two residual ones, after the SSH
+capture). So a flow of two such units, and nothing else weighed, reads `no`.
+`lan-dns` went from 2 `no` and 185 `undecided` to 174 `no` and 13 `undecided`,
 `stack-coap` from 5 `no` and 20 `undecided` to 25 `no`, `lan-ssdp` from 1 and
-1 to 2 `no`. No flow of another protocol read `yes`, and no zenoh flow read
+1 to 2 `no`, and `busylan-ntp` from 94 `undecided` to 89 `no` and 5
+`undecided`. No flow of another protocol read `yes`, and no zenoh flow read
 `no`, before or after.
 
 **Clients of the router's release.** Until now the clients were all 1.10.1,
@@ -438,10 +442,36 @@ handshakes: the weights of the failures moved by up to 197 millibits, and
 three confirming ones by one millibit each (the cookie's fidelity -14 to -13,
 the Init roles +986 to +987, a unit read whole +965 to +966), which moves the
 example sums of the session table, of the C header and of the C consumer by 1
-to 11 millibits. The table above is after both sets.
+to 11 millibits.
 
-Still open after model 2: zenoh releases other than 1.10.1, 1.10.0, 1.9.0,
-1.8.0, 1.7.2 and 1.5.0 (and clients older than the router only for 1.7.2 and
-1.9.0, and of its own release only for 1.9.0, 1.8.0 and 1.7.2), links other
-than loopback, emulated links that lose, reorder or duplicate, and one Wi-Fi
-link, and the null side only on the protocols the corpus holds.
+**A real path.** The loss, reordering and duplication above are emulated.
+This one is not: a zenohd 1.10.1 router on the build host, and on the host
+here one subscriber and twenty publishers, each putting once a second (so that
+the datagrams are closer together than the path's jitter), for two minutes,
+over TCP and over UDP. The path is this host's Wi-Fi and the Tailscale tunnel
+to the build host, and the capture is taken inside the tunnel, where the
+interface gives raw IP frames; a fixed Ethernet header was put before each so
+that the anonymiser and the reader take them, and nothing else was changed.
+300 pings over that path lost none and took 2.7 to 178 ms (standard deviation
+48 ms). All 21 flows of each capture read `yes`. Over TCP none of 3723 SN
+steps broke. Over UDP 274 of 3510 (7.8%) did, which is more than the `2^-4`
+(6.25%) the model assumes for a zenoh flow, and the verdict held: the steps that
+follow are 92% of all, against the third needed. Which of reordering,
+repetition and loss broke them was not traced; the capture inside the tunnel
+cannot tell the tunnel's from the Wi-Fi's. The two captures add 9503 units and
+42 handshakes.
+
+**Older releases.** Router and clients of 1.0.2, 1.3.4, 1.4.0, 1.5.0 and 1.6.2
+were built from their tags (no image of those was at hand, so the router is
+built too; that of 1.0.2 starts only with its rest plugin switched off, since
+it requires the plugin otherwise) and captured over TCP and over UDP on a link
+that loses nothing. All ten read two `yes` flows, none of their 1142 SN steps
+broke, and they add 1732 units and 20 handshakes. The corpus now holds routers
+of 1.0.2, 1.3.4, 1.4.0, 1.5.0, 1.6.2, 1.7.2, 1.8.0, 1.9.0, 1.10.0 and 1.10.1.
+
+Still open after model 2: the releases between those (1.1.x, 1.2.x and the
+other patch releases), a client older than its router for any release but
+1.7.2 and 1.9.0, a link that really loses packets (the tunnelled path lost none
+in 300 pings, and broke steps only over UDP), a reordered TCP session that
+carries more than one SN step, and the null side only on the protocols the
+corpus holds.
