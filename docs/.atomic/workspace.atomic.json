@@ -301744,6 +301744,34 @@
         "Production gate carry: GitHub Actions CI (validate_workspace + verify-codegen.sh + cargo test + Layer 3 interop) lands in Phase 4 (R46+ after walking skeleton + a few codec/FSM expansion rounds), per the R39 architectural roadmap."
       ]
     },
+    "Round 4000": {
+      "decision_summary": "The hosted run at main's c27afce985 was red in nineteen jobs, and I classified them before changing anything: the SCE pin's generated codecs, stale declared counts (router_forward in nine arms, retry_period), a doc link to a function the slot profile lacks, a multicast text baseline, and two I could not explain. While I measured them another session landed the same repairs by the same method, so my commits for the codecs, the counts, the doc link and the baseline were dropped on rebase and nothing of them is filed. What was still mine is the one those repairs did not reach: router_forward::joined_link_tests needs transport-multilink alone, but its fixture recording_actions_over was gated on multilink with qos and two codecs, so a multilink build without them did not compile its own tests, and the C1ay clippy arm for that combination said so. The fixture is now gated on multilink or session-extshm, the consumers it serves.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/test_fixtures.rs: recording_actions_over and recording_driver_over are found by a build with transport-multilink or session-extshm, the gate their consumers need."
+      ],
+      "verification_bullets": [
+        "On a build machine: Layer C1ay passes with this gate (334 s), its narrow clippy arm for multilink included, which failed to compile before it. The nine router_forward counts the other session moved read what I measured arm by arm (263, 265, 288, 271, 274, 315, 263, 265, 273) and retry_period reads 10. The 121 static gates pass on the rebased tree."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Two hosted reds are not explained. Layer Z8 read `shm: expected pass, measured timeout (0 passed)`. The cross-impl job restored the zenohd cache of the pin 1.10.2 and found no zenoh-src under it, while the same clone has both files the step tests for on the build machine, so the restored entry is the suspect: a cache is re-saved only on a miss, and an entry made without the source stays. A key moved with the widened path is the repair the step's own comment names. A third red, the verdict-leg mutation gate, said its unmutated tree was red, which the others above explain."
+      ],
+      "publishable_decision_summary": "The hosted run at main's c27afce985 was red in nineteen jobs, and I classified them before changing anything: the SCE pin's generated codecs, stale declared counts (router_forward in nine arms, retry_period), a doc link to a function the slot profile lacks, a multicast text baseline, and two I could not explain. While I measured them another session landed the same repairs by the same method, so my commits for the codecs, the counts, the doc link and the baseline were dropped on rebase and nothing of them is filed. What was still mine is the one those repairs did not reach: router_forward::joined_link_tests needs transport-multilink alone, but its fixture recording_actions_over was gated on multilink with qos and two codecs, so a multilink build without them did not compile its own tests, and the C1ay clippy arm for that combination said so. The fixture is now gated on multilink or session-extshm, the consumers it serves.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/test_fixtures.rs: recording_actions_over and recording_driver_over are found by a build with transport-multilink or session-extshm, the gate their consumers need."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine: Layer C1ay passes with this gate (334 s), its narrow clippy arm for multilink included, which failed to compile before it. The nine router_forward counts the other session moved read what I measured arm by arm (263, 265, 288, 271, 274, 315, 263, 265, 273) and retry_period reads 10. The 121 static gates pass on the rebased tree."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Two hosted reds are not explained. Layer Z8 read `shm: expected pass, measured timeout (0 passed)`. The cross-impl job restored the zenohd cache of the pin 1.10.2 and found no zenoh-src under it, while the same clone has both files the step tests for on the build machine, so the restored entry is the suspect: a cache is re-saved only on a miss, and an entry made without the source stays. A key moved with the widened path is the repair the step's own comment names. A third red, the verdict-leg mutation gate, said its unmutated tree was red, which the others above explain."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
