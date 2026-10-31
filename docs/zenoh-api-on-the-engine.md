@@ -1085,10 +1085,13 @@ Each lands whole with its surface lines, tests and faults in one round.
   the offer in the InitAck, an unmappable segment refuses it, and a malformed InitSyn is
   ignored, which 1.10.x has done since the `bail!` of 1.5.0 went; `ShmAuthError`); (e) an
   unresponsive peer's pipelines are disabled at once and its transport is
-  deleted and not closed with a frame (the first half taken in round R4015: a session a
+  deleted and not closed with a frame (taken: the first half in round R4015, a session a
   congestion close was ordered of refuses every later send at once, `congestion_close_ordered`;
-  wz still sends a Close frame with reason UNRESPONSIVE, which is the statechart's
-  `tx.congestion.exhaust` arm, not changed here); (f) a newer link state restates the role of its node
+  the second in the round after, the statechart's `tx.congestion.exhaust` arm goes to `Closed`
+  and not through `Closing`, so no Close frame is written and the link is released, where it
+  had sent one with reason UNRESPONSIVE; the action `set_close_reason_unresponsive` went with
+  it, and `close_for_capacity` and `close_for_replacement`, which send their own Close first
+  and then ask for this close, no longer send a second one behind it); (f) a newer link state restates the role of its node
   (`crates/wz-routing-graph/src/lib.rs` fills it only while unknown), and an interest that goes
   away clears the finalised flags of its face (both taken in round R4006: a newer link state
   now restates the role of its node whether or not it was known, and an end of interest takes

@@ -2468,8 +2468,8 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
         return true;
     }
     // R2923 — a sender's blocking message found no room in `wait_before_close`:
-    // the statechart's `tx.congestion.exhaust -> Closing` with
-    // `set_close_reason_unresponsive`, which nothing raised before.
+    // the statechart's `tx.congestion.exhaust -> Closed`, which nothing raised
+    // before and which, as zenoh 1.10.2 deletes the transport, sends no Close frame.
     if actions.take_congestion_close() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
         engine.process_event(E::TxCongestionExhaust);

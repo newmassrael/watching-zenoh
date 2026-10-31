@@ -515,9 +515,9 @@ pub struct OutOfBandState {
     #[cfg(feature = "session-close-ingress")]
     pub close_ordered: bool,
     /// R2923 — a message that could not wait out congestion found no room on
-    /// its link in `wait_before_close`: close the session as unresponsive
-    /// (`tx.congestion.exhaust`), as zenoh's `handle_push_result` closes its
-    /// transport with `UNRESPONSIVE`.
+    /// its link in `wait_before_close`: end the session as unresponsive
+    /// (`tx.congestion.exhaust`), as zenoh's `handle_push_result` deletes its
+    /// transport, without a Close frame since 1.10.2.
     pub tx_congested: bool,
     /// A close for congestion has been ORDERED of this session, ever: the sticky half of
     /// `tx_congested`, which the drive loop clears when it raises the event. zenoh 1.10.2 marks
@@ -9185,9 +9185,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             .take(|s| core::mem::replace(&mut s.close, false))
     }
 
-    /// R2923 — ask the drive loop to close this session as UNRESPONSIVE: a
+    /// R2923 — ask the drive loop to end this session as unresponsive: a
     /// message that may not be dropped found no room on its link in
-    /// `wait_before_close`. Staged, not raised, for the reason
+    /// `wait_before_close`. The machine takes it to `Closed` and writes no
+    /// Close frame; a caller that owes the peer one writes it first
+    /// ([`Self::close_for_capacity`]). Staged, not raised, for the reason
     /// `request_close` gives: the sender is not the loop.
     pub fn request_congestion_close(&self) {
         self.core.out_of_band.raise(|s| {
@@ -10214,7 +10216,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R2923 — upstream's `handle_push_result`
             // (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `if !pushed && !msg.is_droppable() {`):
             // a message that found no room is a congestion drop; a blocking one
-            // also closes the transport, `UNRESPONSIVE`. The close is raised by
+            // also deletes the transport, with no Close frame. The close is raised by
             // the drive loop, as upstream spawns it off the sender, so the
             // sender returns rather than tearing the session down from under
             // its own conduit lock. Either way the put itself succeeded from
@@ -15809,11 +15811,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn set_close_reason_expired(&mut self) {
         self.stage_close_reason(CloseReason::Expired);
-    }
-
-    #[inline(never)]
-    fn set_close_reason_unresponsive(&mut self) {
-        self.stage_close_reason(CloseReason::Unresponsive);
     }
 }
 

@@ -19,7 +19,7 @@
 //        Opening -> framing.error -> Closing (reason=Invalid)
 //        Established -> lease.expired -> Closing (reason=Expired)
 //        Established -> framing.error -> Closing (reason=Invalid)
-//        Established -> tx.congestion.exhaust -> Closing
+//        Established -> tx.congestion.exhaust -> Closed (no Close frame)
 //        Established -> peer.close -> Closed (direct)
 //        Accepting -> framing.error -> Closing (reason=Invalid)
 //
@@ -210,14 +210,23 @@ fn r61_established_framing_error_to_closing_invalid() {
     assert_eq!(actions.close_reason(), Some(CloseReason::Invalid));
 }
 
-// ── 9. Established -> tx.congestion.exhaust -> Closing
+// ── 9. Established -> tx.congestion.exhaust -> Closed (skips Closing)
 #[test]
-fn r61_established_tx_congestion_exhaust_to_closing() {
+fn r61_established_tx_congestion_exhaust_to_closed_direct() {
     let (actions, mut engine) = fresh_engine();
     drive_to_established(&mut engine);
     engine.process_event(E::TxCongestionExhaust);
-    assert_eq!(engine.get_current_state(), S::Closing);
-    assert_eq!(actions.close_reason(), Some(CloseReason::Unresponsive));
+    // zenoh 1.10.2 deletes a transport it could not push a blocking message to, and
+    // enqueues no Close frame: the session skips Closing, as it does on a peer's close.
+    assert_eq!(engine.get_current_state(), S::Closed);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.release_link, 1);
+    assert_eq!(t.send_close_frame_with_reason, 0);
+    assert_eq!(
+        actions.close_reason(),
+        None,
+        "an unresponsive peer is not told a reason"
+    );
 }
 
 // ── 10. Established -> peer.close -> Closed (skips Closing)

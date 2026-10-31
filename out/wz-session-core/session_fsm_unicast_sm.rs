@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: b80d38d95eadd9a4e5c97eebb3b0f3d99ccf9e81bab4326367a306318e893659
+// source-hash: d8bc6b694711ec73c5bd116b950a0ddbf745fe86af3d8f249f9277dad5cc4acf
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -288,7 +288,7 @@ pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
             #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, true),
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(10)), false, true),
             // 16: Accepting, transition 3
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, true),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(7)), false, false),
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(11)), false, false),
             // 17: Accepting, transition 4
             #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(7)), false, false),
@@ -310,7 +310,7 @@ pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
             // 23: Established, transition 2
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(10)), false, true),
             // 24: Established, transition 3
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(10)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(11)), false, false),
             // 25: Established, transition 4
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(11)), false, false),
             // 26: Established, transition 5
@@ -396,7 +396,6 @@ pub trait SessionFsmUnicastActions {
     fn set_close_reason_expired(&mut self);
     fn set_close_reason_generic(&mut self);
     fn set_close_reason_invalid(&mut self);
-    fn set_close_reason_unresponsive(&mut self);
     fn start_keepalive_worker(&mut self);
     fn start_lease_monitor(&mut self);
     fn stop_keepalive_worker(&mut self);
@@ -791,7 +790,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             SessionFsmUnicastState::Closed => {
-                // SCE-MAP: session_fsm_unicast.scxml:247 :: Closed :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:251 :: Closed :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -804,7 +803,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             },
             SessionFsmUnicastState::Closing => {
-                // SCE-MAP: session_fsm_unicast.scxml:239 :: Closing :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:243 :: Closing :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -1215,20 +1214,6 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.set_close_reason_invalid();
                 }
             },
-            // Accepting, transition 2
-            15 => {
-                // SCE-MAP: session_fsm_unicast.scxml:205 :: Accepting :: _transition_2
-                // W3C SCXML 3.13: Transition 2 actions
-                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                'action_block: {
-
-            // W3C SCXML G.7: <sce:action name="set_close_reason_unresponsive">
-            #[cfg(not(feature = "session-unicast-accept"))] self.actions.set_close_reason_unresponsive();
-
-            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
-            #[cfg(feature = "session-unicast-accept")] self.actions.set_close_reason_generic();
-                }
-            },
             // GotInitAck, transition 1
             #[cfg(not(feature = "session-unicast-accept"))] 11 => {
                 // SCE-MAP: session_fsm_unicast.scxml:163 :: GotInitAck :: _transition_1
@@ -1262,6 +1247,17 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.set_close_reason_invalid();
                 }
             },
+            // Accepting, transition 2
+            #[cfg(feature = "session-unicast-accept")] 15 => {
+                // SCE-MAP: session_fsm_unicast.scxml:205 :: Accepting :: _transition_2
+                // W3C SCXML 3.13: Transition 2 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            self.actions.set_close_reason_generic();
+                }
+            },
             // Established, transition 0
             #[cfg(feature = "session-unicast-accept")] 21 => {
                 // SCE-MAP: session_fsm_unicast.scxml:223 :: Established :: _transition_0
@@ -1293,17 +1289,6 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
             self.actions.set_close_reason_invalid();
-                }
-            },
-            // Established, transition 3
-            #[cfg(feature = "session-unicast-accept")] 24 => {
-                // SCE-MAP: session_fsm_unicast.scxml:232 :: Established :: _transition_3
-                // W3C SCXML 3.13: Transition 3 actions
-                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                'action_block: {
-
-            // W3C SCXML G.7: <sce:action name="set_close_reason_unresponsive">
-            self.actions.set_close_reason_unresponsive();
                 }
             },
             // GotInitAck, transition 1

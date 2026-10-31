@@ -129,7 +129,6 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // ─── Step 4: close-reason discriminator coverage ──────────
     binding.set_close_reason_invalid();
     binding.set_close_reason_expired();
-    binding.set_close_reason_unresponsive();
 
     let trace = actions.trace_snapshot();
     assert_eq!(trace.link_driver_open, 1);
@@ -145,8 +144,8 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     assert_eq!(trace.start_keepalive_worker, 1);
     assert_eq!(trace.stop_keepalive_worker, 1);
     assert_eq!(trace.free_pool_slots, 1);
-    assert_eq!(trace.set_close_reason_count, 4);
-    assert_eq!(actions.close_reason(), Some(CloseReason::Unresponsive));
+    assert_eq!(trace.set_close_reason_count, 3);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Expired));
 
     let snap = driver.snapshot();
     assert_eq!(snap.opens, 1);

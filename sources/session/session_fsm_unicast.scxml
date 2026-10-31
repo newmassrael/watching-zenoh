@@ -229,9 +229,13 @@
     <transition event="framing.error" target="Closing">
       <sce:action name="set_close_reason_invalid" effect="duty"/>
     </transition>
-    <transition event="tx.congestion.exhaust" target="Closing">
-      <sce:action name="set_close_reason_unresponsive" effect="duty"/>
-    </transition>
+    <!-- A peer that cannot be written to is not told it is being closed: zenoh 1.10.2 marks the
+         transmission pipelines of an unresponsive transport disabled at once and deletes the
+         transport without enqueuing a Close frame (a push to an unresponsive pipeline can wait
+         without end, which keeps the teardown from cancelling the stalled sender;
+         `io/zenoh-transport/src/unicast/universal/tx.rs` @ `tl.pipeline.mark_disabled();`).
+         The session goes straight to Closed, whose entry releases the link. -->
+    <transition event="tx.congestion.exhaust" target="Closed"/>
     <transition event="peer.close" target="Closed"/>
     <transition event="link.lost" target="Closed"/>
   </state>
