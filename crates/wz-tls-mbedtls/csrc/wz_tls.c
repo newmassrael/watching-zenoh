@@ -2,8 +2,9 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
  * The secure channel of decision D9 over Mbed TLS: an identity (a P-256 key in the PSA key
- * store and a certificate self-signed over it) and a TLS 1.3 session with mutual
- * authentication, pinned by the zid of the peer's key rather than by a chain. The interface is
+ * store and a certificate self-signed over it, or a certificate chain an authority made) and a
+ * TLS 1.3 session with mutual authentication, pinned by the zid of the peer's key or, by the
+ * chain variant, verified against roots. The interface is
  * `wz_tls.h`; this file is compiled with the configuration of the Mbed TLS it links, so it is
  * built beside that library: by `build.rs` from the pinned source, or by an image's own build
  * where the platform carries Mbed TLS (Zephyr).
@@ -209,15 +210,149 @@ void wz_tls_identity_cert(const struct wz_tls_identity *id, const uint8_t **der,
 	*len = id->crt.raw.len;
 }
 
+int wz_tls_identity_from_pem(struct wz_tls_identity **out, const unsigned char *chain,
+			     size_t chain_len, const unsigned char *key, size_t key_len)
+{
+	struct wz_tls_identity *id;
+	int rc;
+
+	if (!started) {
+		return WZ_TLS_E_STATE;
+	}
+	if (chain_len == 0 || key_len == 0 || chain[chain_len - 1] != 0 || key[key_len - 1] != 0) {
+		return WZ_TLS_E_NO_TRUST;
+	}
+	id = mbedtls_calloc(1, sizeof(*id));
+	if (id == NULL) {
+		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+	}
+	mbedtls_pk_init(&id->pk);
+	mbedtls_x509_crt_init(&id->crt);
+	id->key = MBEDTLS_SVC_KEY_ID_INIT;
+
+	/* A positive result is the count of certificates that did not parse: a chain with a bad
+	 * link is not the chain its owner meant, so it is a refusal. */
+	rc = mbedtls_x509_crt_parse(&id->crt, chain, chain_len);
+	if (rc > 0) {
+		rc = MBEDTLS_ERR_X509_CERT_UNKNOWN_FORMAT;
+	}
+	if (rc == 0) {
+		rc = mbedtls_pk_parse_key(&id->pk, key, key_len, NULL, 0);
+	}
+	if (rc == 0) {
+		/* The key must be the certificate's own, or a handshake fails at its end, which is
+		 * a long way from the file that was wrong. */
+		rc = mbedtls_pk_check_pair(&id->crt.pk, &id->pk);
+	}
+	if (rc == 0) {
+		rc = zid_of(&id->pk, id->zid);
+	}
+	if (rc != 0) {
+		wz_tls_identity_free(id);
+		return rc;
+	}
+	*out = id;
+	return 0;
+}
+
 void wz_tls_identity_free(struct wz_tls_identity *id)
 {
 	if (id == NULL) {
 		return;
 	}
 	mbedtls_x509_crt_free(&id->crt);
+	/* A generated key is wrapped around a PSA key this identity owns; a parsed one owns its
+	 * own, which `mbedtls_pk_free` destroys. */
 	mbedtls_pk_free(&id->pk);
-	psa_destroy_key(id->key);
+	if (!mbedtls_svc_key_id_is_null(id->key)) {
+		psa_destroy_key(id->key);
+	}
 	mbedtls_free(id);
+}
+
+/* ── The roots a chain session verifies against. ── */
+
+struct wz_tls_trust {
+	mbedtls_x509_crt roots;
+	int check_dates;
+	int64_t now;
+};
+
+int wz_tls_trust_from_pem(struct wz_tls_trust **out, const unsigned char *roots, size_t len,
+			  int check_dates, int64_t now)
+{
+	struct wz_tls_trust *t;
+	int rc;
+
+	if (!started) {
+		return WZ_TLS_E_STATE;
+	}
+	if (len == 0 || roots[len - 1] != 0) {
+		return WZ_TLS_E_NO_TRUST;
+	}
+	t = mbedtls_calloc(1, sizeof(*t));
+	if (t == NULL) {
+		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+	}
+	mbedtls_x509_crt_init(&t->roots);
+	t->check_dates = check_dates;
+	t->now = now;
+	rc = mbedtls_x509_crt_parse(&t->roots, roots, len);
+	if (rc > 0) {
+		rc = MBEDTLS_ERR_X509_CERT_UNKNOWN_FORMAT;
+	}
+	if (rc == 0 && t->roots.version == 0) {
+		rc = WZ_TLS_E_NO_TRUST;
+	}
+	if (rc != 0) {
+		wz_tls_trust_free(t);
+		return rc;
+	}
+	*out = t;
+	return 0;
+}
+
+void wz_tls_trust_free(struct wz_tls_trust *trust)
+{
+	if (trust == NULL) {
+		return;
+	}
+	mbedtls_x509_crt_free(&trust->roots);
+	mbedtls_free(trust);
+}
+
+/* Seconds since the Unix epoch of a certificate's calendar time (UTC), by the proleptic
+ * Gregorian days-from-civil count. */
+static int64_t unix_of(const mbedtls_x509_time *t)
+{
+	int64_t y = t->year - (t->mon <= 2);
+	int64_t era = (y >= 0 ? y : y - 399) / 400;
+	int64_t yoe = y - era * 400;
+	int64_t doy = (153 * (t->mon + (t->mon > 2 ? -3 : 9)) + 2) / 5 + t->day - 1;
+	int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	int64_t days = era * 146097 + doe - 719468;
+
+	return days * 86400 + (int64_t)t->hour * 3600 + (int64_t)t->min * 60 + t->sec;
+}
+
+/* The library is built without a clock (no MBEDTLS_HAVE_TIME_DATE), so it holds no certificate
+ * to its dates. The caller that has a time states it, and this hook, called for every certificate
+ * of the chain, holds each one to it. */
+static int verify_dates(void *p, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
+{
+	const struct wz_tls_trust *t = p;
+
+	(void)depth;
+	if (!t->check_dates) {
+		return 0;
+	}
+	if (t->now < unix_of(&crt->valid_from)) {
+		*flags |= MBEDTLS_X509_BADCERT_FUTURE;
+	}
+	if (t->now > unix_of(&crt->valid_to)) {
+		*flags |= MBEDTLS_X509_BADCERT_EXPIRED;
+	}
+	return 0;
 }
 
 /* ── A session. ── */
@@ -228,6 +363,9 @@ struct wz_tls_session {
 	struct wz_tls_io io;
 	/* The transport reported a failure; the call that saw it returns WZ_TLS_E_TRANSPORT. */
 	int io_failed;
+	/* The peer is known by the key its certificate carries, so a handshake without one is no
+	 * handshake; a chain session's server may ask for no client certificate at all. */
+	int peer_cert_required;
 };
 
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
@@ -280,8 +418,17 @@ static int result(struct wz_tls_session *s, int rc)
 	}
 }
 
-int wz_tls_session_open(struct wz_tls_session **out, int role, const struct wz_tls_identity *own,
-			const struct wz_tls_io *io)
+/* How a session decides who its peer is. */
+enum answer {
+	/* The zid of the peer's key, which the caller reads after the handshake (decision D1). */
+	ANSWER_PINNED,
+	/* A certificate chain that verifies against the trust's roots. */
+	ANSWER_CHAIN,
+};
+
+static int session_open(struct wz_tls_session **out, int role, enum answer answer,
+			const struct wz_tls_identity *own, const struct wz_tls_trust *trust,
+			const char *server_name, const struct wz_tls_io *io)
 {
 	int endpoint = role == WZ_TLS_SERVER ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT;
 	struct wz_tls_session *s;
@@ -290,6 +437,12 @@ int wz_tls_session_open(struct wz_tls_session **out, int role, const struct wz_t
 	if (!started) {
 		return WZ_TLS_E_STATE;
 	}
+	if (answer == ANSWER_CHAIN && (endpoint == MBEDTLS_SSL_IS_CLIENT && trust == NULL)) {
+		return WZ_TLS_E_NO_TRUST;
+	}
+	if (own == NULL && (answer == ANSWER_PINNED || endpoint == MBEDTLS_SSL_IS_SERVER)) {
+		return WZ_TLS_E_NO_TRUST;
+	}
 	s = mbedtls_calloc(1, sizeof(*s));
 	if (s == NULL) {
 		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
@@ -297,27 +450,43 @@ int wz_tls_session_open(struct wz_tls_session **out, int role, const struct wz_t
 	mbedtls_ssl_config_init(&s->conf);
 	mbedtls_ssl_init(&s->ssl);
 	s->io = *io;
+	s->peer_cert_required = answer == ANSWER_PINNED;
 
 	rc = mbedtls_ssl_config_defaults(&s->conf, endpoint, MBEDTLS_SSL_TRANSPORT_STREAM,
 					 MBEDTLS_SSL_PRESET_DEFAULT);
 	if (rc == 0) {
 		mbedtls_ssl_conf_min_tls_version(&s->conf, MBEDTLS_SSL_VERSION_TLS1_3);
 		mbedtls_ssl_conf_max_tls_version(&s->conf, MBEDTLS_SSL_VERSION_TLS1_3);
-		/* The peer must present a certificate and prove its key in CertificateVerify, which
-		 * Mbed TLS checks in every mode; OPTIONAL keeps an untrusted chain from ending the
-		 * handshake, because no chain is the verdict here: the zid of the key is, and the
-		 * caller reads it before any data (`wz_tls_session_peer_zid`).
-		 */
-		mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
-		rc = mbedtls_ssl_conf_own_cert(&s->conf, (mbedtls_x509_crt *)&own->crt,
-					       (mbedtls_pk_context *)&own->pk);
+		if (answer == ANSWER_PINNED) {
+			/* The peer must present a certificate and prove its key in CertificateVerify,
+			 * which Mbed TLS checks in every mode; OPTIONAL keeps an untrusted chain from
+			 * ending the handshake, because no chain is the verdict here: the zid of the
+			 * key is, and the caller reads it before any data (`wz_tls_session_peer_zid`).
+			 */
+			mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+		} else if (trust != NULL) {
+			/* The chain is the verdict: a client always asks it of the server, a server
+			 * only under mutual TLS, when it was given roots to verify the client by. */
+			mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+			mbedtls_ssl_conf_ca_chain(&s->conf, (mbedtls_x509_crt *)&trust->roots, NULL);
+			mbedtls_ssl_conf_verify(&s->conf, verify_dates, (void *)trust);
+		} else {
+			mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_NONE);
+		}
+		if (own != NULL) {
+			rc = mbedtls_ssl_conf_own_cert(&s->conf, (mbedtls_x509_crt *)&own->crt,
+						       (mbedtls_pk_context *)&own->pk);
+		}
 	}
 	if (rc == 0) {
 		rc = mbedtls_ssl_setup(&s->ssl, &s->conf);
 	}
 	if (rc == 0 && endpoint == MBEDTLS_SSL_IS_CLIENT) {
-		/* The identity is the zid, never a name: no server name is sent or checked. */
-		rc = mbedtls_ssl_set_hostname(&s->ssl, NULL);
+		/* Pinned: the identity is the zid, never a name, so none is sent or checked. Chain:
+		 * the name the caller states is sent and its certificate must cover it, and a caller
+		 * that states none opts out of the name check, as pico does when it is not asked
+		 * to verify names (`Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY` false). */
+		rc = mbedtls_ssl_set_hostname(&s->ssl, answer == ANSWER_CHAIN ? server_name : NULL);
 	}
 	if (rc != 0) {
 		wz_tls_session_free(s);
@@ -326,6 +495,19 @@ int wz_tls_session_open(struct wz_tls_session **out, int role, const struct wz_t
 	mbedtls_ssl_set_bio(&s->ssl, s, bio_send, bio_recv, NULL);
 	*out = s;
 	return 0;
+}
+
+int wz_tls_session_open(struct wz_tls_session **out, int role, const struct wz_tls_identity *own,
+			const struct wz_tls_io *io)
+{
+	return session_open(out, role, ANSWER_PINNED, own, NULL, NULL, io);
+}
+
+int wz_tls_session_open_chain(struct wz_tls_session **out, int role,
+			      const struct wz_tls_identity *own, const struct wz_tls_trust *trust,
+			      const char *server_name, const struct wz_tls_io *io)
+{
+	return session_open(out, role, ANSWER_CHAIN, own, trust, server_name, io);
 }
 
 void wz_tls_session_set_io_ctx(struct wz_tls_session *s, void *ctx)
@@ -337,7 +519,7 @@ int wz_tls_session_handshake(struct wz_tls_session *s)
 {
 	int rc = result(s, mbedtls_ssl_handshake(&s->ssl));
 
-	if (rc == 0 && mbedtls_ssl_get_peer_cert(&s->ssl) == NULL) {
+	if (rc == 0 && s->peer_cert_required && mbedtls_ssl_get_peer_cert(&s->ssl) == NULL) {
 		/* OPTIONAL lets a client finish without one; a channel without a key proves nobody. */
 		return WZ_TLS_E_NO_PEER_CERT;
 	}

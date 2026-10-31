@@ -32,6 +32,9 @@ pub enum TlsError {
     OutOfMemory,
     /// The library was started twice, or used before [`start`].
     State,
+    /// A chain session lacked the identity or roots its role needs, or a PEM held no
+    /// certificate or key, or a certificate chain and its key were not a pair.
+    NoTrust,
     /// Mbed TLS's or PSA's own code, negative.
     Code(i32),
 }
@@ -42,6 +45,7 @@ impl TlsError {
             ffi::E_TRANSPORT => TlsError::Transport,
             ffi::E_NO_PEER_CERT => TlsError::NoPeerCertificate,
             ffi::E_STATE => TlsError::State,
+            ffi::E_NO_TRUST => TlsError::NoTrust,
             ffi::PSA_ERROR_INSUFFICIENT_MEMORY => TlsError::OutOfMemory,
             other => TlsError::Code(other),
         }
@@ -135,6 +139,28 @@ impl Identity {
         let mut raw = ptr::null_mut();
         // SAFETY: `raw` is a live out-pointer and `subject` a NUL-terminated string.
         check(unsafe { ffi::wz_tls_identity_generate(&mut raw, subject.as_ptr()) })?;
+        NonNull::new(raw)
+            .map(|raw| Identity { raw })
+            .ok_or(TlsError::State)
+    }
+
+    /// An identity a certificate authority made: `chain` is the end's own certificate and then
+    /// its intermediates, `key` the end's own private key (PKCS#8 or SEC1), both PEM. A key that
+    /// is not the first certificate's is [`TlsError::Code`] of Mbed TLS's refusal here, not a
+    /// failed handshake later.
+    pub fn from_pem(chain: &CStr, key: &CStr) -> Result<Self, TlsError> {
+        let (chain, key) = (chain.to_bytes_with_nul(), key.to_bytes_with_nul());
+        let mut raw = ptr::null_mut();
+        // SAFETY: a live out-pointer and two NUL-terminated buffers, read for their lengths.
+        check(unsafe {
+            ffi::wz_tls_identity_from_pem(
+                &mut raw,
+                chain.as_ptr(),
+                chain.len(),
+                key.as_ptr(),
+                key.len(),
+            )
+        })?;
         NonNull::new(raw)
             .map(|raw| Identity { raw })
             .ok_or(TlsError::State)
@@ -239,6 +265,43 @@ impl Drop for Identity {
     }
 }
 
+/// The roots a chain session verifies a peer's certificate against, and the time it holds the
+/// chain's validity dates to.
+pub struct Trust {
+    raw: NonNull<ffi::Trust>,
+}
+
+impl Trust {
+    /// The certificates of `roots` (PEM, one or more) as the trust anchors. `now` is the Unix
+    /// time (seconds) every certificate of a chain must be valid at; `None` is a device that has
+    /// no clock, for which no date is a verdict (the library is built without one).
+    pub fn roots(roots: &CStr, now: Option<i64>) -> Result<Self, TlsError> {
+        let roots = roots.to_bytes_with_nul();
+        let mut raw = ptr::null_mut();
+        // SAFETY: a live out-pointer and a NUL-terminated buffer read for its length.
+        check(unsafe {
+            ffi::wz_tls_trust_from_pem(
+                &mut raw,
+                roots.as_ptr(),
+                roots.len(),
+                c_int::from(now.is_some()),
+                now.unwrap_or(0),
+            )
+        })?;
+        NonNull::new(raw)
+            .map(|raw| Trust { raw })
+            .ok_or(TlsError::State)
+    }
+}
+
+impl Drop for Trust {
+    fn drop(&mut self) {
+        // SAFETY: this trust's own pointer, freed once; a session borrowing it cannot outlive it
+        // (`Session<'id, _>`).
+        unsafe { ffi::wz_tls_trust_free(self.raw.as_ptr()) }
+    }
+}
+
 /// What a transport call did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Io {
@@ -322,18 +385,63 @@ fn step(rc: c_int) -> Result<Step<usize>, TlsError> {
     }
 }
 
-/// One TLS 1.3 session with mutual authentication, presenting the identity it borrows, over a
-/// transport of type `T` each call is handed. No chain is the verdict: once the handshake is
-/// done, [`Session::peer_zid`] is the zid of the key the peer proved, for the caller to pin.
+/// One TLS 1.3 session over a transport of type `T` each call is handed, presenting the identity
+/// it borrows. Opened by [`Session::open`] no chain is the verdict: once the handshake is done,
+/// [`Session::peer_zid`] is the zid of the key the peer proved, for the caller to pin. Opened by
+/// [`Session::open_chain`] the verdict is a certificate chain against roots, and the handshake
+/// fails when it does not verify.
 pub struct Session<'id, T: Transport> {
     raw: NonNull<ffi::Session>,
-    _own: PhantomData<&'id Identity>,
+    _borrows: PhantomData<(&'id Identity, &'id Trust)>,
     _transport: PhantomData<fn(&T)>,
 }
 
 impl<'id, T: Transport> Session<'id, T> {
-    /// A session of `role` presenting `own`.
+    /// A session of `role` presenting `own`, the peer pinned by the zid of its key.
     pub fn open(role: Role, own: &'id Identity) -> Result<Self, TlsError> {
+        Self::open_with(role, |out, role, io| {
+            // SAFETY: a live out-pointer, a live identity the session's lifetime is tied to, and
+            // an `Io` the library copies.
+            unsafe { ffi::wz_tls_session_open(out, role, own.raw.as_ptr(), io) }
+        })
+    }
+
+    /// A session of `role` whose peer is verified by a certificate chain.
+    ///
+    /// A client verifies the server's chain against `trust` (required) and presents `own` when it
+    /// has one, which is mutual TLS. It sends `server_name` and requires the certificate to
+    /// cover it; `None` sends no name and checks none. A server presents `own` (required) and,
+    /// given a `trust`, requires the client's chain to verify against it; with none it asks the
+    /// client for no certificate. A role missing what it needs is [`TlsError::NoTrust`].
+    pub fn open_chain(
+        role: Role,
+        own: Option<&'id Identity>,
+        trust: Option<&'id Trust>,
+        server_name: Option<&CStr>,
+    ) -> Result<Self, TlsError> {
+        Self::open_with(role, |out, role, io| {
+            // SAFETY: a live out-pointer, an identity and a trust (or null) the session's
+            // lifetime is tied to, a NUL-terminated name (or null) the library copies, and an
+            // `Io` it copies.
+            unsafe {
+                ffi::wz_tls_session_open_chain(
+                    out,
+                    role,
+                    own.map_or(ptr::null(), |id| id.raw.as_ptr()),
+                    trust.map_or(ptr::null(), |t| t.raw.as_ptr()),
+                    server_name.map_or(ptr::null(), CStr::as_ptr),
+                    io,
+                )
+            }
+        })
+    }
+
+    /// The part of opening a session the two openers share: the transport callbacks, the role,
+    /// and the pointer the library hands back.
+    fn open_with(
+        role: Role,
+        open: impl FnOnce(*mut *mut ffi::Session, c_int, *const ffi::Io) -> c_int,
+    ) -> Result<Self, TlsError> {
         let io = ffi::Io {
             ctx: ptr::null_mut(),
             send: send_on::<T>,
@@ -344,13 +452,11 @@ impl<'id, T: Transport> Session<'id, T> {
             Role::Server => ffi::SERVER,
         };
         let mut raw = ptr::null_mut();
-        // SAFETY: a live out-pointer, a live identity the session's lifetime is tied to, and an
-        // `Io` the library copies.
-        check(unsafe { ffi::wz_tls_session_open(&mut raw, role, own.raw.as_ptr(), &io) })?;
+        check(open(&mut raw, role, &io))?;
         NonNull::new(raw)
             .map(|raw| Session {
                 raw,
-                _own: PhantomData,
+                _borrows: PhantomData,
                 _transport: PhantomData,
             })
             .ok_or(TlsError::State)

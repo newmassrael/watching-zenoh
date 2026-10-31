@@ -42,6 +42,10 @@
 #define MBEDTLS_PK_C
 #define MBEDTLS_PK_PARSE_C
 #define MBEDTLS_PK_WRITE_C
+/* A certificate authority's certificates and keys arrive as PEM (the form a peer's files and
+ * the pico configuration hold them in); the generated identity never needs it. */
+#define MBEDTLS_PEM_PARSE_C
+#define MBEDTLS_BASE64_C
 
 /* Every allocation comes from the arena the program hands `wz_tls_start`; its peak is measured.
  * Before that, Mbed TLS's allocator is not the C library's but one that refuses (`wz_tls.c`), so

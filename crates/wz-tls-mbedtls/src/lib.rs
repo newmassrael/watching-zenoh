@@ -4,13 +4,17 @@
 //! `wz-tls-mbedtls` -- the secure channel of the fixed-memory profile (decision D9 of
 //! `docs/session-lifecycle-intent.md`) over Mbed TLS on its PSA Crypto line.
 //!
-//! TLS 1.3 with mutual authentication: each end presents a certificate self-signed over a P-256
-//! key it generated in the PSA key store, proves the key in the handshake, and is accepted by the
-//! zid that key names (decision D1), never by a certificate authority. Every allocation comes
-//! from one static arena the program hands [`channel::start`].
+//! TLS 1.3 with two ways to answer "who is the peer". Pinned: each end presents a certificate
+//! self-signed over a P-256 key it generated in the PSA key store, proves the key in the
+//! handshake, and is accepted by the zid that key names (decision D1), never by a certificate
+//! authority. Chain: the end's certificate chain verifies against roots the program gives
+//! ([`channel::Trust`]), as a zenoh router's or a zenoh-pico `tls/` link's does, with the name
+//! checked only when one is stated and the dates held only to a time the caller supplies. Every
+//! allocation comes from one static arena the program hands [`channel::start`].
 //!
-//! - [`channel`] -- the library started on its arena, an [`channel::Identity`], and a
-//!   [`channel::Session`] over any byte [`channel::Transport`].
+//! - [`channel`] -- the library started on its arena, an [`channel::Identity`] (generated, or
+//!   read from PEM), the [`channel::Trust`] roots, and a [`channel::Session`] over any byte
+//!   [`channel::Transport`].
 //! - [`stream`] -- the channel as the cooperative runtime's stream: [`stream::TlsStream`] is a
 //!   `StreamSocket` over another one and [`stream::TlsDial`] the `StreamDial` that opens it, so
 //!   the stream link runs over the channel unchanged.

@@ -35,6 +35,9 @@ extern "C" {
 #define WZ_TLS_E_NO_PEER_CERT (-0x10002)
 /** The library was already started, or not yet. */
 #define WZ_TLS_E_STATE (-0x10003)
+/** A chain session was asked for without the roots it verifies against, or a PEM held no
+ * certificate or key. */
+#define WZ_TLS_E_NO_TRUST (-0x10004)
 
 /** What the transport callbacks return besides a byte count. */
 #define WZ_TLS_IO_WOULD_BLOCK (-1)
@@ -74,8 +77,33 @@ void wz_tls_identity_zid(const struct wz_tls_identity *id, uint8_t zid[WZ_TLS_ZI
 /** The identity's certificate, DER, valid for as long as the identity. */
 void wz_tls_identity_cert(const struct wz_tls_identity *id, const uint8_t **der, size_t *len);
 
+/**
+ * An identity a certificate authority made: the certificate chain `chain` (PEM, the end's own
+ * certificate first, then its intermediates) and the private key `key` (PEM, PKCS#8 or SEC1),
+ * which must be the end's own. Both are NUL-terminated and the lengths count the NUL, as Mbed TLS
+ * reads PEM. The zid is the one the end's key names, as for a generated identity. The key lives in
+ * the PSA key store until the identity is freed.
+ */
+int wz_tls_identity_from_pem(struct wz_tls_identity **out, const unsigned char *chain,
+			     size_t chain_len, const unsigned char *key, size_t key_len);
+
 /** Destroy the key and free the identity. No session may still use it. */
 void wz_tls_identity_free(struct wz_tls_identity *id);
+
+struct wz_tls_trust;
+
+/**
+ * The roots a chain session verifies a peer's certificate against: `roots` (PEM, one or more
+ * certificates, NUL-terminated, the length counting the NUL). With `check_dates` the validity
+ * dates of every certificate in the chain are held to `now` (seconds since the Unix epoch); a
+ * device that has no clock passes 0 and no date is a verdict, as the library is built without
+ * one. The roots outlive no session: free the trust only after the sessions that use it.
+ */
+int wz_tls_trust_from_pem(struct wz_tls_trust **out, const unsigned char *roots, size_t len,
+			  int check_dates, int64_t now);
+
+/** Free the trust. No session may still use it. */
+void wz_tls_trust_free(struct wz_tls_trust *trust);
 
 /** The two ends of a handshake. */
 #define WZ_TLS_CLIENT 0
@@ -90,6 +118,21 @@ struct wz_tls_session;
  */
 int wz_tls_session_open(struct wz_tls_session **out, int role, const struct wz_tls_identity *own,
 			const struct wz_tls_io *io);
+
+/**
+ * A session of `role` that answers "who is the peer" by a certificate chain, as a TLS client
+ * verifies a server and a server verifies a client under mutual TLS.
+ *
+ * A client verifies the server's chain against `trust` (required) and presents `own` only if it
+ * has one (mutual TLS); it checks the server's name against `server_name` when that is not NULL
+ * (the SAN must match; an address literal is matched as an IP address) and sends it as the server
+ * name, and checks no name when it is NULL. A server presents `own` (required) and, when `trust`
+ * is not NULL, requires the client's chain to verify against it; with NULL it asks for none.
+ * `trust` and `own` must outlive the session.
+ */
+int wz_tls_session_open_chain(struct wz_tls_session **out, int role,
+			      const struct wz_tls_identity *own, const struct wz_tls_trust *trust,
+			      const char *server_name, const struct wz_tls_io *io);
 
 /** Point the session at `io`'s context for the calls that follow. */
 void wz_tls_session_set_io_ctx(struct wz_tls_session *s, void *ctx);
