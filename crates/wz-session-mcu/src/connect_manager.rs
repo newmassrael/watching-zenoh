@@ -756,7 +756,8 @@ impl ControlledOpener {
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 impl crate::admin_fixed::NodeOpening for ControlledOpener {
     /// The write permit of the configuration, judged alike for every commander: the image that
-    /// names who may command the verbs states it by [`Commanders`] and not by this opener.
+    /// names who may command the verbs states it by `Commanders` (a build with `lifecycle-verbs`
+    /// has it) and not by this opener.
     fn permitted(&self, _commander: Commander<'_>) -> bool {
         self.permit.write_permit()
     }
