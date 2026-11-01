@@ -304086,6 +304086,40 @@
         "Owed: the whatami a link state restates; the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 4066": {
+      "decision_summary": "Round 4058 left dispatch_network_message, the session core's Fresh-stage wrapper of dispatch_network_message_at, with no caller in a build whose only sender is a declaration or an interest: the declaration, interest and final senders had moved to the stage-taking chokepoint, and the wrapper kept the gate of the whole sender union. Under -D warnings that is a dead-code error, and it reddened Layers C1h, C1ax, C1cf, C1j, C1ai, C1m and G of the hosted run of round 4061. The wrapper is removed rather than its gate narrowed: a narrowed gate would have to follow the features of nine callers and would drift the next time one moves. Every sender now names its stage at the chokepoint, and the request and response senders go through stage-taking twins as the push sender does.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: dispatch_network_message is removed; its nine callers pass DispatchStage::Fresh to dispatch_network_message_at with the encoder through as_encoder; dispatch_request and dispatch_response call dispatch_request_at and dispatch_response_at, which take the stage and borrow the message; the chokepoint's doc and the qos parameter's notes moved onto dispatch_network_message_at.",
+        "crates/wz-session-core/src/frame_encode.rs, stats.rs, send_declare_error.rs, reconnect.rs: the doc links and mentions that named the wrapper name dispatch_network_message_at. The public doc of send_plain_put_qos names the private chokepoint as code text, not as a link.",
+        "scripts/lib/reduced_docs_ledger.txt: the line counting that public doc's link to the private wrapper is dropped; Layer C1bzr measured it at 0.",
+        "docs/reason-review-pins.md: the session-close-ingress row for session_actions.rs moves to the new blob; the reason cites OutOfBand, which this round does not touch."
+      ],
+      "verification_bullets": [
+        "cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,declare-interest,codec-frame --all-targets -- -D warnings, the command Layer C1h failed on, passes; so do the default and all-features clippy of wz-session-core with all targets, a no-allocator lib clippy (session-unicast, declare-token, liveliness-token, codec-frame), and the clippy of wz-e2e-declare-observer, wz-e2e-liveliness and wz-e2e-liveliness-token under --no-default-features with all targets, the three crates Layer C1cf named. cargo test -p wz-session-core: 860 passed, 0 failed. Layer C1bzr narrowed to wz-session-core (124 configurations) first found the public doc of send_plain_put_qos linking the private chokepoint, which the ledger carried under the wrapper's name; with that link made code text and the ledger line dropped it passes. reason_review_pin_gate --check is OK with the row moved."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Of the red hosted run of round 4061 this round pays the dead-code cause only; the others were paid by peers' pushes before it (the Commanders link in 4062; router-interest-qos, the ask_local_tokens link, the coop budgets and the declared aliases on the heap by round 4065). Phase 5b of the router task-per-face work (a routed request and response probed and held) waits on its own branch and lands after this."
+      ],
+      "publishable_decision_summary": "Round 4058 left dispatch_network_message, the session core's Fresh-stage wrapper of dispatch_network_message_at, with no caller in a build whose only sender is a declaration or an interest: the declaration, interest and final senders had moved to the stage-taking chokepoint, and the wrapper kept the gate of the whole sender union. Under -D warnings that is a dead-code error, and it reddened Layers C1h, C1ax, C1cf, C1j, C1ai, C1m and G of the hosted run of round 4061. The wrapper is removed rather than its gate narrowed: a narrowed gate would have to follow the features of nine callers and would drift the next time one moves. Every sender now names its stage at the chokepoint, and the request and response senders go through stage-taking twins as the push sender does.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: dispatch_network_message is removed; its nine callers pass DispatchStage::Fresh to dispatch_network_message_at with the encoder through as_encoder; dispatch_request and dispatch_response call dispatch_request_at and dispatch_response_at, which take the stage and borrow the message; the chokepoint's doc and the qos parameter's notes moved onto dispatch_network_message_at.",
+        "crates/wz-session-core/src/frame_encode.rs, stats.rs, send_declare_error.rs, reconnect.rs: the doc links and mentions that named the wrapper name dispatch_network_message_at. The public doc of send_plain_put_qos names the private chokepoint as code text, not as a link.",
+        "scripts/lib/reduced_docs_ledger.txt: the line counting that public doc's link to the private wrapper is dropped; Layer C1bzr measured it at 0.",
+        "docs/reason-review-pins.md: the session-close-ingress row for session_actions.rs moves to the new blob; the reason cites OutOfBand, which this round does not touch."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,declare-interest,codec-frame --all-targets -- -D warnings, the command Layer C1h failed on, passes; so do the default and all-features clippy of wz-session-core with all targets, a no-allocator lib clippy (session-unicast, declare-token, liveliness-token, codec-frame), and the clippy of wz-e2e-declare-observer, wz-e2e-liveliness and wz-e2e-liveliness-token under --no-default-features with all targets, the three crates Layer C1cf named. cargo test -p wz-session-core: 860 passed, 0 failed. Layer C1bzr narrowed to wz-session-core (124 configurations) first found the public doc of send_plain_put_qos linking the private chokepoint, which the ledger carried under the wrapper's name; with that link made code text and the ledger line dropped it passes. reason_review_pin_gate --check is OK with the row moved."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Of the red hosted run of round 4061 this round pays the dead-code cause only; the others were paid by peers' pushes before it (the Commanders link in 4062; router-interest-qos, the ask_local_tokens link, the coop budgets and the declared aliases on the heap by round 4065). Phase 5b of the router task-per-face work (a routed request and response probed and held) waits on its own branch and lands after this."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
