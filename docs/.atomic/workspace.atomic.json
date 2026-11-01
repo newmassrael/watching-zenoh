@@ -304596,6 +304596,38 @@
         "L6 T4 to T5: the ABI with one resolution of pico's keys for both engines and the engine selection (it meets the host-lock case of a C program's read task beside its own thread), zenohd in Layer Z. Open: whether the engine port should expose the pinned zid binding, hostname locators for the name check, TLS 1.2 need of a real zenoh-pico, key and signature types of real certificates, pico's time source, arena beyond a two-link chain. Clippy of the host-lock feature set and the hosted results of earlier pushes are unread."
       ]
     },
+    "Round 4081": {
+      "decision_summary": "A peer that scouts and keeps its south apart (gateway/south names subregions) is now a forwarding node, where it was the registry of faces that does not forward between its sessions. It is the gateway of the nodes that find it: the node joins the scouting group before it serves, as upstream's start_scout binds with a question mark, answers the scouts that name it, and asks the group for the nodes it should dial, handing what it finds to the accept loop through the channel the gossip already uses (enable_autoconnect_into), which the accept loop drains. A peer that scouts and keeps no south apart stays the registry, so the scenarios that passed are untouched. Upstream's regions scenario 2 passes whole (20 of 20, twice, a process per test), and 115 of 126 pass, from 94 or 95; the row of the table is raised to 113. What is left is scenario 1, a client node that listens, answers scouts and forwards (the forwarder has no client role yet), and the intermittent tests of scenarios 6 and 7.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: peer_fits_node admits a peer that scouts when it holds a gateway (gateway_south is a custom partition); a test.",
+        "crates/wz-capi-core/src/drive/router_node.rs: a peer node that scouts shares the dial channel with the gossip, binds the scouting link before it serves, and runs the scouting beside the face loop.",
+        "docs/z8-expected.tsv and docs/zenoh-api-on-the-engine.md: the regions row is 113 and the note says what is left."
+      ],
+      "verification_bullets": [
+        "Locally: the upstream regions file measured with a process per test passes 115 of 126, where 94 or 95 passed, and all 20 tests of scenario 2 pass in two runs each; the failures left are the ten of scenario 1 and one intermittent test; the test of the plan for a peer that scouts passes; clippy with warnings denied passes for the session core with its default features; the capability cost gate passes for the two client builds; the reason, citation, census, notice, prose, surface, needle, licence and table gates pass. Not run: the hosted run and the layers of the pico drop-in."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the regions file: scenario 1 (ten tests: a client node that listens, answers scouts, and forwards between its router and the peers that find it, which needs a client role of the forwarder), the intermittent tests of scenarios 6 and 7, and the gossip test that failed once in a run of the whole file. Owed from the roadmap: the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane. The leaf peers of a region are still the registry of faces, which does not forward."
+      ],
+      "publishable_decision_summary": "A peer that scouts and keeps its south apart (gateway/south names subregions) is now a forwarding node, where it was the registry of faces that does not forward between its sessions. It is the gateway of the nodes that find it: the node joins the scouting group before it serves, as upstream's start_scout binds with a question mark, answers the scouts that name it, and asks the group for the nodes it should dial, handing what it finds to the accept loop through the channel the gossip already uses (enable_autoconnect_into), which the accept loop drains. A peer that scouts and keeps no south apart stays the registry, so the scenarios that passed are untouched. Upstream's regions scenario 2 passes whole (20 of 20, twice, a process per test), and 115 of 126 pass, from 94 or 95; the row of the table is raised to 113. What is left is scenario 1, a client node that listens, answers scouts and forwards (the forwarder has no client role yet), and the intermittent tests of scenarios 6 and 7.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: peer_fits_node admits a peer that scouts when it holds a gateway (gateway_south is a custom partition); a test.",
+        "crates/wz-capi-core/src/drive/router_node.rs: a peer node that scouts shares the dial channel with the gossip, binds the scouting link before it serves, and runs the scouting beside the face loop.",
+        "docs/z8-expected.tsv and docs/zenoh-api-on-the-engine.md: the regions row is 113 and the note says what is left."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the upstream regions file measured with a process per test passes 115 of 126, where 94 or 95 passed, and all 20 tests of scenario 2 pass in two runs each; the failures left are the ten of scenario 1 and one intermittent test; the test of the plan for a peer that scouts passes; clippy with warnings denied passes for the session core with its default features; the capability cost gate passes for the two client builds; the reason, citation, census, notice, prose, surface, needle, licence and table gates pass. Not run: the hosted run and the layers of the pico drop-in."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the regions file: scenario 1 (ten tests: a client node that listens, answers scouts, and forwards between its router and the peers that find it, which needs a client role of the forwarder), the intermittent tests of scenarios 6 and 7, and the gossip test that failed once in a run of the whole file. Owed from the roadmap: the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane. The leaf peers of a region are still the registry of faces, which does not forward."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
