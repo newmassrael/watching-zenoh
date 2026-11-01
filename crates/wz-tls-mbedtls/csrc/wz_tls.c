@@ -321,6 +321,15 @@ void wz_tls_trust_free(struct wz_tls_trust *trust)
 	mbedtls_free(trust);
 }
 
+void wz_tls_trust_set_now(struct wz_tls_trust *trust, int check_dates, int64_t now)
+{
+	if (trust == NULL) {
+		return;
+	}
+	trust->check_dates = check_dates;
+	trust->now = now;
+}
+
 /* Seconds since the Unix epoch of a certificate's calendar time (UTC), by the proleptic
  * Gregorian days-from-civil count. */
 static int64_t unix_of(const mbedtls_x509_time *t)

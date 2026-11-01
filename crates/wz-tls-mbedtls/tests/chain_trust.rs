@@ -206,6 +206,38 @@ fn dates_are_held_to_the_time_the_caller_supplies_and_to_none_without_one() {
     let _ = served.join();
 }
 
+/// September 2020, inside the year the certificate below is valid for.
+const WITHIN_2020: i64 = 1_600_000_000;
+
+#[test]
+fn the_time_a_trust_holds_dates_to_can_be_moved_for_the_next_handshake() {
+    let _library = library();
+    let authority = Authority::new();
+    let lapsing = authority.issue_valid(ExtendedKeyUsagePurpose::ServerAuth, Some((2020, 2021)));
+    let trust = Trust::roots(&authority.root_pem(), Some(WITHIN_2020)).expect("the roots");
+
+    // The program started while the certificate was valid: it is accepted.
+    let (port, served) = serve(server_config(&lapsing, None));
+    wz_client(port, None, &trust, Some(c"localhost")).expect("valid at the time the trust holds");
+    served.join().expect("thread").expect("the server served");
+
+    // It lives on and dials again after the certificate lapsed: the time of this dial refuses it.
+    trust.set_now(Some(now_unix()));
+    let (port, served) = serve(server_config(&lapsing, None));
+    let refused = wz_client(port, None, &trust, Some(c"localhost"));
+    assert!(
+        matches!(refused, Err(TlsError::Code(_))),
+        "a certificate that lapsed since the trust was made: {refused:?}"
+    );
+    let _ = served.join();
+
+    // No time at all is no date as a verdict, as it is for a trust made without one.
+    trust.set_now(None);
+    let (port, served) = serve(server_config(&lapsing, None));
+    wz_client(port, None, &trust, Some(c"localhost")).expect("no clock, no date verdict");
+    served.join().expect("thread").expect("the server served");
+}
+
 #[test]
 fn mutual_tls_presents_the_clients_chain_and_a_client_without_one_is_refused() {
     let _library = library();

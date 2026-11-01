@@ -104,6 +104,7 @@ locked_calls! {
         now: i64,
     ) -> c_int;
     fn wz_tls_trust_free(trust: *mut Trust);
+    fn wz_tls_trust_set_now(trust: *mut Trust, check_dates: c_int, now: i64);
 
     fn wz_tls_session_open_chain(
         out: *mut *mut Session,

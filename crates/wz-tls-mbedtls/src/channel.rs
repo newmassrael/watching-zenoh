@@ -292,6 +292,22 @@ impl Trust {
             .map(|raw| Trust { raw })
             .ok_or(TlsError::State)
     }
+
+    /// Move the time every certificate of a chain is held to (`now` as in [`Trust::roots`]). A
+    /// program that lives long and dials again states the time of each dial, so a certificate
+    /// that expired while it ran is refused at the next handshake and not accepted for as long as
+    /// the program lives. The change is the next handshake's: not for a session in its
+    /// handshake, which the library's lock (`host-lock`) or a single thread keeps apart.
+    pub fn set_now(&self, now: Option<i64>) {
+        // SAFETY: this trust's own live pointer; the C side writes two plain fields.
+        unsafe {
+            ffi::wz_tls_trust_set_now(
+                self.raw.as_ptr(),
+                c_int::from(now.is_some()),
+                now.unwrap_or(0),
+            );
+        }
+    }
 }
 
 impl Drop for Trust {

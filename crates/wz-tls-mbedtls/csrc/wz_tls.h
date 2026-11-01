@@ -105,6 +105,14 @@ int wz_tls_trust_from_pem(struct wz_tls_trust **out, const unsigned char *roots,
 /** Free the trust. No session may still use it. */
 void wz_tls_trust_free(struct wz_tls_trust *trust);
 
+/**
+ * Move the time the trust holds every certificate of a chain to, as `wz_tls_trust_from_pem` states
+ * it. A program that lives long and dials again states the time of each dial, so a certificate
+ * that expired while it ran is refused at the next handshake and not accepted for as long as the
+ * program lives. Not for a session in its handshake: the caller keeps the library's calls apart.
+ */
+void wz_tls_trust_set_now(struct wz_tls_trust *trust, int check_dates, int64_t now);
+
 /** The two ends of a handshake. */
 #define WZ_TLS_CLIENT 0
 #define WZ_TLS_SERVER 1
