@@ -377,7 +377,7 @@ pub struct RemoteQueryablePeer<P: Storage = Profile> {
     /// queryable twin of `RemoteSubscriberPeer::aliases`. A change of completeness is news and
     /// is announced; a repeat of what the application knows is not.
     #[cfg(feature = "alloc")]
-    aliases: alloc::collections::BTreeMap<u64, u64>,
+    aliases: crate::id_map::DeclaredAliases,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -387,7 +387,7 @@ impl<P: Storage> Default for RemoteQueryablePeer<P> {
     fn default() -> Self {
         Self {
             #[cfg(feature = "alloc")]
-            aliases: alloc::collections::BTreeMap::new(),
+            aliases: crate::id_map::DeclaredAliases::new(),
             #[cfg(feature = "storage-profile")]
             declared: DeclaredQueryables::<P>::default(),
             #[cfg(feature = "storage-profile")]
@@ -411,7 +411,7 @@ impl RemoteQueryablePeer<Static> {
             #[cfg(feature = "storage-profile")]
             epoch: (),
             #[cfg(feature = "alloc")]
-            aliases: alloc::collections::BTreeMap::new(),
+            aliases: crate::id_map::DeclaredAliases::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -568,7 +568,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
         self.declared
             .entries()
             .find(|(_, held)| held.complete == complete && held.keyexpr.as_ref() == key)
-            .map(|(other, _)| self.aliases.get(&other).copied().unwrap_or(other))
+            .map(|(other, _)| self.aliases.told_as(other).unwrap_or(other))
     }
 }
 
@@ -1141,7 +1141,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
                 return;
             }
             None => {
-                peer.aliases.remove(&id);
+                peer.aliases.remove(id);
             }
         }
         let view = BorrowedDecl {
@@ -1169,12 +1169,15 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
         let _ = &local_matching;
+        // Whether another declaration still names the queryable `id` named, read before the row
+        // goes and by reference (the receive of a record costs the heap nothing).
         #[cfg(feature = "alloc")]
-        let held = peer.declared.find(id).map(|row| {
-            (
-                alloc::string::String::from(row.keyexpr.as_ref()),
-                row.complete,
-            )
+        let remains = peer.declared.find(id).is_some_and(|row| {
+            peer.declared.entries().any(|(other, held)| {
+                other != id
+                    && held.complete == row.complete
+                    && held.keyexpr.as_ref() == row.keyexpr.as_ref()
+            })
         });
         peer.declared.unbind(id);
         peer.changed();
@@ -1182,12 +1185,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         // by (`RemoteSubscriberPeer::aliases` for the reading).
         #[cfg(feature = "alloc")]
         let report = {
-            let told = peer.aliases.remove(&id);
-            let remains = held.as_ref().is_some_and(|(key, complete)| {
-                peer.declared.entries().any(|(_, row)| {
-                    row.complete == *complete && row.keyexpr.as_ref() == key.as_str()
-                })
-            });
+            let told = peer.aliases.remove(id);
             if remains {
                 return;
             }

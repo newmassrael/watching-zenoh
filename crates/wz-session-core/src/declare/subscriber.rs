@@ -232,7 +232,7 @@ pub struct RemoteSubscriberPeer<P: Storage = Profile> {
     /// rows stay in `declared`, so a withdrawal by either id and the matching watches read what
     /// they always read; only the events the observers hear are one per entity.
     #[cfg(feature = "alloc")]
-    aliases: alloc::collections::BTreeMap<u64, u64>,
+    aliases: crate::id_map::DeclaredAliases,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -250,7 +250,7 @@ impl<P: Storage> Default for RemoteSubscriberPeer<P> {
             #[cfg(feature = "storage-profile")]
             epoch: <P::Epoch as Default>::default(),
             #[cfg(feature = "alloc")]
-            aliases: alloc::collections::BTreeMap::new(),
+            aliases: crate::id_map::DeclaredAliases::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -270,7 +270,7 @@ impl RemoteSubscriberPeer<Static> {
             #[cfg(feature = "storage-profile")]
             epoch: (),
             #[cfg(feature = "alloc")]
-            aliases: alloc::collections::BTreeMap::new(),
+            aliases: crate::id_map::DeclaredAliases::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -410,7 +410,7 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         self.declared
             .entries()
             .find(|(_, held)| held.as_ref() == key)
-            .map(|(other, _)| self.aliases.get(&other).copied().unwrap_or(other))
+            .map(|(other, _)| self.aliases.told_as(other).unwrap_or(other))
     }
 }
 
@@ -1006,7 +1006,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
                 return;
             }
             None => {
-                peer.aliases.remove(&id);
+                peer.aliases.remove(id);
             }
         }
         // R311gb-3d / Track 2 — fan through the DeclSink seam via
@@ -1042,21 +1042,21 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         // get_matching_status fired from inside the
         // on_undecl callback chain observes the post-
         // undeclare state.
+        // Whether another declaration still names the keyexpr `id` named, read before the row
+        // goes and by reference (the receive of a record costs the heap nothing).
         #[cfg(feature = "alloc")]
-        let key = peer
-            .declared
-            .find(id)
-            .map(|k| alloc::string::String::from(k.as_ref()));
+        let remains = peer.declared.find(id).is_some_and(|key| {
+            peer.declared
+                .entries()
+                .any(|(other, held)| other != id && held.as_ref() == key.as_ref())
+        });
         peer.declared.unbind(id);
         peer.changed();
         // The application is told a keyexpr is gone when its last declaration goes, under the
         // id it was told it by ([`RemoteSubscriberPeer::aliases`]).
         #[cfg(feature = "alloc")]
         let report = {
-            let told = peer.aliases.remove(&id);
-            let remains = key
-                .as_deref()
-                .is_some_and(|key| peer.declared.entries().any(|(_, v)| v.as_ref() == key));
+            let told = peer.aliases.remove(id);
             if remains {
                 return;
             }

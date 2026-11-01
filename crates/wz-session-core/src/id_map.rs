@@ -244,6 +244,50 @@ pub struct DeclaredQueryable<P: Storage = Profile> {
 pub type DeclaredQueryables<P = Profile> =
     <P as Storage>::Ids<DeclaredQueryable<P>, { caps::MAX_REMOTE_DECLS }>;
 
+/// The declarations of one peer that name a keyexpr the peer had already declared:
+/// `{id -> the id the application was told the keyexpr under}`. A handful at most (a peer says
+/// one entity twice, as an announcement and as the answer to an interest), so a vector read in
+/// order is all it is: a tree would cost the binary of every build that holds a registry more
+/// than it saves, which is measured (`capability_cost_gate.py`).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Default)]
+pub struct DeclaredAliases(alloc::vec::Vec<(u64, u64)>);
+
+#[cfg(feature = "alloc")]
+impl DeclaredAliases {
+    /// No aliases. `const`, so a session slot that holds one can be a `static`.
+    pub const fn new() -> Self {
+        Self(alloc::vec::Vec::new())
+    }
+
+    /// The id the application was told the keyexpr of `id` under, if `id` is an alias.
+    pub fn told_as(&self, id: u64) -> Option<u64> {
+        self.0
+            .iter()
+            .find(|(held, _)| *held == id)
+            .map(|(_, told)| *told)
+    }
+
+    /// Record that `id` repeats a keyexpr the application was told under `told`.
+    pub fn insert(&mut self, id: u64, told: u64) {
+        match self.0.iter_mut().find(|(held, _)| *held == id) {
+            Some(row) => row.1 = told,
+            None => self.0.push((id, told)),
+        }
+    }
+
+    /// Forget `id`, returning the id it stood for if it was an alias.
+    pub fn remove(&mut self, id: u64) -> Option<u64> {
+        let at = self.0.iter().position(|(held, _)| *held == id)?;
+        Some(self.0.swap_remove(at).1)
+    }
+
+    /// Forget every alias.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
