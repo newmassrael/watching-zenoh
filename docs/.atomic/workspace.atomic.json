@@ -304860,6 +304860,38 @@
         "Owed: scenario 1 (10 tests, a client node with a gateway); the alias table is kept with the alloc backing only; the stop of the whole process seen once in about thirty complete runs of the probe, cause unknown; the re-dial of a found node has no limit but the directory; the retraction of an aggregate reply of a peer-hat face waits for its last backer."
       ]
     },
+    "Round 4089": {
+      "decision_summary": "The SN steps read as a mixture over the link break rate, with the units of the round before. The shipped weights price a step that follows at +7.907 bits and one that breaks at -3.994, which assumes every link breaks one step in sixteen; the corpus has links that break none, 8%, 10%, 37.5% and, in one flow, 75%. The candidate gives each flow a break rate of its own from a Beta prior fitted by maximum likelihood over the zenoh flows (mean 0.0044, concentration 2) and weighs the flow by the probability of its steps under it against the null one, which is the shipped one. Each zenoh flow is read with the prior fitted without its own group, and the fit without the jitter group is the fit with it. The false no of the round before is gone: the jitter flow SN part goes from -2364148 to +2795271 and it reads yes, 619 zenoh flows yes, 2 undecided, none no, at every kappa. With the shipped units the mixture moves no word. The null no is as before (345; 7, 54 and 345 at kappa 1, 16 and 1e6); no null flow reads yes. Nothing shipped; MODEL stays 2.",
+      "changes_bullets": [
+        "`zenoh_hierarchy_tests.rs`: `SnPrior`, its maximum-likelihood fit over a grid of means and concentrations, the mixture weight of a flow steps, the shipped one for comparison, and the report that reads the corpus with the mixture alone and with the mixture and the units, each zenoh flow with the prior fitted without its group.",
+        "`docs/flow-zenoh-verdict.md` 6.6: the model, the weights beside the shipped ones, the results, and what it leaves: a point estimate of the prior, the null side of the steps still derived, and that shipping needs a logarithm and a gamma function in a crate that is no_std with no dependency and no float maths outside its tests."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1625 pass with lz4 and 1610 without, clippy clean for both builds. The words of every flow under four variants were printed and read: the zenoh side did not move in any, no null flow read yes in any. The null member properness test covers the function the mixture uses. The static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open, in order: a logarithm and a gamma ratio that need no float maths (fixed-point, or a table of the logarithms of the integers with the Beta parameters chosen as fractions) so that the mixture can ship in a no_std crate; the prior as a posterior and not a maximum-likelihood point; a link that breaks more than the corpus holds; the null side of the steps measured, with a protocol that has a counter; kappa of the units from zenoh groups that fail them; the model number and the zenoh-analyzer session, because null flows read no today would read undecided. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
+      ],
+      "publishable_decision_summary": "The SN steps read as a mixture over the link break rate, with the units of the round before. The shipped weights price a step that follows at +7.907 bits and one that breaks at -3.994, which assumes every link breaks one step in sixteen; the corpus has links that break none, 8%, 10%, 37.5% and, in one flow, 75%. The candidate gives each flow a break rate of its own from a Beta prior fitted by maximum likelihood over the zenoh flows (mean 0.0044, concentration 2) and weighs the flow by the probability of its steps under it against the null one, which is the shipped one. Each zenoh flow is read with the prior fitted without its own group, and the fit without the jitter group is the fit with it. The false no of the round before is gone: the jitter flow SN part goes from -2364148 to +2795271 and it reads yes, 619 zenoh flows yes, 2 undecided, none no, at every kappa. With the shipped units the mixture moves no word. The null no is as before (345; 7, 54 and 345 at kappa 1, 16 and 1e6); no null flow reads yes. Nothing shipped; MODEL stays 2.",
+      "publishable_changes_bullets": [
+        "`zenoh_hierarchy_tests.rs`: `SnPrior`, its maximum-likelihood fit over a grid of means and concentrations, the mixture weight of a flow steps, the shipped one for comparison, and the report that reads the corpus with the mixture alone and with the mixture and the units, each zenoh flow with the prior fitted without its group.",
+        "`docs/flow-zenoh-verdict.md` 6.6: the model, the weights beside the shipped ones, the results, and what it leaves: a point estimate of the prior, the null side of the steps still derived, and that shipping needs a logarithm and a gamma function in a crate that is no_std with no dependency and no float maths outside its tests."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1625 pass with lz4 and 1610 without, clippy clean for both builds. The words of every flow under four variants were printed and read: the zenoh side did not move in any, no null flow read yes in any. The null member properness test covers the function the mixture uses. The static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open, in order: a logarithm and a gamma ratio that need no float maths (fixed-point, or a table of the logarithms of the integers with the Beta parameters chosen as fractions) so that the mixture can ship in a no_std crate; the prior as a posterior and not a maximum-likelihood point; a link that breaks more than the corpus holds; the null side of the steps measured, with a protocol that has a counter; kappa of the units from zenoh groups that fail them; the model number and the zenoh-analyzer session, because null flows read no today would read undecided. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
