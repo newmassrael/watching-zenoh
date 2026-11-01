@@ -99,10 +99,18 @@ unsafe fn open(listen: u16, connect: Option<u16>, zid: &CStr) -> z_owned_session
     }
     let mut session: z_owned_session_t = std::mem::zeroed();
     let rc = z_open(&mut session, z_config_move(&mut cfg), std::ptr::null());
-    assert_eq!(
-        rc, Z_OK,
-        "the open of listen {listen} and connect {connect:?}"
-    );
+    if rc != Z_OK {
+        // The code names no cause (a bind that failed and a scouting socket that failed are both
+        // `Z_ERR_GENERIC`), and a hosted macOS run has failed here twice without one. Bound the
+        // way the engine binds (the address reusable), the port answers whether it is still held.
+        let probe = std::net::TcpListener::bind(("127.0.0.1", listen))
+            .map(|_| "free")
+            .map_err(|e| e.to_string());
+        panic!(
+            "the open of listen {listen} and connect {connect:?} answered {rc}, not {Z_OK}; \
+             binding the listen port now: {probe:?}"
+        );
+    }
     session
 }
 
