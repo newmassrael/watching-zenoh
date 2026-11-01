@@ -160,29 +160,43 @@ fn regen_codecs(root: &Path) {
         views: true,
         ..ForgeCompileOptions::default()
     };
-    let mut written = 0usize;
+    // Two phases, so that a refused generation leaves `out/` as it was: every codec is generated
+    // in memory first and every refusal is collected, and nothing is written unless all of them
+    // passed. Writing as the loop went left a half-regenerated tree behind when the generator
+    // refused the thirty-first codec of a set (found when a pin move refused one document: thirteen
+    // files had already been rewritten), and stopping at the first refusal hid the rest.
+    let mut generated: Vec<(String, String)> = Vec::with_capacity(CODECS.len());
+    let mut refusals: Vec<String> = Vec::new();
 
     for stem in CODECS {
         let scxml_path = resource_dir.join(format!("{stem}.scxml"));
         let content = std::fs::read_to_string(&scxml_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", scxml_path.display()));
 
-        let output = compile_forge_with_imports(
+        let output = match compile_forge_with_imports(
             &content,
             DocumentLabel::symmetric(stem),
             Language::Rust,
             &resource_dir,
             &options,
-        )
-        .unwrap_or_else(|e| panic!("sce-build codegen failed for {stem}: {e}"));
+        ) {
+            Ok(output) => output,
+            Err(e) => {
+                refusals.push(format!("sce-build codegen failed for {stem}: {e}"));
+                continue;
+            }
+        };
 
         let target_name = format!("{stem}.rs");
-        let code = output
+        let Some(code) = output
             .files
             .iter()
             .find(|(filename, _)| filename == &target_name)
             .map(|(_, code)| code)
-            .unwrap_or_else(|| panic!("sce-build emitted no {target_name} for {stem}"));
+        else {
+            refusals.push(format!("sce-build emitted no {target_name} for {stem}"));
+            continue;
+        };
 
         // Same strip wz-codecs/build.rs applied: SCE emits a file-head
         // `#![doc = "SCE-MAP: stem:line"]` inner attribute (R40 carry) that is
@@ -201,10 +215,26 @@ fn regen_codecs(root: &Path) {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let target = out_dir.join(&target_name);
-        std::fs::write(&target, &stripped)
+        generated.push((target_name, stripped));
+    }
+
+    if !refusals.is_empty() {
+        for refusal in &refusals {
+            eprintln!("xtask: {refusal}");
+        }
+        panic!(
+            "sce-build refused {} of {} codec document(s); nothing was written to {}",
+            refusals.len(),
+            CODECS.len(),
+            out_dir.display()
+        );
+    }
+
+    let written = generated.len();
+    for (target_name, stripped) in &generated {
+        let target = out_dir.join(target_name);
+        std::fs::write(&target, stripped)
             .unwrap_or_else(|e| panic!("write {}: {e}", target.display()));
-        written += 1;
     }
 
     println!(
