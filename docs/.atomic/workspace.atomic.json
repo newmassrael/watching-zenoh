@@ -304302,6 +304302,40 @@
         "Owed: scenario 1 (10 tests) needs the client node with a gateway, scenario 2 (16) is peers that are gateways of their own regions (the gateway of an API node); the alias table is kept with the alloc backing only; the stop of the whole process seen once in about thirty complete runs of the probe, cause unknown; the re-dial of a found node has no limit but the directory; the retraction of an aggregate reply of a peer-hat face waits for its last backer."
       ]
     },
+    "Round 4072": {
+      "decision_summary": "The calibration judged by group, first slice. The corpus test reads every file with weights counted from every file, a fit and not a validation, over units that are not independent. A new test module re-scores each flow from its outcome counts (the shipped table gives back every flow own sums, and the fit it uses gives back the shipped table), leaves 40 groups out in turn (18 null protocols, 22 zenoh groups named from file names), counts the weights again from the rest and reads the left-out flows. No flow of any group changes its word; the extreme sums move 2.4 bits at most. The bound on a zenoh failure stands on 6.1e-5 over 49505 units, 0.0212 over 140 files and 0.1273 over 22 groups, none of them seen to fail. Nothing is asserted about the rates; the owner has not stated what the corpus must show. The open risk is a zenoh workload the corpus lacks: two residual units weigh -25188 on the no sum.",
+      "changes_bullets": [
+        "`crates/wz-capture/src/zenoh_calibration_tests.rs`: new, in the build that opens lz4 (`compression`): flow counts, a table of weights, the fit, the group of a file, the exactness tests and the two reports.",
+        "`zenoh_evidence.rs`: the test helpers `upper_bound`, `bisect` (the closed form for none seen is now the fast path and bisection its check), `measured_weights` and `millibits` are shared; `ln_factorial` keeps its running sums (the suite from 63 to 11 seconds).",
+        "`zenoh_corpus_tests.rs`: `corpus_dir`, `manifest` and its entry are shared. `docs/flow-zenoh-verdict.md`: section 6.3 with the numbers and the next steps."
+      ],
+      "verification_bullets": [
+        "On a build host, in both builds: wz-capture 1617 pass with compression and 1610 without, clippy clean for both, the four new tests run (82 seconds before the factorial sums were kept, 11 seconds for the suite after). A first version returned early in the build without lz4 and passed over nothing; it was found by the empty report and the module is now not compiled there. The pre-push static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open, in the order the recommendation gives: the group named in the manifest and not from file names; a held-out set the weights are never counted from, frozen; a hierarchical model with a failure rate per group (Beta-binomial over units) and the SN break rate as a mixture; workload groups in the corpus (queries and replies, liveliness, fragmented payloads, priorities, authentication, another implementation); the owner statement of what the corpus must show. The rest of the zenoh alpha and beta tags are not worth capturing: they read alike."
+      ],
+      "publishable_decision_summary": "The calibration judged by group, first slice. The corpus test reads every file with weights counted from every file, a fit and not a validation, over units that are not independent. A new test module re-scores each flow from its outcome counts (the shipped table gives back every flow own sums, and the fit it uses gives back the shipped table), leaves 40 groups out in turn (18 null protocols, 22 zenoh groups named from file names), counts the weights again from the rest and reads the left-out flows. No flow of any group changes its word; the extreme sums move 2.4 bits at most. The bound on a zenoh failure stands on 6.1e-5 over 49505 units, 0.0212 over 140 files and 0.1273 over 22 groups, none of them seen to fail. Nothing is asserted about the rates; the owner has not stated what the corpus must show. The open risk is a zenoh workload the corpus lacks: two residual units weigh -25188 on the no sum.",
+      "publishable_changes_bullets": [
+        "`crates/wz-capture/src/zenoh_calibration_tests.rs`: new, in the build that opens lz4 (`compression`): flow counts, a table of weights, the fit, the group of a file, the exactness tests and the two reports.",
+        "`zenoh_evidence.rs`: the test helpers `upper_bound`, `bisect` (the closed form for none seen is now the fast path and bisection its check), `measured_weights` and `millibits` are shared; `ln_factorial` keeps its running sums (the suite from 63 to 11 seconds).",
+        "`zenoh_corpus_tests.rs`: `corpus_dir`, `manifest` and its entry are shared. `docs/flow-zenoh-verdict.md`: section 6.3 with the numbers and the next steps."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, in both builds: wz-capture 1617 pass with compression and 1610 without, clippy clean for both, the four new tests run (82 seconds before the factorial sums were kept, 11 seconds for the suite after). A first version returned early in the build without lz4 and passed over nothing; it was found by the empty report and the module is now not compiled there. The pre-push static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open, in the order the recommendation gives: the group named in the manifest and not from file names; a held-out set the weights are never counted from, frozen; a hierarchical model with a failure rate per group (Beta-binomial over units) and the SN break rate as a mixture; workload groups in the corpus (queries and replies, liveliness, fragmented payloads, priorities, authentication, another implementation); the owner statement of what the corpus must show. The rest of the zenoh alpha and beta tags are not worth capturing: they read alike."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
