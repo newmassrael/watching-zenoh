@@ -9,7 +9,373 @@
 // as is pinned in crates/wz-capture/src/zenoh_corpus_tests.rs, and
 // `capture_anonymise.py --verify-corpus captures/corpus` holds every file to
 // being one the anonymiser would leave as it is.
+//
+// `groups` says which captures are NOT independent evidence of each other: a
+// null protocol is a group of its own, a zenoh release line, a link condition or
+// a workload is another. The calibration is judged by group
+// (docs/flow-zenoh-verdict.md §6.3, §6.4), so a file belongs to exactly one, and
+// a file the table does not name fails the test that reads this.
 {
+  groups: [
+    {
+      name: "loopback 1.10.1",
+      files: [
+        "zenoh-tcp-full.pcap",
+        "zenoh-tcp-midsession.pcap",
+        "zenoh-udp-full.pcap",
+      ],
+    },
+    {
+      name: "lz4",
+      files: [
+        "zenoh-tcp-lz4.pcap",
+        "zenoh-udp-lz4-midsession.pcap",
+        "zenoh-tcp-lz4-midsession.pcap",
+      ],
+    },
+    {
+      name: "release 1.5",
+      files: [
+        "zenoh15-tcp-full.pcap",
+        "zenoh15-tcp-midsession.pcap",
+        "zenoh15-udp-full.pcap",
+        "zenoh-matched-1-5-0-tcp.pcap",
+        "zenoh-matched-1-5-0-udp.pcap",
+        "zenoh-matched-1-5-1-tcp.pcap",
+        "zenoh-matched-1-5-1-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.10",
+      files: [
+        "zenoh-v1-10-0-tcp-full.pcap",
+        "zenoh-v1-10-0-udp-full.pcap",
+        "zenoh-matched-1-10-2-tcp.pcap",
+        "zenoh-matched-1-10-2-udp.pcap",
+        "zenoh-matched-1-10-0-tcp.pcap",
+        "zenoh-matched-1-10-0-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.9",
+      files: [
+        "zenoh-v1-9-0-tcp-full.pcap",
+        "zenoh-v1-9-0-udp-full.pcap",
+        "zenoh-matched-1-9-0-tcp.pcap",
+        "zenoh-matched-1-9-0-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.8",
+      files: [
+        "zenoh-v1-8-0-tcp-full.pcap",
+        "zenoh-v1-8-0-udp-full.pcap",
+        "zenoh-matched-1-8-0-tcp.pcap",
+        "zenoh-matched-1-8-0-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.7",
+      files: [
+        "zenoh-v1-7-2-tcp-full.pcap",
+        "zenoh-v1-7-2-udp-full.pcap",
+        "zenoh-matched-1-7-2-tcp.pcap",
+        "zenoh-matched-1-7-2-udp.pcap",
+        "zenoh-matched-1-7-0-tcp.pcap",
+        "zenoh-matched-1-7-0-udp.pcap",
+        "zenoh-matched-1-7-1-tcp.pcap",
+        "zenoh-matched-1-7-1-udp.pcap",
+      ],
+    },
+    {
+      name: "pico",
+      files: [
+        "zenoh-pico-tcp.pcap",
+        "zenoh-pico-udp.pcap",
+        "link-pico-tcp.pcap",
+      ],
+    },
+    {
+      name: "handshakes",
+      files: [
+        "zenoh-handshakes.pcap",
+      ],
+    },
+    {
+      name: "loss",
+      files: [
+        "zenoh-udp-lossy.pcap",
+        "zenoh-udp-loss-1.pcap",
+        "zenoh-udp-loss-10.pcap",
+        "zenoh-udp-loss-20.pcap",
+        "zenoh-tcp-loss-1.pcap",
+        "zenoh-tcp-loss-5.pcap",
+      ],
+    },
+    {
+      name: "reorder",
+      files: [
+        "zenoh-tcp-reorder-25.pcap",
+        "zenoh-udp-reorder-25.pcap",
+      ],
+    },
+    {
+      name: "duplicates",
+      files: [
+        "zenoh-tcp-dup-5.pcap",
+        "zenoh-udp-dup-5.pcap",
+      ],
+    },
+    {
+      name: "version skew",
+      files: [
+        "zenoh-mixed-c1-7-2-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-7-2-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-9-0-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-9-0-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-7-2-r1-9-0-tcp.pcap",
+        "zenoh-mixed-c1-7-2-r1-9-0-udp.pcap",
+        "zenoh-mixed-c1-0-2-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-0-2-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-3-4-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-3-4-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-4-0-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-4-0-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-5-0-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-5-0-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-6-2-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-6-2-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-10-1-r1-10-2-tcp.pcap",
+        "zenoh-mixed-c1-10-1-r1-10-2-udp.pcap",
+        "zenoh-mixed-c1-8-0-r1-10-0-tcp.pcap",
+        "zenoh-mixed-c1-8-0-r1-10-0-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-9-0-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-9-0-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-8-0-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-8-0-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-7-2-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-7-2-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-6-2-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-6-2-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-5-0-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-5-0-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-3-4-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-3-4-udp.pcap",
+        "zenoh-mixed-c1-10-2-r1-0-2-tcp.pcap",
+        "zenoh-mixed-c1-10-2-r1-0-2-udp.pcap",
+      ],
+    },
+    {
+      name: "tunnel",
+      files: [
+        "zenoh-tunnel-udp-20pub.pcap",
+        "zenoh-tunnel-tcp-20pub.pcap",
+        "zenoh-tunnel-loaded-udp-20pub.pcap",
+      ],
+    },
+    {
+      name: "release 1.6",
+      files: [
+        "zenoh-matched-1-6-2-tcp.pcap",
+        "zenoh-matched-1-6-2-udp.pcap",
+        "zenoh-matched-1-6-1-tcp.pcap",
+        "zenoh-matched-1-6-1-udp.pcap",
+        "zenoh-matched-1-6-0-tcp.pcap",
+        "zenoh-matched-1-6-0-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.4",
+      files: [
+        "zenoh-matched-1-4-0-tcp.pcap",
+        "zenoh-matched-1-4-0-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.3",
+      files: [
+        "zenoh-matched-1-3-4-tcp.pcap",
+        "zenoh-matched-1-3-4-udp.pcap",
+        "zenoh-matched-1-3-0-tcp.pcap",
+        "zenoh-matched-1-3-0-udp.pcap",
+        "zenoh-matched-1-3-1-tcp.pcap",
+        "zenoh-matched-1-3-1-udp.pcap",
+        "zenoh-matched-1-3-2-tcp.pcap",
+        "zenoh-matched-1-3-2-udp.pcap",
+        "zenoh-matched-1-3-3-tcp.pcap",
+        "zenoh-matched-1-3-3-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.0",
+      files: [
+        "zenoh-matched-1-0-2-tcp.pcap",
+        "zenoh-matched-1-0-2-udp.pcap",
+        "zenoh-matched-1-0-1-tcp.pcap",
+        "zenoh-matched-1-0-1-udp.pcap",
+        "zenoh-matched-1-0-0-tcp.pcap",
+        "zenoh-matched-1-0-0-udp.pcap",
+        "zenoh-matched-1-0-4-tcp.pcap",
+        "zenoh-matched-1-0-4-udp.pcap",
+        "zenoh-matched-1-0-3-tcp.pcap",
+        "zenoh-matched-1-0-3-udp.pcap",
+        "zenoh-matched-1-0-0-rc-1-tcp.pcap",
+        "zenoh-matched-1-0-0-rc-1-udp.pcap",
+        "zenoh-matched-1-0-0-rc-2-tcp.pcap",
+        "zenoh-matched-1-0-0-rc-2-udp.pcap",
+        "zenoh-matched-1-0-0-beta-4-tcp.pcap",
+        "zenoh-matched-1-0-0-beta-4-udp.pcap",
+        "zenoh-matched-1-0-0-alpha-6-tcp.pcap",
+        "zenoh-matched-1-0-0-alpha-6-udp.pcap",
+      ],
+    },
+    {
+      name: "jitter",
+      files: [
+        "zenoh-jitter-tcp-20pub.pcap",
+        "zenoh-jitter-udp-20pub.pcap",
+      ],
+    },
+    {
+      name: "release 1.1",
+      files: [
+        "zenoh-matched-1-1-1-tcp.pcap",
+        "zenoh-matched-1-1-1-udp.pcap",
+        "zenoh-matched-1-1-0-tcp.pcap",
+        "zenoh-matched-1-1-0-udp.pcap",
+      ],
+    },
+    {
+      name: "release 1.2",
+      files: [
+        "zenoh-matched-1-2-1-tcp.pcap",
+        "zenoh-matched-1-2-1-udp.pcap",
+        "zenoh-matched-1-2-0-tcp.pcap",
+        "zenoh-matched-1-2-0-udp.pcap",
+        "zenoh-matched-1-2-3-tcp.pcap",
+        "zenoh-matched-1-2-3-udp.pcap",
+      ],
+    },
+    {
+      name: "real Wi-Fi",
+      files: [
+        "link-tcp-full.pcap",
+        "link-tcp-large.pcap",
+        "link-tcp-midsession.pcap",
+        "link-udp-full.pcap",
+      ],
+    },
+    {
+      name: "lan-dns",
+      files: [
+        "lan-dns.pcap",
+      ],
+    },
+    {
+      name: "lan-mdns",
+      files: [
+        "lan-mdns.pcap",
+      ],
+    },
+    {
+      name: "lan-ssdp",
+      files: [
+        "lan-ssdp.pcap",
+      ],
+    },
+    {
+      name: "stack-mqtt",
+      files: [
+        "stack-mqtt.pcap",
+      ],
+    },
+    {
+      name: "stack-rtps",
+      files: [
+        "stack-rtps.pcap",
+      ],
+    },
+    {
+      name: "stack-coap",
+      files: [
+        "stack-coap.pcap",
+      ],
+    },
+    {
+      name: "stack-someip",
+      files: [
+        "stack-someip.pcap",
+      ],
+    },
+    {
+      name: "stack-quic",
+      files: [
+        "stack-quic.pcap",
+      ],
+    },
+    {
+      name: "busylan-dhcp",
+      files: [
+        "busylan-dhcp.pcap",
+      ],
+    },
+    {
+      name: "busylan-ntp",
+      files: [
+        "busylan-ntp.pcap",
+      ],
+    },
+    {
+      name: "busylan-wsd",
+      files: [
+        "busylan-wsd.pcap",
+      ],
+    },
+    {
+      name: "stack-http",
+      files: [
+        "stack-http.pcap",
+      ],
+    },
+    {
+      name: "stack-tls",
+      files: [
+        "stack-tls.pcap",
+      ],
+    },
+    {
+      name: "stack-http-post",
+      files: [
+        "stack-http-post.pcap",
+      ],
+    },
+    {
+      name: "stack-redis",
+      files: [
+        "stack-redis.pcap",
+      ],
+    },
+    {
+      name: "stack-postgres",
+      files: [
+        "stack-postgres.pcap",
+      ],
+    },
+    {
+      name: "stack-ssh",
+      files: [
+        "stack-ssh.pcap",
+      ],
+    },
+    {
+      name: "stack-smtp",
+      files: [
+        "stack-smtp.pcap",
+      ],
+    },
+  ],
   files: [
     {
       file: "zenoh-tcp-full.pcap",

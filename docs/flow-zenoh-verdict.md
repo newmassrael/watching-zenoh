@@ -596,8 +596,8 @@ flow's own sums, and the second that the fit it uses counts the shipped weights
 from the whole corpus; so the rest reads the library and not a look-alike. The
 third leaves one group out at a time, counts the weights again from the others
 and reads the left-out flows with them (40 groups: 18 null protocols, 22 zenoh
-groups by release line, link and what the file exercises, named from the file's
-name until the manifest names them). It prints, and asserts nothing about the
+groups by release line, link and what the file exercises, named in the `groups`
+of the manifest, where a file in no group or in two stops the reader). It prints, and asserts nothing about the
 rates, because the owner has not said what the corpus must show.
 
 What it shows:

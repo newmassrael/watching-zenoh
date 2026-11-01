@@ -37,6 +37,9 @@ pub(crate) fn corpus_dir() -> std::path::PathBuf {
 pub(crate) struct Entry {
     pub(crate) file: String,
     pub(crate) hypothesis: String,
+    /// The group of independent evidence the manifest puts the file in
+    /// (`groups` of `corpus.json5`).
+    pub(crate) group: String,
     packets: u64,
 }
 
@@ -47,21 +50,70 @@ pub(crate) fn manifest() -> Vec<Entry> {
     let Some(Json5Value::Array(files)) = doc.get("files") else {
         panic!("the manifest has a `files` array");
     };
+    let Some(Json5Value::Array(groups)) = doc.get("groups") else {
+        panic!("the manifest has a `groups` array");
+    };
     let text_of = |v: &Json5Value, key: &str| match v.get(key) {
         Some(Json5Value::String(s)) => s.clone(),
         other => panic!("`{key}` is a string in every entry: {other:?}"),
     };
-    files
+    // file -> group, each file once: a file in two groups would be counted as
+    // evidence twice, and one in none would be judged by nothing.
+    let mut group_of = alloc::collections::BTreeMap::<String, String>::new();
+    for g in groups {
+        let name = text_of(g, "name");
+        let Some(Json5Value::Array(members)) = g.get("files") else {
+            panic!("group `{name}` has a `files` array");
+        };
+        for m in members {
+            let Json5Value::String(file) = m else {
+                panic!("group `{name}` lists file names: {m:?}");
+            };
+            if let Some(other) = group_of.insert(file.clone(), name.clone()) {
+                panic!("{file} is in groups `{other}` and `{name}`: a file is in exactly one");
+            }
+        }
+    }
+    let entries: Vec<Entry> = files
         .iter()
-        .map(|v| Entry {
-            file: text_of(v, "file"),
-            hypothesis: text_of(v, "hypothesis"),
-            packets: match v.get("packets") {
-                Some(Json5Value::Number(n)) => n.parse().expect("`packets` is an integer"),
-                other => panic!("`packets` is a number in every entry: {other:?}"),
-            },
+        .map(|v| {
+            let file = text_of(v, "file");
+            let group = group_of
+                .get(&file)
+                .cloned()
+                .unwrap_or_else(|| panic!("{file} is in no group of the manifest's `groups`"));
+            Entry {
+                hypothesis: text_of(v, "hypothesis"),
+                packets: match v.get("packets") {
+                    Some(Json5Value::Number(n)) => n.parse().expect("`packets` is an integer"),
+                    other => panic!("`packets` is a number in every entry: {other:?}"),
+                },
+                group,
+                file,
+            }
         })
-        .collect()
+        .collect();
+    // Every listed file was found above, so the two sets are equal exactly when
+    // they have as many members: a group naming a file the manifest does not list,
+    // or a file the manifest lists twice, makes them differ.
+    assert_eq!(
+        group_of.len(),
+        entries.len(),
+        "the groups and the manifest list different files"
+    );
+    // A group is of one hypothesis: its evidence is counted for one error.
+    let mut hypothesis_of = alloc::collections::BTreeMap::<&str, &str>::new();
+    for e in &entries {
+        let seen = hypothesis_of
+            .entry(e.group.as_str())
+            .or_insert(e.hypothesis.as_str());
+        assert_eq!(
+            *seen, e.hypothesis,
+            "group `{}` holds both zenoh and other files",
+            e.group
+        );
+    }
+    entries
 }
 
 /// A file's flows by verdict: `(yes, no, undecided)`.

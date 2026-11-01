@@ -16,8 +16,9 @@
 //! not: the units of one session share a stack, a traffic generator and a
 //! link. A null protocol is a group of its own. A zenoh file is in the group
 //! of its release line, of its link (loss, reordering, jitter, a tunnel, a
-//! real Wi-Fi), or of what it exercises (compression, handshakes); [`group_of`]
-//! says which, from the file's name, until the manifest names it.
+//! real Wi-Fi), or of what it exercises (compression, handshakes); the `groups`
+//! of `captures/corpus/corpus.json5` says which, and the manifest reader refuses
+//! a file in no group or in two.
 //!
 //! A flow's two sums are linear in its outcome counts ([`Counts`]), so a flow
 //! is read again from them with any table of weights ([`Table`]). That the
@@ -140,48 +141,6 @@ fn flows_of(d: &Dissection) -> Vec<Flow> {
     out
 }
 
-/// The group of independent evidence a file belongs to. A null protocol is its
-/// own; a zenoh file is in the group of the thing that makes it unlike the
-/// others, read from its name.
-fn group_of(file: &str, zenoh: bool) -> String {
-    let stem = file.trim_end_matches(".pcap");
-    if !zenoh {
-        return String::from(stem);
-    }
-    let parts: Vec<&str> = stem.split('-').collect();
-    let release = |minor: &str| alloc::format!("release 1.{minor}");
-    let has = |needle: &str| stem.contains(needle);
-    if stem.starts_with("zenoh-pico") || stem.starts_with("link-pico") {
-        String::from("pico")
-    } else if stem.starts_with("link-") {
-        String::from("real Wi-Fi")
-    } else if stem.starts_with("zenoh-tunnel") {
-        String::from("tunnel")
-    } else if stem.starts_with("zenoh-jitter") {
-        String::from("jitter")
-    } else if stem.starts_with("zenoh-mixed") {
-        String::from("version skew")
-    } else if stem.starts_with("zenoh-matched") {
-        release(parts[3])
-    } else if stem.starts_with("zenoh-v1") {
-        release(parts[2])
-    } else if stem.starts_with("zenoh15") {
-        release("5")
-    } else if has("loss") {
-        String::from("loss")
-    } else if has("reorder") {
-        String::from("reorder")
-    } else if has("-dup") {
-        String::from("duplicates")
-    } else if has("handshakes") {
-        String::from("handshakes")
-    } else if has("lz4") {
-        String::from("lz4")
-    } else {
-        String::from("loopback 1.10.1")
-    }
-}
-
 fn read_corpus() -> Vec<File> {
     manifest()
         .into_iter()
@@ -197,7 +156,7 @@ fn read_corpus() -> Vec<File> {
             }
             let zenoh = entry.hypothesis == "zenoh";
             File {
-                group: group_of(&entry.file, zenoh),
+                group: entry.group,
                 name: entry.file,
                 zenoh,
                 flows,
