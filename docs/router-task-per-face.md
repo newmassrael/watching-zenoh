@@ -409,7 +409,7 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    guard, so a router that had a permit to await would still have to put the message somewhere and send it when
    the permit came, and that somewhere is the credit stage of phase 4: a destination's queue, offered room by the
    loop on the link's notice. What still parked a face's thread after 4b was a message the stage did not take: a
-   declaration, an interest and the final of a query (a request and a response too, below), sent with a wait for
+   declaration, an interest and the final of a query (a request and a response too, 5b below), sent with a wait for
    room. A declaration sent that way was also the one message that could reach the peer before the data the
    destination held, which came first. So the stage takes them: the session core probes them as it probes a
    Push and a link-state message (`dispatch_declare_at`, `dispatch_interest_at`, `dispatch_response_final_at`,
@@ -419,9 +419,20 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    Two tests, each shown to fail without the change it holds: a declaration, an interest and a final probed on a
    full link come back whole (`NoRoom`, which only a probe answers), and a declaration for a destination that
    holds a Put is held behind it and reaches the link after it.
-   Not yet: a request and a response, which may carry a shared-memory payload whose handoff a probe would have
-   to open and give back (the Push probe does), keep the waiting send; a droppable message keeps its one wait of
-   `wait_before_drop`; and the session core's own permit, which a synchronous `publish` and the C ABI need to stop
+
+   **5b, a request and a response.** Their value and payload may be a buffer of shared memory, whose handoff
+   the sender opens before the send; a probe that finds no room must give it back. So they are probed as a Push
+   is, inside the sender's transaction (`open_shm_tx`), which the probe commits when the message left and drops
+   when it did not (`dispatch_request_at`, `dispatch_response_at`, and the two arms of
+   `try_send_network_message_qos`; a response's express flush follows only one that left). The router holds one
+   that finds no room as it holds a Push (`held_request`, `held_response`): only when it routes it on behalf of
+   a face it can gate, when its QoS does not drop it, and when it carries no shared-memory descriptor, since the
+   relay maps such a buffer for its destination in a way a later send cannot undo. Two tests, each shown to fail
+   without its change (the router's request arm; the session core's request arm and, separately, its response
+   arm): a request and a response probed on a full link come back whole, and a query routed from a face whose
+   destination holds a Put is held behind it and reaches the link after it.
+   Not yet: a droppable message keeps its one wait of `wait_before_drop`; a message carrying shared memory keeps
+   the waiting send; and the session core's own permit, which a synchronous `publish` and the C ABI need to stop
    parking, is not built.
 6. **Chains.** The conduit's lock becomes async so that a chain waits as a task and not as a thread; the
    chain fix of 3578 (send waiting, one message) then stops one face.

@@ -74,10 +74,11 @@
 //! ## Not covered
 //!
 //! A message whose payload is in shared memory is sent through the relay, whose mapping of the
-//! payload for the destination cannot be undone and retried, and keeps the waiting send. A query
-//! and a reply keep it too, since they may carry such a payload and a probe of them does not open
-//! and give back its handoff yet. A declaration, an interest and the final of a query are held,
-//! in the data lane behind what the destination holds, so that they keep their order with it.
+//! payload for the destination cannot be undone and retried, and keeps the waiting send; so does a
+//! query whose value, or a reply whose payload, is such a buffer. Any other query and reply is held
+//! as a Push is, on behalf of the face it came from. A declaration, an interest and the final of a
+//! query are held whoever sent them. All of them wait in the data lane behind what the destination
+//! holds, so that they keep their order with it.
 //!
 //! A put of the node's own session is not held either: its publisher is the one to slow down,
 //! and waits for room outside the tables ([`super::local_publish`]).
@@ -444,7 +445,9 @@ impl RouterForwarder {
     ///   data the destination holds, in the one queue, so that it does not reach the peer before a
     ///   message that came first, and so that the face's thread that routes it does not park for
     ///   room. Like a link-state message, it is mostly made by the router from a change of its
-    ///   tables, and what bounds it is the age of the destination's oldest message.
+    ///   tables, and what bounds it is the age of the destination's oldest message;
+    /// - data, a request and a response that may not be dropped, on the terms of a Push (phase 5b,
+    ///   [`Self::held_request`], [`Self::held_response`]).
     pub(super) fn held_lane(&self, msg: &NetworkMessage, reliable: bool) -> Option<Lane> {
         if !reliable {
             return None;
@@ -468,6 +471,8 @@ impl RouterForwarder {
                     wz_session_core::declare_ext_qos::read_response_final_qos(response_final),
                 )
             }
+            NetworkMessage::Request(request) => return self.held_request(request),
+            NetworkMessage::Response(response) => return self.held_response(response),
             _ => return None,
         };
         self.credit.source()?;
@@ -483,6 +488,33 @@ impl RouterForwarder {
     /// The data lane for a message whose QoS may not drop it; `None` for one it may.
     fn held_unless_droppable(qos: wz_session_core::sample::QosLevel) -> Option<Lane> {
         (qos.congestion() != CongestionControl::Drop).then_some(Lane::Data)
+    }
+
+    /// A request is held as a Push is (phase 5b): routed on behalf of a face that can be gated,
+    /// its QoS not one that drops it, and its value not a buffer of shared memory, which the relay
+    /// maps for the destination in a way a later send cannot undo and retry.
+    fn held_request(&self, request: &wz_session_core::wire::RequestOwned) -> Option<Lane> {
+        self.credit.source()?;
+        #[cfg(feature = "transport-shm")]
+        if let wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) = &request.body {
+            if !wz_session_core::request_build::query_value_shm_descriptors(query).is_empty() {
+                return None;
+            }
+        }
+        Self::held_unless_droppable(wz_session_core::declare_ext_qos::read_request_qos(request))
+    }
+
+    /// A response is held as a request is (phase 5b), on behalf of the face of the queryable that
+    /// answered, and not when its payload is a buffer of shared memory.
+    fn held_response(&self, response: &wz_session_core::wire::ResponseOwned) -> Option<Lane> {
+        self.credit.source()?;
+        #[cfg(feature = "transport-shm")]
+        if !wz_session_core::response_build::response_shm_descriptors(response).is_empty() {
+            return None;
+        }
+        Self::held_unless_droppable(wz_session_core::declare_ext_qos::read_response_qos(
+            response,
+        ))
     }
 }
 

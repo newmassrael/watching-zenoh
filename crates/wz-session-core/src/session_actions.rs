@@ -11152,9 +11152,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// link must be able to hold them behind it, or they reach the peer before the data that came
     /// first.
     ///
-    /// A request and a response are sent as [`Self::send_network_message_qos`] sends them, which
-    /// waits: they may carry a shared-memory payload, whose handoff a probe would have to open and
-    /// give back, and that is not done here yet.
+    /// So are a request and a response, inside the sender's shared-memory transaction as a Push
+    /// is, since their value and payload may be such a buffer: the transaction is committed when
+    /// the message left and dropped, giving back what it took, when it did not.
+    ///
+    /// Any other message is sent as [`Self::send_network_message_qos`] sends it, which waits.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -11264,6 +11266,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         ))]
         if let crate::network_message::NetworkMessage::Interest(interest) = &msg {
             return match self.dispatch_interest_at(DispatchStage::Probe, interest, reliable) {
+                Ok(Dispatched::Sent) => Ok(()),
+                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
+                #[cfg(feature = "transport-fragmentation")]
+                Ok(Dispatched::Chain) => Err(Unsent::Chain(msg)),
+                Err(e) => Err(Unsent::Failed(e)),
+            };
+        }
+        // A request and a response carry a buffer of shared memory when their value or payload is
+        // one, so they are probed as a Push is: inside a transaction of the sender's handoff that
+        // the probe commits when the message left and drops, giving back what it took, when it
+        // did not.
+        #[cfg(feature = "codec-request")]
+        if let crate::network_message::NetworkMessage::Request(request) = &msg {
+            #[cfg(feature = "session-extshm")]
+            let transaction = self.open_shm_tx(&msg, reliable, priority);
+            let ended = self.dispatch_request_at(DispatchStage::Probe, request, reliable);
+            #[cfg(feature = "session-extshm")]
+            if let (Ok(Dispatched::Sent), Some(transaction)) = (&ended, transaction) {
+                transaction.commit();
+            }
+            return match ended {
+                Ok(Dispatched::Sent) => Ok(()),
+                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
+                #[cfg(feature = "transport-fragmentation")]
+                Ok(Dispatched::Chain) => Err(Unsent::Chain(msg)),
+                Err(e) => Err(Unsent::Failed(e)),
+            };
+        }
+        #[cfg(feature = "codec-response")]
+        if let crate::network_message::NetworkMessage::Response(response) = &msg {
+            #[cfg(feature = "session-extshm")]
+            let transaction = self.open_shm_tx(&msg, reliable, priority);
+            let ended = self.dispatch_response_at(DispatchStage::Probe, response, reliable);
+            #[cfg(feature = "session-extshm")]
+            if let (Ok(Dispatched::Sent), Some(transaction)) = (&ended, transaction) {
+                transaction.commit();
+            }
+            return match ended {
                 Ok(Dispatched::Sent) => Ok(()),
                 Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(msg)),
                 #[cfg(feature = "transport-fragmentation")]

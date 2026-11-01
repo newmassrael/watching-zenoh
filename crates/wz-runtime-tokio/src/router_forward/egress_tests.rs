@@ -1222,6 +1222,103 @@ fn a_declaration_is_held_behind_the_data_its_destination_holds_and_leaves_after_
     );
 }
 
+/// Phase 5b: a query that may not be dropped, routed from a face to a destination with no room, is
+/// held behind the data the destination holds, as a Put is, and reaches the link after it. It was
+/// sent with a wait for room on the routing face's thread.
+#[test]
+fn a_query_routed_from_a_face_is_held_behind_the_data_its_destination_holds() {
+    use wz_session_core::declare_build::build_declare_queryable;
+    use wz_session_core::request_build::build_request_query;
+
+    let rig = Rig::new(false);
+    forward_frame(
+        &rig.fwd,
+        DEST,
+        vec![NetworkMessage::Declare(Box::new(
+            build_declare_queryable(11, 0, Some("demo/asked")).expect("declare queryable"),
+        ))],
+    );
+    rig.link.set_full(true);
+    let baseline = rig.link.sent();
+    let mut request = build_request_query(5, 0, Some("demo/asked")).expect("request");
+    wz_session_core::declare_ext_qos::set_request_qos(
+        &mut request,
+        QosLevel::DEFAULT.with_congestion(CongestionControl::Block),
+    );
+    forward_frame(
+        &rig.fwd,
+        SOURCE,
+        vec![
+            blocking_put(b"the-put-that-came-first"),
+            NetworkMessage::Request(Box::new(request)),
+        ],
+    );
+    assert_eq!(
+        rig.fwd.egress_held(),
+        2,
+        "the Put and the query are held for the destination"
+    );
+    assert_eq!(
+        rig.link.sent(),
+        baseline,
+        "nothing left a link with no room"
+    );
+
+    rig.link.set_full(false);
+    rig.fwd.woken();
+    assert_eq!(rig.fwd.egress_held(), 0, "both left");
+    let bytes = rig.link.bytes();
+    let at = |needle: &[u8]| {
+        bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .unwrap_or_else(|| panic!("{} is on the link", String::from_utf8_lossy(needle)))
+    };
+    assert!(
+        at(b"the-put-that-came-first") < at(b"demo/asked"),
+        "the Put that came first reached the link first"
+    );
+}
+
+/// Phase 5b: a request and a response are probed. To a link with no room each comes back whole,
+/// with nothing written; to one with room each leaves. Only a probe answers `NoRoom`, and the link
+/// does not stall a wait, so a send that waited fails the test and does not hang it.
+#[test]
+fn a_request_and_a_response_are_probed_and_come_back_whole_when_there_is_no_room() {
+    use wz_session_core::request_build::build_request_query;
+    use wz_session_core::response_build::build_response_reply_literal;
+    use wz_session_core::session_actions::Unsent;
+
+    let messages = || {
+        vec![
+            NetworkMessage::Request(Box::new(
+                build_request_query(5, 0, Some("demo/asked")).expect("request"),
+            )),
+            NetworkMessage::Response(Box::new(
+                build_response_reply_literal(5, "demo/asked", b"answer").expect("response"),
+            )),
+        ]
+    };
+    for message in messages() {
+        let kind = format!("{message:?}").chars().take(16).collect::<String>();
+        let full = RoomLink::new(true);
+        let actions = client_over(&full, zid(0xCC));
+        let outcome = actions.try_send_network_message_qos(message, true, false, Priority::DEFAULT);
+        assert!(
+            matches!(&outcome, Err(Unsent::NoRoom(_))),
+            "{kind}: a message that finds no room is the caller's again, got {outcome:?}"
+        );
+        assert_eq!(full.sent(), 0, "{kind}: nothing was written");
+    }
+    for message in messages() {
+        let open = RoomLink::new(false);
+        let actions = client_over(&open, zid(0xCD));
+        let outcome = actions.try_send_network_message_qos(message, true, false, Priority::DEFAULT);
+        assert!(outcome.is_ok(), "a link with room is given the message");
+        assert!(open.sent() > 0, "and it was written");
+    }
+}
+
 /// A message larger than the whole budget of a destination is held, alone: a queue that refused it
 /// could never send it. It gates the face that sent it all the same, and leaves when there is room.
 #[test]
