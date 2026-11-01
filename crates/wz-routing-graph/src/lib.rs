@@ -781,6 +781,13 @@ pub struct LinkstateNetwork {
     idx_by_zid: Versioned<HashMap<Zid, NodeIndex>>,
     links: Versioned<HashMap<LinkId, Link>>,
     next_link_id: LinkId,
+    /// For a node of a single-hop gossip net, the sn of the entry that last SET its links, which
+    /// is not the node's `sn`: an entry that names no links (what a neighbour says of a node it
+    /// knows) raises the sn and leaves the links as they were. The ingest compares the two to
+    /// take the node's own entry of an sn that hearsay reached first
+    /// ([`process_linkstates_peer_to_peer`](Self::process_linkstates_peer_to_peer)). A node with
+    /// no row has had no links set.
+    links_sn: HashMap<Zid, u64>,
     /// Per-root spanning trees from this peer's vantage, indexed by the
     /// root node's `NodeIndex::index()` (sparse; gaps are default Trees).
     /// Rebuilt by `compute_trees`.
@@ -910,6 +917,7 @@ impl LinkstateNetwork {
             idx_by_zid: Versioned::new(idx_by_zid),
             links: Versioned::new(HashMap::new()),
             next_link_id: 0,
+            links_sn: HashMap::new(),
             // one (trivial) self-rooted tree + a zero self-distance, as in
             // zenoh `Network::new` (`network.rs:174-179`).
             trees: Versioned::new(vec![Tree {
@@ -2135,6 +2143,9 @@ impl LinkstateNetwork {
         for ls in states {
             match self.get_idx(&ls.zid) {
                 None => {
+                    if !ls.links.is_empty() {
+                        self.links_sn.insert(ls.zid, ls.sn);
+                    }
                     self.insert_node(Node {
                         zid: ls.zid,
                         whatami: Some(ls.whatami),
@@ -2149,9 +2160,25 @@ impl LinkstateNetwork {
                     changes.new.push(ls.zid);
                 }
                 Some(idx) => {
+                    let links_at = self.links_sn.get(&ls.zid).copied().unwrap_or(0);
                     let node = &mut self.graph[idx];
-                    // sn-staleness gate (zenoh `network.rs:577-579`).
-                    if node.sn >= ls.sn {
+                    // sn-staleness gate (zenoh `network.rs:577-579`), with ONE exception that
+                    // the pin's gate does not have: an entry of the SAME sn that carries the
+                    // links no entry of that sn has set yet. What a neighbour says of another
+                    // node it knows is a zid and an sn and no links (`Details { links: false }`),
+                    // and it raises the sn the node's own entry is later compared with. Which of
+                    // the two arrives first depends on how two handshakes interleave, and when
+                    // the second-hand one wins, the node's own entry, the only one that names
+                    // its links, is ignored: `gateways_of` then answers none, or the links of
+                    // the sn before, and the inter-region filter reads that as a smaller set of
+                    // gateways to choose among, so that more than one gateway of the region
+                    // carries what only the primary should. The same sn is the same state, so
+                    // taking the links it adds changes nothing a node that had them would hold,
+                    // and once they are set the gate is the pin's again, which is what keeps two
+                    // nodes from announcing each other forever.
+                    let completes_hearsay =
+                        node.sn == ls.sn && !ls.links.is_empty() && links_at < ls.sn;
+                    if node.sn > ls.sn || (node.sn == ls.sn && !completes_hearsay) {
                         continue;
                     }
                     // A node the graph holds only because a face registered it
@@ -2167,6 +2194,7 @@ impl LinkstateNetwork {
                     // A `Network`'s rule; a peer's `Gossip` graph is item 751 8e.
                     if !ls.links.is_empty() || self.object == NetObject::Gossip {
                         node.links = ls.links;
+                        self.links_sn.insert(ls.zid, ls.sn);
                     }
                     if node.whatami.is_none() {
                         node.whatami = Some(ls.whatami);
@@ -5404,6 +5432,116 @@ mod tests {
             net.gateways_of(&zid(0xEE)),
             None,
             "an unknown node has no answer"
+        );
+    }
+
+    /// What a neighbour says of a node it knows carries the node's sn and none of its links, and
+    /// it must not stop the node's OWN entry of that sn from naming them. A router hears of a
+    /// peer from another peer before the peer's face and entry reach it, in an order that follows
+    /// how two handshakes interleave; with the pin's sn gate alone the entry that carries the
+    /// links is then ignored, `gateways_of` answers none for good, and the inter-region filter
+    /// lets every gateway of the region carry the data instead of the primary.
+    #[test]
+    fn a_nodes_own_entry_of_the_same_sn_names_the_links_a_neighbours_hearsay_left_out() {
+        let mut net = LinkstateNetwork::new_in_region(zid(0x01), WhatAmI::Router, true);
+        net.set_full_linkstate(false);
+        let hearsay_link = net.add_link(zid(0x07), WhatAmI::Peer);
+        // Peer 0x07 tells of the gateway 0xAA and of the peer 0xD0, whose sn it knows is 5 and
+        // whose links it does not say.
+        net.ingest_linkstate_list(
+            hearsay_link,
+            list(vec![
+                gateway(entry(10, 1, Some(&zid(0xAA)), Some(1), &[])),
+                entry(12, 5, Some(&zid(0xD0)), Some(1), &[]),
+            ]),
+        );
+        // Only now does 0xD0's own face come up, and its own entry arrive: the same sn, with the
+        // link it holds to the gateway.
+        let own_link = net.add_link(zid(0xD0), WhatAmI::Peer);
+        let own = || {
+            list(vec![
+                entry(20, 5, Some(&zid(0xD0)), Some(1), &[11]),
+                gateway(entry(11, 1, Some(&zid(0xAA)), Some(1), &[])),
+            ])
+        };
+        let changes = net.ingest_linkstate_list(own_link, own());
+        assert_eq!(
+            net.gateways_of(&zid(0xD0)),
+            Some(vec![zid(0xAA)]),
+            "the entry that names the links is taken"
+        );
+        assert!(
+            changes.updated.contains(&zid(0xD0)),
+            "and it is a change like any other: {changes:?}"
+        );
+
+        // Once the node has its links the pin's gate is the whole rule again: the same entry
+        // twice changes nothing, so two nodes that announce each other do not do it forever,
+        // and an entry of that sn that names no links wipes none.
+        let again = net.ingest_linkstate_list(own_link, own());
+        assert!(
+            again.new.is_empty() && again.updated.is_empty(),
+            "an entry of the same sn is stale once the links are held: {again:?}"
+        );
+        net.ingest_linkstate_list(
+            hearsay_link,
+            list(vec![entry(12, 5, Some(&zid(0xD0)), Some(1), &[])]),
+        );
+        assert_eq!(
+            net.gateways_of(&zid(0xD0)),
+            Some(vec![zid(0xAA)]),
+            "hearsay of the same sn leaves the links alone"
+        );
+    }
+
+    /// The same, for a node that already holds the links of an earlier sn: the node links a
+    /// second gateway (its sn rises), a neighbour's hearsay of the new sn reaches the net before
+    /// the node's own entry, and the entry that names the second gateway must still be taken, or
+    /// the net keeps the first gateway alone and two gateways of the region both believe they
+    /// are the primary.
+    #[test]
+    fn a_nodes_own_entry_adds_the_link_that_hearsay_of_its_sn_overtook() {
+        let mut net = LinkstateNetwork::new_in_region(zid(0x01), WhatAmI::Router, true);
+        net.set_full_linkstate(false);
+        let hearsay_link = net.add_link(zid(0x07), WhatAmI::Peer);
+        let own_link = net.add_link(zid(0xD0), WhatAmI::Peer);
+        // The node's own entry of sn 5 names the gateway 0xAA.
+        net.ingest_linkstate_list(
+            own_link,
+            list(vec![
+                entry(20, 5, Some(&zid(0xD0)), Some(1), &[11]),
+                gateway(entry(11, 1, Some(&zid(0xAA)), Some(1), &[])),
+            ]),
+        );
+        assert_eq!(net.gateways_of(&zid(0xD0)), Some(vec![zid(0xAA)]));
+
+        // It links the gateway 0xBB too, at sn 6, and hearsay of sn 6 gets here first.
+        net.ingest_linkstate_list(
+            hearsay_link,
+            list(vec![
+                gateway(entry(13, 1, Some(&zid(0xBB)), Some(1), &[])),
+                entry(12, 6, Some(&zid(0xD0)), Some(1), &[]),
+            ]),
+        );
+        assert_eq!(
+            net.gateways_of(&zid(0xD0)),
+            Some(vec![zid(0xAA)]),
+            "hearsay names no links and leaves the ones it knew"
+        );
+        net.ingest_linkstate_list(
+            own_link,
+            list(vec![
+                entry(20, 6, Some(&zid(0xD0)), Some(1), &[11, 13]),
+                gateway(entry(11, 1, Some(&zid(0xAA)), Some(1), &[])),
+                gateway(entry(13, 1, Some(&zid(0xBB)), Some(1), &[])),
+            ]),
+        );
+        let mut gateways = net.gateways_of(&zid(0xD0)).expect("the node is known");
+        gateways.sort_by_key(|z| z.as_slice().to_vec());
+        assert_eq!(
+            gateways,
+            vec![zid(0xAA), zid(0xBB)],
+            "the node's own entry of sn 6 names both"
         );
     }
 
