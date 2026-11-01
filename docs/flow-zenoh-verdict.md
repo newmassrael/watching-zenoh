@@ -279,9 +279,9 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 48625 units; 0 framings lost in 576 directions held from
-  their start; 0 differing cookies in 601 echoes; 0 Init pairs of one kind in
-  603; 0 other versions in 1206 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 49505 units; 0 framings lost in 584 directions held from
+  their start; 0 differing cookies in 609 echoes; 0 Init pairs of one kind in
+  611; 0 other versions in 1222 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), 1.7.2, 1.8.0 and 1.9.0
   routers with the clients built from the same release, 1.10.0 and 1.9.0
@@ -306,17 +306,17 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +966 | +3546 | +2603 |
-| unit residual | -13987 | -12568 | -6745 |
-| unit undecoded | -13987 | -13098 | -7000 |
+| unit read whole | +967 | +3546 | +2603 |
+| unit residual | -14012 | -12594 | -6745 |
+| unit undecoded | -14012 | -13124 | -7000 |
 | stream framing held | +2838 | +6453 | (none) |
-| stream framing lost | -7591 | -7574 | (none) |
+| stream framing lost | -7611 | -7594 | (none) |
 | cookie matched (8 bytes) | +63993 | +63993 | +63999 |
-| cookie differing | -7652 | -7652 | -10000 |
+| cookie differing | -7671 | -7671 | -10000 |
 | Inits of opposite kinds | +993 | +993 | +999 |
-| Inits of one kind | -6657 | -6657 | -9000 |
+| Inits of one kind | -6676 | -6676 | -9000 |
 | version of this reader | +7996 | +7996 | +8000 |
-| another version | -8649 | -8649 | (none) |
+| another version | -8668 | -8668 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
@@ -406,7 +406,7 @@ KeepAlives in a row missing before it, which fits the lease; the packets of
 that capture alone do not say it.
 
 A frame that repeats its SN never counts toward `yes`: a unit read whole
-(+966) and a broken step (-3994) sum to -3028. On the `no` sum the two largely
+(+967) and a broken step (-3994) sum to -3027. On the `no` sum the two largely
 cancel (+3546 and -3994: the null side reads a unit whole about one time in
 twelve and a step breaks nearly always, a zenoh flow breaks a step one time in
 sixteen), a frame that does both being 1.4 times as likely under the null as
@@ -432,9 +432,9 @@ crossing rested on the unit weight the real mDNS beats.
 
 Every zenoh capture added since (the links above and the releases below) moved
 the counts and with them the weights, and the null captures moved with them. A
-residual or undecoded unit now weighs -13987 on the `yes` sum, and -12568 or
--13098 on the `no` sum: two units that no codec of this reader reads whole
-weigh -25136 or more there, past the threshold, where three were needed at
+residual or undecoded unit now weighs -14012 on the `yes` sum, and -12594 or
+-13124 on the `no` sum: two units that no codec of this reader reads whole
+weigh -25188 or more there, past the threshold, where three were needed at
 first (and two undecoded ones, but not two residual ones, after the SSH
 capture). So a flow of two such units, and nothing else weighed, reads `no`.
 `lan-dns` went from 2 `no` and 185 `undecided` to 174 `no` and 13 `undecided`,
@@ -563,9 +563,18 @@ All four read two `yes` flows and none of their 459 SN steps broke, so a
 release candidate of the 1.0.0 line speaks the wire this reader reads. They
 add 881 units and 8 handshakes.
 
-Still open after model 2: tags other
-than the plain releases and these two (the alpha and beta tags of 1.0.0, and
-the 0.x tags, whose wire may differ, which makes them a test of the foreign
-version weight and not of the `yes` side),
+**Beta and alpha.** The latest beta and the latest alpha of the same line,
+1.0.0-beta.4 and 1.0.0-alpha.6, were built and captured the same way. All four
+captures read two `yes` flows and none of their 460 SN steps broke: the wire of
+the 1.0.0 line did not change between alpha.6 and the release, as far as this
+reader looks. They add 880 units and 8 handshakes, and a unit read whole
+weighs one millibit more on the `yes` sum (+967), which moves the example sums
+of the session table, of the C header and of the C consumer by 3 to 10
+millibits.
+
+Still open after model 2: the other alpha and beta tags of 1.0.0 (alpha.2,
+alpha.4, alpha.5, beta.1 to beta.3) and the 0.x tags, whose wire may differ,
+which makes the 0.x tags a test of the foreign version weight and not of the
+`yes` side,
 a path that loses more than 1.8%, and the null side only on the protocols the
 corpus holds.

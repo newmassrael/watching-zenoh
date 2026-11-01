@@ -1872,7 +1872,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     // keep-alives carry no SN, the fixture's cookie is empty, and its TCP opens
     // without a SYN, so its framing is not weighed.
     let zenoh = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
-                 \"zenoh_evidence\":{\"log2_lr_millibits\":26645,\
+                 \"zenoh_evidence\":{\"log2_lr_millibits\":26655,\
                  \"log2_lr_no_millibits\":52445,\
                  \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,\
                  \"checks\":[{\"check\":\"init_roles\",\"strength\":\"handshake\",\
@@ -1882,7 +1882,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                  \"confirmed\":2,\"violated\":0,\"millibits\":15992,\"no_millibits\":15992,\
                  \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                  {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                 \"confirmed\":10,\"violated\":0,\"millibits\":9660,\"no_millibits\":35460,\
+                 \"confirmed\":10,\"violated\":0,\"millibits\":9670,\"no_millibits\":35460,\
                  \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
         "{{\"document\":{{\"name\":\"session_table\",\"revision\":6}},\"ok\":true,\
