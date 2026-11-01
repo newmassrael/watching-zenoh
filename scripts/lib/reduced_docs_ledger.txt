@@ -523,7 +523,6 @@ wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link 
 wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::set_max_reassembly_bytes`: the struct `SessionLinkActions` has no field or associated item named `set_max_reassembly_bytes`
 wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::tx_refusals`: no item named `session_actions` in module `wz_session_core`
 wz-session-core	wz-session-core/src/send_wire_error.rs	1	error[E0433]: cannot find `link` in `crate`: could not find `link` in the crate root
-wz-session-core	wz-session-core/src/session_actions.rs	1	error: public documentation for `send_plain_put_qos` links to private item `Self::dispatch_network_message`: this item is private
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `DeclarationCache::generation`: no item named `DeclarationCache` in scope
 wz-session-core	wz-session-core/src/session_actions.rs	2	error: unresolved link to `DeclareOwned`: no item named `DeclareOwned` in scope
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `RequestQueryBuilder`: no item named `RequestQueryBuilder` in scope

@@ -190,7 +190,7 @@ fn write_qos_ext(
 ///
 /// R311y215 — `ext_qos` carries the Frame's QoS priority (`Some` iff a QoS
 /// session sends a non-DEFAULT priority; see
-/// [`crate::session_actions::SessionLinkActions::dispatch_network_message`]).
+/// [`crate::session_actions::SessionLinkActions::dispatch_network_message_at`]).
 /// When present the header gains `FLAG_T_Z` and a single z64 ext_qos
 /// (`[0x31][VLE(priority)]`, [`write_qos_ext`]) is written between `VLE(sn)` and
 /// the payload — zenoh `frame::ext::QoS`, written only when `!= DEFAULT`
@@ -464,7 +464,7 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
 
 /// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
 /// (c3d) floods a self-built OAM carrier through the same
-/// `dispatch_network_message` chokepoint as the data-plane senders. Same
+/// `dispatch_network_message_at` chokepoint as the data-plane senders. Same
 /// `try_as_borrowed().encode(sink)` projection as [`push_body`]. Co-gated on
 /// `codec-push` (the send path it feeds), so an encode-only `codec-linkstate`
 /// build does not compile this orphaned.

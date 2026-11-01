@@ -61,7 +61,7 @@
 //!   post-compression, RX pre-decompression — so both are on-the-wire totals,
 //!   which is the zenoh `tx_bytes` / `rx_bytes` parity point.
 //! - **Network (`n_msgs`, the payload counters)** — the `session_actions`
-//!   module's `dispatch_network_message`, the single TX chokepoint all seven
+//!   module's `dispatch_network_message_at`, the single TX chokepoint all seven
 //!   typed `dispatch_*` wrappers land on, and the RX twin
 //!   [`inc_rx_network`](crate::stats::TransportStats::inc_rx_network) driven
 //!   from the `drive` module's frame-payload walk. Each TX wrapper hands down a
@@ -82,7 +82,7 @@
 //!
 //! Re-measured against wz's own emit structure, that premise is false. wz's
 //! batching accumulates NETWORK messages into ONE Frame (the `session_actions`
-//! module's `dispatch_network_message`, whose `batch.active` arm appends into a
+//! module's `dispatch_network_message_at`, whose `batch.active` arm appends into a
 //! single staged buffer), and a fragment chain emits each chunk through its own
 //! `send_wire` (that module's `emit_frame_or_fragments`). Every wire write is
 //! therefore exactly ONE transport message — a Frame, a Fragment, or a
@@ -394,7 +394,7 @@ impl MessageLabel {
 }
 
 /// How one network message counts — the parameter every TX sender hands the
-/// `dispatch_network_message` chokepoint, and the RX walk hands
+/// `dispatch_network_message_at` chokepoint, and the RX walk hands
 /// [`TransportStats::inc_rx_network`].
 ///
 /// A CONTROL-plane message (Declare / Interest / OAM / ResponseFinal) has no
@@ -710,7 +710,7 @@ impl TransportStats {
         self.rx.t_msgs.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count one outbound NETWORK message — the `dispatch_network_message`
+    /// Count one outbound NETWORK message — the `dispatch_network_message_at`
     /// chokepoint, which takes the class from its typed caller.
     #[inline]
     pub fn inc_tx_network(&self, class: &NetworkStatsClass) {

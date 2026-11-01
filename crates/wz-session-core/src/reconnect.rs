@@ -18,7 +18,7 @@
 //!   recorded it. pico caches the encoded `_z_network_message_t`; wz caches
 //!   the *pre-encode* arguments and re-runs the same builder at replay time
 //!   because the transport envelope (Frame SN) is minted per send by the
-//!   `dispatch_network_message` chokepoint (R311jq) — replaying stored wire
+//!   `dispatch_network_message_at` chokepoint (R311jq) — replaying stored wire
 //!   bytes would replay a stale SN.
 //! - [`SwappableLink`] is the transport-replacement seam: the
 //!   `SessionLinkActions::driver`

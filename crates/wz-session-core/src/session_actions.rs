@@ -226,7 +226,7 @@ use crate::declare::local_token::build_token_reply;
 // pulls `declare-final` and reaches no builder).
 // R2386 — the SAME claim survived in this file's TWELVE OTHER `any(..)` gates,
 // which R311y350 did not sweep: the send plumbing (`send_wire`, `emit_on_link`,
-// `select_link`, `session_send_available`, `dispatch_network_message`,
+// `select_link`, `session_send_available`, `dispatch_network_message_at`,
 // `emit_frame_or_fragments`, `FrameEmit`, the fragment-credit taker and the two
 // outbound `Declare` match arms) each listed `declare-final` as a feature that
 // ORIGINATES an outbound message. None of them did after 138f842 — the deletion
@@ -674,11 +674,11 @@ impl<R: SessionRuntime> TxConduits<R> {
     ///
     /// Without `transport-qos` there is one conduit and every priority indexes
     /// it. The same holds inside a `transport-qos` build on a session that did
-    /// NOT negotiate QoS, because `SessionLinkActions::dispatch_network_message`
+    /// NOT negotiate QoS, because `SessionLinkActions::dispatch_network_message_at`
     /// forces `Priority::DEFAULT` there before reaching this seam.
     ///
     /// Gated on the union of its two callers' gates: the emit chokepoint's
-    /// (`dispatch_network_message`) and the batch drain's.
+    /// (`dispatch_network_message_at`) and the batch drain's.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1758,7 +1758,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
-    /// every `Self::dispatch_network_message` call flushes
+    /// every `Self::dispatch_network_message_at` call flushes
     /// immediately, the pre-A3 behavior. `Self::batch_start` activates
     /// accumulation; see [`BatchTx`] for the buffer shape — the
     /// absorb/overflow state machine lives in the chokepoint itself
@@ -2117,7 +2117,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// or the reconnect supervisor tears the transport down for re-dial
     /// ([`SessionLinkActions::reset_for_reopen`]), `true` again when Established
     /// (re-)enters (`record_established_at`). The
-    /// `SessionLinkActions::dispatch_network_message` chokepoint gates on it
+    /// `SessionLinkActions::dispatch_network_message_at` chokepoint gates on it
     /// so a data send inside the RECONNECTING window rejects typed
     /// ([`SendWireError::TransportUnavailable`]) instead of silently
     /// vanishing into a dead writer channel — zenoh-pico's tx path fails
@@ -2482,7 +2482,7 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
 /// would have run: the job is owned for the reason upstream owns its message
 /// before `spawn_blocking` (`NetworkMessageExt::to_owned(&msg)`), and carrying
 /// the bytes rather than a typed message keeps ONE chokepoint — the session's
-/// private `dispatch_network_message` — for every kind a session
+/// private `dispatch_network_message_at` — for every kind a session
 /// sends. Opaque to the runtime, which only passes it back to
 /// [`SessionLinkActions::run_block_first_job`].
 ///
@@ -2519,7 +2519,7 @@ pub struct BlockFirstJob {
     body: alloc::vec::Vec<u8>,
 }
 
-/// R2952 — which pass through [`SessionLinkActions::dispatch_network_message`]
+/// R2952 — which pass through [`SessionLinkActions::dispatch_network_message_at`]
 /// a message is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(any(
@@ -2798,7 +2798,7 @@ pub type ReplyEgressGate =
 ///
 /// Grouped rather than passed as six positional arguments: they are ONE
 /// decision's inputs, they are resolved together at the top of
-/// `dispatch_network_message` (before the conduit lock is taken), and they travel
+/// `dispatch_network_message_at` (before the conduit lock is taken), and they travel
 /// together to both call sites. All `Copy`, so the grouping is free.
 ///
 /// Carries the SAME feature gate as
@@ -3018,14 +3018,17 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
             return;
         };
         let qos = parts.qos;
-        let _ = self.dispatch_network_message(
-            qos.priority(),
-            /*reliable=*/ true,
-            qos,
-            wz_codecs::response::Response::MAX_ENCODED_BYTES,
-            crate::stats::NetworkStatsClass::unread(),
-            |sink| writer.encode_tx(sink),
-        );
+        let _ = self
+            .dispatch_network_message_at(
+                DispatchStage::Fresh,
+                qos.priority(),
+                /*reliable=*/ true,
+                qos,
+                wz_codecs::response::Response::MAX_ENCODED_BYTES,
+                crate::stats::NetworkStatsClass::unread(),
+                as_encoder(&|sink| writer.encode_tx(sink)),
+            )
+            .map(|_| ());
         #[cfg(feature = "transport-batching")]
         if qos.is_express() {
             self.flush_open_batch();
@@ -3111,14 +3114,17 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     // `ext_qos` reads as).
     #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        let _ = self.dispatch_network_message(
-            Priority::Control,
-            /*reliable=*/ true,
-            crate::sample::QosLevel::DEFAULT,
-            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
-            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-            |sink| build_token_reply(token_id, keyexpr, interest_id).encode(sink),
-        );
+        let _ = self
+            .dispatch_network_message_at(
+                DispatchStage::Fresh,
+                Priority::Control,
+                /*reliable=*/ true,
+                crate::sample::QosLevel::DEFAULT,
+                wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+                crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+                as_encoder(&|sink| build_token_reply(token_id, keyexpr, interest_id).encode(sink)),
+            )
+            .map(|_| ());
     }
     #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
@@ -4663,7 +4669,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the core owns
     /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `if msg.congestion_control() == CongestionControl::BlockFirst {`).
     ///
-    /// Called by [`Self::dispatch_network_message`] for a `BlockFirst` message
+    /// Called by [`Self::dispatch_network_message_at`] for a `BlockFirst` message
     /// once the session has a link to send on. Answers `false` when the caller
     /// is to send the message NOW: this session has no hand-off (a runtime
     /// without a second thread, which sends block-first as blocking). Answers
@@ -5677,7 +5683,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `mtu = min(link MTU, negotiated batch_size)` where the
     /// negotiated value is `min(own, peer)` (unicast/transport.c:47-49
     /// sizes the TX wbuf to exactly that). Closes the R311jm carry —
-    /// before this, `dispatch_network_message` sized against the LOCAL
+    /// before this, `dispatch_network_message_at` sized against the LOCAL
     /// advertisement only and a frame could exceed what the peer's RX
     /// buffer accepts.
     ///
@@ -5769,7 +5775,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The configured reassembly cap, or `usize::MAX` when the host declared
     /// none. Resolved BEFORE the conduit lock is taken by
-    /// `Self::dispatch_network_message`, for the same disjoint-mutex
+    /// `Self::dispatch_network_message_at`, for the same disjoint-mutex
     /// discipline `negotiated_batch_mtu` / `negotiated_sn_mask` follow.
     #[cfg(feature = "transport-fragmentation")]
     pub fn max_reassembly_bytes(&self) -> usize {
@@ -7008,7 +7014,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (the session is up while ≥1 link is live — a dead link fails over); for a
     /// SINGLE-link session (empty set) it is this binding's own `self.link` F2
     /// gate, byte-identical to the pre-multilink behavior. Read on the data send
-    /// hot path ([`Self::dispatch_network_message`]) — gated on the SAME codec
+    /// hot path ([`Self::dispatch_network_message_at`]) — gated on the SAME codec
     /// union as its sole caller so a minimal subset build (no data-send codec)
     /// does not carry it as dead code under `-D warnings`.
     #[cfg(all(
@@ -7749,7 +7755,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// transport-lowlatency — the negotiated lowlatency capability for this
-    /// session. Read by the lean tx seam (`Self::dispatch_network_message`)
+    /// session. Read by the lean tx seam (`Self::dispatch_network_message_at`)
     /// and the lean rx seam ([`crate::drive::dispatch_link_event`]); true only
     /// when BOTH peers offered the ext.
     #[cfg(feature = "transport-lowlatency")]
@@ -9430,79 +9436,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.outbound_frame_sn.mint(priority, reliable, sn_mask)
     }
 
-    /// Transport-framing chokepoint for every outbound network message —
-    /// zenoh-pico `_z_transport_tx_send_n_msg_inner` parity
-    /// (`src/transport/common/tx.c`). The chokepoint OWNS the frame
-    /// sequence number (R311jq): SNs are frame-scoped, minted only when a
-    /// frame opens, so batching never burns SNs on appended messages and
-    /// the wire SN cadence stays inside the peer's `_z_sn_precedes`
-    /// half-window whatever the batch length (zenoh-pico
-    /// `src/transport/utils.c:80` — `distance <= half(window)`; the
-    /// R311jp message-scoped mint could exceed it at small
-    /// `seq_num_res`). Senders hand a per-type body encoder
-    /// (`crate::frame_encode::*_body`) plus the codec's worst-case bound;
-    /// the chokepoint decides framing:
-    ///
-    /// ```text
-    ///   batching active → absorb into the open frame under the batch
-    ///                     lock (open / append / overflow-reopen /
-    ///                     oversize — all emits inside the lock so
-    ///                     concurrent senders cannot reorder frames)
-    ///   otherwise       → mint SN, encode one frame, emit (fragmenting
-    ///                     on MTU overflow per transport-fragmentation)
-    /// ```
-    ///
-    /// Compiled iff a network-message sender routes through it. This is the
-    /// wire-emit feature union (cf. the `Reliability` import) MINUS the three
-    /// handshake-only codecs (codec-init/open/close): INIT/OPEN/CLOSE carry no
-    /// frame sequence number and are never fragmented, so they keep their own
-    /// direct emit. Keep in sync with the routed `send_*` methods — every
-    /// `dispatch_*` typed wrapper (push / response / response-final /
-    /// request / declare / interest) lands here.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_network_message<P>(
-        &self,
-        priority: Priority,
-        reliable: bool,
-        // R2923 — the message's congestion control, off its own ext_qos:
-        // `Drop` may be dropped when its conduit's link is congested, `Block`
-        // waits and closes the session if the link never frees.
-        //
-        // R2952 — the whole `ext_qos`, not only its congestion control: a
-        // `BlockFirst` message's slot is keyed by its own priority.
-        qos: crate::sample::QosLevel,
-        worst_case_payload: usize,
-        stats_class: crate::stats::NetworkStatsClass,
-        encode_body: P,
-    ) -> Result<(), SendWireError>
-    where
-        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
-    {
-        self.dispatch_network_message_at(
-            DispatchStage::Fresh,
-            priority,
-            reliable,
-            qos,
-            worst_case_payload,
-            stats_class,
-            as_encoder(&encode_body),
-        )
-        // Only a probe can end in `NoRoom`, and this is not one.
-        .map(|_| ())
-    }
-
     /// R311y215 (transport-qos) / R3122 -- the EFFECTIVE priority a message is routed on: the
     /// caller's when this session negotiated QoS, else forced to DEFAULT (a non-QoS session has
     /// one conduit and writes no ext_qos). Without `transport-qos` the priority passes straight
@@ -9535,8 +9468,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// [`Self::dispatch_network_message`] at a given [`DispatchStage`]: a
-    /// block-first message's background push re-enters here as `Scheduled`
+    /// Transport-framing chokepoint for every outbound network message —
+    /// zenoh-pico `_z_transport_tx_send_n_msg_inner` parity
+    /// (`src/transport/common/tx.c`). The chokepoint OWNS the frame
+    /// sequence number (R311jq): SNs are frame-scoped, minted only when a
+    /// frame opens, so batching never burns SNs on appended messages and
+    /// the wire SN cadence stays inside the peer's `_z_sn_precedes`
+    /// half-window whatever the batch length (zenoh-pico
+    /// `src/transport/utils.c:80` — `distance <= half(window)`; the
+    /// R311jp message-scoped mint could exceed it at small
+    /// `seq_num_res`). Senders hand a per-type body encoder
+    /// (`crate::frame_encode::*_body`) plus the codec's worst-case bound;
+    /// the chokepoint decides framing:
+    ///
+    /// ```text
+    ///   batching active → absorb into the open frame under the batch
+    ///                     lock (open / append / overflow-reopen /
+    ///                     oversize — all emits inside the lock so
+    ///                     concurrent senders cannot reorder frames)
+    ///   otherwise       → mint SN, encode one frame, emit (fragmenting
+    ///                     on MTU overflow per transport-fragmentation)
+    /// ```
+    ///
+    /// Compiled iff a network-message sender routes through it. This is the
+    /// wire-emit feature union (cf. the `Reliability` import) MINUS the three
+    /// handshake-only codecs (codec-init/open/close): INIT/OPEN/CLOSE carry no
+    /// frame sequence number and are never fragmented, so they keep their own
+    /// direct emit. Keep in sync with the routed `send_*` methods — every
+    /// `dispatch_*` typed wrapper (push / response / response-final /
+    /// request / declare / interest) lands here.
+    ///
+    /// Every sender names its [`DispatchStage`]: a send of its own is `Fresh`
+    /// (only a `Probe` can end in [`Dispatched::NoRoom`]), and a block-first
+    /// message's background push re-enters here as `Scheduled`
     /// ([`Self::run_block_first_job`]), which is neither observed again nor
     /// scheduled again.
     #[cfg(any(
@@ -9563,6 +9527,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         stage: DispatchStage,
         priority: Priority,
         reliable: bool,
+        // R2923 — the message's congestion control, off its own ext_qos:
+        // `Drop` may be dropped when its conduit's link is congested, `Block`
+        // waits and closes the session if the link never frees.
+        //
+        // R2952 — the whole `ext_qos`, not only its congestion control: a
+        // `BlockFirst` message's slot is keyed by its own priority.
         qos: crate::sample::QosLevel,
         worst_case_payload: usize,
         _stats_class: crate::stats::NetworkStatsClass,
@@ -10461,7 +10431,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let reliability = Reliability::from_reliable_bool(reliable);
         // The conduit the follow-on SNs reserve on IS the frame's conduit:
         // `ext_qos = Some(p)` iff the effective priority `p != DEFAULT`
-        // (dispatch_network_message), and a DEFAULT frame carries `None`,
+        // (dispatch_network_message_at), and a DEFAULT frame carries `None`,
         // so `ext_qos.unwrap_or(DEFAULT)` reconstructs the effective
         // priority exactly (no separate param — keeps the arg count sane).
         let priority = ext_qos.unwrap_or(Priority::DEFAULT);
@@ -10932,7 +10902,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R311jq — typed chokepoint entries: each hands its per-type body
     /// encoder (`crate::frame_encode::*_body`, the single home of the
-    /// encode projection) to [`Self::dispatch_network_message`], which
+    /// encode projection) to [`Self::dispatch_network_message_at`], which
     /// owns the frame SN. cfg = the union of the routed `send_*` callers
     /// (a build where no caller exists must not carry the dead symbol).
     #[cfg(feature = "codec-push")]
@@ -10944,7 +10914,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         let class = self.outbound_push_class(&push);
-        self.dispatch_network_message(
+        self.dispatch_network_message_at(
+            DispatchStage::Fresh,
             priority,
             reliable,
             // R2923 — every arm's congestion control comes off the message's
@@ -10954,8 +10925,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // What THIS message can encode to, and not the codec's reserve hint for any message.
             crate::frame_encode::push_capacity_hint(&push),
             class,
-            crate::frame_encode::push_body(&push),
+            as_encoder(&crate::frame_encode::push_body(&push)),
         )
+        .map(|_| ())
     }
 
     /// [`Self::dispatch_push`] at a given stage, borrowing the message: a probe that finds no
@@ -11403,7 +11375,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// band off its own `ext_qos` in `dispatch_response`), so a non-DEFAULT
     /// priority reaching a non-Push message is inert rather than mis-banded. A
     /// non-QoS session further clamps `priority` back to DEFAULT downstream in
-    /// [`Self::dispatch_network_message`] (`is_qos()` gate), so the twin is a no-op
+    /// [`Self::dispatch_network_message_at`] (`is_qos()` gate), so the twin is a no-op
     /// on every build that has not negotiated per-priority conduits.
     #[cfg(any(
         feature = "codec-push",
@@ -11665,14 +11637,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     ))]
     fn dispatch_declare_lent(&self, what: &LentDeclaration<'_>) -> Result<(), SendWireError> {
-        self.dispatch_network_message(
+        self.dispatch_network_message_at(
+            DispatchStage::Fresh,
             Priority::Control,
             /*reliable=*/ true,
             crate::declare_ext_qos::QOS_DECLARE,
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-            |sink| what.declare().encode(sink),
+            as_encoder(&|sink| what.declare().encode(sink)),
         )
+        .map(|_| ())
     }
 
     /// See [`Self::dispatch_push`]. The OAM-LINKSTATE TX path (c3d
@@ -11683,10 +11657,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// multi-node flood fragments correctly — PROVIDED `transport-fragmentation`
     /// is on, which the `routing-peer` feature PULLS (R311rd); without it an
     /// oversize OAM is dropped at the `u16` stream guard. Co-gated on
-    /// `codec-push`: the OAM TX rides the `dispatch_network_message` send
+    /// `codec-push`: the OAM TX rides the `dispatch_network_message_at` send
     /// infrastructure the data plane brings (`routing-peer` pulls codec-push), so
     /// `codec-linkstate` alone — an encode-only build — does not pull this
-    /// send path (which would orphan it without `dispatch_network_message`).
+    /// send path (which would orphan it without `dispatch_network_message_at`).
     #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
     #[cfg(feature = "alloc")]
     fn dispatch_oam(
@@ -11736,15 +11710,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         request: crate::wire::RequestOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        let class = self.outbound_request_class(&request);
-        self.dispatch_network_message(
+        self.dispatch_request_at(DispatchStage::Fresh, &request, reliable)
+            // Only a probe can end in `NoRoom`, and this is not one.
+            .map(|_| ())
+    }
+
+    /// [`Self::dispatch_request`] at a stage, borrowing the message so that a probe that finds no
+    /// room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    #[cfg(feature = "codec-request")]
+    #[cfg(feature = "alloc")]
+    fn dispatch_request_at(
+        &self,
+        stage: DispatchStage,
+        request: &crate::wire::RequestOwned,
+        reliable: bool,
+    ) -> Result<Dispatched, SendWireError> {
+        let class = self.outbound_request_class(request);
+        let encode_body = crate::frame_encode::request_body(request);
+        self.dispatch_network_message_at(
+            stage,
             // Request/Response = the data plane; zenoh default `Priority::Data`.
             Self::REQUEST_ROUTE_PRIORITY,
             reliable,
-            crate::declare_ext_qos::read_request_qos(&request),
+            crate::declare_ext_qos::read_request_qos(request),
             wz_codecs::request::Request::MAX_ENCODED_BYTES,
             class,
-            crate::frame_encode::request_body(&request),
+            as_encoder(&encode_body),
         )
     }
 
@@ -11757,7 +11748,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         response: crate::wire::ResponseOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        let class = self.outbound_response_class(&response);
+        self.dispatch_response_at(DispatchStage::Fresh, &response, reliable)
+            // Only a probe can end in `NoRoom`, and this is not one.
+            .map(|_| ())
+    }
+
+    /// [`Self::dispatch_response`] at a stage, borrowing the message so that a probe that finds
+    /// no room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]). The
+    /// express flush follows only a response that left.
+    #[cfg(feature = "codec-response")]
+    #[cfg(feature = "alloc")]
+    fn dispatch_response_at(
+        &self,
+        stage: DispatchStage,
+        response: &crate::wire::ResponseOwned,
+        reliable: bool,
+    ) -> Result<Dispatched, SendWireError> {
+        let class = self.outbound_response_class(response);
         // R2594 — the band and the express bit come off the Response ITSELF,
         // not a constant chosen here. A queryable's reply carries its query's
         // QoS and a relayed Response carries whatever its sender stamped, so
@@ -11768,22 +11775,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // was `Priority::DEFAULT` for every reply, so a `RealTime` query was
         // answered in the `Data` band. A non-QoS session still clamps the band
         // downstream.
-        let qos = crate::declare_ext_qos::read_response_qos(&response);
-        self.dispatch_network_message(
+        let qos = crate::declare_ext_qos::read_response_qos(response);
+        let encode_body = crate::frame_encode::response_body(response);
+        let ended = self.dispatch_network_message_at(
+            stage,
             qos.priority(),
             reliable,
             qos,
             wz_codecs::response::Response::MAX_ENCODED_BYTES,
             class,
-            crate::frame_encode::response_body(&response),
+            as_encoder(&encode_body),
         )?;
         // Express drains the open batch window, as the Push arm does for an
-        // express publish.
+        // express publish; only after a response that left.
         #[cfg(feature = "transport-batching")]
-        if qos.is_express() {
+        if qos.is_express() && ended == Dispatched::Sent {
             self.flush_open_batch();
         }
-        Ok(())
+        Ok(ended)
     }
 
     /// See [`Self::dispatch_push`].
@@ -12067,7 +12076,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// extension chain, and the `Box` the network message travels in), which was the larger
     /// part of what a publish cost before the frame reached a buffer.
     ///
-    /// The send is [`Self::dispatch_network_message`]'s, so the congestion control, the
+    /// The send is `Self::dispatch_network_message_at`'s, so the congestion control, the
     /// batching window, the express flush and the fragmentation of an oversize payload are
     /// the owned message's. `qos` is what [`crate::declare_ext_qos::read_push_qos`] reads off
     /// the owned message's extension; a build without `pubsub-qos` writes none and reads the
@@ -12109,14 +12118,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             });
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
-        let sent = self.dispatch_network_message(
-            priority,
-            reliable,
-            qos,
-            wz_codecs::push::Push::MAX_ENCODED_BYTES,
-            class,
-            |sink| crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos),
-        );
+        let sent = self
+            .dispatch_network_message_at(
+                DispatchStage::Fresh,
+                priority,
+                reliable,
+                qos,
+                wz_codecs::push::Push::MAX_ENCODED_BYTES,
+                class,
+                as_encoder(&|sink| {
+                    crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
+                }),
+            )
+            .map(|_| ());
         if let Err(error) = sent {
             return Some(Err(error));
         }
@@ -12165,7 +12179,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             );
             #[cfg(not(feature = "transport-stats"))]
             let class = crate::stats::NetworkStatsClass::unread();
-            self.dispatch_network_message(
+            self.dispatch_network_message_at(
+                DispatchStage::Fresh,
                 priority,
                 reliable,
                 // A Put built here carries no extension, so no `ext_qos`: the
@@ -12173,10 +12188,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::sample::QosLevel::DEFAULT,
                 wz_codecs::push::Push::MAX_ENCODED_BYTES,
                 class,
-                // The borrowed composition the multicast TX of a build with no
+                as_encoder(
+                    &// The borrowed composition the multicast TX of a build with no
                 // allocator encodes too (`multicast_tx::MulticastTxPut`).
                 |sink| crate::lent_push::literal_put(keyexpr_suffix, value).encode(sink),
+                ),
             )
+            .map(|_| ())
         }
         #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
         {
@@ -12386,13 +12404,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             use wz_codecs::push::{Push, PushVariant};
             use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
             use wz_codecs::wireexpr_local::WireexprLocal;
-            self.dispatch_network_message(
+            self.dispatch_network_message_at(
+                DispatchStage::Fresh,
                 Priority::DEFAULT,
                 reliable,
                 crate::sample::QosLevel::DEFAULT,
                 wz_codecs::push::Push::MAX_ENCODED_BYTES,
                 crate::stats::NetworkStatsClass::unread(),
-                |sink| {
+                as_encoder(&|sink| {
                     Push {
                         header: wz_codecs::wire_const::N_MID_PUSH | 0x20,
                         keyexpr: Wireexpr {
@@ -12409,8 +12428,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         }),
                     }
                     .encode(sink)
-                },
+                }),
             )
+            .map(|_| ())
         }
         #[cfg(all(feature = "codec-push", feature = "alloc"))]
         {
@@ -14026,14 +14046,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             SendWireError::Codec(sce_forge_runtime::codec::CodecError::PresentIfMismatch)
         })?;
         let qos = parts.qos;
-        self.dispatch_network_message(
+        self.dispatch_network_message_at(
+            DispatchStage::Fresh,
             qos.priority(),
             /*reliable=*/ true,
             qos,
             wz_codecs::request::Request::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::unread(),
-            |sink| writer.encode(sink),
-        )?;
+            as_encoder(&|sink| writer.encode(sink)),
+        )
+        .map(|_| ())?;
         #[cfg(feature = "transport-batching")]
         if qos.is_express() {
             self.flush_open_batch();
@@ -14135,14 +14157,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // it: on the band its own `ext_qos` names, as control plane.
         #[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
         {
-            let _ = self.dispatch_network_message(
-                qos.priority(),
-                /*reliable=*/ true,
-                qos,
-                wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
-                crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
-                |sink| crate::lent_control::response_final(request_id, qos).encode(sink),
-            );
+            let _ = self
+                .dispatch_network_message_at(
+                    DispatchStage::Fresh,
+                    qos.priority(),
+                    /*reliable=*/ true,
+                    qos,
+                    wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+                    crate::stats::NetworkStatsClass::control(
+                        crate::stats::MessageLabel::ResponseFinal,
+                    ),
+                    as_encoder(&|sink| {
+                        crate::lent_control::response_final(request_id, qos).encode(sink)
+                    }),
+                )
+                .map(|_| ());
         }
         #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
         {

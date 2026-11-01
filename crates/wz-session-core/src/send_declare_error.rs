@@ -229,7 +229,7 @@ impl From<CodecError> for SendDeclareError {
 }
 
 // F2 — chokepoint-error projection: the declare-plane senders route
-// through the same `dispatch_network_message` gate as the wire senders,
+// through the same `dispatch_network_message_at` gate as the wire senders,
 // so its `SendWireError` rejects must arrive typed on the declare
 // surface (variant-for-variant; both enums append-order their tails).
 impl From<crate::send_wire_error::SendWireError> for SendDeclareError {
