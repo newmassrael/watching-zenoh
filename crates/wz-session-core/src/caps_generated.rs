@@ -61,6 +61,7 @@ pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
     limit(option_env!("WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"), 1000000);
 pub(super) const TX_EXPIRY_CLOSE_AFTER: usize =
     limit(option_env!("WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"), 0);
+pub(super) const PICO_TX_QUEUE_SIZE: usize = limit(option_env!("WZ_LIMIT_PICO_TX_QUEUE_SIZE"), 8);
 pub(super) const SNAPSHOT_PERIOD_MS: usize =
     limit(option_env!("WZ_LIMIT_SNAPSHOT_PERIOD_MS"), 1000);
 pub(super) const SNAPSHOT_HISTOGRAM_BUCKETS: usize =

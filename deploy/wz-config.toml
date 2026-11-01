@@ -1995,6 +1995,23 @@ closes the session, which is the policy as it was before this limit. At most
 '''
 
 [[limit]]
+id = "PICO_TX_QUEUE_SIZE"
+kconfig = "WZ_LIMIT_PICO_TX_QUEUE_SIZE"
+default = 8
+help = '''
+How many batches each priority's outbound queue holds for the pico C ABI, in
+1 to 16 (upstream's range for a queue size; a value outside it counts as the
+nearest end). zenoh-pico has no bounded queue: a put writes on the calling
+thread. The queue of this runtime is written by a second thread, and a lane
+of two batches (upstream's default) holds four frames of 1 KiB, so the sender
+and the writer wait for each other after every four. On the bench host the
+no-drop rate of 1 KiB puts to a pico peer was 300 k a second with 2, 520 k
+with 4, 960 k with 8 and 920 k with 16. The queue is a bound and not an
+allocation: a frame takes heap only while it is queued, so a larger value
+costs memory only under a peer that does not drain.
+'''
+
+[[limit]]
 id = "SNAPSHOT_PERIOD_MS"
 kconfig = "WZ_LIMIT_SNAPSHOT_PERIOD_MS"
 default = 1000

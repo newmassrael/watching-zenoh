@@ -116,7 +116,43 @@ kernel) share one SMT pair. With the publisher given two physical cores (CPUs 6,
 
 so wz to wz passes pico at 2048 B (the three repetitions read 220 k, 175 k and 220 k, a spread of
 more than one search step), while wz to pico stays 11 percent behind and 1 KiB stays 11 to 17
-percent behind: the placement does not explain those two cells, and neither has a reading yet.
+percent behind: the placement does not explain those two cells. The next paragraph reads them.
+
+**The depth of the lane, not the write, bounded those two cells.** Sampling the stacks of the
+publisher at 1 KiB and 290,000 a second (150 samples under a debugger), the putting thread was in
+`wait_for_room` in 126 and the writer thread in `epoll_wait` in 148: the pico lane held two batches
+(4,096 bytes), so four 1 KiB frames filled it and the sender and the writer then waited for each
+other after every four frames, bound by the wake latency of a futex and an eventfd. The lane's depth
+is now the limit `PICO_TX_QUEUE_SIZE` (`WZ_LIMIT_PICO_TX_QUEUE_SIZE`, default 8, in upstream's
+`1..=16` for a queue size); `TxQueueConf::default()` keeps upstream's 2, and only the pico C ABI
+on the tokio engine reads it (the lwip and MCU paths do not). Measured on the publisher pinned to
+two physical cores, 1 KiB, wz to wz / wz to pico (msg/s):
+
+| lane size | wz to wz | wz to pico |
+|---|---|---|
+| 2 | 320 k | 300 k |
+| 4 | 540 k | 520 k |
+| 8 | 560 k | 960 k |
+| 16 | 560 k | 920 k |
+
+pico to pico read 350 k to 360 k. Eight is the knee; wz to wz stops at 560 k because the wz
+subscriber is the next bottleneck. With the limit at its default, at the default pinning (median of
+three, pc3, msg/s):
+
+| size | pico to pico | wz to wz | wz to pico | pico to wz |
+|---|---|---|---|---|
+| 8 B | 370 k | 5.12 M | 4.80 M | 400 k |
+| 64 B | 380 k | 4.48 M | 4.32 M | 400 k |
+| 1024 B | 360 k | 560 k | 920 k | 360 k |
+| 2048 B | 180 k | 230 k | 480 k | 190 k |
+
+The small sizes did not move (8 B and 64 B read as before within one search step), and 1 KiB and
+2048 B are ahead of pico from wz's side, so the 11 to 17 percent gap above is closed under this
+setting. What this does not say: the figure is the throughput of one host over loopback, with no
+latency reading; the wz side spends about 27 percent more CPU than pico for the same rate (the user
+time is about five times pico's) and two threads where pico has one; a lane now holds up to eight
+batches of heap while frames are queued; and pico to wz reads a tie with pico to pico
+(360 k at 1 KiB, 190 k at 2048 B), because pico's publisher is what bounds it.
 
 - **Host to host, the same build's text differs.** The same pico-client build read
   1,794,606 bytes on the development host, 1,827,441 on the bench host and 1,833,173 on

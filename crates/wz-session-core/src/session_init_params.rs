@@ -370,6 +370,21 @@ const fn build_expiry_close_after() -> u16 {
     }
 }
 
+/// `PICO_TX_QUEUE_SIZE` as the size of a queue: upstream's `MIN_SIZE..=MAX_SIZE`, the nearest end
+/// for a limit outside it, so that a build which states one cannot make the configuration the
+/// session refuses at `validate`.
+const fn build_pico_queue_size() -> usize {
+    use crate::link::TxQueueShape;
+    let size = crate::caps::PICO_TX_QUEUE_SIZE;
+    if size < TxQueueShape::MIN_SIZE {
+        TxQueueShape::MIN_SIZE
+    } else if size > TxQueueShape::MAX_SIZE {
+        TxQueueShape::MAX_SIZE
+    } else {
+        size
+    }
+}
+
 impl Default for TxQueueConf {
     fn default() -> Self {
         Self {
@@ -430,9 +445,13 @@ impl TxQueueConf {
     /// the close deadline: the sender waits for the writer as pico's would wait
     /// for the socket, and a peer that never drains is still bounded by
     /// `wait_before_close`.
+    ///
+    /// The queue holds `PICO_TX_QUEUE_SIZE` batches per priority and not upstream's two: a put of
+    /// pico writes on its own thread, where here a second thread writes, and a lane of four
+    /// frames of 1 KiB made the two wait for each other after every four.
     pub const fn pico() -> Self {
         Self {
-            sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
+            sizes: [build_pico_queue_size(); crate::qos::Priority::NUM],
             wait_before_drop_us: WAIT_BEFORE_CLOSE_US,
             max_wait_before_drop_fragments_us: 0,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
@@ -594,6 +613,23 @@ mod no_progress_tests {
         assert!(!TxQueueConf::pico().expiry_keeps_session);
         assert_eq!(TxQueueConf::default().expiry_close_after, 0);
         assert_eq!(TxQueueConf::pico().expiry_close_after, 0);
+    }
+
+    /// The pico ABI's queue is the declared `PICO_TX_QUEUE_SIZE` for every priority, upstream's
+    /// range holds it, and every other configuration keeps upstream's default of two.
+    #[test]
+    fn the_pico_queue_is_the_declared_size_and_the_rest_keep_upstreams_default() {
+        let pico = TxQueueConf::pico();
+        let size = crate::caps::PICO_TX_QUEUE_SIZE.clamp(
+            crate::link::TxQueueShape::MIN_SIZE,
+            crate::link::TxQueueShape::MAX_SIZE,
+        );
+        assert!(pico.sizes.iter().all(|&s| s == size));
+        assert_eq!(pico.validate(), Ok(()));
+        assert!(TxQueueConf::default()
+            .sizes
+            .iter()
+            .all(|&s| s == crate::link::TxQueueShape::DEFAULT_SIZE));
     }
 
     /// The window is held against the total wait: none, zero and past-the-total are refused,
