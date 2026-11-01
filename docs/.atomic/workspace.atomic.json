@@ -304408,6 +304408,38 @@
         "Not measured: latency with the deeper lane, a host other than pc3, a zenoh or zenoh-c counterpart of the host table, the batched row (zp_batch) after the write bound and this depth, and the heap a lane holds at eight batches under many sessions. wz to wz at 1 KiB stops at 560 k because the wz subscriber is the next bottleneck. The user-space cost of wz is about five times pico's (2.3 microseconds a put against 0.43 at 290,000 a second, from per-thread CPU); where it goes is not read: candidates are the frame allocation, the join of queued frames in take_next_packed, and the wake of the writer; a vectored write instead of the join and the pooled queue of the zero-copy build are the levers to read first, by stack sampling of the user-mode frames."
       ]
     },
+    "Round 4075": {
+      "decision_summary": "The acceptance criteria of the zenoh verdict, stated in groups. The thresholds are 2^-20 and a corpus cannot measure a rate that small: with no failure seen in n independent trials the 95% bound is about 3/n. Section 6.4 of the design note makes the claim in three layers: the theory (Ville) guarantees the nominal rate if the model is true and nothing tests it; the corpus tests the model at levels it can reach (2^-1 to 2^-10, the share of independent groups that cross each, with exact intervals) and the rate at 2^-20 is stated as an extrapolation; the cost is reported as expected sample size per group. Independence is counted in groups, the false no over zenoh groups and the false yes over null ones: claims of 10%, 5% and 1% need 29, 59 and 299 of each, and the corpus holds 22 and 18. A development corpus chooses the model; a validation corpus is collected after the model is frozen and fixed by a ledger entry before it is read. The levels are this session recommendation, not a ruling.",
+      "changes_bullets": [
+        "`docs/flow-zenoh-verdict.md`: section 6.4, the three layers, the table of groups needed and held, the two corpora, and what it does not decide (a failure rate per group, the time order of a flow evidence, the consumer field for the model version).",
+        "`zenoh_calibration_tests.rs`: `the_groups_a_claim_needs_are_the_zero_failure_bound_inverted` asserts 29, 59 and 299 as the inverse of the zero-failure bound (and one fewer failing it) and prints the shortfall; it asserts nothing about the corpus."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1610 pass without lz4 and the calibration module 5 pass with it, clippy clean for both builds. The pre-push static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. The shortfall printed: 7 zenoh and 11 null groups for 10%, 37 and 41 for 5%, 277 and 281 for 1%. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open and in this order: the owner confirms or moves the levels of the table; the reader reports the running maximum of a flow sum, which the second layer needs and which changes the reader and the consumer, so it is for the zenoh-analyzer session; the groups named in the manifest; the calibration generated from the manifest; a failure rate per group and the SN break rate as a mixture; the validation corpus, frozen before it is collected."
+      ],
+      "publishable_decision_summary": "The acceptance criteria of the zenoh verdict, stated in groups. The thresholds are 2^-20 and a corpus cannot measure a rate that small: with no failure seen in n independent trials the 95% bound is about 3/n. Section 6.4 of the design note makes the claim in three layers: the theory (Ville) guarantees the nominal rate if the model is true and nothing tests it; the corpus tests the model at levels it can reach (2^-1 to 2^-10, the share of independent groups that cross each, with exact intervals) and the rate at 2^-20 is stated as an extrapolation; the cost is reported as expected sample size per group. Independence is counted in groups, the false no over zenoh groups and the false yes over null ones: claims of 10%, 5% and 1% need 29, 59 and 299 of each, and the corpus holds 22 and 18. A development corpus chooses the model; a validation corpus is collected after the model is frozen and fixed by a ledger entry before it is read. The levels are this session recommendation, not a ruling.",
+      "publishable_changes_bullets": [
+        "`docs/flow-zenoh-verdict.md`: section 6.4, the three layers, the table of groups needed and held, the two corpora, and what it does not decide (a failure rate per group, the time order of a flow evidence, the consumer field for the model version).",
+        "`zenoh_calibration_tests.rs`: `the_groups_a_claim_needs_are_the_zero_failure_bound_inverted` asserts 29, 59 and 299 as the inverse of the zero-failure bound (and one fewer failing it) and prints the shortfall; it asserts nothing about the corpus."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1610 pass without lz4 and the calibration module 5 pass with it, clippy clean for both builds. The pre-push static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. The shortfall printed: 7 zenoh and 11 null groups for 10%, 37 and 41 for 5%, 277 and 281 for 1%. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open and in this order: the owner confirms or moves the levels of the table; the reader reports the running maximum of a flow sum, which the second layer needs and which changes the reader and the consumer, so it is for the zenoh-analyzer session; the groups named in the manifest; the calibration generated from the manifest; a failure rate per group and the SN break rate as a mixture; the validation corpus, frozen before it is collected."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
