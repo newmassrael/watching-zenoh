@@ -651,20 +651,24 @@ impl OpenPlan {
     /// Whether a peer opened with this plan can run as a forwarding node
     /// ([`OpenArguments::run_node`] with [`NodeRole::Peer`](crate::drive::NodeRole::Peer)): it
     /// accepts sessions, which is what makes it a node others route through, and asks nothing
-    /// of the node that it does not carry (a multicast group, a scouting that dials what it
-    /// finds, a listener that is bound after the open). A peer that fits no node is the registry
-    /// of faces the other roles are, which does not forward between its faces.
+    /// of the node that it does not carry (a multicast group, a listener that is bound after the
+    /// open). A peer that scouts and keeps its south apart (`gateway/south` names subregions) is a
+    /// node too: it is the gateway of the nodes that find it, and the node carries the scouting
+    /// that dials what it finds ([`OpenArguments::run_node`]). A peer that scouts and keeps no
+    /// south apart fits no node, and is the registry of faces the other roles are, which does not
+    /// forward between its faces.
     #[cfg(feature = "router-node")]
     pub fn peer_fits_node(&self) -> bool {
         #[cfg(feature = "scout")]
         let scouts = self.scouting.as_ref().is_some_and(|plan| plan.scouts());
         #[cfg(not(feature = "scout"))]
         let scouts = false;
+        let a_gateway = matches!(self.gateway_south, SouthPartition::Custom(_));
         // A listener that cannot be bound is a failed open here; one that is bound later, when
         // `listen/exit_on_failure` is off, is the registry's to serve.
         !self.listen.is_empty()
             && self.groups.is_empty()
-            && !scouts
+            && (!scouts || a_gateway)
             && self.listen_phase.policy.exit_on_failure
     }
 
@@ -1259,6 +1263,37 @@ mod tests {
     /// The offer for a config document, read by the one reader an open uses.
     fn offer_for(document: &str) -> Result<SessionOffer, OpenRefusal> {
         session_offer(&node_of(document))
+    }
+
+    /// A peer is a forwarding node when it accepts sessions and asks nothing the node does not
+    /// carry. One that scouts is a node only when it keeps its south apart: it is then the gateway
+    /// of the nodes that find it, and the node scouts and dials what it finds. A peer that scouts
+    /// and keeps no south apart is the registry of faces, which does not forward between them.
+    #[cfg(all(feature = "router-node", feature = "scout"))]
+    #[test]
+    fn a_peer_that_scouts_is_a_node_only_when_it_holds_a_gateway() {
+        let listening = |document: &str| {
+            plan_of(WhatAmI::Peer, &[], &["tcp/127.0.0.1:0"], document)
+                .expect("a document a peer opens with")
+        };
+        let scouting = r#"scouting: { multicast: { enabled: true, address: "224.7.7.7:7777" } }"#;
+        let gateway =
+            r#"gateway: { south: [ { filters: [ { negated: true, region_names: ["main"] } ] } ] }"#;
+        assert!(
+            !listening(&format!("{{ {scouting} }}")).peer_fits_node(),
+            "a peer that scouts and holds no gateway is the registry of faces"
+        );
+        assert!(
+            listening(&format!("{{ {scouting}, {gateway} }}")).peer_fits_node(),
+            "a peer that scouts and holds a gateway is a node"
+        );
+        assert!(
+            listening(&format!(
+                r#"{{ scouting: {{ multicast: {{ enabled: false }} }} }}"#
+            ))
+            .peer_fits_node(),
+            "a peer that does not scout is a node whatever its south"
+        );
     }
 
     /// R2970 — an unconfigured session offers QoS, upstream's default, and nothing else: shared

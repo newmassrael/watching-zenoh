@@ -451,15 +451,29 @@ pub(crate) fn open_router_blocking(
     // the topology it is flooded, and the face loop dials it. Without it, a peer reaches only
     // the nodes it was told to connect to, and a node that is not directly linked to another
     // one reaches it only through the node between them.
-    let dial_intents = match (role, gossip) {
-        (NodeRole::Peer, Some(policy)) => Some(forwarder.enable_autoconnect(
-            wz_runtime_tokio::linkstate_forward::AutoConnect::with_strategies(
-                own_zid,
-                policy.autoconnect,
-                policy.strategies,
-            ),
-        )),
-        _ => None,
+    //
+    // A node that also scouts dials what its scouts find the same way: the accept loop drains ONE
+    // receiver, so the two producers share the ends of one channel.
+    #[cfg(feature = "scout")]
+    let scouts = role == NodeRole::Peer && scouting.as_ref().is_some_and(|plan| plan.scouts());
+    #[cfg(not(feature = "scout"))]
+    let scouts = false;
+    let (dial_intents, scout_intents) = match (role, gossip) {
+        (NodeRole::Peer, gossip) if gossip.is_some() || scouts => {
+            let (intents_tx, intents_rx) = tokio::sync::mpsc::unbounded_channel();
+            if let Some(policy) = gossip {
+                forwarder.enable_autoconnect_into(
+                    wz_runtime_tokio::linkstate_forward::AutoConnect::with_strategies(
+                        own_zid,
+                        policy.autoconnect,
+                        policy.strategies,
+                    ),
+                    intents_tx.clone(),
+                );
+            }
+            (Some(intents_rx), scouts.then_some(intents_tx))
+        }
+        _ => (None, None),
     };
     // The authentication the config states, asked of the sessions the node accepts and offered to
     // the ones it dials, installed before the node is served (the accept loop reads it once).
@@ -532,6 +546,7 @@ pub(crate) fn open_router_blocking(
                 face_drive,
                 groups,
                 dial_intents,
+                scout_intents,
                 #[cfg(feature = "scout")]
                 scouting,
                 node_shutdown,
@@ -624,6 +639,7 @@ async fn run_router(
     face_drive: RoutingFaceDrive,
     groups: Vec<GroupJoin>,
     dial_intents: Option<wz_runtime_tokio::accept_loop::DialIntentReceiver>,
+    scout_intents: Option<wz_runtime_tokio::accept_loop::DialIntentSender>,
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
@@ -692,6 +708,26 @@ async fn run_router(
     // responder after its bind, before it connects to anything).
     #[cfg(feature = "scout")]
     let _findable = responder.map(Responder::start);
+    // A node that scouts joins the group before it serves, so that a group it cannot join fails
+    // the open (upstream's `start_scout` binds with a `?`), and asks it for the nodes it should
+    // dial once it serves.
+    #[cfg(feature = "scout")]
+    let scout = match (
+        scouting.as_ref().filter(|plan| plan.scouts()),
+        scout_intents,
+    ) {
+        (Some(plan), Some(intents)) => match ScoutLink::bind(plan).await {
+            Ok(link) => Some((plan, link, intents)),
+            Err(error) => {
+                log_open_failure("the scouting of the node", &error);
+                let _ = tx.send(Err(OpenError::DriveFailed));
+                return;
+            }
+        },
+        _ => None,
+    };
+    #[cfg(not(feature = "scout"))]
+    let _ = scout_intents;
     // The nodes this router dials (router to router federation), resolved here so the loop never
     // waits on a resolver. A target that is not an address of a node is a refusal of the open by
     // what it was, not a dial that is silently skipped.
@@ -767,7 +803,7 @@ async fn run_router(
             shutdown.notified().await;
         }
     };
-    let _summary = peer_loop_shared(
+    let serve = peer_loop_shared(
         sources,
         params,
         clock,
@@ -776,8 +812,25 @@ async fn run_router(
         |_event| {},
         forwarder.clone(),
         face_drive,
-    )
-    .await;
+    );
+    // The scouting has no end of its own: it runs beside the faces until they are served no more.
+    #[cfg(feature = "scout")]
+    let _summary = match scout {
+        Some((plan, link, intents)) => {
+            tokio::pin!(serve);
+            let scouting_on = async {
+                link.autoconnect(plan, &zid, &intents).await;
+                std::future::pending().await
+            };
+            tokio::select! {
+                summary = &mut serve => summary,
+                never = scouting_on => never,
+            }
+        }
+        None => serve.await,
+    };
+    #[cfg(not(feature = "scout"))]
+    let _summary = serve.await;
     // The node leaves its group as it ends, which announces the departure to the members, where
     // a face dropped with the node would leave it silently and they would hold the router until
     // its lease ran out.
