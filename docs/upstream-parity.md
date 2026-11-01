@@ -128,7 +128,9 @@ percent behind: the placement does not explain those two cells. The next paragra
 publisher at 1 KiB and 290,000 a second (150 samples under a debugger), the putting thread was in
 `wait_for_room` in 126 and the writer thread in `epoll_wait` in 148: the pico lane held two batches
 (4,096 bytes), so four 1 KiB frames filled it and the sender and the writer then waited for each
-other after every four frames, bound by the wake latency of a futex and an eventfd. The lane's depth
+other after every four frames. What binds them is single buffering, read below under the table: the
+lane counts the batch the writer is writing as occupied until the writer asks for the next one, so
+while it writes four frames the sender has no room. The lane's depth
 is now the limit `PICO_TX_QUEUE_SIZE` (`WZ_LIMIT_PICO_TX_QUEUE_SIZE`, default 8, in upstream's
 `1..=16` for a queue size); `TxQueueConf::default()` keeps upstream's 2, and only the pico C ABI
 on the tokio engine reads it (the lwip and MCU paths do not). Measured on the publisher pinned to
@@ -142,8 +144,25 @@ two physical cores, 1 KiB, wz to wz / wz to pico (msg/s):
 | 16 | 560 k | 920 k |
 
 pico to pico read 350 k to 360 k. Eight is the knee; wz to wz stops at 560 k because the wz
-subscriber is the next bottleneck. With the limit at its default, at the default pinning (median of
-three, pc3, msg/s):
+subscriber is the next bottleneck (its drive thread reads 401 ticks of 400 at 540,000 a second).
+
+Why the knee is there, tried by three temporary changes of the queue at 1 KiB on the same pinning
+(two repetitions each, not landed):
+
+| change | lane size | wz to wz | wz to pico |
+|---|---|---|---|
+| a sender is woken only when the lane is at most half full | 2 | 315 k | 300 k |
+| the lane counts only the frames still queued, not the batch being written | 2 | 560 k | 590 k |
+| the same, with the lane at its default | 8 | 570 k | 940 k |
+
+The wake rule is not the cause (the first row equals the unchanged size 2). The cause is single
+buffering: a lane of two batches holds one batch of the writer's and nothing else while it writes, so
+production and writing do not overlap, and counting only the queued frames, which lets the sender fill
+the lane while the writer writes, gives wz to wz 560 k at size 2, what size 8 gives. What the second
+row lacks against size 8 (590 k against 960 k to pico) is room to queue ahead of the writer, so the
+depth stays a measured gain of its own. The accounting of the third row adds nothing to size 8, and
+it moves the memory bound of a lane to what is queued plus the batch being written; it was therefore
+not applied. With the limit at its default, at the default pinning (median of three, pc3, msg/s):
 
 | size | pico to pico | wz to wz | wz to pico | pico to wz |
 |---|---|---|---|---|
