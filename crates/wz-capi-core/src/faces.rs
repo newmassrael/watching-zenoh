@@ -2226,6 +2226,29 @@ impl SharedSession {
                 }
             }
         }
+        // R3074 -- gossip: the new face is told every node this one knows and where each can be
+        // reached, and the faces that hear of a new link are told this one is up. Sent from
+        // here, with the face's identity read off its handshake (this runs past a completed
+        // one), so a face that was refused above is never announced. The plane takes its own
+        // lock for the decision and returns, so what is sent here is sent under this lock only.
+        //
+        // BEFORE the first declaration the face is owed, and that order is the point. A
+        // router that learns this node's subscriber before it learns this node's links reads the
+        // node as linked to no gateway, and the inter-region filter
+        // (`zenoh/src/net/routing/dispatcher/tables.rs` @ `impl InterRegionFilter<'_> {`) reads
+        // that as "no gateway to choose among, forward": every gateway of the region then
+        // carries what only the primary should, and the subscriber is handed a sample twice.
+        // Measured on upstream's regions test, scenario 7: in the failing runs the routers
+        // judged a sample toward a peer with an empty set of that peer's gateways, before the
+        // list that names them was ingested, because this send came after the replays below.
+        // Upstream sends the topology when the link is created (`Gossip::add_link`) and the
+        // declarations after it, so a link's first message is its topology and the link is
+        // FIFO: whoever learns a declaration of this node has already learned its links.
+        #[cfg(feature = "gossip")]
+        if let Some(gossip) = &self.gossip {
+            let outbound = gossip.face_up(id, &FaceIdentity::of(actions));
+            Self::send_gossip(&guard.faces, Some((id, actions)), outbound);
+        }
         // Keyexpr aliases replay FIRST, before the subscriber and queryable
         // declares below. Ordering is load-bearing on the reliable channel: a
         // peer resolves an aliased id through the mapping table it built from
@@ -2343,16 +2366,6 @@ impl SharedSession {
                 };
                 filters.insert(entry.id, hold);
             }
-        }
-        // R3074 -- gossip: the new face is told every node this one knows and where each can be
-        // reached, and the faces that hear of a new link are told this one is up. Sent from
-        // here, with the face's identity read off its handshake (this runs past a completed
-        // one), so a face that was refused above is never announced. The plane takes its own
-        // lock for the decision and returns, so what is sent here is sent under this lock only.
-        #[cfg(feature = "gossip")]
-        if let Some(gossip) = &self.gossip {
-            let outbound = gossip.face_up(id, &FaceIdentity::of(actions));
-            Self::send_gossip(&guard.faces, Some((id, actions)), outbound);
         }
         // R3073 -- the LAST line of the replay: a peer this node meets as a north-bound peer is
         // told that what it has been sent is everything this node held, which is the message its
@@ -6487,6 +6500,76 @@ mod admission_tests {
         assert_eq!(
             decide(&LOW, &[(1, Some(&NODE), true)], Some(&NODE), true),
             Admission::Admit
+        );
+    }
+}
+
+/// The order of what a face is sent when it comes up: its topology, then what it is owed.
+#[cfg(all(test, feature = "gossip"))]
+mod face_up_order_tests {
+    use super::*;
+    use wz_runtime_tokio_test_support::establish_capability_pair;
+    use wz_session_core::inbound::InboundFrame;
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    /// What a node is first told over a new link is where the node is linked to, and only then
+    /// what it declared.
+    ///
+    /// The router at the far end judges every sample it routes toward this node against the
+    /// gateways this node links to (`zenoh/src/net/routing/dispatcher/tables.rs` @
+    /// `impl InterRegionFilter<'_> {`), and it learns this node's links from the topology
+    /// message. A subscriber declared first leaves a window in which the router routes toward a
+    /// node it believes is linked to nobody, reads that as "no gateway to choose among" and
+    /// forwards from every gateway of its region: the subscriber is handed a sample once per
+    /// gateway. The link is FIFO, so one message before the other is the whole of the fix. This
+    /// test fails (the declaration is first) when the send is moved back behind the replays.
+    #[tokio::test]
+    async fn a_new_face_is_sent_its_topology_before_any_declaration() {
+        let pair = establish_capability_pair(false, false, |_| {}).await;
+        let (dials, _intents) = tokio::sync::mpsc::unbounded_channel();
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources {
+                gossip: Some(GossipSetup {
+                    whatami: WhatAmI::Peer,
+                    policy: GossipPolicy::shipped(WhatAmI::Peer),
+                    dials,
+                }),
+                ..SessionResources::default()
+            },
+        )
+        .expect("test host entropy");
+        // Declared BEFORE the face exists, so the face is owed it when it comes up.
+        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+        shared.declare_subscriber("wz/order/test".to_owned(), Locality::Any, sink);
+
+        let before = pair.resp_driver.snapshot().sends.len();
+        assert!(shared.face_up(1, &pair.resp_actions, false));
+
+        let mut kinds = Vec::new();
+        for (bytes, _) in pair.resp_driver.snapshot().sends.iter().skip(before) {
+            let Ok(InboundFrame::Frame { payload, .. }) = pair.init_actions.handle_inbound(bytes)
+            else {
+                continue;
+            };
+            for message in parse_frame_payload(&payload).expect("the frame decodes") {
+                kinds.push(match message {
+                    NetworkMessage::Oam(_) => "topology",
+                    NetworkMessage::Declare(_) => "declaration",
+                    _ => "other",
+                });
+            }
+        }
+        let topology = kinds.iter().position(|k| *k == "topology");
+        let declaration = kinds.iter().position(|k| *k == "declaration");
+        assert!(
+            topology.is_some() && declaration.is_some(),
+            "the face is sent both a topology message and the declaration it is owed: {kinds:?}"
+        );
+        assert!(
+            topology < declaration,
+            "the topology comes first: {kinds:?}"
         );
     }
 }
