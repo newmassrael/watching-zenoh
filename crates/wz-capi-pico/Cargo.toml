@@ -317,6 +317,13 @@ transport-link-quic = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport
 # `tls/` scheme still parses but bind and dial return a feature-gated
 # `Unsupported`, so the keys are inert rather than misleading.
 transport-link-tls = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport-link-tls"]
+# The `tls/` link on the COOPERATIVE engine (step T4 of L6, docs/capi-pico-on-coop-engine.md): the
+# same twelve `Z_CONFIG_TLS_*` keys as `transport-link-tls`, resolved once to PEM bytes, run over
+# the Mbed TLS channel the cooperative engine's stack is given (`wz-capi-coop`'s `tls::HostTls`),
+# for the dial and the listen. It selects the cooperative engine, as `transport-link-tls` selects
+# the tokio one (rustls): a build names the secure channel it wants, and one that names both is
+# refused (the tokio engine would open every session and run neither's `tls/` link as the other's).
+tls-mbedtls = ["engine-coop", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
 # The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
 # it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under
 # `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds; without it the scheme still
@@ -681,6 +688,9 @@ optional = true
 # discriminator's self-signed `localhost` cert. Never enters a `cargo build` (only
 # `cargo test` unifies it); no cycle (test-support -> wz-runtime-tokio, not -> pico).
 [dev-dependencies]
+# The `tls/` link on the cooperative engine (`tests/tls_coop_roundtrip.rs`) states its certificate
+# keys inline, as the stock examples do: the test encodes the PEM of the fixture's certificate.
+base64 = "0.22"
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
     "tls-fixtures",
 ] }

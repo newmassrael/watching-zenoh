@@ -55,7 +55,11 @@ use crate::config::{
 // them at module scope would make the no-backend build carry twelve unused
 // imports, which `-D warnings` rejects — so the import rides the same cfg as its
 // single consumer rather than the consumer being widened to justify the import.
-#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+#[cfg(any(
+    feature = "transport-link-tls",
+    feature = "transport-link-quic",
+    feature = "tls-mbedtls"
+))]
 use crate::config::{
     Z_CONFIG_TLS_CONNECT_CERTIFICATE_BASE64_KEY, Z_CONFIG_TLS_CONNECT_CERTIFICATE_KEY,
     Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_BASE64_KEY, Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_KEY,
@@ -72,9 +76,9 @@ use crate::result::Z_EINVAL;
 use crate::result::Z_ERR_GENERIC;
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 #[cfg(feature = "engine-tokio")]
-use wz_capi_core::drive::{
-    open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
-};
+use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, SessionState};
+#[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
+use wz_capi_port::tls_material::CapiTlsConfig;
 use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
 use wz_session_core::WhatAmI;
 
@@ -201,7 +205,11 @@ const PICO_GROUP: wz_capi_core::drive::GroupProfile =
 /// silent `None`: `None` means "the caller configured no such material", and
 /// letting a corrupt one collapse into it would open a session with less
 /// protection than was asked for.
-#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+#[cfg(any(
+    feature = "transport-link-tls",
+    feature = "transport-link-quic",
+    feature = "tls-mbedtls"
+))]
 fn resolve_pem(
     cfg: &ConfigState,
     path_key: u8,
@@ -232,7 +240,11 @@ fn resolve_pem(
 /// could consume a certificate. The `not` arm below is not a stub — it is the
 /// correct answer for that build, where a `tls/` or `quic/` endpoint is rejected
 /// at bind/dial as `Unsupported` and the cert keys have no consumer to reach.
-#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+#[cfg(any(
+    feature = "transport-link-tls",
+    feature = "transport-link-quic",
+    feature = "tls-mbedtls"
+))]
 pub(crate) fn resolve_tls_config(cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
     let enable_mtls = cfg.get(Z_CONFIG_TLS_ENABLE_MTLS_KEY) == Some("true");
     // The mTLS material is read only when mTLS is ON. pico gates its own
@@ -284,7 +296,11 @@ pub(crate) fn resolve_tls_config(cfg: &ConfigState) -> Result<CapiTlsConfig, ZRe
 /// cannot open a `tls/` endpoint, and the runtime says so at bind/dial.
 #[cfg(all(
     feature = "engine-tokio",
-    not(any(feature = "transport-link-tls", feature = "transport-link-quic"))
+    not(any(
+        feature = "transport-link-tls",
+        feature = "transport-link-quic",
+        feature = "tls-mbedtls"
+    ))
 ))]
 pub(crate) fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
     Ok(CapiTlsConfig::default())
@@ -295,7 +311,11 @@ pub(crate) fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZR
 /// `wz_ext_config_device_requires` only, so it is part of the unstable surface.
 #[cfg(all(
     feature = "unstable-api",
-    any(feature = "transport-link-tls", feature = "transport-link-quic")
+    any(
+        feature = "transport-link-tls",
+        feature = "transport-link-quic",
+        feature = "tls-mbedtls"
+    )
 ))]
 pub(crate) fn tls_files_named(cfg: &ConfigState) -> Vec<String> {
     let mut keys = vec![
@@ -317,7 +337,11 @@ pub(crate) fn tls_files_named(cfg: &ConfigState) -> Vec<String> {
 /// The no-TLS-backend build reads no certificate file.
 #[cfg(all(
     feature = "unstable-api",
-    not(any(feature = "transport-link-tls", feature = "transport-link-quic"))
+    not(any(
+        feature = "transport-link-tls",
+        feature = "transport-link-quic",
+        feature = "tls-mbedtls"
+    ))
 ))]
 pub(crate) fn tls_files_named(_cfg: &ConfigState) -> Vec<String> {
     Vec::new()
@@ -508,7 +532,7 @@ pub unsafe extern "C" fn z_open(
         // A malformed value fails the open rather than degrading to a plaintext
         // or trust-free session: a caller that asked for TLS and silently got
         // something else is the one outcome worse than a failed z_open.
-        #[cfg(feature = "engine-tokio")]
+        #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
         let tls = match resolve_tls_config(&cfg) {
             Ok(tls) => tls,
             Err(code) => return code,
@@ -561,7 +585,7 @@ pub unsafe extern "C" fn z_open(
             start_read_task,
             #[cfg(feature = "admin-space")]
             start_admin_space,
-            #[cfg(feature = "engine-tokio")]
+            #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
         };
         #[cfg(feature = "engine-tokio")]
@@ -718,7 +742,9 @@ struct OpenRequest {
     start_read_task: bool,
     #[cfg(feature = "admin-space")]
     start_admin_space: bool,
-    #[cfg(feature = "engine-tokio")]
+    /// The TLS material the config's keys name, resolved to PEM bytes: the tokio engine builds
+    /// rustls configs from it, the cooperative engine the Mbed TLS channel's dial and listen.
+    #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
     tls: CapiTlsConfig,
 }
 
@@ -967,9 +993,23 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
     let transport_endpoint = listen.first().or_else(|| connect.first()).cloned();
+    let links =
+        wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial);
+    // The `tls/` link: the secure channel over the host's streams, for the dial and the listen,
+    // made from the material the config's keys named. A config whose material cannot make a
+    // channel (half a listener, a key that is not its chain's) fails the open, as a malformed
+    // value does at the keys, and never degrades to a session without the protection asked for.
+    #[cfg(feature = "tls-mbedtls")]
+    let links = match wz_capi_coop::tls::HostTls::from_config(
+        wz_runtime_posix::stream::PosixTcpDial,
+        &request.tls,
+        wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+    ) {
+        Ok(tls) => links.with_tls(tls),
+        Err(_) => return crate::result::Z_ERR_INVALID,
+    };
     let opened = wz_capi_coop::CoopEngine::open(
-        wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial)
-            .waited_by_owner(),
+        links.waited_by_owner(),
         wz_runtime_posix::PosixClock,
         wz_runtime_posix::PosixEntropy,
         wz_capi_coop::CoopConfig {

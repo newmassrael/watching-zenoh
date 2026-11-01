@@ -11104,6 +11104,16 @@ layer_c1co_pico_client_dials_a_listener() {
         cargo test -p wz-capi-pico --no-default-features \
         --features "engine-coop,peer,multi-thread,link-udp,connectivity" \
         --test mutual_dial || return 1
+    # The `tls/` link on the cooperative engine, reached through the exported `z_*` symbols (step
+    # T4 of L6, `crates/wz-capi-pico/tests/tls_coop_roundtrip.rs`): a listener presents a chain and
+    # a dial that trusts it opens a session that carries a put each way, and a dial that trusts
+    # another certificate does not open. `tls-mbedtls` is the cooperative engine's secure channel
+    # (Mbed TLS built from the pinned submodules), so there is no tokio engine in this build; with
+    # the link left out of the stack the listener itself is refused and both tests fail.
+    _runci_guarded_test "C1co tls engine-coop" 2 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features "tls-mbedtls,peer,multi-thread,link-udp" \
+        --test tls_coop_roundtrip || return 1
     # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
     # one over the engine's own window, and finds nobody on a group nobody answers, which the
     # tokio engine's default build already runs; this is the same test with no tokio engine in

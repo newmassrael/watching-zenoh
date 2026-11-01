@@ -3894,6 +3894,7 @@ dependencies = [
 name = "wz-capi-pico"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "getrandom 0.2.17",
  "libc",
  "tokio",
