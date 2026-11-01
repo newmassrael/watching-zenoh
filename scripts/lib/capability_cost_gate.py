@@ -233,8 +233,13 @@ CASES: tuple[Case, ...] = (
     # Result, which is why the base `coop` image (937,467 to 940,971) hardly moved. What is left
     # (+12,184 over the baseline) is that refusal path, until the SCE tree lands the list bounds
     # and the gate normal form its pin note says are due.
+    # 941,200 -> 949,300 with the first hosted run since round 4029 (head `133e48a08`, 955,495): the
+    # reading less the 11,748 the alias table of the declaration registries no longer costs (a
+    # `Vec`, where a `BTreeMap` made the registry's first reading 13,056 over the tree of round 4060
+    # on this machine and the second 1,308) and 5,500, an estimate the next hosted run replaces. The
+    # four cases below move the same way; the other coop cases fall back under their budgets.
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         941_200,
+         949_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -307,7 +312,7 @@ CASES: tuple[Case, ...] = (
     # (`Z_FEATURE_LOCAL_SUBSCRIBER`), which the reference pico of the test lanes is not built with
     # but a program that publishes and subscribes on one session needs.
     Case("pico-client-coop-local", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,local-subscriber", 948_900,
+         "engine-coop,link-udp,local-subscriber", 957_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -336,7 +341,7 @@ CASES: tuple[Case, ...] = (
     # answers `@/<zid>/pico/**`, which needs the answering end and, for the peers it lists, the
     # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,admin-space", 1_301_200,
+         "engine-coop,link-udp,admin-space", 1_307_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -364,7 +369,7 @@ CASES: tuple[Case, ...] = (
     # The cooperative client that asks and answers queries: the requesting end and the answering
     # end, which is what the next case adds its loopback leg to.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable", 1_243_400,
+         "engine-coop,link-udp,query,queryable", 1_249_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -384,7 +389,7 @@ CASES: tuple[Case, ...] = (
     # The same, with a get delivered to the session's own queryables
     # (`Z_FEATURE_LOCAL_QUERYABLE`), which a program that asks its own queryable needs.
     Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_261_800,
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_268_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
