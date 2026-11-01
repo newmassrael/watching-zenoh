@@ -304780,6 +304780,40 @@
         "L6 T4, the rest: CapiTlsConfig (the PEM bytes of the twelve keys, plain data) moves from wz-capi-core to wz-capi-port and wz-capi-core re-exports it, with its tokio-typed client_auth turning into a function in wz-capi-core; the cooperative engine takes it in CoopConfig and builds TlsDial::chain from it; resolve_tls_config is ungated from the tokio engine by a feature that names the Mbed TLS provider; the engine-selection rule (a tls/ build selects the tokio engine unless it names the provider); the real pico TLS programs on the cooperative engine in Layer E. Then T5, zenohd in Layer Z. Open: TLS 1.2 need of a real zenoh-pico, key and signature types of real certificates, pico's time source, hostname locators for the name check, whether the engine port should expose the pinned zid binding. The hosted results of the pushes since round 4012 are unread."
       ]
     },
+    "Round 4087": {
+      "decision_summary": "The null side of the candidate made hierarchical, and a finding that is not about the null side. Each null protocol is a Beta-binomial over the units of its flows, its spread estimated from them (DNS, RTPS, CoAP, SOME/IP at the grid floor 0.05, DHCP 1, mDNS 2, NTP and WSD at the ceiling, five members with too few flows to estimate). The artifact is gone: 531 failed units weigh -15975 on the no sum, where they weighed +51235. The no is not back: 9 of 653 null flows read no at kappa 1 and 55 at kappa 16, against 345 shipped, so its loss is the model and not only the candidate asymmetry. And a zenoh flow reads no, at every kappa: zenoh-jitter-udp-20pub, 2401 units read whole and 588 SN steps followed, 1756 broke (75%, against the 6% assumed). The shipped model weighs its units +8.5 million on the no sum and its SN steps -2.36 million and reads yes at +38597, a difference of two numbers of millions. With a null whose flows read whole all at once the units saturate at about 8 bits and the SN steps decide. Units and SN steps are one step; neither ships alone. Nothing shipped; MODEL stays 2.",
+      "changes_bullets": [
+        "`zenoh_hierarchy_tests.rs`: `NullMember`, the estimate of a spread by grid maximum likelihood, `ln_member`, `candidate_both`, a properness test of a null member flow, and the report of the corpus with both sides heterogeneous, which prints a zenoh flow that reads no with its units, SN steps and sums.",
+        "`zenoh_calibration_tests.rs`: `File::name`, `Counts::sn`, `Flow` and its fields are visible to it.",
+        "`docs/flow-zenoh-verdict.md` 6.5: a subsection with the measurements, the finding about the units and the SN steps, and what it says of the shipped verdict."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1624 pass with lz4 and 1610 without, clippy clean for both builds; the new properness test (a null member flow adds to one over the failures of its units, with and without a spread, for three shares). The moved zenoh flow was printed with its counts before the cause was written down: the cause is read, not inferred. The static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open, in order: the SN break rate as a mixture over a per-link rate (Robbins), together with the units, since neither ships alone; then the report again, with the jitter flow as its first test; kappa from zenoh groups that fail units (section 6.4); the grid floor of the null spread (DNS, RTPS, CoAP, SOME/IP sit at 0.05, so their true spread may be smaller). Shipping any of it turns null no flows into undecided and needs the zenoh-analyzer session. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
+      ],
+      "publishable_decision_summary": "The null side of the candidate made hierarchical, and a finding that is not about the null side. Each null protocol is a Beta-binomial over the units of its flows, its spread estimated from them (DNS, RTPS, CoAP, SOME/IP at the grid floor 0.05, DHCP 1, mDNS 2, NTP and WSD at the ceiling, five members with too few flows to estimate). The artifact is gone: 531 failed units weigh -15975 on the no sum, where they weighed +51235. The no is not back: 9 of 653 null flows read no at kappa 1 and 55 at kappa 16, against 345 shipped, so its loss is the model and not only the candidate asymmetry. And a zenoh flow reads no, at every kappa: zenoh-jitter-udp-20pub, 2401 units read whole and 588 SN steps followed, 1756 broke (75%, against the 6% assumed). The shipped model weighs its units +8.5 million on the no sum and its SN steps -2.36 million and reads yes at +38597, a difference of two numbers of millions. With a null whose flows read whole all at once the units saturate at about 8 bits and the SN steps decide. Units and SN steps are one step; neither ships alone. Nothing shipped; MODEL stays 2.",
+      "publishable_changes_bullets": [
+        "`zenoh_hierarchy_tests.rs`: `NullMember`, the estimate of a spread by grid maximum likelihood, `ln_member`, `candidate_both`, a properness test of a null member flow, and the report of the corpus with both sides heterogeneous, which prints a zenoh flow that reads no with its units, SN steps and sums.",
+        "`zenoh_calibration_tests.rs`: `File::name`, `Counts::sn`, `Flow` and its fields are visible to it.",
+        "`docs/flow-zenoh-verdict.md` 6.5: a subsection with the measurements, the finding about the units and the SN steps, and what it says of the shipped verdict."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1624 pass with lz4 and 1610 without, clippy clean for both builds; the new properness test (a null member flow adds to one over the failures of its units, with and without a spread, for three shares). The moved zenoh flow was printed with its counts before the cause was written down: the cause is read, not inferred. The static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open, in order: the SN break rate as a mixture over a per-link rate (Robbins), together with the units, since neither ships alone; then the report again, with the jitter flow as its first test; kappa from zenoh groups that fail units (section 6.4); the grid floor of the null spread (DNS, RTPS, CoAP, SOME/IP sit at 0.05, so their true spread may be smaller). Shipping any of it turns null no flows into undecided and needs the zenoh-analyzer session. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
