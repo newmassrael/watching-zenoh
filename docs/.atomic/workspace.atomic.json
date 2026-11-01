@@ -304440,6 +304440,40 @@
         "Open and in this order: the owner confirms or moves the levels of the table; the reader reports the running maximum of a flow sum, which the second layer needs and which changes the reader and the consumer, so it is for the zenoh-analyzer session; the groups named in the manifest; the calibration generated from the manifest; a failure rate per group and the SN break rate as a mixture; the validation corpus, frozen before it is collected."
       ]
     },
+    "Round 4076": {
+      "decision_summary": "The calibration groups are named in the manifest. Round 4072 took them from file names, a guess that a rename silently changes. corpus.json5 now has a groups table (40 groups: 18 null protocols, 22 zenoh groups by release line, link and what a file exercises) and the manifest reader stops, naming the file, when a file is in no group or in two, when a group names a file the manifest does not list, or when a group holds both zenoh and other files, so evidence is never counted twice or judged by nothing. The name-derived function is deleted. The report is the same as before: 40 groups with the same file counts and the same extreme sums, which shows the table says what the names said. A first version used a map removal that the discard-site lint refused; it now looks the group up and compares counts.",
+      "changes_bullets": [
+        "`captures/corpus/corpus.json5`: `groups`, one entry per group with its files, and a header comment saying what a group is.",
+        "`zenoh_corpus_tests.rs`: `Entry` has the group, and the reader checks the table against the files in four ways.",
+        "`zenoh_calibration_tests.rs`: `group_of` is deleted, the group comes from the entry. `docs/flow-zenoh-verdict.md` 6.3 names the table as the source."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1618 pass with lz4 and 1610 without, clippy clean for both builds, the group report equal to the previous one line for line on the groups checked (40 groups, release 1.0 18 files, version skew 36, loss 6). The corpus verifier reads the new manifest and passes. The static gate array: 123 of 123 pass, failed=0, after the discard-site lint refusal was fixed; the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open, as in round 4075: the owner confirms or moves the levels of the acceptance table; the reader reports the running maximum of a flow sum (for the zenoh-analyzer session); the calibration generated from the manifest, now that the groups are in it; a failure rate per group and the SN break rate as a mixture; the validation corpus, frozen before it is collected."
+      ],
+      "publishable_decision_summary": "The calibration groups are named in the manifest. Round 4072 took them from file names, a guess that a rename silently changes. corpus.json5 now has a groups table (40 groups: 18 null protocols, 22 zenoh groups by release line, link and what a file exercises) and the manifest reader stops, naming the file, when a file is in no group or in two, when a group names a file the manifest does not list, or when a group holds both zenoh and other files, so evidence is never counted twice or judged by nothing. The name-derived function is deleted. The report is the same as before: 40 groups with the same file counts and the same extreme sums, which shows the table says what the names said. A first version used a map removal that the discard-site lint refused; it now looks the group up and compares counts.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/corpus.json5`: `groups`, one entry per group with its files, and a header comment saying what a group is.",
+        "`zenoh_corpus_tests.rs`: `Entry` has the group, and the reader checks the table against the files in four ways.",
+        "`zenoh_calibration_tests.rs`: `group_of` is deleted, the group comes from the entry. `docs/flow-zenoh-verdict.md` 6.3 names the table as the source."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1618 pass with lz4 and 1610 without, clippy clean for both builds, the group report equal to the previous one line for line on the groups checked (40 groups, release 1.0 18 files, version skew 36, loss 6). The corpus verifier reads the new manifest and passes. The static gate array: 123 of 123 pass, failed=0, after the discard-site lint refusal was fixed; the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open, as in round 4075: the owner confirms or moves the levels of the acceptance table; the reader reports the running maximum of a flow sum (for the zenoh-analyzer session); the calibration generated from the manifest, now that the groups are in it; a failure rate per group and the SN break rate as a mixture; the validation corpus, frozen before it is collected."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
