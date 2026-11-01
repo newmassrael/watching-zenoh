@@ -303984,6 +303984,38 @@
         "Carried: the other reds of the hosted run of round 4061 are their sessions' (dispatch_network_message dead code, the router-interest-qos gate, the lwip no-heap test, the capability-cost overrun of nine coop cases); O4 (h) waits for the SCE generator fix; the kit hardware measurement and the mold 2.30.0 link abort."
       ]
     },
+    "Round 4063": {
+      "decision_summary": "Step 3 of decision D12 is built: a node declaration names the commanders of its verbs. A commander is an endpoint of a role of its own, a zid and the verbs it may command, and it is no place the node reaches: it has no locator, holds no session and raises no budget. A pair of a zid and a verb is declared once, a wildcard does not exist, and the validator refuses a commander for a node with no tls router or peer, since only a secure channel proves a zid. The generator emits one list of sixteen-byte zids per verb, only for a node that names a commander, and no registered node does, so no generated file changed. The image that binds the verbs and reads these lists is the step that remains, with the kit lane's witness of it.",
+      "changes_bullets": [
+        "scripts/lib/wz_node.py: the commander role (zid and verbs), its limit on the slot target, its validation, the lists the emitter writes per verb, and the selftests that hold them.",
+        "docs/target-build-contract.md: the commander paragraph beside listen and multicast. docs/session-lifecycle-intent.md: step 3 as built."
+      ],
+      "verification_bullets": [
+        "The generator's selftest passes with the new cases (a valid commander and its lists, no list for a node without one, a commander over no secure channel, a verb that is not one, no verb, a leading zero, a repeat, a locator, too many, a node of commanders alone), and the check that the tracked generated files are current passes: 7 declarations, 7 current. The vocabulary of the slot target lists the role with a limit of 8."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "D12 step 4 remains: the images that bind the verbs in band (deploy/mcu-admin-node and deploy/zephyr-admin-node bind the open alone under the write permit) take a list of commanders and bind Verbs over it; then D14, the kit lane's open by zid and read of the admin root's sessions on that image. Neither image can be run here. Open for the owner: whether the heap profile's key authority also takes the commander. Hosted CI for the tip is unread."
+      ],
+      "publishable_decision_summary": "Step 3 of decision D12 is built: a node declaration names the commanders of its verbs. A commander is an endpoint of a role of its own, a zid and the verbs it may command, and it is no place the node reaches: it has no locator, holds no session and raises no budget. A pair of a zid and a verb is declared once, a wildcard does not exist, and the validator refuses a commander for a node with no tls router or peer, since only a secure channel proves a zid. The generator emits one list of sixteen-byte zids per verb, only for a node that names a commander, and no registered node does, so no generated file changed. The image that binds the verbs and reads these lists is the step that remains, with the kit lane's witness of it.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_node.py: the commander role (zid and verbs), its limit on the slot target, its validation, the lists the emitter writes per verb, and the selftests that hold them.",
+        "docs/target-build-contract.md: the commander paragraph beside listen and multicast. docs/session-lifecycle-intent.md: step 3 as built."
+      ],
+      "publishable_verification_bullets": [
+        "The generator's selftest passes with the new cases (a valid commander and its lists, no list for a node without one, a commander over no secure channel, a verb that is not one, no verb, a leading zero, a repeat, a locator, too many, a node of commanders alone), and the check that the tracked generated files are current passes: 7 declarations, 7 current. The vocabulary of the slot target lists the role with a limit of 8."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D12 step 4 remains: the images that bind the verbs in band (deploy/mcu-admin-node and deploy/zephyr-admin-node bind the open alone under the write permit) take a list of commanders and bind Verbs over it; then D14, the kit lane's open by zid and read of the admin root's sessions on that image. Neither image can be run here. Open for the owner: whether the heap profile's key authority also takes the commander. Hosted CI for the tip is unread."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
