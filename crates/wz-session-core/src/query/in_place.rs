@@ -89,7 +89,8 @@ fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bo
         ext.eid() == crate::ext_header::body_eid::QUERY_VALUE
             && matches!(
                 &ext.body,
-                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) if z.slices.is_some()
+                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z)
+                    if wz_codecs::query_value_zbuf::QueryValueZbuf::input_after_shm(z)
             )
     })
 }

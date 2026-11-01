@@ -27,8 +27,7 @@ pub struct Join<'a> {
     pub version: u8,
     pub cbyte: u8,
     pub zid: &'a [u8],
-    pub sn_res: Option<u8>,
-    pub batch_size: Option<u16>,
+    pub s: Option<JoinS>,
     pub lease: u64,
     pub next_sn_reliable: u64,
     pub next_sn_best_effort: u64,
@@ -126,8 +125,7 @@ impl<'a> Join<'a> {
         _out.version = version;
         _out.cbyte = cbyte;
         _out.zid = zid;
-        _out.sn_res = sn_res;
-        _out.batch_size = batch_size;
+        _out.s = if (s & 0x01u8) != 0 { Some(JoinS { sn_res: sn_res.unwrap_or_default(), batch_size: batch_size.unwrap_or_default() }) } else { None };
         _out.lease = lease;
         _out.next_sn_reliable = next_sn_reliable;
         _out.next_sn_best_effort = next_sn_best_effort;
@@ -168,8 +166,8 @@ impl<'a> Join<'a> {
     /// `sce:encode-may-fail`), or the sink's own error:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S, s: u8) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w, s)
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -186,12 +184,24 @@ impl<'a> Join<'a> {
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self, s: u8) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink, s)?;
+        self.encode(&mut _sce_sink)?;
         Ok(_sce_v)
     }
+}
+
+/// The fields `S` decides (docs/adr/0065 §6 R4b), present together
+/// while it holds: a value holds all of them or none, and `Join`
+/// derives `S` from which.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JoinS {
+    /// The `sn_res` field.
+    pub sn_res: u8,
+    /// The `batch_size` field.
+    pub batch_size: u16,
 }
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
@@ -205,16 +215,14 @@ pub trait JoinSource {
     fn cbyte(&self) -> u8;
     /// The `zid` field.
     fn zid(&self) -> &[u8];
-    /// The `sn_res` field.
-    fn sn_res(&self) -> Option<u8>;
-    /// The `batch_size` field.
-    fn batch_size(&self) -> Option<u16>;
     /// The `lease` field.
     fn lease(&self) -> u64;
     /// The `next_sn_reliable` field.
     fn next_sn_reliable(&self) -> u64;
     /// The `next_sn_best_effort` field.
     fn next_sn_best_effort(&self) -> u64;
+    /// The fields `S` decides, held together (docs/adr/0065 §6 R4b).
+    fn s(&self) -> Option<JoinS>;
 }
 
 impl<T: JoinSource + ?Sized> JoinSource for &T {
@@ -227,12 +235,6 @@ impl<T: JoinSource + ?Sized> JoinSource for &T {
     fn zid(&self) -> &[u8] {
         (**self).zid()
     }
-    fn sn_res(&self) -> Option<u8> {
-        (**self).sn_res()
-    }
-    fn batch_size(&self) -> Option<u16> {
-        (**self).batch_size()
-    }
     fn lease(&self) -> u64 {
         (**self).lease()
     }
@@ -241,6 +243,9 @@ impl<T: JoinSource + ?Sized> JoinSource for &T {
     }
     fn next_sn_best_effort(&self) -> u64 {
         (**self).next_sn_best_effort()
+    }
+    fn s(&self) -> Option<JoinS> {
+        (**self).s()
     }
 }
 
@@ -256,19 +261,20 @@ pub struct JoinParts<'a> {
     pub cbyte: u8,
     /// The `zid` field.
     pub zid: &'a [u8],
-    /// The `sn_res` field.
-    pub sn_res: Option<u8>,
-    /// The `batch_size` field.
-    pub batch_size: Option<u16>,
     /// The `lease` field.
     pub lease: u64,
     /// The `next_sn_reliable` field.
     pub next_sn_reliable: u64,
     /// The `next_sn_best_effort` field.
     pub next_sn_best_effort: u64,
+    /// The fields `S` decides, held together (docs/adr/0065 §6 R4b).
+    pub s: Option<JoinS>,
 }
 
 impl<'a> JoinSource for JoinParts<'a> {
+    fn s(&self) -> Option<JoinS> {
+        self.s
+    }
     fn version(&self) -> u8 {
         self.version
     }
@@ -277,12 +283,6 @@ impl<'a> JoinSource for JoinParts<'a> {
     }
     fn zid(&self) -> &[u8] {
         self.zid
-    }
-    fn sn_res(&self) -> Option<u8> {
-        self.sn_res
-    }
-    fn batch_size(&self) -> Option<u16> {
-        self.batch_size
     }
     fn lease(&self) -> u64 {
         self.lease
@@ -296,6 +296,9 @@ impl<'a> JoinSource for JoinParts<'a> {
 }
 
 impl<'a> JoinSource for Join<'a> {
+    fn s(&self) -> Option<JoinS> {
+        self.s
+    }
     fn version(&self) -> u8 {
         self.version
     }
@@ -304,12 +307,6 @@ impl<'a> JoinSource for Join<'a> {
     }
     fn zid(&self) -> &[u8] {
         self.zid
-    }
-    fn sn_res(&self) -> Option<u8> {
-        self.sn_res
-    }
-    fn batch_size(&self) -> Option<u16> {
-        self.batch_size
     }
     fn lease(&self) -> u64 {
         self.lease
@@ -323,6 +320,9 @@ impl<'a> JoinSource for Join<'a> {
 }
 
 impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinSource for JoinOwned<S> {
+    fn s(&self) -> Option<JoinS> {
+        self.s
+    }
     fn version(&self) -> u8 {
         self.version
     }
@@ -331,12 +331,6 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinSource for JoinOwned<S> {
     }
     fn zid(&self) -> &[u8] {
         ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid)
-    }
-    fn sn_res(&self) -> Option<u8> {
-        self.sn_res
-    }
-    fn batch_size(&self) -> Option<u16> {
-        self.batch_size
     }
     fn lease(&self) -> u64 {
         self.lease
@@ -356,33 +350,37 @@ impl<'a> Join<'a> {
     /// [`JoinSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents, and a value the encoding cannot carry is refused
     /// before the first byte is written.
-    pub fn encode_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K, s: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::write_source(src, w, s)
+    pub fn encode_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+
+    /// The flag-input `S` that `src` says: set exactly when the value holds the side of `S` present while it holds.
+    /// A parent hands the decode this bit and derives it from here for the
+    /// encode.
+    pub fn input_s<S: JoinSource + ?Sized>(src: &S) -> bool {
+        JoinSource::s(src).is_some()
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K, s: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let (_m_sn_res, _m_batch_size) = match src.s() {
+            Some(JoinS { sn_res, batch_size }) => (Some(sn_res), Some(batch_size)),
+            None => (None, None),
+        };
         let _n_d_cbyte_zid_len_m1_0: usize = src.zid().len().checked_sub(1).ok_or(CodecError::LengthOutOfRange)?;
         if _n_d_cbyte_zid_len_m1_0 > 0xF {
             return Err(CodecError::LengthOutOfRange);
         }
         let _v_cbyte_zid_len_m1: u8 = _n_d_cbyte_zid_len_m1_0 as u8;
         let _c_cbyte: u8 = (src.cbyte() & !0xF0) | (_v_cbyte_zid_len_m1 << 4);
-        if ((s & 0x1) != 0) != src.sn_res().is_some() {
-            return Err(CodecError::PresentIfMismatch);
-        }
-        if ((s & 0x1) != 0) != src.batch_size().is_some() {
-            return Err(CodecError::PresentIfMismatch);
-        }
-        let _ = s;
         w.write_u8(src.version())?;
         w.write_u8(_c_cbyte)?;
         w.write_bytes(src.zid())?;
-        if let Some(_v) = src.sn_res() {
+        if let Some(_v) = _m_sn_res {
             w.write_u8(_v)?;
         }
-        if let Some(_v) = src.batch_size() {
+        if let Some(_v) = _m_batch_size {
             w.write_u8((_v & 0xFF) as u8)?;
             w.write_u8((_v >> 8 & 0xFF) as u8)?;
         }
@@ -395,10 +393,37 @@ impl<'a> Join<'a> {
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: JoinSource + ?Sized>(src: &S, s: u8) -> Result<usize, CodecError> {
+    pub fn count_source<S: JoinSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c, s)?;
+        Self::write_source(src, &mut _c)?;
         Ok(_c.len())
+    }
+}
+
+impl<'a, S: JoinSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Join<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Join<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: JoinSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: JoinSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
     }
 }
 
@@ -467,8 +492,7 @@ pub struct JoinOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_r
     pub version: u8,
     pub cbyte: u8,
     pub zid: S::Bytes<16>,
-    pub sn_res: Option<u8>,
-    pub batch_size: Option<u16>,
+    pub s: Option<JoinS>,
     pub lease: u64,
     pub next_sn_reliable: u64,
     pub next_sn_best_effort: u64,
@@ -509,8 +533,7 @@ impl<'a> Join<'a> {
             version: self.version,
             cbyte: self.cbyte,
             zid: <S::Bytes<16> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.zid)?,
-            sn_res: self.sn_res,
-            batch_size: self.batch_size,
+            s: self.s,
             lease: self.lease,
             next_sn_reliable: self.next_sn_reliable,
             next_sn_best_effort: self.next_sn_best_effort,
@@ -551,8 +574,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
         _out.version = self.version;
         _out.cbyte = self.cbyte;
         _out.zid = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid);
-        _out.sn_res = self.sn_res;
-        _out.batch_size = self.batch_size;
+        _out.s = self.s;
         _out.lease = self.lease;
         _out.next_sn_reliable = self.next_sn_reliable;
         _out.next_sn_best_effort = self.next_sn_best_effort;
@@ -585,18 +607,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
     /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K, s: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Join::encode_source(self, w, s)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Join::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
     /// past the bound the borrowed view declares is refused, as is any value
     /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self, s: u8) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Join::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink, s)?;
+        self.encode(&mut _sce_sink)?;
         Ok(_sce_v)
     }
 }
@@ -619,8 +641,7 @@ impl<'a> Join<'a> {
             version: self.version,
             cbyte: self.cbyte,
             zid: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<16>(origin, self.zid)?,
-            sn_res: self.sn_res,
-            batch_size: self.batch_size,
+            s: self.s,
             lease: self.lease,
             next_sn_reliable: self.next_sn_reliable,
             next_sn_best_effort: self.next_sn_best_effort,

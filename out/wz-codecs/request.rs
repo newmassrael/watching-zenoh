@@ -367,6 +367,38 @@ pub enum RequestVariantSource<'s, #[cfg(feature = "request-put-del")] A0: ?Sized
     Default { tag: RequestUnknownTag, body: &'s D },
 }
 
+#[cfg(not(feature = "request-put-del"))]
+impl<'s, A2: ?Sized, D: ?Sized> RequestVariantSource<'s, A2, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::CodecZenohQuery(_) => 3,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
+#[cfg(feature = "request-put-del")]
+impl<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized> RequestVariantSource<'s, A0, A1, A2, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            #[cfg(feature = "request-put-del")]
+            Self::CodecZenohMsgPut(_) => 1,
+            #[cfg(feature = "request-put-del")]
+            Self::CodecZenohMsgDel(_) => 2,
+            Self::CodecZenohQuery(_) => 3,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
 /// Flags of `Request` a parent sets in place of the ones a value presents:
 /// the end flag of a chain whose entries are `Request`, which the chain
 /// derives from where an entry stands.
@@ -619,6 +651,11 @@ impl<'a> Request<'a> {
     pub fn encode_source<S: RequestSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
         Self::count_source(src)?;
         Self::write_source(src, w)
+    }
+
+    /// The tag of the arm `src` holds ([`RequestVariantSource::tag`]).
+    pub fn tag_of<S: RequestSource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.

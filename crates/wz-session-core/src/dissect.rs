@@ -7019,7 +7019,7 @@ mod tests {
             InboundFrame::Init { body, is_ack, .. } => {
                 assert!(is_ack);
                 assert_eq!(body.zid.as_ref(), &zid);
-                assert_eq!(body.batch_size, Some(0x1000));
+                assert_eq!(body.s.map(|s| s.batch_size), Some(0x1000));
                 assert_eq!(body.cookie.as_ref().map(|c| c.as_ref()), Some(&cookie[..]));
             }
             other => panic!("not an Init: {other:?}"),
@@ -7177,13 +7177,15 @@ mod tests {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: &[0xB0, 0xB1, 0xB2, 0xB3],
-            sn_res: Some(0x09),
-            batch_size: Some(0x2000),
+            s: Some(wz_codecs::init_body::InitBodyS {
+                sn_res: 0x09,
+                batch_size: 0x2000,
+            }),
             cookie_len: None,
             cookie: None,
         };
         let mut bytes = alloc::vec![wz_codecs::wire_const::T_MID_INIT | 0x40];
-        bytes.extend_from_slice(&init.encode_to_vec(1).expect("a fixture init is encodable"));
+        bytes.extend_from_slice(&init.encode_to_vec().expect("a fixture init is encodable"));
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the init");
         // The raw byte SURVIVES: the children are a reading of it, not a
         // replacement for it.
@@ -7203,15 +7205,17 @@ mod tests {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-            sn_res: Some(0x09),
-            batch_size: Some(0x1000),
+            s: Some(wz_codecs::join::JoinS {
+                sn_res: 0x09,
+                batch_size: 0x1000,
+            }),
             lease: 10_000,
             next_sn_reliable: 7,
             next_sn_best_effort: 9,
         };
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
-        bytes.extend_from_slice(&join.encode_to_vec(1).expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the join");
         assert_eq!(uint(&f, "sn_res"), 0x09);
         assert_eq!(label_of(&f, "sn_res_frame_sn"), "16bit");
@@ -7219,16 +7223,15 @@ mod tests {
 
         // Code `0b00` in BOTH pairs -- present, named, and read as `8bit`.
         let zeroed = wz_codecs::join::Join {
-            sn_res: Some(0x00),
+            s: Some(wz_codecs::join::JoinS {
+                sn_res: 0x00,
+                batch_size: 0x1000,
+            }),
             ..join
         };
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
-        bytes.extend_from_slice(
-            &zeroed
-                .encode_to_vec(1)
-                .expect("a fixture join is encodable"),
-        );
+        bytes.extend_from_slice(&zeroed.encode_to_vec().expect("a fixture join is encodable"));
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the zeroed join");
         assert_eq!(uint(&f, "sn_res"), 0x00);
         assert_eq!(label_of(&f, "sn_res_frame_sn"), "8bit");
@@ -7260,21 +7263,23 @@ mod tests {
             // whatami = peer (0x01) in the low bits, zid_len-1 = 3 in the high.
             cbyte: (3 << 4) | 0x01,
             zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-            sn_res: Some(0x00),
-            batch_size: Some(0x1000),
+            s: Some(wz_codecs::join::JoinS {
+                sn_res: 0x00,
+                batch_size: 0x1000,
+            }),
             lease: 10_000,
             next_sn_reliable: 7,
             next_sn_best_effort: 9,
         };
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
-        bytes.extend_from_slice(&join.encode_to_vec(1).expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
         let f = agree_transport("Join", &bytes, |header, body| {
             let s = u8::from(header & wz_codecs::wire_const::FLAG_T_JOIN_S != 0);
             let mut c = SceCursor::new(body);
             let j = wz_codecs::join::Join::decode(&mut c, s).expect("codec rejected the join");
             assert_eq!(j.zid, &[0xA0, 0xA1, 0xA2, 0xA3]);
-            assert_eq!(j.batch_size, Some(0x1000));
+            assert_eq!(j.s.map(|s| s.batch_size), Some(0x1000));
             assert_eq!(j.next_sn_reliable, 7);
             body.len() - c.remaining()
         });
@@ -7291,15 +7296,11 @@ mod tests {
         // the two optionals, and the codec agrees on the shorter body. Without
         // this leg a walker that read them unconditionally would still pass the
         // leg above.
-        let minimal = wz_codecs::join::Join {
-            sn_res: None,
-            batch_size: None,
-            ..join
-        };
+        let minimal = wz_codecs::join::Join { s: None, ..join };
         let mut bytes = alloc::vec![wz_codecs::wire_const::T_MID_JOIN];
         bytes.extend_from_slice(
             &minimal
-                .encode_to_vec(0)
+                .encode_to_vec()
                 .expect("a fixture join is encodable"),
         );
         let f = agree_transport("Join", &bytes, |header, body| {
@@ -7369,15 +7370,14 @@ mod tests {
             version: 0x09,
             cbyte: 0x01,
             zid: &[0xB0],
-            sn_res: None,
-            batch_size: None,
+            s: None,
             // 10 SECONDS on the wire, which is the pico default beacon's form.
             lease: 10,
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
         };
         let mut bytes = alloc::vec![T_MID_JOIN | FLAG_T_JOIN_T];
-        bytes.extend_from_slice(&join.encode_to_vec(0).expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
 
         let f = dissect_transport_message(&bytes, 0).expect("join did not dissect");
         assert_eq!(
@@ -7999,8 +7999,7 @@ mod tests {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-            sn_res: None,
-            batch_size: None,
+            s: None,
             lease: 10_000,
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
@@ -8012,7 +8011,7 @@ mod tests {
         }
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_Z];
-        bytes.extend_from_slice(&join.encode_to_vec(0).expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
         bytes.extend(ext_zbuf(0x01 | crate::ext_header::EXT_FLAG_M, false, &body));
         bytes
     }
@@ -8032,8 +8031,7 @@ mod tests {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-            sn_res: None,
-            batch_size: None,
+            s: None,
             lease: 10_000,
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
@@ -8045,7 +8043,7 @@ mod tests {
         }
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_Z];
-        bytes.extend_from_slice(&join.encode_to_vec(0).expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
         bytes.extend(ext_zbuf(0x01 | crate::ext_header::EXT_FLAG_M, true, &body));
         bytes.extend(ext_zint(0x07, false, patch));
         bytes
@@ -8282,13 +8280,12 @@ mod tests {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-            sn_res: None,
-            batch_size: None,
+            s: None,
             lease: 10_000,
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
         };
-        bytes.extend_from_slice(&join.encode_to_vec(0).expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
         bytes.extend(ext_zbuf(
             0x02 | crate::ext_header::EXT_FLAG_M,
             false,

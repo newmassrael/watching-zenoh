@@ -397,6 +397,27 @@ pub enum DeclareVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, A3: ?Sized
     Default { tag: DeclareUnknownTag, body: &'s D },
 }
 
+impl<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, A3: ?Sized, A4: ?Sized, A5: ?Sized, A6: ?Sized, A7: ?Sized, A8: ?Sized, D: ?Sized> DeclareVariantSource<'s, A0, A1, A2, A3, A4, A5, A6, A7, A8, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::CodecZenohDeclKexpr(_) => 0,
+            Self::CodecZenohUndeclKexpr(_) => 1,
+            Self::CodecZenohDeclSubscriber(_) => 2,
+            Self::CodecZenohUndeclSubscriber(_) => 3,
+            Self::CodecZenohDeclQueryable(_) => 4,
+            Self::CodecZenohUndeclQueryable(_) => 5,
+            Self::CodecZenohDeclToken(_) => 6,
+            Self::CodecZenohUndeclToken(_) => 7,
+            Self::CodecZenohDeclFinal(_) => 26,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Declare` says: its presented fields. A length, a count
 /// or the flag a gated field is announced by is not among them; `Declare`
@@ -574,6 +595,11 @@ impl<'a> Declare<'a> {
     pub fn encode_source<S: DeclareSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
         Self::count_source(src)?;
         Self::write_source(src, w)
+    }
+
+    /// The tag of the arm `src` holds ([`DeclareVariantSource::tag`]).
+    pub fn tag_of<S: DeclareSource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.

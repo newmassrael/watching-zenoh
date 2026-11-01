@@ -283,6 +283,21 @@ pub enum QueryExtEntryVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?
     Default { tag: QueryExtEntryUnknownTag, body: &'s D },
 }
 
+impl<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized> QueryExtEntryVariantSource<'s, A0, A1, A2, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::CodecZenohExtUnit(_) => 0,
+            Self::CodecZenohExtZint(_) => 1,
+            Self::CodecZenohQueryValueZbuf(_) => 2,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
 /// Flags of `QueryExtEntry` a parent sets in place of the ones a value presents:
 /// the end flag of a chain whose entries are `QueryExtEntry`, which the chain
 /// derives from where an entry stands.
@@ -417,8 +432,12 @@ impl<'a> QueryExtEntry<'a> {
     /// `src` presents, and a value the encoding cannot carry is refused
     /// before the first byte is written.
     pub fn encode_source<S: QueryExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K, after_shm: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::count_source(src, after_shm)?;
         Self::write_source(src, w, after_shm)
+    }
+
+    /// The tag of the arm `src` holds ([`QueryExtEntryVariantSource::tag`]).
+    pub fn tag_of<S: QueryExtEntrySource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
@@ -431,12 +450,7 @@ impl<'a> QueryExtEntry<'a> {
     /// ones `src` presents.
     #[doc(hidden)]
     pub fn write_source_in<S: QueryExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K, after_shm: u8, over: &QueryExtEntryOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _d_header_enc: u8 = match src.body() {
-            QueryExtEntryVariantSource::CodecZenohExtUnit(_) => 0,
-            QueryExtEntryVariantSource::CodecZenohExtZint(_) => 1,
-            QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_) => 2,
-            QueryExtEntryVariantSource::Default { tag, .. } => tag.get(),
-        };
+        let _d_header_enc: u8 = src.body().tag();
         let mut _c_header: u8 = (src.header() & !0x60) | (_d_header_enc << 5);
         if let Some(_o) = over.header_m {
             _c_header = (_c_header & !0x10) | (u8::from(_o) << 4);
@@ -444,12 +458,18 @@ impl<'a> QueryExtEntry<'a> {
         if let Some(_o) = over.header_z {
             _c_header = (_c_header & !0x80) | (u8::from(_o) << 7);
         }
+        {
+            let _h: bool = after_shm != 0;
+            if match src.body() { QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_b) => QueryValueZbuf::input_after_shm(_b) != _h, _ => false, } {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        }
         let _ = after_shm;
         w.write_u8(_c_header)?;
         match src.body() {
             QueryExtEntryVariantSource::CodecZenohExtUnit(_b) => ExtUnit::write_source(_b, w)?,
             QueryExtEntryVariantSource::CodecZenohExtZint(_b) => ExtZint::write_source(_b, w)?,
-            QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_b) => QueryValueZbuf::write_source(_b, w, after_shm)?,
+            QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_b) => QueryValueZbuf::write_source(_b, w)?,
             QueryExtEntryVariantSource::Default { body: _b, .. } => ExtUnit::write_source(_b, w)?,
         }
         Ok(())

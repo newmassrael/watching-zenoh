@@ -335,6 +335,20 @@ pub enum PushVariantSource<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> {
     Default { tag: PushUnknownTag, body: &'s D },
 }
 
+impl<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> PushVariantSource<'s, A0, A1, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::CodecZenohMsgPut(_) => 1,
+            Self::CodecZenohMsgDel(_) => 2,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
 /// Flags of `Push` a parent sets in place of the ones a value presents:
 /// the end flag of a chain whose entries are `Push`, which the chain
 /// derives from where an entry stands.
@@ -496,6 +510,11 @@ impl<'a> Push<'a> {
     pub fn encode_source<S: PushSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
         Self::count_source(src)?;
         Self::write_source(src, w)
+    }
+
+    /// The tag of the arm `src` holds ([`PushVariantSource::tag`]).
+    pub fn tag_of<S: PushSource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.

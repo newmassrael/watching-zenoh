@@ -669,7 +669,10 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 {
                     use crate::session_fsm_unicast::SessionFsmUnicastState as S;
                     if engine.get_current_state() == S::SentInitSyn {
-                        if !actions.init_ack_caps_acceptable(body.sn_res, body.batch_size) {
+                        if !actions.init_ack_caps_acceptable(
+                            body.s.map(|s| s.sn_res),
+                            body.s.map(|s| s.batch_size),
+                        ) {
                             engine.process_event(E::FramingError);
                             return DriverLoopOutcome::InitAckCapsRejected;
                         }

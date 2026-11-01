@@ -4450,17 +4450,19 @@ mod tests {
     /// incompatible-config refuse — multicast has no negotiation).
     #[tokio::test]
     async fn drive_loop_ignores_join_with_mismatched_sn_res() {
-        use wz_codecs::join::Join;
+        use wz_codecs::join::{Join, JoinS};
         let zid = [0x01, 0x02, 0x03, 0x04];
         let mut join = Join::new();
         join.version = 0x09;
         join.set_whatami(WhatAmI::Peer.to_wire());
         join.set_zid_len_m1((zid.len() - 1) as u8);
         join.zid = &zid;
-        join.sn_res = Some(0x01); // 14-bit ring, ours is 0x02 (28-bit)
-        join.batch_size = Some(0xFFFF);
+        join.s = Some(JoinS {
+            sn_res: 0x01, // 14-bit ring, ours is 0x02 (28-bit)
+            batch_size: 0xFFFF,
+        });
         join.lease = 5_000;
-        let body = join.encode_to_vec(1).expect("a fixture Join encodes");
+        let body = join.encode_to_vec().expect("a fixture Join encodes");
         let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
         dgram.extend_from_slice(&body);
 

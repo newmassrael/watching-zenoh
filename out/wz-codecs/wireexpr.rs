@@ -174,6 +174,19 @@ pub enum WireexprVariantSource<'s, A0: ?Sized, A1: ?Sized> {
     WireexprLocal(&'s A1),
 }
 
+impl<'s, A0: ?Sized, A1: ?Sized> WireexprVariantSource<'s, A0, A1> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::WireexprNonlocal(_) => 0,
+            Self::WireexprLocal(_) => 1,
+        }
+    }
+}
+
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Wireexpr` says: its presented fields. A length, a count
 /// or the flag a gated field is announced by is not among them; `Wireexpr`
@@ -252,6 +265,11 @@ impl<'a> Wireexpr<'a> {
     /// before the first byte is written.
     pub fn encode_source<S: WireexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K, n: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
         Self::write_source(src, w, n)
+    }
+
+    /// The tag of the arm `src` holds ([`WireexprVariantSource::tag`]).
+    pub fn tag_of<S: WireexprSource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.

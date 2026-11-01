@@ -9034,8 +9034,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // same SN ring; the packed `sn_res` byte is wire-identical
                 // on InitSyn and InitAck, so the decoder is shared.
                 self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
-                    body.sn_res,
-                    body.batch_size,
+                    body.s.map(|s| s.sn_res),
+                    body.s.map(|s| s.batch_size),
                 )));
             }
             #[cfg(feature = "codec-init-body")]
@@ -9071,8 +9071,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // outbound InitAck (zenoh-pico
                 // unicast/transport.c:123-140 rejection condition).
                 self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
-                    body.sn_res,
-                    body.batch_size,
+                    body.s.map(|s| s.sn_res),
+                    body.s.map(|s| s.batch_size),
                 )));
             }
             #[cfg(feature = "codec-open-body")]

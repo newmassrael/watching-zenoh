@@ -71,7 +71,7 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::init_body::InitBody;
+use wz_codecs::init_body::{InitBody, InitBodyS};
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::stream_envelope::StreamEnvelope;
@@ -478,9 +478,6 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
     }
     let chain = chain_of(spec.extensions)?;
     let mut flags = 0u8;
-    if spec.size.is_some() {
-        flags |= wire_const::FLAG_T_INIT_S;
-    }
     let cookie = match spec.role {
         InitRole::Syn => None,
         InitRole::Ack { cookie } => {
@@ -495,19 +492,21 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
         version: spec.version,
         cbyte: cbyte(spec.whatami, spec.zid.len()),
         zid: spec.zid,
-        sn_res: spec
-            .size
-            .map(|s| pack_sn_res(s.frame_sn_code, s.request_id_code)),
-        batch_size: spec.size.map(|s| s.batch_size),
+        s: spec.size.map(|s| InitBodyS {
+            sn_res: pack_sn_res(s.frame_sn_code, s.request_id_code),
+            batch_size: s.batch_size,
+        }),
         cookie_len: cookie.map(|c| c.len() as u64),
         cookie,
     };
+    if body.s.is_some() {
+        flags |= wire_const::FLAG_T_INIT_S;
+    }
     let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + chain.len());
     wire.push(flags | wire_const::T_MID_INIT);
     {
         let mut sink = VecSink::new(&mut wire);
-        body.encode(&mut sink, (flags >> 6) & 1)
-            .expect("VecSink is infallible");
+        body.encode(&mut sink).expect("VecSink is infallible");
     }
     wire.extend_from_slice(&chain);
     Ok(wire)

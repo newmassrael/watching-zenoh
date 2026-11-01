@@ -11134,17 +11134,17 @@ mod datagram_tests {
             // zid width, so it is spelled out rather than guessed.
             cbyte: 0x31,
             zid: &[0xAA; 4],
-            sn_res: None,
-            batch_size: None,
+            s: None,
             // A-gated: the ACK carries the cookie field, the SYN does not.
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
-        // The S (resolution present) discriminator rides the parent header, so
-        // the codec takes it as an argument. A (is-ack) is what the cookie says.
+        // The S (resolution present) and A (is-ack) discriminators ride the
+        // parent header, and the body says both: S by its size group, A by its
+        // cookie.
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0)
+                .encode_to_vec()
                 .expect("a fixture InitBody is encodable"),
         );
         wire.extend_from_slice(ext_bytes);
@@ -11195,14 +11195,16 @@ mod datagram_tests {
             // The S flag announces BOTH size parameters: the resolution byte and
             // the batch size travel together, and leaving one out makes the
             // decoder read the next field's bytes as the missing one.
-            sn_res: Some(sn_res),
-            batch_size: Some(u16::MAX),
+            s: Some(wz_codecs::init_body::InitBodyS {
+                sn_res,
+                batch_size: u16::MAX,
+            }),
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
         wire.extend_from_slice(
             &body
-                .encode_to_vec(1)
+                .encode_to_vec()
                 .expect("a fixture InitBody is encodable"),
         );
         wire
@@ -12767,14 +12769,13 @@ mod datagram_tests {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: &[1, 2, 3, 4],
-            sn_res: None,
-            batch_size: None,
+            s: None,
             lease: 10_000,
             next_sn_reliable: 7,
             next_sn_best_effort: 9,
         };
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
-        wire.extend_from_slice(&join.encode_to_vec(0).expect("a fixture Join is encodable"));
+        wire.extend_from_slice(&join.encode_to_vec().expect("a fixture Join is encodable"));
 
         let mut d = Dissection::new();
         d.push_packet(LINKTYPE_ETHERNET, 0, &raweth_packet(&wire));
@@ -12904,14 +12905,13 @@ mod datagram_tests {
             zid: &[1, 2, 3, 4],
             // S clear, so the size parameters are absent rather than
             // defaulted — the shape a JOIN takes when it accepts the peer's.
-            sn_res: None,
-            batch_size: None,
+            s: None,
             lease: 10_000,
             next_sn_reliable: 7,
             next_sn_best_effort: 9,
         };
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
-        wire.extend_from_slice(&join.encode_to_vec(0).expect("a fixture Join is encodable"));
+        wire.extend_from_slice(&join.encode_to_vec().expect("a fixture Join is encodable"));
 
         let pkt = udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &wire);
         let mut d = Dissection::new();
@@ -13062,15 +13062,14 @@ mod datagram_tests {
                 version: 0x09,
                 cbyte: (3 << 4) | 0x01,
                 zid: &[1, 2, 3, 4],
-                sn_res: None,
-                batch_size: None,
+                s: None,
                 cookie_len: None,
                 cookie: None,
             };
             let mut w = alloc::vec![wc::T_MID_INIT];
             w.extend_from_slice(
                 &body
-                    .encode_to_vec(0)
+                    .encode_to_vec()
                     .expect("a fixture InitBody is encodable"),
             );
             w
@@ -13102,14 +13101,13 @@ mod datagram_tests {
                 version: 0x09,
                 cbyte: (3 << 4) | 0x01,
                 zid: &[1, 2, 3, 4],
-                sn_res: None,
-                batch_size: None,
+                s: None,
                 lease: 10_000,
                 next_sn_reliable: 0,
                 next_sn_best_effort: 0,
             };
             let mut w = alloc::vec![wc::T_MID_JOIN];
-            w.extend_from_slice(&body.encode_to_vec(0).expect("a fixture Join is encodable"));
+            w.extend_from_slice(&body.encode_to_vec().expect("a fixture Join is encodable"));
             w
         };
         let keep_alive = alloc::vec![wc::T_MID_KEEP_ALIVE];
@@ -17091,8 +17089,10 @@ mod datagram_tests {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-            sn_res: Some(0x00),
-            batch_size: Some(0x1000),
+            s: Some(wz_codecs::join::JoinS {
+                sn_res: 0x00,
+                batch_size: 0x1000,
+            }),
             // 10 whole seconds, which a pico beacon sends as T=1 + VLE 10.
             lease: 10,
             next_sn_reliable: 7,
@@ -17103,7 +17103,7 @@ mod datagram_tests {
                 | wz_session_core::wire_const::FLAG_T_JOIN_S
                 | wz_session_core::wire_const::FLAG_T_JOIN_T
         ];
-        wire.extend_from_slice(&join.encode_to_vec(1).expect("a fixture Join is encodable"));
+        wire.extend_from_slice(&join.encode_to_vec().expect("a fixture Join is encodable"));
 
         let mut d = Dissection::new();
         // The real multicast session group: zenoh shares 224.0.0.224:7446 for
@@ -17118,7 +17118,7 @@ mod datagram_tests {
             Ok(InboundFrame::Join { body, has_ext, .. }) => {
                 assert!(!has_ext, "this JOIN carries no ext chain");
                 assert_eq!(body.zid.as_ref(), &[0xA0, 0xA1, 0xA2, 0xA3]);
-                assert_eq!(body.batch_size, Some(0x1000));
+                assert_eq!(body.s.map(|s| s.batch_size), Some(0x1000));
                 assert_eq!(body.next_sn_reliable, 7);
                 assert_eq!(body.next_sn_best_effort, 9);
                 // The T flag is projected at the decode boundary, so no

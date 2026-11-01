@@ -948,7 +948,10 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     assert_eq!(carried.peer_whatami, announced.whatami(), "and the role");
     assert_eq!(
         PeerInitCaps::from_init_body(Some(carried.sn_res), Some(carried.batch_size)),
-        PeerInitCaps::from_init_body(announced.sn_res, announced.batch_size),
+        PeerInitCaps::from_init_body(
+            announced.s.map(|s| s.sn_res),
+            announced.s.map(|s| s.batch_size)
+        ),
         "and the sizing caps the InitSyn announced"
     );
 
@@ -992,8 +995,8 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     assert_eq!(
         *actions.inbound_peer_init_caps.lock().unwrap(),
         Some(PeerInitCaps::from_init_body(
-            announced.sn_res,
-            announced.batch_size
+            announced.s.map(|s| s.sn_res),
+            announced.s.map(|s| s.batch_size)
         )),
         "the caps are back"
     );

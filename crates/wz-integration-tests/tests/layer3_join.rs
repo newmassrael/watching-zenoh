@@ -20,7 +20,7 @@
 //! both inherit the zenoh-pico `_z_uint16_encode` LSB-first
 //! convention.
 
-use wz_codecs::join::Join;
+use wz_codecs::join::{Join, JoinS};
 use wz_codecs::wire_const::PROTOCOL_VERSION;
 use zenoh_pico_sys::{
     _z_conduit_sn_list_t, _z_conduit_sn_list_t__bindgen_ty_1, _z_coundit_sn_t, _z_id_t,
@@ -120,13 +120,12 @@ fn layer3_join_s0_basic() {
         version: input.version,
         cbyte,
         zid: input.zid,
-        sn_res: None,
-        batch_size: None,
+        s: None,
         lease: input.lease,
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .encode_to_vec()
     .expect("the Join encodes");
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
@@ -153,13 +152,15 @@ fn layer3_join_s1_with_size_negotiation() {
         version: input.version,
         cbyte,
         zid: input.zid,
-        sn_res: Some(sn_res),
-        batch_size: Some(input.batch_size),
+        s: Some(JoinS {
+            sn_res,
+            batch_size: input.batch_size,
+        }),
         lease: input.lease,
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .encode_to_vec()
     .expect("the Join encodes");
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
@@ -191,15 +192,14 @@ fn layer3_join_t_flag_lease_in_seconds() {
         version: input.version,
         cbyte,
         zid: input.zid,
-        sn_res: None,
-        batch_size: None,
+        s: None,
         // The glue's encode-side projection (multicast_glue::encode_join):
         // whole-second lease -> seconds on the wire.
         lease: input.lease / 1000,
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .encode_to_vec()
     .expect("the Join encodes");
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
@@ -237,13 +237,12 @@ fn layer3_join_vle_boundaries_on_sn() {
             version: input.version,
             cbyte,
             zid: input.zid,
-            sn_res: None,
-            batch_size: None,
+            s: None,
             lease,
             next_sn_reliable: sn_r,
             next_sn_best_effort: sn_be,
         }
-        .encode_to_vec(((input.parent_flags) >> 6) & 1)
+        .encode_to_vec()
         .expect("the Join encodes");
         let pico = zenoh_pico_encode_join(&input);
         assert_eq!(

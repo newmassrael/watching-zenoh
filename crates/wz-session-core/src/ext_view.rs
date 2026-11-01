@@ -252,7 +252,7 @@ mod query {
     use wz_codecs::query_ext_entry::{
         QueryExtEntryOwned, QueryExtEntryOwnedVariant, QueryExtEntryUnknownTag,
     };
-    use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
+    use wz_codecs::query_value_zbuf::{QueryValueZbufAfterShm, QueryValueZbufOwned};
 
     impl<S: CodecStorage> ExtEntryView for QueryExtEntryOwned<S> {
         fn header(&self) -> u8 {
@@ -269,11 +269,14 @@ mod query {
 
         fn plain_zbuf(&self) -> Option<&[u8]> {
             match &self.body {
-                // `value` is populated for the plain shape only: the sliced shape
-                // has an encoding and a list of slices instead.
-                QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => {
-                    z.value.as_ref().map(SceByteBuf::as_slice)
-                }
+                // `value` is on the plain shape only: the sliced shape has an
+                // encoding and a list of slices instead.
+                QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => match &z.after_shm {
+                    QueryValueZbufAfterShm::NotAfterShm { value } => {
+                        Some(SceByteBuf::as_slice(value))
+                    }
+                    QueryValueZbufAfterShm::AfterShm { .. } => None,
+                },
                 _ => None,
             }
         }
@@ -307,7 +310,10 @@ mod query {
             use wz_codecs::query_ext_entry::QueryExtEntryVariant;
             match &self.body {
                 // As on the owned entry: only the plain shape has `value`.
-                QueryExtEntryVariant::CodecZenohQueryValueZbuf(z) => z.value,
+                QueryExtEntryVariant::CodecZenohQueryValueZbuf(z) => match &z.after_shm {
+                    QueryValueZbufAfterShm::NotAfterShm { value } => Some(*value),
+                    QueryValueZbufAfterShm::AfterShm { .. } => None,
+                },
                 _ => None,
             }
         }
@@ -340,7 +346,10 @@ mod query {
             use wz_codecs::query_ext_entry::QueryExtEntryViewVariant;
             match &self.body {
                 // As on the owned entry: only the plain shape has `value`.
-                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) => z.value,
+                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) => match &z.after_shm {
+                    QueryValueZbufAfterShm::NotAfterShm { value } => Some(*value),
+                    QueryValueZbufAfterShm::AfterShm { .. } => None,
+                },
                 _ => None,
             }
         }
@@ -358,7 +367,10 @@ mod query {
         fn plain_zbuf_in(&self) -> Option<&'a [u8]> {
             use wz_codecs::query_ext_entry::QueryExtEntryViewVariant;
             match &self.body {
-                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) => z.value,
+                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) => match &z.after_shm {
+                    QueryValueZbufAfterShm::NotAfterShm { value } => Some(*value),
+                    QueryValueZbufAfterShm::AfterShm { .. } => None,
+                },
                 _ => None,
             }
         }
@@ -378,18 +390,15 @@ mod query {
         use sce_forge_runtime::codec::SceList;
         super::find_by_eid(extensions, crate::ext_header::body_eid::QUERY_VALUE).map_or(0, |ext| {
             match &ext.body {
-                QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => {
-                    match (&z.value, &z.slices) {
-                        (Some(bytes), _) => {
-                            crate::encoding::split_value_body(SceByteBuf::as_slice(bytes))
-                                .map_or(0, |(_, payload)| payload.len())
-                        }
-                        (None, Some(slices)) => {
-                            crate::put_payload::slices_len(SceList::as_slice(slices.inner()))
-                        }
-                        (None, None) => 0,
+                QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => match &z.after_shm {
+                    QueryValueZbufAfterShm::NotAfterShm { value } => {
+                        crate::encoding::split_value_body(SceByteBuf::as_slice(value))
+                            .map_or(0, |(_, payload)| payload.len())
                     }
-                }
+                    QueryValueZbufAfterShm::AfterShm { slices, .. } => {
+                        crate::put_payload::slices_len(SceList::as_slice(slices.inner()))
+                    }
+                },
                 _ => 0,
             }
         })
@@ -411,11 +420,8 @@ mod query {
             }
             ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => {
                 QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
-                    value_len: z.value_len,
-                    value: Some(z.value),
-                    encoding: None,
+                    after_shm: QueryValueZbufAfterShm::NotAfterShm { value: z.value },
                     slice_count: None,
-                    slices: None,
                 })
             }
             ExtEntryOwnedVariant::Default { tag, body } => {

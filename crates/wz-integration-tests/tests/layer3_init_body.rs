@@ -18,7 +18,7 @@
 //!     req_id_res) + batch_size u16 LE
 //!   - parent.A: VLE(cookie_len) + cookie bytes
 
-use wz_codecs::init_body::InitBody;
+use wz_codecs::init_body::{InitBody, InitBodyS};
 use wz_codecs::wire_const::PROTOCOL_VERSION;
 use zenoh_pico_sys::{
     _z_delete_context_t, _z_id_t, _z_init_encode, _z_slice_t, _z_t_msg_init_t, _z_wbuf_clear,
@@ -142,12 +142,11 @@ fn layer3_init_body_s0_a0() {
         version: input.version,
         cbyte,
         zid: input.zid,
-        sn_res: None,
-        batch_size: None,
+        s: None,
         cookie_len: None,
         cookie: None,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .encode_to_vec()
     .expect("the InitBody encodes");
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
@@ -173,12 +172,14 @@ fn layer3_init_body_s1_a0() {
         version: input.version,
         cbyte,
         zid: input.zid,
-        sn_res: Some(sn_res),
-        batch_size: Some(input.batch_size),
+        s: Some(InitBodyS {
+            sn_res,
+            batch_size: input.batch_size,
+        }),
         cookie_len: None,
         cookie: None,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .encode_to_vec()
     .expect("the InitBody encodes");
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
@@ -204,12 +205,11 @@ fn layer3_init_body_s0_a1() {
         version: input.version,
         cbyte,
         zid: input.zid,
-        sn_res: None,
-        batch_size: None,
+        s: None,
         cookie_len: Some(cookie.len() as u64),
         cookie: Some(&cookie),
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .encode_to_vec()
     .expect("the InitBody encodes");
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
@@ -236,12 +236,14 @@ fn layer3_init_body_s1_a1() {
         version: input.version,
         cbyte,
         zid: input.zid,
-        sn_res: Some(sn_res),
-        batch_size: Some(input.batch_size),
+        s: Some(InitBodyS {
+            sn_res,
+            batch_size: input.batch_size,
+        }),
         cookie_len: Some(cookie.len() as u64),
         cookie: Some(&cookie),
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .encode_to_vec()
     .expect("the InitBody encodes");
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);

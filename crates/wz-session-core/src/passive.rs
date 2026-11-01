@@ -3507,7 +3507,10 @@ impl FlowContext {
                 // See `FlowContext::caps` for why this is an assignment and
                 // not a fold.
                 if *is_ack {
-                    self.caps = Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
+                    self.caps = Some(PeerInitCaps::from_init_body(
+                        body.s.map(|s| s.sn_res),
+                        body.s.map(|s| s.batch_size),
+                    ));
                 }
                 self.phase = if self.negotiated() {
                     SessionPhase::InitComplete
@@ -4820,8 +4823,7 @@ mod tests {
             // spelled out rather than guessed.
             cbyte: 0x31,
             zid: &[0xAA; 4],
-            sn_res: None,
-            batch_size: None,
+            s: None,
             // The cookie is A-gated on Init: an InitAck carries it, an
             // InitSyn does not (`out/wz-codecs/init_body.rs:103-112`). The
             // fixture keeps it empty; presence, not content, is what the
@@ -4829,11 +4831,11 @@ mod tests {
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
-        // `encode(sink, s)`: the S (resolution present) discriminator rides the
-        // parent header, so the codec takes it. A (is-ack) is what the cookie says.
+        // The S (resolution present) and A (is-ack) discriminators ride the parent
+        // header, and the body says both: S by its size group, A by its cookie.
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0)
+                .encode_to_vec()
                 .expect("a fixture init body is encodable"),
         );
         if !exts.is_empty() {
@@ -7387,15 +7389,14 @@ mod tests {
             version: 0x09,
             cbyte: 0x31,
             zid: &[0xAA; 4],
-            sn_res: Some(sn_res),
-            batch_size: Some(batch_size),
+            s: Some(wz_codecs::init_body::InitBodyS { sn_res, batch_size }),
             cookie_len: is_ack.then_some(cookie as u64),
             cookie: is_ack.then_some(&zeros[..]),
         };
         let mut wire = vec![flags | wz_codecs::wire_const::T_MID_INIT];
         wire.extend_from_slice(
             &body
-                .encode_to_vec(1)
+                .encode_to_vec()
                 .expect("a fixture init body is encodable"),
         );
         wire

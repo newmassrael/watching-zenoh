@@ -68,7 +68,7 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
 #[cfg(feature = "codec-init-body")]
-use wz_codecs::init_body::InitBody;
+use wz_codecs::init_body::{InitBody, InitBodyS};
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBody;
 
@@ -171,7 +171,7 @@ pub fn encode_init_into(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Result<(), CodecError> {
-    let mut parent_flags = wire_const::FLAG_T_INIT_S;
+    let mut parent_flags = 0;
     if is_ack {
         parent_flags |= wire_const::FLAG_T_INIT_A;
     }
@@ -197,15 +197,19 @@ pub fn encode_init_into(
         // zid is the protocol-bounded peer id (1..=16); init_cbyte
         // above already encodes its length.
         zid: &params.zid,
-        sn_res: Some(pack_sn_res(caps.seq_num_res, caps.req_id_res)),
-        batch_size: Some(caps.batch_size),
+        s: Some(InitBodyS {
+            sn_res: pack_sn_res(caps.seq_num_res, caps.req_id_res),
+            batch_size: caps.batch_size,
+        }),
         cookie_len: cookie.map(|c| c.len() as u64),
         cookie,
     };
+    if body.s.is_some() {
+        parent_flags |= wire_const::FLAG_T_INIT_S;
+    }
 
     buf.append_byte(parent_flags | wire_const::T_MID_INIT)?;
-    let s = (parent_flags >> 6) & 1;
-    body.encode(&mut TxSink::new(&mut *buf), s)?;
+    body.encode(&mut TxSink::new(&mut *buf))?;
     encode_ext_chain_into(buf, extensions)
 }
 

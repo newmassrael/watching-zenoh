@@ -34,6 +34,7 @@
 use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::query::Query;
 use wz_codecs::query_ext_entry::QueryExtEntryVariant;
+use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
 
 /// The value extension of a plain value: header `0x43`, declared length 2, then
 /// the encoding byte and one payload byte.
@@ -62,16 +63,11 @@ fn value_is_sliced(wire: &[u8]) -> bool {
     let QueryExtEntryVariant::CodecZenohQueryValueZbuf(value) = &last.body else {
         panic!("the value extension is a ZBuf entry");
     };
-    let sliced = value.slices.is_some();
+    let sliced = matches!(value.after_shm, QueryValueZbufAfterShm::AfterShm { .. });
     assert_eq!(
         sliced,
-        value.encoding.is_some() && value.slice_count.is_some(),
+        value.slice_count.is_some(),
         "the sliced fields are present or absent together"
-    );
-    assert_eq!(
-        !sliced,
-        value.value.is_some(),
-        "exactly one layout's fields are present"
     );
     sliced
 }

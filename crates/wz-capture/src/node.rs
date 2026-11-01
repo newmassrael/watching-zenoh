@@ -2808,7 +2808,7 @@ pub(crate) mod tests {
         }];
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0)
+                .encode_to_vec()
                 .expect("a fixture InitBody is encodable"),
         );
         let mut framed = (wire.len() as u16).to_le_bytes().to_vec();
@@ -2829,7 +2829,7 @@ pub(crate) mod tests {
         join.set_whatami(role);
         join.set_zid_len_m1(zid.len() as u8 - 1);
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
-        wire.extend_from_slice(&join.encode_to_vec(0).expect("a fixture Join is encodable"));
+        wire.extend_from_slice(&join.encode_to_vec().expect("a fixture Join is encodable"));
         wire
     }
 

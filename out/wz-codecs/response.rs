@@ -339,6 +339,20 @@ pub enum ResponseVariantSource<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> {
     Default { tag: ResponseUnknownTag, body: &'s D },
 }
 
+impl<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> ResponseVariantSource<'s, A0, A1, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::CodecZenohReply(_) => 4,
+            Self::CodecZenohErr(_) => 5,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
 /// Flags of `Response` a parent sets in place of the ones a value presents:
 /// the end flag of a chain whose entries are `Response`, which the chain
 /// derives from where an entry stands.
@@ -519,6 +533,11 @@ impl<'a> Response<'a> {
     pub fn encode_source<S: ResponseSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
         Self::count_source(src)?;
         Self::write_source(src, w)
+    }
+
+    /// The tag of the arm `src` holds ([`ResponseVariantSource::tag`]).
+    pub fn tag_of<S: ResponseSource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.

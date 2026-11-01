@@ -275,6 +275,21 @@ pub enum ExtEntryVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized
     Default { tag: ExtEntryUnknownTag, body: &'s D },
 }
 
+impl<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized> ExtEntryVariantSource<'s, A0, A1, A2, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::CodecZenohExtUnit(_) => 0,
+            Self::CodecZenohExtZint(_) => 1,
+            Self::CodecZenohExtZbuf(_) => 2,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
 /// Flags of `ExtEntry` a parent sets in place of the ones a value presents:
 /// the end flag of a chain whose entries are `ExtEntry`, which the chain
 /// derives from where an entry stands.
@@ -412,6 +427,11 @@ impl<'a> ExtEntry<'a> {
         Self::write_source(src, w)
     }
 
+    /// The tag of the arm `src` holds ([`ExtEntryVariantSource::tag`]).
+    pub fn tag_of<S: ExtEntrySource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
+    }
+
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
@@ -422,12 +442,7 @@ impl<'a> ExtEntry<'a> {
     /// ones `src` presents.
     #[doc(hidden)]
     pub fn write_source_in<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &ExtEntryOverrides) -> Result<(), K::Error> {
-        let _d_header_enc: u8 = match src.body() {
-            ExtEntryVariantSource::CodecZenohExtUnit(_) => 0,
-            ExtEntryVariantSource::CodecZenohExtZint(_) => 1,
-            ExtEntryVariantSource::CodecZenohExtZbuf(_) => 2,
-            ExtEntryVariantSource::Default { tag, .. } => tag.get(),
-        };
+        let _d_header_enc: u8 = src.body().tag();
         let mut _c_header: u8 = (src.header() & !0x60) | (_d_header_enc << 5);
         if let Some(_o) = over.header_m {
             _c_header = (_c_header & !0x10) | (u8::from(_o) << 4);

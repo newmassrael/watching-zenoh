@@ -1792,9 +1792,8 @@ mod join_tests {
     /// by the caller. The fixture is the CODEC's bytes rather than a hand-laid
     /// string, so a decode that disagrees with the codec fails here.
     fn join_wire(flags: u8, join: &wz_codecs::join::Join<'_>) -> Vec<u8> {
-        let s = u8::from(flags & wire_const::FLAG_T_JOIN_S != 0);
         let mut wire = alloc::vec![wire_const::T_MID_JOIN | flags];
-        wire.extend_from_slice(&join.encode_to_vec(s).expect("a fixture join is encodable"));
+        wire.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
         wire
     }
 
@@ -1804,8 +1803,10 @@ mod join_tests {
             // whatami = peer (0x01), zid_len-1 = 3.
             cbyte: (3 << 4) | 0x01,
             zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-            sn_res: Some(0x00),
-            batch_size: Some(0x1000),
+            s: Some(wz_codecs::join::JoinS {
+                sn_res: 0x00,
+                batch_size: 0x1000,
+            }),
             lease: 10_000,
             next_sn_reliable: 7,
             next_sn_best_effort: 9,
@@ -1825,8 +1826,8 @@ mod join_tests {
                 assert!(extensions.is_empty());
                 assert_eq!(body.version, 0x09);
                 assert_eq!(body.zid.as_ref(), &[0xA0, 0xA1, 0xA2, 0xA3]);
-                assert_eq!(body.sn_res, Some(0x00));
-                assert_eq!(body.batch_size, Some(0x1000));
+                assert_eq!(body.s.map(|s| s.sn_res), Some(0x00));
+                assert_eq!(body.s.map(|s| s.batch_size), Some(0x1000));
                 assert_eq!(body.lease, 10_000);
                 assert_eq!(body.next_sn_reliable, 7);
                 assert_eq!(body.next_sn_best_effort, 9);
@@ -1841,15 +1842,13 @@ mod join_tests {
     #[test]
     fn an_s_clear_join_carries_no_capability_pair() {
         let minimal = wz_codecs::join::Join {
-            sn_res: None,
-            batch_size: None,
+            s: None,
             ..sample()
         };
         let wire = join_wire(0, &minimal);
         match parse_inbound(&wire).expect("parse_inbound rejected the minimal join") {
             InboundFrame::Join { body, .. } => {
-                assert_eq!(body.sn_res, None);
-                assert_eq!(body.batch_size, None);
+                assert_eq!(body.s, None);
                 assert_eq!(body.lease, 10_000, "the lease must still be read");
                 assert_eq!(body.next_sn_best_effort, 9);
             }
@@ -1865,8 +1864,7 @@ mod join_tests {
     fn a_t_flagged_lease_is_projected_to_milliseconds() {
         let seconds = wz_codecs::join::Join {
             lease: 10,
-            sn_res: None,
-            batch_size: None,
+            s: None,
             ..sample()
         };
         let wire = join_wire(wire_const::FLAG_T_JOIN_T, &seconds);
@@ -2020,14 +2018,16 @@ mod kind_name_tests {
                 version: 0x09,
                 cbyte: (3 << 4) | 0x01,
                 zid: &[0xA0, 0xA1, 0xA2, 0xA3],
-                sn_res: Some(0x00),
-                batch_size: Some(0x1000),
+                s: Some(wz_codecs::join::JoinS {
+                    sn_res: 0x00,
+                    batch_size: 0x1000,
+                }),
                 lease: 10_000,
                 next_sn_reliable: 7,
                 next_sn_best_effort: 9,
             };
             let mut wire = alloc::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
-            wire.extend_from_slice(&join.encode_to_vec(1).expect("a fixture join is encodable"));
+            wire.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
             cases.push((wire, "Join"));
         }
 

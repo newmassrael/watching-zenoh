@@ -315,7 +315,7 @@ pub fn attach_query_value_shm(
     use crate::ext_header::{body_ext_id, EXT_ENC_ZBUF, EXT_FLAG_Z};
     use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
     use wz_codecs::ext_unit::ExtUnit;
-    use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
+    use wz_codecs::query_value_zbuf::{QueryValueZbufAfterShm, QueryValueZbufOwned};
 
     if crate::ext_view::find_by_eid(
         crate::held_list::HeldList::entries(&query.extensions).unwrap_or(&[]),
@@ -339,13 +339,14 @@ pub fn attach_query_value_shm(
     let value = QueryExtEntryOwned {
         header: EXT_ENC_ZBUF | body_ext_id::QUERY_BODY,
         body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
-            value_len: declared,
-            value: None,
-            encoding: Some(encoding_codec.try_into_owned_in::<crate::wire::WireStorage>()?),
+            after_shm: QueryValueZbufAfterShm::AfterShm {
+                encoding: encoding_codec.try_into_owned_in::<crate::wire::WireStorage>()?,
+                slices: crate::put_payload::shm_slices::<crate::wire::WireStorage>(
+                    &descriptor_bytes,
+                )?,
+                value_len: declared,
+            },
             slice_count: Some(1),
-            slices: Some(crate::put_payload::shm_slices::<crate::wire::WireStorage>(
-                &descriptor_bytes,
-            )?),
         }),
     };
 
@@ -382,6 +383,7 @@ fn sliced_query_value(
     use crate::ext_header::body_eid;
     use crate::held_list::HeldList;
     use crate::wire::parts::QueryExtEntryOwnedVariant;
+    use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
 
     query
         .extensions
@@ -392,7 +394,12 @@ fn sliced_query_value(
             QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value)
                 if crate::ext_view::ExtEntryView::eid(ext) == body_eid::QUERY_VALUE =>
             {
-                value.slices.entries().map(|slices| (index, slices))
+                match &value.after_shm {
+                    QueryValueZbufAfterShm::AfterShm { slices, .. } => {
+                        Some((index, slices.as_slice()))
+                    }
+                    QueryValueZbufAfterShm::NotAfterShm { .. } => None,
+                }
             }
             _ => None,
         })
@@ -438,7 +445,7 @@ pub fn relay_query_value_shm(
         has_shared_slice, join_slices, remake_slices, slice_list, RelayFault,
     };
     use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
-    use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
+    use wz_codecs::query_value_zbuf::{QueryValueZbufAfterShm, QueryValueZbufOwned};
 
     let Some((index, slices)) = sliced_query_value(query) else {
         return Ok(());
@@ -455,7 +462,10 @@ pub fn relay_query_value_shm(
     if has_shared_slice(&remade) {
         let mut value = value.clone();
         value.slice_count = Some(remade.len() as u32);
-        value.slices = Some(slice_list(&remade)?);
+        let QueryValueZbufAfterShm::AfterShm { slices, .. } = &mut value.after_shm else {
+            return Err(RelayFault::Unrepresentable);
+        };
+        *slices = slice_list(&remade)?;
         for (position, ext) in entries.iter().enumerate() {
             let mut ext = ext.clone();
             if position == index {
@@ -470,20 +480,18 @@ pub fn relay_query_value_shm(
 
     // No descriptor is left: the value is the encoding and the bytes of the slices, as a peer that
     // reads no shared memory reads it.
-    let mut body = value
-        .encoding
-        .as_ref()
-        .map(|encoding| encoding.as_borrowed().encode_to_vec())
-        .ok_or(RelayFault::Unrepresentable)?;
+    let QueryValueZbufAfterShm::AfterShm { encoding, .. } = &value.after_shm else {
+        return Err(RelayFault::Unrepresentable);
+    };
+    let mut body = encoding.as_borrowed().encode_to_vec();
     body.extend(join_slices(remade));
     let plain = QueryExtEntryOwned {
         header: EXT_ENC_ZBUF | body_ext_id::QUERY_BODY,
         body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
-            value_len: body.len() as u64,
-            value: Some(crate::wire::wire_bytes(&body).map_err(unrepresentable)?),
-            encoding: None,
+            after_shm: QueryValueZbufAfterShm::NotAfterShm {
+                value: crate::wire::wire_bytes(&body).map_err(unrepresentable)?,
+            },
             slice_count: None,
-            slices: None,
         }),
     };
     for (position, ext) in entries.iter().enumerate() {
@@ -1929,13 +1937,11 @@ mod tests {
                 );
                 match &exts[0].body {
                     crate::wire::parts::QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(zb) => {
-                        assert_eq!(zb.value_len, 2);
-                        assert_eq!(
-                            zb.value.as_ref().map(|v| v.as_slice()),
-                            Some(b"hi".as_slice()),
-                            "an attachment is the plain shape, never the sliced one"
-                        );
-                        assert!(zb.slices.is_none());
+                        use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
+                        let QueryValueZbufAfterShm::NotAfterShm { value } = &zb.after_shm else {
+                            panic!("an attachment is the plain shape, never the sliced one");
+                        };
+                        assert_eq!(value.as_slice(), b"hi".as_slice());
                     }
                     _ => panic!("attachment ext body must be a ZBuf"),
                 }
@@ -3153,17 +3159,16 @@ mod shm_value_build_tests {
     #[test]
     fn an_extension_of_the_values_id_is_not_a_value() {
         use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
-        use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
+        use wz_codecs::query_value_zbuf::{QueryValueZbufAfterShm, QueryValueZbufOwned};
         let mut request = build_request_query(1, 0, Some("k")).unwrap();
         let query = query_of(&mut request);
         let lookalike = QueryExtEntryOwned {
             header: 0x53,
             body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
-                value_len: 1,
-                value: Some(crate::wire::wire_bytes(&[0xAB]).unwrap()),
-                encoding: None,
+                after_shm: QueryValueZbufAfterShm::NotAfterShm {
+                    value: crate::wire::wire_bytes(&[0xAB]).unwrap(),
+                },
                 slice_count: None,
-                slices: None,
             }),
         };
         query.extensions = Some(

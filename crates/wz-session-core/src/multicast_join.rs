@@ -34,7 +34,7 @@ use sce_forge_runtime::codec::SliceSink;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 use sce_forge_runtime::codec::{CodecError, SceSink};
-use wz_codecs::join::Join;
+use wz_codecs::join::{Join, JoinS};
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
@@ -149,10 +149,11 @@ where
         join.set_zid_len_m1((zid.len() - 1) as u8);
         join.zid = zid.as_slice();
     }
-    let advertises = params.join_advertises_caps();
-    if advertises {
-        join.sn_res = Some(pack_res_cbyte(params.seq_num_res, params.req_id_res));
-        join.batch_size = Some(params.batch_size);
+    if params.join_advertises_caps() {
+        join.s = Some(JoinS {
+            sn_res: pack_res_cbyte(params.seq_num_res, params.req_id_res),
+            batch_size: params.batch_size,
+        });
     }
     // R311ku — the unit projection SSOT (`crate::lease`) is shared with
     // the unicast OPEN encoder; both carry the same `_Z_FLAG_T_*_T` rule.
@@ -181,7 +182,7 @@ where
     );
     join.next_sn_reliable = base_r;
     join.next_sn_best_effort = base_be;
-    let mut flags = if advertises {
+    let mut flags = if join.s.is_some() {
         wire_const::FLAG_T_JOIN_S
     } else {
         0
@@ -224,7 +225,7 @@ where
         flags |= wire_const::FLAG_T_Z;
     }
     out.write_u8(flags | wire_const::T_MID_JOIN)?;
-    join.encode(out, u8::from(advertises))?;
+    join.encode(out)?;
     #[cfg(feature = "transport-qos")]
     if emits_qos_ext {
         write_join_qos_ext(out, &tx_sn.advertise_per_priority(), has_patch)?;
@@ -464,15 +465,15 @@ pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBa
     if join.version != wz_codecs::wire_const::PROTOCOL_VERSION {
         return None;
     }
-    let res_cbyte = join.sn_res.unwrap_or(pack_res_cbyte(
-        PROTOCOL_DEFAULT_RESOLUTION,
-        PROTOCOL_DEFAULT_RESOLUTION,
-    ));
+    let res_cbyte = join.s.map_or(
+        pack_res_cbyte(PROTOCOL_DEFAULT_RESOLUTION, PROTOCOL_DEFAULT_RESOLUTION),
+        |s| s.sn_res,
+    );
     let (seq_num_res, req_id_res) = unpack_res_cbyte(res_cbyte);
     if seq_num_res != params.seq_num_res || req_id_res != params.req_id_res {
         return None;
     }
-    if join.batch_size.unwrap_or(PROTOCOL_DEFAULT_BATCH_SIZE) != params.batch_size {
+    if join.s.map_or(PROTOCOL_DEFAULT_BATCH_SIZE, |s| s.batch_size) != params.batch_size {
         return None;
     }
     Some(JoinBaseline {
@@ -682,8 +683,7 @@ mod tests {
             wire_const::T_MID_JOIN
         );
         let join = decode_join(&dgram).expect("JOIN decodes");
-        assert_eq!(join.sn_res, None);
-        assert_eq!(join.batch_size, None);
+        assert_eq!(join.s, None);
         assert!(
             validate_join(&join, &p).is_some(),
             "protocol-default group admits the minimal JOIN"
@@ -702,8 +702,8 @@ mod tests {
         let dgram = join0(&p);
         assert_ne!(dgram[0] & wire_const::FLAG_T_JOIN_S, 0, "S flag set");
         let join = decode_join(&dgram).expect("JOIN decodes");
-        assert_eq!(join.sn_res, Some(0x0A), "seq 2 | req 2 << 2");
-        assert_eq!(join.batch_size, Some(2_048));
+        assert_eq!(join.s.map(|s| s.sn_res), Some(0x0A), "seq 2 | req 2 << 2");
+        assert_eq!(join.s.map(|s| s.batch_size), Some(2_048));
         assert!(
             validate_join(&join, &p).is_some(),
             "same-config group admits the advertised caps"
@@ -890,8 +890,10 @@ mod tests {
         join.set_whatami(p.whatami.to_wire());
         join.set_zid_len_m1(3);
         join.zid = &[0x05, 0x06, 0x07, 0x08];
-        join.sn_res = Some(pack_res_cbyte(0x02, 0x01)); // seq ok, req off
-        join.batch_size = Some(p.batch_size);
+        join.s = Some(JoinS {
+            sn_res: pack_res_cbyte(0x02, 0x01), // seq ok, req off
+            batch_size: p.batch_size,
+        });
         join.lease = p.lease_ms;
         assert!(validate_join(&join, &p).is_none(), "req-id mismatch");
     }
@@ -909,8 +911,10 @@ mod tests {
             join.set_whatami(p.whatami.to_wire());
             join.set_zid_len_m1(3);
             join.zid = &zid;
-            join.sn_res = Some(pack_res_cbyte(p.seq_num_res, p.req_id_res));
-            join.batch_size = Some(p.batch_size);
+            join.s = Some(JoinS {
+                sn_res: pack_res_cbyte(p.seq_num_res, p.req_id_res),
+                batch_size: p.batch_size,
+            });
             join.lease = p.lease_ms;
             join
         };
@@ -1058,11 +1062,13 @@ mod tests {
         join.set_whatami(WhatAmI::Peer.to_wire());
         join.set_zid_len_m1((zid.len() - 1) as u8);
         join.zid = &zid;
-        join.sn_res = Some(0x00);
-        join.batch_size = Some(0xFFFF);
+        // The group makes the encode write sn_res + batch_size.
+        join.s = Some(JoinS {
+            sn_res: 0x00,
+            batch_size: 0xFFFF,
+        });
         join.lease = 5_000;
-        // s=1: sn_res + batch_size written
-        let body = join.encode_to_vec(1).expect("a fixture join is encodable");
+        let body = join.encode_to_vec().expect("a fixture join is encodable");
         let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
         dgram.extend_from_slice(&body);
         assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));

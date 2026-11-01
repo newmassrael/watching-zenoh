@@ -434,6 +434,7 @@ fn extract_query_attachment_shared(query: &QueryOwned) -> Option<crate::link::Rx
     #[cfg(all(feature = "query-attachment", feature = "rx-shared-bytes"))]
     {
         use crate::wire::parts::QueryExtEntryOwnedVariant;
+        use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
         // The entry `decode_attachment_ext` reads: the one of the attachment's
         // identity, with a plain ZBuf body.
         let ext = crate::ext_view::find_by_eid(
@@ -441,7 +442,7 @@ fn extract_query_attachment_shared(query: &QueryOwned) -> Option<crate::link::Rx
             crate::ext_header::body_eid::QUERY_ATTACHMENT,
         )?;
         if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
-            if let Some(value) = &z.value {
+            if let QueryValueZbufAfterShm::NotAfterShm { value } = &z.after_shm {
                 let bytes = value.as_rx_bytes();
                 return bytes.is_shared().then(|| bytes.clone());
             }
@@ -469,13 +470,14 @@ fn extract_query_value_shared(
     #[cfg(all(feature = "query-value", feature = "rx-shared-bytes"))]
     {
         use crate::wire::parts::QueryExtEntryOwnedVariant;
+        use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
         // The entry `decode_query_value_ext` reads: the one of the value's identity.
         let ext = crate::ext_view::find_by_eid(
             query.extensions.as_deref()?,
             crate::ext_header::body_eid::QUERY_VALUE,
         )?;
         if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
-            if let Some(value) = &z.value {
+            if let QueryValueZbufAfterShm::NotAfterShm { value } = &z.after_shm {
                 let whole = value.as_rx_bytes();
                 if !whole.is_shared() {
                     return None;
@@ -2733,19 +2735,17 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
             let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &ext.body else {
                 continue;
             };
-            let Some(slices) = value.slices.as_ref() else {
+            let wz_codecs::query_value_zbuf::QueryValueZbufAfterShm::AfterShm {
+                encoding,
+                slices,
+                ..
+            } = &value.after_shm
+            else {
                 continue;
             };
             // The encoding precedes the slices on the wire, in the same codec the
-            // plain shape's leading bytes are read with, and defaults when absent.
-            let encoding = value
-                .encoding
-                .as_ref()
-                .map(crate::sample::EncodingHint::from_codec)
-                .unwrap_or(crate::sample::EncodingHint {
-                    packed_id: 0,
-                    schema: None,
-                });
+            // plain shape's leading bytes are read with.
+            let encoding = crate::sample::EncodingHint::from_codec(encoding);
             return match self
                 .shm
                 .unswap_slices(SceList::as_slice(slices.inner()), band)

@@ -569,14 +569,13 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
             version: 0x09,
             cbyte: 0x31,
             zid: if is_ack { ZID_B } else { ZID_A },
-            sn_res: None,
-            batch_size: None,
+            s: None,
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0)
+                .encode_to_vec()
                 .expect("a fixture init body is encodable"),
         );
         wire

@@ -324,6 +324,21 @@ pub enum OamVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized> {
     Default { tag: OamUnknownTag, body: &'s D },
 }
 
+impl<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized> OamVariantSource<'s, A0, A1, A2, D> {
+    /// The tag of the arm this is: the value the document gives a known
+    /// arm, and the tag a default arm holds. It is the tag the encode
+    /// writes, or the one a caller hands the decode for a variant whose
+    /// wire form carries none.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::CodecZenohExtUnit(_) => 0,
+            Self::CodecZenohExtZint(_) => 1,
+            Self::CodecZenohExtZbuf(_) => 2,
+            Self::Default { tag, .. } => tag.get(),
+        }
+    }
+}
+
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Oam` says: its presented fields. A length, a count
 /// or the flag a gated field is announced by is not among them; `Oam`
@@ -472,16 +487,16 @@ impl<'a> Oam<'a> {
         Self::write_source(src, w)
     }
 
+    /// The tag of the arm `src` holds ([`OamVariantSource::tag`]).
+    pub fn tag_of<S: OamSource + ?Sized>(src: &S) -> u8 {
+        src.body().tag()
+    }
+
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: OamSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
-        let _d_header_enc: u8 = match src.body() {
-            OamVariantSource::CodecZenohExtUnit(_) => 0,
-            OamVariantSource::CodecZenohExtZint(_) => 1,
-            OamVariantSource::CodecZenohExtZbuf(_) => 2,
-            OamVariantSource::Default { tag, .. } => tag.get(),
-        };
+        let _d_header_enc: u8 = src.body().tag();
         let _p_header_z_0: bool = src.extensions().is_some();
         let _c_header: u8 = (((src.header() & !0x60) | (_d_header_enc << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;

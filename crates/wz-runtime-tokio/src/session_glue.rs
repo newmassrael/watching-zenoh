@@ -6644,7 +6644,7 @@ mod init_advertisement_tests {
             panic!("encoded InitSyn must parse as Init");
         };
         assert_eq!(
-            body.batch_size,
+            body.s.map(|s| s.batch_size),
             Some(65535),
             "the internal 0 sentinel must never reach the wire"
         );
@@ -6657,7 +6657,7 @@ mod init_advertisement_tests {
         else {
             panic!("encoded InitSyn must parse as Init");
         };
-        assert_eq!(body.batch_size, Some(1024));
+        assert_eq!(body.s.map(|s| s.batch_size), Some(1024));
     }
 
     /// The batch a session advertises is capped by the largest frame its link
@@ -6701,7 +6701,7 @@ mod init_advertisement_tests {
             else {
                 panic!("an encoded Init must parse as Init");
             };
-            body.batch_size
+            body.s.map(|s| s.batch_size)
         };
 
         assert_eq!(actions.own_batch_advertisement(), RX_CAPACITY);
