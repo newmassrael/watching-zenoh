@@ -303952,6 +303952,38 @@
         "Owed: the whatami a link state restates; the members of a router's group as the admin sessions rows after the unicast ones; the plugins keys of the adminspace test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the gossip core itself sends nothing when a face goes down under multihop; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the four budgets re-measured on the hosted run."
       ]
     },
+    "Round 4062": {
+      "decision_summary": "Layer C1bzr redded on the first hosted verdict since round 4029 (run for round 4061, shard 5 of 6 and its settle job) at one rustdoc link of the fixed-memory connect manager: the document of the write permit of the controlled opener pointed at Commanders, the zid lists of decision D12 step 2, which exist only with the feature lifecycle-verbs, while the impl the document sits on compiles without it; in that reduced configuration the link did not resolve. The link is plain code text now and the sentence says which build has the type. The same shape as round 4035 (a link from an item that is compiled to one that is not); the other link to the type, on an item gated by lifecycle-verbs, resolves and was left. No code changed. The red was reported by the session that landed round 4061 after it read the hosted run, and taken here because the crate's configurations are this lane's.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/connect_manager.rs: the doc of the NodeOpening impl for ControlledOpener names Commanders as code, and says a build with lifecycle-verbs has it."
+      ],
+      "verification_bullets": [
+        "Hosted run of round 4061: C1bzr failed with `unresolved link to Commanders` at wz-session-mcu/src/connect_manager.rs 759:56 (reported by the landing session, read in the source here: the struct is under feature lifecycle-verbs at line 599, the doc is on an impl under adminspace-fixed and session-slot only).",
+        "After the edit, on a build host: Layer C1bzr narrowed to wz-session-mcu passed, 24 configuration(s), no finding above the ledger; reason_review_pin_gate --check OK; rustfmt --check clean.",
+        "Not run: the other crates of the lane (every other red of that hosted run is another session's), and the hosted run of this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Carried: the other reds of the hosted run of round 4061 are their sessions' (dispatch_network_message dead code, the router-interest-qos gate, the lwip no-heap test, the capability-cost overrun of nine coop cases); O4 (h) waits for the SCE generator fix; the kit hardware measurement and the mold 2.30.0 link abort."
+      ],
+      "publishable_decision_summary": "Layer C1bzr redded on the first hosted verdict since round 4029 (run for round 4061, shard 5 of 6 and its settle job) at one rustdoc link of the fixed-memory connect manager: the document of the write permit of the controlled opener pointed at Commanders, the zid lists of decision D12 step 2, which exist only with the feature lifecycle-verbs, while the impl the document sits on compiles without it; in that reduced configuration the link did not resolve. The link is plain code text now and the sentence says which build has the type. The same shape as round 4035 (a link from an item that is compiled to one that is not); the other link to the type, on an item gated by lifecycle-verbs, resolves and was left. No code changed. The red was reported by the session that landed round 4061 after it read the hosted run, and taken here because the crate's configurations are this lane's.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/connect_manager.rs: the doc of the NodeOpening impl for ControlledOpener names Commanders as code, and says a build with lifecycle-verbs has it."
+      ],
+      "publishable_verification_bullets": [
+        "Hosted run of round 4061: C1bzr failed with `unresolved link to Commanders` at wz-session-mcu/src/connect_manager.rs 759:56 (reported by the landing session, read in the source here: the struct is under feature lifecycle-verbs at line 599, the doc is on an impl under adminspace-fixed and session-slot only).",
+        "After the edit, on a build host: Layer C1bzr narrowed to wz-session-mcu passed, 24 configuration(s), no finding above the ledger; reason_review_pin_gate --check OK; rustfmt --check clean.",
+        "Not run: the other crates of the lane (every other red of that hosted run is another session's), and the hosted run of this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried: the other reds of the hosted run of round 4061 are their sessions' (dispatch_network_message dead code, the router-interest-qos gate, the lwip no-heap test, the capability-cost overrun of nine coop cases); O4 (h) waits for the SCE generator fix; the kit hardware measurement and the mold 2.30.0 link abort."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
