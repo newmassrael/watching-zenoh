@@ -439,6 +439,59 @@ fn leaving_a_group_out_of_the_counts_moves_its_own_flows_by_this_much() {
     assert_eq!(flows_read, total, "every flow is read in exactly one group");
 }
 
+/// The independent groups a claim needs: with no failure seen in `g` groups the
+/// one-sided 95% bound on a group failing is `1 - 0.05^(1/g)`
+/// (`docs/flow-zenoh-verdict.md` section 6.4), so the least `g` that brings it to
+/// `target`.
+fn groups_needed(target: f64) -> u64 {
+    let mut g = 1u64;
+    while 1.0 - 0.05f64.powf(1.0 / g as f64) > target {
+        g += 1;
+    }
+    g
+}
+
+/// The numbers of the acceptance table are the zero-failure bound inverted, and
+/// the report says how far the corpus is from each row. It asserts the table and
+/// not the corpus: whether the corpus must reach a row is the owner's to state.
+#[test]
+fn the_groups_a_claim_needs_are_the_zero_failure_bound_inverted() {
+    for (target, needed) in [(0.10, 29u64), (0.05, 59), (0.01, 299)] {
+        assert_eq!(groups_needed(target), needed, "target {target}");
+        // The bound at `needed` is within the target, and at one fewer it is not.
+        assert!(fit::upper_bound(0, needed) <= target);
+        assert!(fit::upper_bound(0, needed - 1) > target);
+    }
+    let files = read_corpus();
+    let groups = |zenoh: bool| {
+        files
+            .iter()
+            .filter(|f| f.zenoh == zenoh)
+            .map(|f| f.group.as_str())
+            .collect::<alloc::collections::BTreeSet<_>>()
+            .len() as u64
+    };
+    let (zenoh, null) = (groups(true), groups(false));
+    std::println!("claim | needs | zenoh groups held | null groups held");
+    for (name, target) in [("10%", 0.10), ("5%", 0.05), ("1%", 0.01)] {
+        let needed = groups_needed(target);
+        std::println!(
+            "{name} | {needed} | {zenoh} ({} short) | {null} ({} short)",
+            needed.saturating_sub(zenoh),
+            needed.saturating_sub(null)
+        );
+    }
+    // A group is a trial of one side: a file is in exactly one group.
+    assert_eq!(
+        files
+            .iter()
+            .map(|f| f.group.as_str())
+            .collect::<alloc::collections::BTreeSet<_>>()
+            .len() as u64,
+        zenoh + null
+    );
+}
+
 /// What the zenoh failure chances are bounded by, with the count the bound
 /// stands on: units, files, groups. The units are not independent of each
 /// other, and the files of one group are not independent of each other.

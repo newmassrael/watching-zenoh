@@ -632,3 +632,68 @@ Beta-binomial over units, so a flow's evidence for zenoh saturates instead of
 growing by 967 for each unit), the SN break rate as a mixture and not a
 constant, workload groups in the corpus, and a held-out set the weights are
 never counted from.
+
+### 6.4 What the corpus must show: the acceptance criteria (2026-11-01)
+
+The thresholds are `alpha = beta = 2^-20`, about one in a million. A corpus
+cannot measure a rate that small: with no failure seen in `n` independent
+trials the one-sided 95% bound is about `3 / n`, so one in a million needs about
+three million independent flows, and the corpus holds hundreds. Asking the
+corpus to show the nominal rate would fail the test for the wrong reason, or
+pass it by a count of units that are not independent. The claim is therefore
+made in three layers, each checked by what can check it.
+
+1. **The theory** guarantees the nominal rate when the model is true: Ville's
+   inequality (section 2) bounds the chance that `2^L` ever reaches `1/alpha`.
+   That is a proof, and nothing in the corpus tests it.
+2. **The model's validity**, which is what the corpus can test. The model is true
+   when each increment is a conditional likelihood ratio, and the way it fails is
+   that a group of captures behaves unlike the ones the weights were counted
+   from. It is tested at levels the corpus can reach: the same sums are read
+   against the thresholds `2^-1` to `2^-10` (`+1` to `+10` bits and the same
+   below), and the share of independent GROUPS that cross each one is held to
+   the level, with its exact interval. If the shares fall as the levels do, the
+   rate at `2^-20` is an extrapolation from a model that held where it could be
+   seen, and is stated as one.
+3. **The operating characteristics**: how many units a flow needs before the
+   verdict is read (Wald's expected sample size and its 95th percentile), per
+   protocol and per group.
+
+**Independence is counted in groups.** A group is a null protocol, a zenoh
+release line, a link condition or a workload (section 6.3), and with no failure
+seen in `G` groups the one-sided 95% bound on a group failing is
+`1 - 0.05^(1/G)`. The two errors are counted on different groups: the false `no`
+over the zenoh groups and the false `yes` over the null ones. The numbers below
+are the recommendation of this session, to be stated and moved only by a ledger
+entry:
+
+| level of the claim | a group fails with chance at most | independent groups needed (each side) | zenoh groups held | null groups held |
+|---|---|---|---|---|
+| interim | 10% | 29 | 22 | 18 |
+| first target | 5% | 59 | 22 | 18 |
+| final target | 1% | 299 | 22 | 18 |
+
+The interim row is the first one the corpus can reach by adding captures of the
+kinds it lacks. Counting the groups is not the same as covering the workload: a
+group is only independent evidence if it differs in what can make the reader
+fail, and 22 zenoh groups of one traffic generator are fewer than they look. The
+groups that count are the ones section 6.3 lists as absent: queries and replies,
+liveliness, fragmented payloads, other priorities, authentication, multicast and
+an implementation other than the reference one.
+
+**Two corpora, one frozen.** The development corpus is what exists; it chooses
+the model by leaving a group out (section 6.3). A validation corpus is collected
+AFTER the model is frozen, of implementations, workloads and links the model was
+not fitted on, and is not counted into any weight until it has been reported
+once. The weights, the groups' definition and the thresholds are fixed by a ledger
+entry before the first of its files is read, which is what a pre-registration is
+for.
+
+**What this section does not decide.** The levels of the table are the
+recommendation of this session, not a ruling; the model that makes the
+extrapolation honest (a failure rate per group, a Beta-binomial over units, so a
+flow's evidence saturates and the width of the prior follows the number of
+groups), the time order of a flow's evidence that the second layer needs (the
+reader reports a sum today, and the running maximum is the quantity Ville bounds),
+and the consumer's field for the model version and the level the evidence
+supports are each a step with its own entry, the last two with the consumer.
