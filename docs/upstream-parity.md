@@ -92,6 +92,32 @@ the next, with and without this change (the unmodified queue read 4.32 M too), s
 step of the search (5 percent) between two sessions is the host's. What is left of the gap, 310 k
 against 360 k, has no reading yet. The batched row above is not re-measured with this change.
 
+Sizes between 64 B and 2 KiB, puts one by one, median of three on pc3, default pinning (msg/s;
+pico to pico / wz to wz / wz to pico / pico to wz):
+
+| size | pico to pico | wz to wz | wz to pico | pico to wz |
+|---|---|---|---|---|
+| 128 B | 370 k | 2.64 M | 2.64 M | 390 k |
+| 256 B | 370 k | 1.52 M | 1.52 M | 400 k |
+| 512 B | 360 k | 680 k | 660 k | 340 k |
+| 2048 B | 185 k | 125 k | 125 k | 185 k |
+
+Up to 512 B wz is ahead, because one write carries many frames where pico sends one per put. At
+2048 B (a put past the 2,048 B batch, so a chain of two fragments) it was behind by a third under the
+default pinning, and the cause is the placement and not the number of writes: pico makes two `sendto`
+calls a put (20,004 for 10,000 puts), wz about one (the two fragments leave in one write), and wz's
+sender and writer threads (42 and 86 percent busy at 120,000 a second, the writer 82 percent in the
+kernel) share one SMT pair. With the publisher given two physical cores (CPUs 6,7,8,9):
+
+| size | pico to pico | wz to wz | wz to pico | pico to wz |
+|---|---|---|---|---|
+| 1024 B | 360 k | 320 k | 300 k | 360 k |
+| 2048 B | 180 k | 220 k | 160 k | 190 k |
+
+so wz to wz passes pico at 2048 B (the three repetitions read 220 k, 175 k and 220 k, a spread of
+more than one search step), while wz to pico stays 11 percent behind and 1 KiB stays 11 to 17
+percent behind: the placement does not explain those two cells, and neither has a reading yet.
+
 - **Host to host, the same build's text differs.** The same pico-client build read
   1,794,606 bytes on the development host, 1,827,441 on the bench host and 1,833,173 on
   hosted CI on the same day. A size figure names the host it was read on.
