@@ -304920,6 +304920,36 @@
         "Read the next finished hosted run per job: the feature-gate NEG and isolated-crate lanes of run 41292703209 were not re-run here."
       ]
     },
+    "Round 4091": {
+      "decision_summary": "The cause given for the pico lane depth in round 4074 is corrected. It said that the sender and the writer wait for each other after every four frames, bound by the wake latency of a futex and an eventfd. Three temporary changes of the queue, measured at 1 KiB with the publisher on two physical cores (two repetitions each), read otherwise.\n\nWaking a sender only when the lane is at most half full left size 2 where it was (wz to wz 315 k, wz to pico 300 k against 320 k and 300 k): the wake rule is not the cause. Counting only the frames still queued, and not the batch the writer is writing, took size 2 to 560 k wz to wz and 590 k wz to pico: the cause is single buffering. A lane of two batches is full while the writer writes one, so the sender has no room until the writer asks for the next batch and production and writing do not overlap. With the same accounting at the default size 8 the lane read 570 k and 940 k, what size 8 reads unchanged (560 k and 960 k). What size 2 lacks even with the accounting, 590 k against 960 k to pico, is room to queue ahead of the writer, so the depth is a gain of its own.\n\nNothing was applied: the accounting adds nothing to size 8, and it would move the memory bound of a lane from what it holds to what is queued plus the batch being written. The limit PICO_TX_QUEUE_SIZE stays at 8 and keeps its meaning. The mechanism and the three rows are recorded in docs/upstream-parity.md, and the statement of round 4074 on the cause is withdrawn.",
+      "changes_bullets": [
+        "docs/upstream-parity.md: the sentence that named the wake latency of a futex and an eventfd as the bound is replaced by the single-buffering reading, and a table of the three temporary changes with what each read follows the lane-size table. No code changed in this round; the temporary changes were made in the working tree of the measurement and reverted, none was committed."
+      ],
+      "verification_bullets": [
+        "On pc3 through bx: scripts/pico-compare.sh nodrop 2 1024 with the publisher pinned to CPUs 6,7,8,9, puts one by one, once per temporary change (the release of an in-flight batch waking senders only when the lane is at most half full, at size 2; has_room counting the queued bytes without the in-flight batch and the packed take waking senders, at size 2 and at size 8). The unchanged size 2 and size 8 rows are those of round 4074. Pico to pico read 360 k in all three runs. One host; pc3 showed another session's lock in the bx log."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: where the wz subscriber's 1.85 microseconds a message go (one drive thread saturated at 540,000 a second); a user-mode profile is needed, and perf_event_paranoid is 4 on the bench host. The lane depth stays a fixed limit; a window sized from the writer's drain rate is the textbook form and is not built or measured. Not measured: the same three changes at 2048 B and at the default pinning."
+      ],
+      "publishable_decision_summary": "The cause given for the pico lane depth in round 4074 is corrected. It said that the sender and the writer wait for each other after every four frames, bound by the wake latency of a futex and an eventfd. Three temporary changes of the queue, measured at 1 KiB with the publisher on two physical cores (two repetitions each), read otherwise.\n\nWaking a sender only when the lane is at most half full left size 2 where it was (wz to wz 315 k, wz to pico 300 k against 320 k and 300 k): the wake rule is not the cause. Counting only the frames still queued, and not the batch the writer is writing, took size 2 to 560 k wz to wz and 590 k wz to pico: the cause is single buffering. A lane of two batches is full while the writer writes one, so the sender has no room until the writer asks for the next batch and production and writing do not overlap. With the same accounting at the default size 8 the lane read 570 k and 940 k, what size 8 reads unchanged (560 k and 960 k). What size 2 lacks even with the accounting, 590 k against 960 k to pico, is room to queue ahead of the writer, so the depth is a gain of its own.\n\nNothing was applied: the accounting adds nothing to size 8, and it would move the memory bound of a lane from what it holds to what is queued plus the batch being written. The limit PICO_TX_QUEUE_SIZE stays at 8 and keeps its meaning. The mechanism and the three rows are recorded in docs/upstream-parity.md, and the statement of round 4074 on the cause is withdrawn.",
+      "publishable_changes_bullets": [
+        "docs/upstream-parity.md: the sentence that named the wake latency of a futex and an eventfd as the bound is replaced by the single-buffering reading, and a table of the three temporary changes with what each read follows the lane-size table. No code changed in this round; the temporary changes were made in the working tree of the measurement and reverted, none was committed."
+      ],
+      "publishable_verification_bullets": [
+        "On pc3 through bx: scripts/pico-compare.sh nodrop 2 1024 with the publisher pinned to CPUs 6,7,8,9, puts one by one, once per temporary change (the release of an in-flight batch waking senders only when the lane is at most half full, at size 2; has_room counting the queued bytes without the in-flight batch and the packed take waking senders, at size 2 and at size 8). The unchanged size 2 and size 8 rows are those of round 4074. Pico to pico read 360 k in all three runs. One host; pc3 showed another session's lock in the bx log."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: where the wz subscriber's 1.85 microseconds a message go (one drive thread saturated at 540,000 a second); a user-mode profile is needed, and perf_event_paranoid is 4 on the bench host. The lane depth stays a fixed limit; a window sized from the writer's drain rate is the textbook form and is not built or measured. Not measured: the same three changes at 2048 B and at the default pinning."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
