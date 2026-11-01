@@ -36,7 +36,7 @@
 //! established from then on. The initiator's reservation (at the InitAck) is a claim that the
 //! rival acceptor of the same node respects, and it is established at [`confirm`].
 //!
-//! [`confirm`]: LinkAdmission::confirm
+//! [`confirm`]: wz_session_core::link_admission::LinkAdmission::confirm
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};

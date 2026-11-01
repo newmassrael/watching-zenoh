@@ -9329,6 +9329,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
+    /// [`Self::link_admitted`] for the zid the InitSyn named, which the acceptor holds from its
+    /// InitSyn: the node is asked first, and a link it does not guard is answered `true` without
+    /// the zid being read at all. A guarded link's zid is copied to the stack (a zid is at most
+    /// `ZID_MAX` bytes), so no build allocates for the question, which the heap-free tests of the
+    /// fixed-memory crates hold to: reading it with `peer_zid` is one `Vec` for every handshake.
+    /// The two mutexes are taken one after the other and never nested.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-open-body",
+        feature = "session-unicast-accept"
+    ))]
+    pub(crate) fn link_admitted_for_remote(&self) -> bool {
+        if !R::with_mutex_mut(&self.link.link_lease, |slot| slot.is_some()) {
+            return true;
+        }
+        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+            slot.as_deref().map(|bytes| {
+                let mut buffer = [0u8; ZID_MAX];
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                (buffer, bytes.len())
+            })
+        });
+        match zid {
+            Some((buffer, len)) => self.link_admitted(&buffer[..len]),
+            // A link whose peer named no zid cannot collide with another.
+            None => true,
+        }
+    }
+
     /// The node's answer to an initiator that is about to take the OpenAck; `true` for a link the
     /// node does not guard. See [`crate::link_admission::LinkAdmission::confirm`].
     #[cfg(all(feature = "alloc", feature = "codec-open-body"))]

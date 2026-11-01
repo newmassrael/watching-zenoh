@@ -1081,12 +1081,11 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                             if engine.get_current_state()
                                 == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitAck =>
                         {
-                            // A `match`, not `is_none_or`: stable since 1.82, and the
-                            // workspace's floor is 1.81.
-                            match actions.peer_zid() {
-                                Some(zid) => actions.link_admitted(&zid),
-                                None => true,
-                            }
+                            // The zid is the one the InitSyn named. It is read by the
+                            // method, not here with `peer_zid()`: that copies it into a
+                            // `Vec`, one allocation per accepted handshake of every
+                            // build with a heap, guarded or not.
+                            actions.link_admitted_for_remote()
                         }
                         #[cfg(feature = "codec-open-body")]
                         InboundFrame::Open { is_ack: true, .. } => actions.link_confirmed(),

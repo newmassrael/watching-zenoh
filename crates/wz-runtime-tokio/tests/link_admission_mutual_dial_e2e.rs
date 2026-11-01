@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-#![cfg(all(feature = "routing-accept", feature = "transport-link-tcp"))]
+#![cfg(all(
+    feature = "routing-accept",
+    feature = "routing-peer",
+    feature = "transport-link-tcp"
+))]
 
 //! Two nodes that each listen and each dial the other end with ONE link, and no face of either was
 //! ever brought up on a link that was then closed.

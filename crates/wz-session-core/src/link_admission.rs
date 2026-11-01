@@ -21,8 +21,9 @@
 //!
 //! The function takes the zids and the directions and nothing of an engine, which is what lets the
 //! cooperative engine's face table (`wz-capi-coop`) and a registry of another engine call the one
-//! rule. The rule is ungated, because it allocates nothing; [`LinkAdmission`], which asks it while
-//! a link is still being established, is the heap profile's.
+//! rule. The rule is ungated, because it allocates nothing; `LinkAdmission`, which asks it while
+//! a link is still being established, is the heap profile's and so is not linked from here: a
+//! build without a heap has no such item for a link to name.
 
 use crate::credential_identity::zid_from_wire;
 
