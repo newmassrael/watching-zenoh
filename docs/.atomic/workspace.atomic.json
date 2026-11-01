@@ -304154,6 +304154,40 @@
         "Still owed by the router task-per-face work: a droppable message keeps its one wait of wait_before_drop; a message carrying shared memory keeps the waiting send; the session core's own permit, which a synchronous publish and the C ABI need to stop parking, is not built; phase 6 (the conduit's lock made async for chains) and the table-sharing policy (snapshot, shard) are not started."
       ]
     },
+    "Round 4068": {
+      "decision_summary": "The regeneration of out/wz-codecs wrote each codec as the generator accepted it, so a pin move whose generator refused one document (ADR 0065's stale encode-may-fail check refused open_body at the first try with the pin of ADR 0077 step 1) left thirteen files of out/ already rewritten, a half-regenerated tree, and stopped at the first refusal so the other thirteen stale declarations stayed hidden until the SCE session ran its own check. The xtask now generates every codec in memory first, collects every refusal and prints each, and writes nothing unless all of them passed; the SCE session agreed it is wz's xtask to fix and offered a library call that checks a set, which this does not wait for. Measured both ways: at the current pin the regeneration leaves out/ byte-identical; with two documents deliberately broken (and restored) it printed three refusals, the two documents and the codec that imports one, said that nothing was written, and left out/ unchanged. The migration to the SCE landings after ADR 0065 R3 is a separate piece of work the owner schedules (decision of the SCE owner: no backport branch, the consumer moves one landing at a time, ADR 0078); a local branch holds the regeneration at ADR 0077 step 1, which compiles with 192 errors in the two lowest crates.",
+      "changes_bullets": [
+        "xtask/src/main.rs: regen_codecs generates all codec documents in memory, collects every refusal, and writes out/wz-codecs only when none was refused."
+      ],
+      "verification_bullets": [
+        "At the current vendor/sce pin, `bash scripts/regen-codegen.sh` exits 0 and `git status` shows no change under out/.",
+        "With undecl_subscriber and undecl_token deliberately given an invalid field type (restored with git checkout afterwards): exit 101, three refusals printed (the two documents and `declare`, which imports one), `nothing was written to out/wz-codecs`, and `git status` showed no change under out/.",
+        "cargo fmt --manifest-path xtask/Cargo.toml --check clean; cargo clippy --manifest-path xtask/Cargo.toml --all-targets -D warnings exit 0 on a build host; reason_review_pin_gate OK.",
+        "Not run: the hosted run of this tip; the switchboard and statechart legs of the xtask are unchanged and still write as they go."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Carried: O4 (h) waits for the pin to reach 15f1340899 or later, by the seven SCE landings in order (a1046ed4da R2, 072252fc0a R4a, 5a1145e4d0 R4b, ef4bd59831 R4c, 955774d15a R7 decode, fb93729dea R7 type, 15f1340899 ADR 0077), each regenerated and built, scheduled by the owner against the sessions editing session_actions.rs, router_forward.rs and declare/*; the autoroller of ADR 0078 section 4; the statechart and switchboard legs of the xtask still write as they go; the kit hardware measurement and the mold 2.30.0 link abort."
+      ],
+      "publishable_decision_summary": "The regeneration of out/wz-codecs wrote each codec as the generator accepted it, so a pin move whose generator refused one document (ADR 0065's stale encode-may-fail check refused open_body at the first try with the pin of ADR 0077 step 1) left thirteen files of out/ already rewritten, a half-regenerated tree, and stopped at the first refusal so the other thirteen stale declarations stayed hidden until the SCE session ran its own check. The xtask now generates every codec in memory first, collects every refusal and prints each, and writes nothing unless all of them passed; the SCE session agreed it is wz's xtask to fix and offered a library call that checks a set, which this does not wait for. Measured both ways: at the current pin the regeneration leaves out/ byte-identical; with two documents deliberately broken (and restored) it printed three refusals, the two documents and the codec that imports one, said that nothing was written, and left out/ unchanged. The migration to the SCE landings after ADR 0065 R3 is a separate piece of work the owner schedules (decision of the SCE owner: no backport branch, the consumer moves one landing at a time, ADR 0078); a local branch holds the regeneration at ADR 0077 step 1, which compiles with 192 errors in the two lowest crates.",
+      "publishable_changes_bullets": [
+        "xtask/src/main.rs: regen_codecs generates all codec documents in memory, collects every refusal, and writes out/wz-codecs only when none was refused."
+      ],
+      "publishable_verification_bullets": [
+        "At the current vendor/sce pin, `bash scripts/regen-codegen.sh` exits 0 and `git status` shows no change under out/.",
+        "With undecl_subscriber and undecl_token deliberately given an invalid field type (restored with git checkout afterwards): exit 101, three refusals printed (the two documents and `declare`, which imports one), `nothing was written to out/wz-codecs`, and `git status` showed no change under out/.",
+        "cargo fmt --manifest-path xtask/Cargo.toml --check clean; cargo clippy --manifest-path xtask/Cargo.toml --all-targets -D warnings exit 0 on a build host; reason_review_pin_gate OK.",
+        "Not run: the hosted run of this tip; the switchboard and statechart legs of the xtask are unchanged and still write as they go."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carried: O4 (h) waits for the pin to reach 15f1340899 or later, by the seven SCE landings in order (a1046ed4da R2, 072252fc0a R4a, 5a1145e4d0 R4b, ef4bd59831 R4c, 955774d15a R7 decode, fb93729dea R7 type, 15f1340899 ADR 0077), each regenerated and built, scheduled by the owner against the sessions editing session_actions.rs, router_forward.rs and declare/*; the autoroller of ADR 0078 section 4; the statechart and switchboard legs of the xtask still write as they go; the kit hardware measurement and the mold 2.30.0 link abort."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
