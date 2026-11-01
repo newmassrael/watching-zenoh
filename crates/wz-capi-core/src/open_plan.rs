@@ -1288,10 +1288,7 @@ mod tests {
             "a peer that scouts and holds a gateway is a node"
         );
         assert!(
-            listening(&format!(
-                r#"{{ scouting: {{ multicast: {{ enabled: false }} }} }}"#
-            ))
-            .peer_fits_node(),
+            listening(r#"{ scouting: { multicast: { enabled: false } } }"#).peer_fits_node(),
             "a peer that does not scout is a node whatever its south"
         );
     }
