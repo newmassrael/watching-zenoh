@@ -687,7 +687,7 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "zenoh-link": 1,
     "zenoh-link-commons": 4,
     "zenoh-link-tcp": 2,
-    "zenoh-link-tls": 6,
+    "zenoh-link-tls": 5,
     "zenoh-link-udp": 11,
     "zenoh-link-ws": 2,
     "zenoh-plugin-rest": 2,
@@ -792,7 +792,9 @@ def rootless_undeclared_budget() -> int:
 # R3706 — 504 -> 502, the two `builders` occurrences (`builders/...` paths a reason cites) that now
 # resolve to a tracked file, the top crate's own `api/builders` directory; its row left the table.
 # Item 751 -- 502 -> 500, the same two line-form removals as ROOTLESS_LINE_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 484
+# 484 -> 483, the citation of the TLS link's utility file in the base64 dependency's manifest
+# comment, which left `wz-runtime-tokio` when the PEM readers moved to `wz-tls-pem`.
+ROOTLESS_TOTAL_BUDGET = 483
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
