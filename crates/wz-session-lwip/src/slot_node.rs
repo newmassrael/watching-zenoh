@@ -43,20 +43,13 @@ use core::cell::RefCell;
 use wz_runtime_coop::session_drive::{
     LinkOpenError, LinkProto, Locator, SessionDriveConfig, SessionRole,
 };
-use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef};
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
-use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
-use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
-use wz_session_core::locator_directory::{DirectoryRefusal, DirectoryZid, Lifetime, LocatorSource};
+use wz_session_core::locator_directory::{DirectoryRefusal, DirectoryZid};
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::text_out::FixedText;
-use wz_session_mcu::admin_fixed::{FixedAdminSession, FixedNodeStatus, RowRefused};
-use wz_session_mcu::admin_status::DialStatus;
-use wz_session_mcu::connect_manager::{
-    ConnectManager, NodeOpener, NodeRefusal, NodeState, PeerStore, SlotState,
-};
+use wz_session_mcu::admin_fixed::FixedNodeStatus;
+use wz_session_mcu::connect_manager::{NodeOpener, NodeRefusal, NodeState, PeerStore, SlotState};
+use wz_session_mcu::slot_admin::AdminCore;
 use wz_session_mcu::slot_dial::{events_of, Bind};
 
 use wz_link_lwip::LwipLink;
@@ -68,6 +61,7 @@ use crate::links::LwipLinks;
 use crate::listener::{Admission, SessionListener};
 use crate::session_host::{LwipStack, OpenRefused, SessionHost};
 
+pub use wz_session_mcu::slot_admin::NodeRefused;
 pub use wz_session_mcu::slot_dial::{SessionFactory, SlotSession};
 
 /// How a dial opens its socket on lwIP: out of the pool the image declared, on a port the stack
@@ -98,23 +92,6 @@ where
 pub type SlotDialer<'a, C, L, F, const S: usize, const P: usize> =
     wz_session_mcu::slot_dial::SlotDialer<'a, C, LwipStack<L>, LwipBinder<'a, L>, F, S, P>;
 
-/// The declaration ids the node uses on each session; ids are per session.
-const ADMIN_QUERYABLE_ID: u64 = 1;
-const CONFIG_SUBSCRIBER_ID: u64 = 2;
-
-/// An admin key (`@/<zid>/<whatami>/**` or `.../config/**`) in fixed text.
-type KeyText = FixedText<{ caps::MAX_KEYEXPR_BYTES }>;
-
-/// Which input a node's construction refused: the admin keys its identity names
-/// did not fit, which is found at startup, where it can be fixed, and not at the
-/// first declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeRefused {
-    /// A key built from the node's zid and role is wider than
-    /// `caps::MAX_KEYEXPR_BYTES`.
-    KeyTooLong,
-}
-
 /// An MCU node a host can reach, and reconfigure, at runtime, on the slot profile.
 ///
 /// Built from the pieces the image declared; ticked from the firmware's loop with
@@ -132,11 +109,10 @@ where
     listen_port: u16,
     listening: bool,
     timeouts: SessionTimeouts,
-    status: &'static FixedNodeStatus<S>,
-    manager: ConnectManager<SlotDialer<'a, C, L, F, S, P>>,
+    /// What decides the same on every stack: the connect manager, the admin space declared on
+    /// each session and the report (`wz_session_mcu::slot_admin`).
+    core: AdminCore<'a, C, LwipStack<L>, LwipBinder<'a, L>, F, S, P>,
     accepted: BoundedVec<SlotSession<C, LwipUdpDriver>, LANES>,
-    admin_key: KeyText,
-    config_key: KeyText,
 }
 
 impl<'a, C, L, F, const S: usize, const P: usize, const LANES: usize>
@@ -172,17 +148,6 @@ where
         listen_port: u16,
         timeouts: SessionTimeouts,
     ) -> Result<Self, NodeRefused> {
-        let mut admin_key = KeyText::new();
-        write_admin_queryable_key(&mut admin_key, zid_hex, whatami);
-        let mut config_key = KeyText::new();
-        let _ = wz_session_core::admin_config_space::write_config_space_pattern(
-            &mut config_key,
-            zid_hex,
-            whatami,
-        );
-        if admin_key.overflowed() || config_key.overflowed() {
-            return Err(NodeRefused::KeyTooLong);
-        }
         Ok(Self {
             host,
             links,
@@ -191,15 +156,18 @@ where
             listen_port,
             listening: false,
             timeouts,
-            status,
-            manager: ConnectManager::in_static_store(
+            core: AdminCore::new(
+                host,
+                LwipBinder { links },
+                factory,
+                timeouts,
                 control,
-                SlotDialer::new(&**host, LwipBinder { links }, factory, timeouts),
                 peers,
-            ),
+                status,
+                zid_hex,
+                whatami,
+            )?,
             accepted: BoundedVec::new(),
-            admin_key,
-            config_key,
         })
     }
 
@@ -210,28 +178,22 @@ where
 
     /// Call `f` for each session this node dialled and holds, with the endpoint it was
     /// dialled for, in the list's order.
-    pub fn for_each_dialled(&self, mut f: impl FnMut(&str, &SlotSession<C, LwipUdpDriver>)) {
-        for (endpoint, session) in self.manager.sessions() {
-            f(endpoint, session);
-        }
+    pub fn for_each_dialled(&self, f: impl FnMut(&str, &SlotSession<C, LwipUdpDriver>)) {
+        self.core.for_each_dialled(f);
     }
 
     /// Call `f` for each session this node holds with a node it was asked to open by its zid,
     /// with the zid it was dialled for, in the order the nodes were asked for.
     pub fn for_each_dialled_node(
         &self,
-        mut f: impl FnMut(&DirectoryZid, &SlotSession<C, LwipUdpDriver>),
+        f: impl FnMut(&DirectoryZid, &SlotSession<C, LwipUdpDriver>),
     ) {
-        for (zid, session) in self.manager.node_sessions() {
-            f(zid, session);
-        }
+        self.core.for_each_dialled_node(f);
     }
 
     /// Where every node asked for by its zid stands, in the order they were asked for.
-    pub fn for_each_node(&self, mut f: impl FnMut(&DirectoryZid, NodeState)) {
-        for (zid, state) in self.manager.node_states() {
-            f(zid, state);
-        }
+    pub fn for_each_node(&self, f: impl FnMut(&DirectoryZid, NodeState)) {
+        self.core.for_each_node(f);
     }
 
     /// State that the node `zid` may be reached at `locator`: a hint the build declares for a
@@ -245,68 +207,36 @@ where
         locator: &str,
         now_ms: u64,
     ) -> Result<(), DirectoryRefusal> {
-        self.manager.confirm_locator(
-            zid,
-            locator,
-            LocatorSource::Declared,
-            now_ms,
-            Lifetime::Permanent,
-        )
+        self.core.declare_node(zid, locator, now_ms)
     }
 
     /// Hold a session with the node `zid` at what is known of it, as the lifecycle open query
     /// would ask. `Err` says by name why the node cannot be held.
     pub fn open_node(&mut self, zid: DirectoryZid, now_ms: u64) -> Result<(), NodeRefusal> {
-        self.manager.open_node(zid, now_ms)
+        self.core.open_node(zid, now_ms)
     }
 
     /// The opener a node's admin queryable answers `session/open/<peer>` with, which holds the
     /// store and not the node, so it can be declared in a `static` beside the other tables.
     pub fn node_opener(&self) -> Option<NodeOpener> {
-        self.manager.node_opener()
+        self.core.node_opener()
     }
 
     /// Where every written endpoint stands, as the connect manager holds it.
-    pub fn for_each_endpoint(&self, mut f: impl FnMut(&str, SlotState)) {
-        for (endpoint, state) in self.manager.states() {
-            f(endpoint, state);
-        }
+    pub fn for_each_endpoint(&self, f: impl FnMut(&str, SlotState)) {
+        self.core.for_each_endpoint(f);
     }
 
     /// Advance the node to `now_ms`: bind the listening port if it is not bound, let
     /// go of the accepted sessions that have ended, admit the ones that have asked,
     /// keep the dialled sessions in step with the control, declare the admin space on
-    /// every established session that has not had it, and report what the node holds.
+    /// every established session that has not had it, and report what the node holds
+    /// (the last four are the core's, `AdminCore::tick`).
     pub fn tick(&mut self, now_ms: u64) {
         self.ensure_listening();
         self.accepted.retain(|session| !session.is_finished());
         self.admit();
-        self.report_inbound(now_ms);
-        self.manager.tick(now_ms);
-        self.declare_on_new_sessions();
-        self.report(now_ms);
-    }
-
-    /// Tell the connect manager which nodes have a session of their own here whose key proved
-    /// their zid (decision D10), so a node waited for under a passive intent holds it. A session
-    /// whose peer only claims a zid is not that peer's, and is left out.
-    fn report_inbound(&mut self, now_ms: u64) {
-        // As many as the node accepts at once, which the array is sized by.
-        let mut verified: [DirectoryZid; LANES] = [[0; CREDENTIAL_ZID_BYTES]; LANES];
-        let mut count = 0;
-        for session in self.accepted.iter() {
-            let actions = session.actions();
-            if !actions.peer_identity_verified() {
-                continue;
-            }
-            if let Some(zid) = actions.peer_zid_array() {
-                if count < LANES {
-                    verified[count] = zid;
-                    count += 1;
-                }
-            }
-        }
-        self.manager.inbound_sessions(&verified[..count], now_ms);
+        self.core.tick(now_ms, self.accepted.iter());
     }
 
     /// Bind the node's port and hand the socket to the listener, once. A bind that
@@ -356,83 +286,4 @@ where
             },
         );
     }
-
-    /// Send the admin declarations on every established session that has not had
-    /// them.
-    fn declare_on_new_sessions(&self) {
-        let admin_key = self.admin_key.prefix();
-        let config_key = self.config_key.prefix();
-        let live = self
-            .accepted
-            .iter()
-            .chain(self.manager.sessions().map(|(_, session)| session))
-            .chain(self.manager.node_sessions().map(|(_, session)| session));
-        for session in live {
-            if session.actions().is_established()
-                && !session.declared()
-                && declare_admin(session.actions(), admin_key, config_key)
-            {
-                session.mark_declared();
-            }
-        }
-    }
-
-    /// Report every established session, accepted and dialled, and every written
-    /// endpoint with where it stands, as the heap node does.
-    fn report(&self, now_ms: u64) {
-        let mut rows: BoundedVec<Result<FixedAdminSession, RowRefused>, S> = BoundedVec::new();
-        let sessions = self
-            .accepted
-            .iter()
-            .chain(self.manager.sessions().map(|(_, session)| session))
-            .chain(self.manager.node_sessions().map(|(_, session)| session));
-        for session in sessions {
-            if let Some(row) = session
-                .actions()
-                .with_admin_session(|view: AdminSessionRef<'_>| FixedAdminSession::from_view(&view))
-            {
-                // More established sessions than the pool has slots cannot be; one
-                // that did not fit would be a row the status could not take either.
-                let _ = rows.push(row);
-            }
-        }
-        self.status.set_session_rows(rows);
-        let mut live = self.manager.sessions();
-        let mut endpoints: BoundedVec<(&str, DialStatus), MAX_STATIC_CONNECT> = BoundedVec::new();
-        for (endpoint, state) in self.manager.states() {
-            let status = match state {
-                SlotState::Live => DialStatus::Live {
-                    established: live
-                        .next()
-                        .is_some_and(|(_, session)| session.actions().is_established()),
-                },
-                SlotState::Waiting { at_ms } => DialStatus::Waiting {
-                    retry_in_ms: at_ms.saturating_sub(now_ms),
-                },
-                SlotState::Refused(why) => DialStatus::Refused {
-                    reason: why.as_str(),
-                },
-            };
-            let _ = endpoints.push((endpoint, status));
-        }
-        self.status.set_endpoints(endpoints);
-    }
-}
-
-/// Declare upstream's two admin-space interests on `actions`: `true` once both went
-/// out. A router forwards a GET or a PUT only to a face that declared a match, so
-/// without these a stock zenohd connected to the node holds a live session and
-/// routes nothing to it.
-fn declare_admin<C: ClockSource + 'static>(
-    actions: &SessionHandle<C, LwipUdpDriver>,
-    admin_key: &str,
-    config_key: &str,
-) -> bool {
-    // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
-    actions
-        .send_declare_queryable(ADMIN_QUERYABLE_ID, 0, Some(admin_key), false)
-        .is_ok()
-        && actions
-            .send_declare_subscriber(CONFIG_SUBSCRIBER_ID, 0, Some(config_key))
-            .is_ok()
 }
