@@ -304474,6 +304474,40 @@
         "Open, as in round 4075: the owner confirms or moves the levels of the acceptance table; the reader reports the running maximum of a flow sum (for the zenoh-analyzer session); the calibration generated from the manifest, now that the groups are in it; a failure rate per group and the SN break rate as a mixture; the validation corpus, frozen before it is collected."
       ]
     },
+    "Round 4077": {
+      "decision_summary": "The zenoh calibration is generated from the corpus. The counts of captures/corpus/ and the twelve weights computed from them were literals written by hand, with the pinned examples and the design note beside them, so one capture was a dozen edits and a drift was found by a failing test or not at all. They are now one generated file, zenoh_calibration_generated.rs: the model constants and the measured counts re-export it. The test the_generated_calibration_is_current renders the file from the corpus and fails with the first line that differs and the whole file the corpus gives; with WZ_BLESS_CALIBRATION set it writes it, which scripts/regen-calibration.sh does. The same test holds the design note weight table and counts to the calibration. A first regeneration gave the values already in the tree, so nothing moved. A control: one count changed by one in the generated file fails this test, the corpus count test and the weights derivation test. Not a bx action: it would form a cycle with regen-codegen, which reads every file.",
+      "changes_bullets": [
+        "`crates/wz-capture/src/zenoh_calibration_generated.rs` (new, generated): the weights, the null members and the zenoh counts; `zenoh_evidence.rs` aliases them, `Weight::pair` is new so that a generated line is rustfmt-stable, and the numbers in its comments are gone.",
+        "`zenoh_calibration_tests.rs`: the calibration, its rendering, the currency test and the design-note check. `scripts/regen-calibration.sh`: the command.",
+        "`docs/flow-zenoh-verdict.md`: 6.3 says what is generated and what is not."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1619 pass with lz4 and 1610 without, wz-capi-dissect 227 pass and its 4 consumer tests, clippy clean for the three builds, rustfmt check clean on the generated file. The control above, run and reverted. The static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. The bx action was tried and refused by bx as a cycle. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: the example sums that the session table, the C header and the C consumer pin are still moved by hand (a test names each); the SN steps weights are assumed and not generated; the reader running maximum of a flow sum for the zenoh-analyzer session; a failure rate per group and the SN break rate as a mixture; the validation corpus; the owner confirmation of the acceptance levels. regen-calibration as a bx action needs regen-codegen to name its inputs. This push went over a red hosted run, 41308083310, acknowledged in docs/hosted-red-acks.md: the macOS C ABI job failed wz-capi-pico mutual_dial, the same test as run 41292703063, a second time and not a path this round touches; its cause is not established, and the hypothesis written there is that z_close returns before its listener is released."
+      ],
+      "publishable_decision_summary": "The zenoh calibration is generated from the corpus. The counts of captures/corpus/ and the twelve weights computed from them were literals written by hand, with the pinned examples and the design note beside them, so one capture was a dozen edits and a drift was found by a failing test or not at all. They are now one generated file, zenoh_calibration_generated.rs: the model constants and the measured counts re-export it. The test the_generated_calibration_is_current renders the file from the corpus and fails with the first line that differs and the whole file the corpus gives; with WZ_BLESS_CALIBRATION set it writes it, which scripts/regen-calibration.sh does. The same test holds the design note weight table and counts to the calibration. A first regeneration gave the values already in the tree, so nothing moved. A control: one count changed by one in the generated file fails this test, the corpus count test and the weights derivation test. Not a bx action: it would form a cycle with regen-codegen, which reads every file.",
+      "publishable_changes_bullets": [
+        "`crates/wz-capture/src/zenoh_calibration_generated.rs` (new, generated): the weights, the null members and the zenoh counts; `zenoh_evidence.rs` aliases them, `Weight::pair` is new so that a generated line is rustfmt-stable, and the numbers in its comments are gone.",
+        "`zenoh_calibration_tests.rs`: the calibration, its rendering, the currency test and the design-note check. `scripts/regen-calibration.sh`: the command.",
+        "`docs/flow-zenoh-verdict.md`: 6.3 says what is generated and what is not."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1619 pass with lz4 and 1610 without, wz-capi-dissect 227 pass and its 4 consumer tests, clippy clean for the three builds, rustfmt check clean on the generated file. The control above, run and reverted. The static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. The bx action was tried and refused by bx as a cycle. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the example sums that the session table, the C header and the C consumer pin are still moved by hand (a test names each); the SN steps weights are assumed and not generated; the reader running maximum of a flow sum for the zenoh-analyzer session; a failure rate per group and the SN break rate as a mixture; the validation corpus; the owner confirmation of the acceptance levels. regen-calibration as a bx action needs regen-codegen to name its inputs. This push went over a red hosted run, 41308083310, acknowledged in docs/hosted-red-acks.md: the macOS C ABI job failed wz-capi-pico mutual_dial, the same test as run 41292703063, a second time and not a path this round touches; its cause is not established, and the hypothesis written there is that z_close returns before its listener is released."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
