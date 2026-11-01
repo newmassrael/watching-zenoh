@@ -164,6 +164,12 @@ pub enum ZephyrNetError {
     NoDelay(c_int),
     /// A stream's `getpeername` returned this.
     PeerName(c_int),
+    /// `listen` returned this: the image has no TCP (`CONFIG_NET_TCP`), or the socket was not
+    /// bound.
+    Listen(c_int),
+    /// `accept` returned this although `poll` reported the listener readable: the stack had no
+    /// descriptor to give the connection, or the peer gave up before it was taken.
+    Accept(c_int),
 }
 
 /// One IPv4 UDP socket on Zephyr's net stack, bound to an explicit local

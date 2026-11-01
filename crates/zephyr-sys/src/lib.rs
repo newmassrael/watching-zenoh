@@ -158,6 +158,12 @@ pub mod socket {
         pub fn recv(sock: c_int, buf: *mut c_void, max_len: usize, flags: c_int) -> isize;
         pub fn getpeername(sock: c_int, addr: *mut SockaddrIn, addrlen: *mut SockLen) -> c_int;
         pub fn shutdown(sock: c_int, how: c_int) -> c_int;
+        /// The accepting half of the stream calls: mark a bound `SOCK_STREAM` socket as one that
+        /// takes connections (`backlog` of them queued), and take the next connection off it,
+        /// which is a new descriptor and names its peer in `addr`. A listener needs
+        /// `CONFIG_NET_TCP`, as a connect does.
+        pub fn listen(sock: c_int, backlog: c_int) -> c_int;
+        pub fn accept(sock: c_int, addr: *mut SockaddrIn, addrlen: *mut SockLen) -> c_int;
     }
 }
 

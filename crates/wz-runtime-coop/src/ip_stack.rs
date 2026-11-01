@@ -654,6 +654,59 @@ where
     }
 }
 
+/// The listening half of an [`IpStack`] for `tls/` connections: the port a node accepts secure
+/// channels on. It is made by [`IpStack::tls_acceptor`] over a listener whose accept completes the
+/// channel's handshake (`wz-tls-mbedtls`'s `TlsListener`), so a stream it yields is a secure
+/// channel whose peer has proved its key, and it yields the stack's `tls/` link, which is what a
+/// `tls/` dial opens. [`IpAcceptor`] is its plain twin.
+#[cfg(feature = "session-slot")]
+pub struct IpTlsAcceptor<A, U, T = NoStream> {
+    listener: A,
+    rx: &'static dyn ByteSource,
+    tx: &'static dyn ByteSource,
+    refused: u32,
+    stack: core::marker::PhantomData<fn() -> (U, T)>,
+}
+
+#[cfg(feature = "session-slot")]
+impl<A, U, T> IpTlsAcceptor<A, U, T> {
+    /// Connections taken off the port and closed at once because the tables had no buffer left
+    /// for a link: the node was full.
+    pub const fn refused(&self) -> u32 {
+        self.refused
+    }
+
+    /// The `(address, port)` the listener is bound to.
+    pub fn local(&self) -> ([u8; 4], u16)
+    where
+        A: StreamListen,
+    {
+        self.listener.local()
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<A, U, T> Accept<IpDriver<U, T, A::Stream>> for IpTlsAcceptor<A, U, T>
+where
+    A: StreamListen,
+    A::Stream: 'static,
+    U: DatagramSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    fn accept(&mut self) -> Result<Option<IpDriver<U, T, A::Stream>>, LinkOpenError> {
+        // As [`IpAcceptor`]: the connection comes off the port before the buffers are claimed, so
+        // a full node closes it, and a poll that finds none claims nothing.
+        let Some(stream) = self.listener.accept()? else {
+            return Ok(None);
+        };
+        let (Some(rx), Some(tx)) = (self.rx.claim(), self.tx.claim()) else {
+            self.refused = self.refused.saturating_add(1);
+            return Err(LinkOpenError::Exhausted);
+        };
+        Ok(Some(IpDriver::Tls(StreamDriver::over(stream, rx, tx))))
+    }
+}
+
 #[cfg(feature = "session-slot")]
 impl<U, D, L> IpStack<U, D, L>
 where
@@ -671,6 +724,23 @@ where
         A: StreamListen<Stream = D::Stream>,
     {
         IpAcceptor {
+            listener,
+            rx: self.rx,
+            tx: self.tx,
+            refused: 0,
+            stack: core::marker::PhantomData,
+        }
+    }
+
+    /// The acceptor of the secure channels `listener` completes, whose links claim their buffers
+    /// from the tables of this stack. The stream such a listener yields is the stream the stack's
+    /// secure dial does, so a link over it is the `tls/` link a dial opens, and carries the zid
+    /// the peer's key proved (`StreamSocket::peer_credential_zid`).
+    pub fn tls_acceptor<A>(&self, listener: A) -> IpTlsAcceptor<A, U, D::Stream>
+    where
+        A: StreamListen<Stream = L::Stream>,
+    {
+        IpTlsAcceptor {
             listener,
             rx: self.rx,
             tx: self.tx,
@@ -1009,6 +1079,51 @@ mod tests {
         assert_eq!(ends.src.as_str(), "tcp/10.0.0.2:40002");
         assert_eq!(link.link_rx_capacity(), 66);
         assert_eq!(acceptor.refused(), 0);
+    }
+
+    #[cfg(feature = "session-slot")]
+    static SECURE_ACCEPT_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static SECURE_ACCEPT_TX: ByteCells<34, 1> = ByteCells::new();
+
+    /// The secure listener's connection is the stack's `tls/` link, not its `tcp/` one: the
+    /// session host runs the driver the stack names, and that is the variant a `tls/` dial opens.
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn an_accepted_secure_channel_is_the_tls_link_a_dial_opens() {
+        let stack = IpStack::<Datagrams, Dial>::new(
+            [10, 0, 0, 2],
+            &SECURE_ACCEPT_RX,
+            &SECURE_ACCEPT_TX,
+            Dial,
+        )
+        .with_tls(Dial);
+        let mut acceptor = stack.tls_acceptor(Listener::with_waiting(2));
+        assert_eq!(acceptor.local(), ([10, 0, 0, 2], 7447));
+        let link: IpDriver<Datagrams, Stream, Stream> = acceptor
+            .accept()
+            .expect("the port is sound")
+            .expect("a connection waited");
+        assert!(matches!(link, IpDriver::Tls(_)));
+        assert!(link.batch_length_prefixed(), "a stream frames its batches");
+        assert_eq!(link.link_rx_capacity(), 66);
+        assert_eq!(acceptor.refused(), 0);
+        let full: Result<Option<IpDriver<Datagrams, Stream, Stream>>, _> = acceptor.accept();
+        assert!(
+            matches!(full, Err(LinkOpenError::Exhausted)),
+            "one buffer pair, and the first link holds it"
+        );
+        assert_eq!(
+            acceptor.refused(),
+            1,
+            "a full node counts the one it closed"
+        );
+        drop(link);
+        let quiet: Result<Option<IpDriver<Datagrams, Stream, Stream>>, _> = acceptor.accept();
+        assert!(
+            matches!(quiet, Ok(None)),
+            "the refused connection was taken off the port, not left queued"
+        );
     }
 
     #[cfg(feature = "session-slot")]
