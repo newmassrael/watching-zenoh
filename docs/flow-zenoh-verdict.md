@@ -713,3 +713,64 @@ groups), the time order of a flow's evidence that the second layer needs (the
 reader reports a sum today, and the running maximum is the quantity Ville bounds),
 and the consumer's field for the model version and the level the evidence
 supports are each a step with its own entry, the last two with the consumer.
+
+### 6.5 A candidate for the unit reading: a failure rate per group (2026-11-01)
+
+The shipped model gives every unit of a zenoh flow the same chance of failing,
+the bound the corpus allows, and adds the units up: `n` units weigh `n` times
+one unit, and a failure always costs the same. That is a model of one population
+of units. The corpus has 22 zenoh groups, and the units of a group share what
+makes them read well or badly.
+
+`crates/wz-capture/src/zenoh_hierarchy_tests.rs` holds a candidate, and ships
+nothing (`model::MODEL` stays 2). Each group has its own failure rate, drawn from
+a Beta distribution whose mean has the Jeffreys prior and the posterior the 22
+groups give it, none of which failed a unit, and whose spread is a
+concentration `kappa`: a Beta-binomial over the units of a group. A flow of `n`
+units, `k` of which failed, weighs the log of its probability under that
+predictive against the shipped null side, so that only the zenoh side moves.
+
+`kappa` is the number the corpus cannot give: with no group failing, how unlike
+each other the groups' rates are is not measured. The report therefore reads the
+corpus at several, and what it answers is how much of the shipped verdict rests
+on the choice.
+
+- **The zenoh side does not move at any `kappa`**: 619 flows `yes` and 2
+  `undecided` (the two of the 20% loss link), 0 `no`. No flow with no failed
+  unit changed its word. At `kappa` = 10^6, where the groups are alike, the
+  candidate reads the corpus exactly as the shipped model does, and the weight
+  of a flow with no failure differs from it by under 0.1% (+38648 against +38680
+  for 40 units).
+- **What moves is the `no` of the null flows.** Of 653 null flows the shipped
+  model reads 345 `no` and 308 `undecided`. The candidate reads 54 `no` at
+  `kappa` = 16 and 5 at `kappa` = 1. DNS, NTP, CoAP, DHCP and the rest go back
+  to `undecided`: their units fail, and the shipped model prices a failing unit
+  of a zenoh flow as a rare event, so a run of them is conclusive. A model that
+  admits a zenoh group whose units fail most of the time does not call a flow
+  not zenoh for that alone.
+- **The same holds for flows in which every unit failed**: 10 units read `no` at
+  `kappa` >= 16 and `undecided` below; 40 units read `no` from `kappa` = 4; 2
+  units read `no` only at `kappa` = 10^6. The shipped model says `no` at 2.
+
+That the candidate loses `no` is partly its own doing, and the report shows how:
+at `kappa` = 1 a flow of 531 units that all failed weighs +51235 on the `no` sum,
+toward zenoh. The candidate makes the zenoh side heterogeneous and leaves the
+null side as independent units, which fail with a fixed share. A heavy-tailed
+zenoh side then beats a null side that falls off geometrically, as the run
+lengthens. A null protocol's flows differ as well, and with a null side that is
+heterogeneous too (a rate per null protocol, its spread measured from the flows
+within each null capture, which the corpus does have) the null's chance of a long
+run of failures falls off as slowly as the zenoh side's, and the run counts
+against zenoh again. That is the next step, and until it is taken the candidate's
+numbers for `no` are a bound on how much the verdict can be made to depend on
+`kappa`, not a recommendation. Whether the null side recovers the `no` is an
+argument here and not a measurement.
+
+What it already says is where the shipped verdict stands. The 345 null flows
+that read `no` rest on `kappa` being large: on the groups of zenoh being alike
+in how their units read. The corpus cannot say that, because no zenoh group has
+failed a unit. It is measured by zenoh groups that do: workloads and
+implementations this reader reads badly, which section 6.4 asks for for another
+reason. Until one exists, the `yes` of the shipped model is as safe as the
+candidate's (the zenoh side is the same at every `kappa`), and its `no` is as
+strong as its assumption.

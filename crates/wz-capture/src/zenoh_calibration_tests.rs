@@ -48,9 +48,9 @@ use crate::Dissection;
 
 /// The outcomes a flow's sums are made of.
 #[derive(Debug, Default, Clone, Copy)]
-struct Counts {
+pub(crate) struct Counts {
     /// Framing units read whole, residual, undecoded.
-    units: [u64; 3],
+    pub(crate) units: [u64; 3],
     /// Stream directions whose framing held, or was lost first.
     framing: [u64; 2],
     /// Cookie echoes matched, differing.
@@ -91,19 +91,19 @@ impl Counts {
 }
 
 /// One flow: its outcomes and the sums the library gave it.
-struct Flow {
-    counts: Counts,
-    yes: i64,
-    no: i64,
+pub(crate) struct Flow {
+    pub(crate) counts: Counts,
+    pub(crate) yes: i64,
+    pub(crate) no: i64,
 }
 
 /// One file of the corpus, read.
-struct File {
+pub(crate) struct File {
     name: String,
-    zenoh: bool,
-    group: String,
-    flows: Vec<Flow>,
-    counts: Counts,
+    pub(crate) zenoh: bool,
+    pub(crate) group: String,
+    pub(crate) flows: Vec<Flow>,
+    pub(crate) counts: Counts,
 }
 
 fn flows_of(d: &Dissection) -> Vec<Flow> {
@@ -141,7 +141,7 @@ fn flows_of(d: &Dissection) -> Vec<Flow> {
     out
 }
 
-fn read_corpus() -> Vec<File> {
+pub(crate) fn read_corpus() -> Vec<File> {
     manifest()
         .into_iter()
         .map(|entry| {

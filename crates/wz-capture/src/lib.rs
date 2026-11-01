@@ -262,6 +262,8 @@ mod zenoh_corpus_tests;
 /// zenoh flow keeps: the checks, their weights and the tallies `session_table`
 /// keeps at ingest. Ungated for the reason the table is.
 pub mod zenoh_evidence;
+#[cfg(test)]
+mod zenoh_hierarchy_tests;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.
