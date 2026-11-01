@@ -9291,6 +9291,13 @@ layer_c1y_cargo_test_routing_peer() {
     # (hosted run 41192748568 printed `22 passed`; the build host read 22 at 925109f3ee).
     _runci_guarded_test "C1y accept_loop" 22 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
+    # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
+    # one link each, and no face of either goes up on a link that is then closed). It needs
+    # `peer_loop`, so it is compiled by `routing-accept,routing-peer` and by no lane above that
+    # names `routing-accept` alone: 1 = what that command PRINTED.
+    _runci_guarded_test "C1y link admission mutual dial" 1 \
+        cargo test -p wz-runtime-tokio --features routing-accept,routing-peer \
+        --test link_admission_mutual_dial_e2e --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
     # `routing-peer` as well as the access set below. Two pins for one plane is not

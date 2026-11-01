@@ -2223,7 +2223,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// the link is still being established. `None` for a node that decides the question after the
     /// link is up, or that holds one link in any case. On the LINK, as the handshake it guards
     /// is.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     pub(crate) link_lease: R::Mutex<Option<crate::link_admission::LinkLease>>,
 }
 
@@ -3449,7 +3449,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 batch_slots: R::new_mutex(
                     [const { None::<crate::tx_lease::HeldSlot> }; TX_CONDUITS],
                 ),
-                #[cfg(feature = "alloc")]
+                #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
                 link_lease: R::new_mutex(None),
             } in_place {}
         );
@@ -9303,7 +9303,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// known and (the initiator) when the OpenAck is about to be taken, and a link the node refuses
     /// is closed with `MaxLinks` before the application has seen anything over it. `dialled` says
     /// whether this session dialled the link. A second install replaces the first, which is released.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     pub fn install_link_admission(
         &self,
         authority: alloc::sync::Arc<dyn crate::link_admission::LinkAdmission>,
@@ -9317,6 +9317,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// guard. See [`crate::link_admission::LinkAdmission::reserve`].
     #[cfg(all(
         feature = "alloc",
+        target_has_atomic = "ptr",
         any(
             feature = "codec-init-body",
             all(feature = "codec-open-body", feature = "session-unicast-accept")
@@ -9337,6 +9338,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The two mutexes are taken one after the other and never nested.
     #[cfg(all(
         feature = "alloc",
+        target_has_atomic = "ptr",
         feature = "codec-open-body",
         feature = "session-unicast-accept"
     ))]
@@ -9360,7 +9362,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The node's answer to an initiator that is about to take the OpenAck; `true` for a link the
     /// node does not guard. See [`crate::link_admission::LinkAdmission::confirm`].
-    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
+    #[cfg(all(
+        feature = "alloc",
+        target_has_atomic = "ptr",
+        feature = "codec-open-body"
+    ))]
     pub(crate) fn link_confirmed(&self) -> bool {
         R::with_mutex_mut(&self.link.link_lease, |slot| match slot {
             Some(lease) => lease.confirm(),
@@ -9370,7 +9376,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// This link has left its node's admission: its place is free for the next link to the same
     /// node. The node calls it when the link's face goes; the lease's drop does it otherwise.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     pub fn release_link_admission(&self) {
         R::with_mutex_mut(&self.link.link_lease, |slot| {
             if let Some(lease) = slot.as_ref() {
@@ -9384,6 +9390,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// declared over it by either end.
     #[cfg(all(
         feature = "alloc",
+        target_has_atomic = "ptr",
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
     pub(crate) fn refuse_link(&self) {

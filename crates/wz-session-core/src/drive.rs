@@ -1061,6 +1061,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 // the FSM where it was, the link closed with `MaxLinks`, and the open ends.
                 #[cfg(all(
                     feature = "alloc",
+                    target_has_atomic = "ptr",
                     any(feature = "codec-init-body", feature = "codec-open-body")
                 ))]
                 {

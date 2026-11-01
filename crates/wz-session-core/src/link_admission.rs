@@ -110,13 +110,18 @@ pub trait LinkAdmission: Send + Sync {
 }
 
 /// A link's place in a node's [`LinkAdmission`], released when the link's session is dropped.
-#[cfg(feature = "alloc")]
+///
+/// A node shares its admission among the links it holds as an `alloc::sync::Arc`, which a target
+/// without atomics (ARMv6-M) has no type for: such a target holds at most the link its single
+/// task drives, has no second link to admit, and has no lease either. An `Rc` is not the
+/// answer: the session a link belongs to is `Send`, and a lease inside it must be too.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub struct LinkLease {
     authority: alloc::sync::Arc<dyn LinkAdmission>,
     token: u64,
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl LinkLease {
     /// The lease of a link `dialled` (or not), opened with `authority`.
     pub fn new(authority: alloc::sync::Arc<dyn LinkAdmission>, dialled: bool) -> Self {
@@ -141,7 +146,7 @@ impl LinkLease {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl Drop for LinkLease {
     fn drop(&mut self) {
         self.authority.release(self.token);
