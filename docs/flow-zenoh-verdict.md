@@ -735,7 +735,8 @@ each other the groups' rates are is not measured. The report therefore reads the
 corpus at several, and what it answers is how much of the shipped verdict rests
 on the choice.
 
-- **The zenoh side does not move at any `kappa`**: 619 flows `yes` and 2
+- **With the null side as the shipped one, the zenoh side does not move at any
+  `kappa`**: 619 flows `yes` and 2
   `undecided` (the two of the 20% loss link), 0 `no`. No flow with no failed
   unit changed its word. At `kappa` = 10^6, where the groups are alike, the
   candidate reads the corpus exactly as the shipped model does, and the weight
@@ -757,20 +758,61 @@ at `kappa` = 1 a flow of 531 units that all failed weighs +51235 on the `no` sum
 toward zenoh. The candidate makes the zenoh side heterogeneous and leaves the
 null side as independent units, which fail with a fixed share. A heavy-tailed
 zenoh side then beats a null side that falls off geometrically, as the run
-lengthens. A null protocol's flows differ as well, and with a null side that is
-heterogeneous too (a rate per null protocol, its spread measured from the flows
-within each null capture, which the corpus does have) the null's chance of a long
-run of failures falls off as slowly as the zenoh side's, and the run counts
-against zenoh again. That is the next step, and until it is taken the candidate's
-numbers for `no` are a bound on how much the verdict can be made to depend on
-`kappa`, not a recommendation. Whether the null side recovers the `no` is an
-argument here and not a measurement.
+lengthens. The null side was then made heterogeneous too (below), which is the
+measurement of what was here an argument.
 
-What it already says is where the shipped verdict stands. The 345 null flows
-that read `no` rest on `kappa` being large: on the groups of zenoh being alike
-in how their units read. The corpus cannot say that, because no zenoh group has
-failed a unit. It is measured by zenoh groups that do: workloads and
+#### With the null side heterogeneous too
+
+Each null protocol is a Beta-binomial over the units of its flows: the share of
+its units that fail is its own, and so is the spread among its flows, estimated
+from them by the concentration of a grid that makes them likeliest (a member
+with fewer than 5 flows that framed a unit has none estimated, and takes a spread
+of 1 on the `yes` sum and independent units on the `no` sum, each the cautious
+side for the error it could cause). The estimates differ a great deal: DNS, RTPS,
+CoAP and SOME/IP at 0.05, the grid's floor and the most heterogeneous it allows
+(so the true spread may be smaller still), DHCP at 1, mDNS at 2, NTP and WSD at
+10000, the grid's ceiling, which is independent units. Five members have no
+estimate (SSDP, MQTT, QUIC, PostgreSQL and SSH), and five more framed no unit and
+are not members of this model.
+
+- **The sign of the artifact is gone and the `no` is not back.** A flow of 531
+  units that all failed weighs -15975 on the `no` sum at `kappa` = 1, where it
+  was +51235, so the null side's heavy tail does what the argument said. But it
+  stays short of the threshold at `kappa` = 1, and reads `no` at `kappa` = 16 for
+  10 units or more, as it did with the independent null. Of 653 null flows, 9
+  read `no` at `kappa` = 1 and 55 at `kappa` = 16 (345 shipped, and 5 and 54 with
+  the independent null). So the loss of `no` is the model's and not only the
+  candidate's asymmetry: if zenoh groups can fail their units as the null's flows
+  do, a run of failed units does not tell them apart. (`kappa` = 4 was read with
+  the independent null only.)
+- **A zenoh flow reads `no`.** One flow of `zenoh-jitter-udp-20pub.pcap`, at every
+  `kappa` including 10^6, where the zenoh side is the shipped one. Its 2401 units
+  all read whole; of its SN steps 588 followed and 1756 broke (75%, against the
+  6% that `SN_BREAKS` assumes). The shipped model weighs its units +8513946 on the
+  `no` sum and its SN steps about -2364148, and the flow reads `yes` at +38597,
+  18 bits over the threshold, as the difference of two numbers of millions. With
+  the null heterogeneous the units weigh +7907 (about 8 bits): 2401 units that
+  read whole are not 2401 pieces of evidence when a null protocol's flows read
+  whole all at once or not at all, and the evidence saturates, as it should. The
+  SN steps stay at their sum, and the flow reads `no`.
+
+That is the finding, and it is not a defect of the null side. The shipped model
+sums two kinds of observation that are both strongly correlated within a flow, the
+units and the SN steps, and the first sum was large enough to carry the second.
+Making the first one honest exposes the second: an SN break rate that is a
+constant, in a flow whose link breaks three steps in four. The break rate is a
+property of the link, as the units' failure rate is of the group, and it belongs
+in the model the same way (a mixture over the rate, so that a flow with many
+breaks is a flow of a bad link and not a flow of many independent breaks). The
+two are one step, and neither ships alone: the candidate with the units alone
+turns a real zenoh flow into a false `no`.
+
+What the measurements already say is where the shipped verdict stands. The 345
+null flows that read `no` rest on `kappa` being large: on the groups of zenoh
+being alike in how their units read. The corpus cannot say that, because no zenoh
+group has failed a unit; it is measured by zenoh groups that do (workloads and
 implementations this reader reads badly, which section 6.4 asks for for another
-reason. Until one exists, the `yes` of the shipped model is as safe as the
-candidate's (the zenoh side is the same at every `kappa`), and its `no` is as
-strong as its assumption.
+reason). And the `yes` of the jitter flow rests on the same independence
+assumption, in the other direction: two sums of millions that nearly cancel.
+Neither is a defect of a flow the corpus misreads today. Both are numbers that a
+link or a workload the corpus lacks would move.

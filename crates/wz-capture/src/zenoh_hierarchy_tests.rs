@@ -222,6 +222,217 @@ fn word(yes: i64, no: i64) -> &'static str {
     }
 }
 
+/// The concentrations a null member's spread is looked for among.
+const KAPPAS: [f64; 15] = [
+    0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1_000.0, 10_000.0,
+];
+
+/// The fewest flows with units a null member needs for its spread to be
+/// estimated from them. Fewer, and it has none: the `yes` sum takes a spread of
+/// 1, the widest the grid's middle allows and the cautious side for a false
+/// `yes`, and the `no` sum takes independent units, the cautious side for a
+/// false `no`.
+const FLOWS_TO_ESTIMATE: usize = 5;
+
+/// One null protocol as a Beta-binomial over the units of its flows: the share of
+/// its units that fail, and how much its flows differ in it.
+struct NullMember {
+    file: alloc::string::String,
+    /// Flows that framed at least one unit.
+    flows: usize,
+    units: u64,
+    /// The share failing, for the `no` sum (Jeffreys) and for the `yes` sum (the
+    /// least the explained share's upper bound leaves).
+    no_share: f64,
+    yes_share: f64,
+    /// The spread estimated from the member's flows.
+    kappa: Option<f64>,
+}
+
+/// `ln P` of one sequence of `n` units, `k` of which failed, in a flow of a
+/// member with a failure `share`: independent units without a `kappa`, a
+/// Beta-binomial with one.
+fn ln_member(share: f64, kappa: Option<f64>, k: u64, n: u64) -> f64 {
+    let share = share.clamp(1e-12, 1.0 - 1e-12);
+    match kappa {
+        None => k as f64 * share.ln() + (n - k) as f64 * (1.0 - share).ln(),
+        Some(c) => {
+            let (a, b) = (c * share, c * (1.0 - share));
+            ln_beta(a + k as f64, b + (n - k) as f64) - ln_beta(a, b)
+        }
+    }
+}
+
+/// The null members of the corpus: those that framed a unit, with the spread of
+/// each estimated from its flows by the concentration of the grid that makes
+/// them likeliest.
+fn null_members(files: &[File]) -> Vec<NullMember> {
+    let mut members = Vec::new();
+    for f in files.iter().filter(|f| !f.zenoh) {
+        let flows: Vec<(u64, u64)> = f
+            .flows
+            .iter()
+            .map(|flow| {
+                let u = flow.counts.units;
+                (u[1] + u[2], u.iter().sum::<u64>())
+            })
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        let units: u64 = flows.iter().map(|&(_, n)| n).sum();
+        if units == 0 {
+            continue;
+        }
+        let failed: u64 = flows.iter().map(|&(k, _)| k).sum();
+        let no_share = (failed as f64 + 0.5) / (units as f64 + 1.0);
+        let yes_share = 1.0 - fit::upper_bound(units - failed, units);
+        let kappa = if flows.len() < FLOWS_TO_ESTIMATE {
+            None
+        } else {
+            let likelihood = |c: f64| -> f64 {
+                flows
+                    .iter()
+                    .map(|&(k, n)| ln_member(no_share, Some(c), k, n))
+                    .sum()
+            };
+            KAPPAS
+                .iter()
+                .copied()
+                .fold(None::<(f64, f64)>, |best, c| {
+                    let l = likelihood(c);
+                    match best {
+                        Some((_, bl)) if bl >= l => best,
+                        _ => Some((c, l)),
+                    }
+                })
+                .map(|(c, _)| c)
+        };
+        members.push(NullMember {
+            file: f.name.clone(),
+            flows: flows.len(),
+            units,
+            no_share,
+            yes_share,
+            kappa,
+        });
+    }
+    members
+}
+
+/// A flow of `n` units, `k` of which failed, with the zenoh side of `h` and the
+/// null side a rate per protocol: the `yes` sum against the likeliest member, the
+/// `no` sum against the members' average, in millibits.
+fn candidate_both(h: &Hierarchy, members: &[NullMember], k: u64, n: u64) -> (i64, i64) {
+    let p1 = h.ln_predictive(k, n);
+    let yes_null = members
+        .iter()
+        .map(|m| ln_member(m.yes_share, Some(m.kappa.unwrap_or(1.0)), k, n))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let each: Vec<f64> = members
+        .iter()
+        .map(|m| ln_member(m.no_share, m.kappa, k, n))
+        .collect();
+    let no_null = log_sum_exp(&each) - (members.len() as f64).ln();
+    (
+        millibits((p1 - yes_null) / core::f64::consts::LN_2),
+        millibits((p1 - no_null) / core::f64::consts::LN_2),
+    )
+}
+
+/// A null member's flow is a distribution too: over the failures of `n` units its
+/// probabilities add to one, with a spread and without.
+#[test]
+fn a_null_members_flow_is_a_distribution() {
+    let ln_choose = |n: u64, k: u64| {
+        ln_gamma(n as f64 + 1.0) - ln_gamma(k as f64 + 1.0) - ln_gamma((n - k) as f64 + 1.0)
+    };
+    for kappa in [None, Some(0.3), Some(3.0), Some(300.0)] {
+        for share in [0.05, 0.5, 0.9] {
+            let n = 15;
+            let total: f64 = (0..=n)
+                .map(|k| (ln_choose(n, k) + ln_member(share, kappa, k, n)).exp())
+                .sum();
+            assert!(
+                (total - 1.0).abs() < 1e-9,
+                "share {share}, kappa {kappa:?}: adds to {total}"
+            );
+        }
+    }
+}
+
+/// THE REPORT WITH A HIERARCHICAL NULL SIDE: each null protocol has its own spread,
+/// estimated from its flows, and the zenoh side is the candidate of the report
+/// above at several concentrations. The question is whether the `no` that the
+/// candidate lost with an independent null comes back. Printed; the words are not
+/// asserted.
+#[test]
+fn the_corpus_read_with_a_hierarchical_null_side_too() {
+    let files = read_corpus();
+    let members = null_members(&files);
+    let groups = zenoh_groups(&files);
+    std::println!("null member | flows with units | units | failing share | spread");
+    for m in &members {
+        std::println!(
+            "{} | {} | {} | {:.3} | {}",
+            m.file,
+            m.flows,
+            m.units,
+            m.no_share,
+            m.kappa
+                .map_or_else(|| String::from("not estimated"), |c| alloc::format!("{c}"))
+        );
+    }
+    for kappa in [1.0, 16.0, 1.0e6] {
+        let h = Hierarchy::fit(kappa, &groups);
+        let mut cache: BTreeMap<(u64, u64), (i64, i64)> = BTreeMap::new();
+        let mut moved: BTreeMap<(String, &str, &str), u64> = BTreeMap::new();
+        let mut tally = [[0u64; 3]; 4];
+        for f in &files {
+            for flow in &f.flows {
+                let u = flow.counts.units;
+                let (k, n) = (u[1] + u[2], u.iter().sum::<u64>());
+                let (cy, cn) = *cache
+                    .entry((k, n))
+                    .or_insert_with(|| candidate_both(&h, &members, k, n));
+                let (sy, sn) = shipped_unit_part(&u);
+                let (y, no) = (flow.yes - sy + cy, flow.no - sn + cn);
+                let (was, now) = (word(flow.yes, flow.no), word(y, no));
+                let slot = |w: &str| match w {
+                    "yes" => 0,
+                    "no" => 1,
+                    _ => 2,
+                };
+                let side = if f.zenoh { 0 } else { 2 };
+                tally[side][slot(was)] += 1;
+                tally[side + 1][slot(now)] += 1;
+                if was != now {
+                    *moved.entry((f.group.clone(), was, now)).or_default() += 1;
+                }
+                if f.zenoh && now == "no" {
+                    // A zenoh flow read `no`: what it holds, and what its sums were.
+                    std::println!(
+                        "  ZENOH FLOW READ NO in {}: units {:?}, SN steps followed/broke {:?}; sums shipped {} / {}, now {y} / {no}; its unit part shipped {sy} / {sn}, now {cy} / {cn}",
+                        f.name, u, flow.counts.sn, flow.yes, flow.no
+                    );
+                }
+            }
+        }
+        std::println!(
+            "kappa {kappa}: zenoh flows shipped {:?} both-hierarchical {:?} | null flows shipped {:?} both-hierarchical {:?}  (yes, no, undecided)",
+            tally[0], tally[1], tally[2], tally[3]
+        );
+        for ((group, was, now), flows) in &moved {
+            std::println!("    {group}: {was} -> {now} in {flows} flow(s)");
+        }
+        for n in [2u64, 10, 40, 531] {
+            let (y, no) = candidate_both(&h, &members, n, n);
+            std::println!(
+                "  every one of {n} units failed: {y} / {no} {}",
+                word(y, no)
+            );
+        }
+    }
+}
+
 /// The function the model stands on is right, and what it makes of a flow is a
 /// distribution: over the `k` failures of `n` units the probabilities add to one.
 #[test]

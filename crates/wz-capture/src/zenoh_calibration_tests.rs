@@ -60,7 +60,7 @@ pub(crate) struct Counts {
     /// Version headers of this reader's version, of another.
     versions: [u64; 2],
     /// SN steps that followed, that broke.
-    sn: [u64; 2],
+    pub(crate) sn: [u64; 2],
 }
 
 impl Counts {
@@ -99,7 +99,7 @@ pub(crate) struct Flow {
 
 /// One file of the corpus, read.
 pub(crate) struct File {
-    name: String,
+    pub(crate) name: String,
     pub(crate) zenoh: bool,
     pub(crate) group: String,
     pub(crate) flows: Vec<Flow>,
