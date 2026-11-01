@@ -971,6 +971,23 @@ pub trait FaceForwarder {
         None
     }
 
+    /// The node's say on a second link to a node it holds, asked WHILE the link is still being
+    /// established ([`wz_session_core::link_admission::LinkAdmission`]): the loop installs it on
+    /// every session it opens before the first wire byte, as it does the authentication, and the
+    /// handshake asks it when the remote's zid is known and before the initiator takes the OpenAck.
+    /// A link it refuses is closed with `MaxLinks` before either end has declared anything over it.
+    ///
+    /// `None`, the default, decides the question after the link is up ([`Self::admit`],
+    /// [`Self::holds_peer`], [`Self::judge_second_link`]): the loop's own collision resolution.
+    /// A node whose listener and dials run in more than one loop over one registry must answer
+    /// here, because only the registry sees the other loop's link, and the loop's resolution
+    /// then runs on a link the registry has already let through. Read once, when the loop starts,
+    /// and not installed by a loop that aggregates links (`max_links` above one): its second link
+    /// to a node is the aggregation the handshake negotiates.
+    fn link_admission(&self) -> Option<Arc<dyn wz_session_core::link_admission::LinkAdmission>> {
+        None
+    }
+
     /// The prefix this node's keys carry on the wire (`namespace`), which the loop installs on
     /// every session it opens before the first wire byte, as it does the authentication. `None`,
     /// the default, is a node whose keys are the wire's. Each participant's namespace is its own:
@@ -1256,6 +1273,10 @@ struct FaceTemplate {
     /// beside the partition.
     #[cfg(feature = "routing-namespace")]
     namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
+    /// The node's admission of a second link to a node it holds
+    /// ([`FaceForwarder::link_admission`]), installed on each session beside the partition so
+    /// the handshake asks it.
+    admission: Option<Arc<dyn wz_session_core::link_admission::LinkAdmission>>,
 }
 
 /// Which side of a handshake a session is opened on: the authentication a node holds is
@@ -1294,13 +1315,17 @@ impl FaceTemplate {
         let auth = self.auth;
         #[cfg(feature = "routing-namespace")]
         let namespace = self.namespace;
-        #[cfg(not(feature = "session-extauth"))]
-        let _ = role;
+        let admission = self.admission;
         (self.params, move |actions: &Arc<SessionLinkActions>| {
             if let Some(zid) = expected_zid {
                 actions.expect_peer_zid(zid);
             }
             actions.set_south_partition((*partition).clone());
+            // The link's place in the node's admission is taken before the first wire byte, so
+            // the handshake can ask for it at the InitAck and the OpenSyn.
+            if let Some(admission) = &admission {
+                actions.install_link_admission(Arc::clone(admission), role == AuthRole::Dial);
+            }
             #[cfg(feature = "routing-namespace")]
             if let Some(namespace) = &namespace {
                 actions.set_namespace(namespace.clone());
@@ -2943,6 +2968,17 @@ where
     tokio::pin!(shutdown);
     // Item 751 — every face below is opened from this one template, so each
     // session announces from the partition the forwarder places it by.
+    //
+    // The node's admission of a second link to a node it holds is asked by the handshake, which
+    // an aggregating loop must not let refuse: its second link to a node is the aggregation.
+    #[cfg(feature = "transport-multilink")]
+    let admission = if max_links > 1 {
+        None
+    } else {
+        forwarder.link_admission()
+    };
+    #[cfg(not(feature = "transport-multilink"))]
+    let admission = forwarder.link_admission();
     let params = FaceTemplate {
         params,
         partition: Arc::new(forwarder.south_partition()),
@@ -2950,6 +2986,7 @@ where
         auth: forwarder.session_auth(),
         #[cfg(feature = "routing-namespace")]
         namespace: forwarder.session_namespace(),
+        admission,
     };
 
     // R2233 (open-debt item 585) — fold the configured dial targets into their

@@ -1049,6 +1049,54 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         return DriverLoopOutcome::InitAckPeerMismatch;
                     }
                 }
+                // The node's say on the link, asked while it is still being established
+                // ([`crate::link_admission::LinkAdmission`]). Upstream decides a second link to a
+                // held node here and not after the handshake: the acceptor before its OpenAck is
+                // sent, the initiator before its OpenSyn and again before it takes the OpenAck
+                // (`io/zenoh-transport/src/unicast/manager.rs` @ `init_transport_unicast`). A link
+                // refused here has said nothing the application could see, whichever end
+                // declared first, which is the whole of the difference from closing the
+                // loser after both ends have admitted it. After the checks that name the peer,
+                // for the zid they have established, and before the event: a refusal leaves
+                // the FSM where it was, the link closed with `MaxLinks`, and the open ends.
+                #[cfg(all(
+                    feature = "alloc",
+                    any(feature = "codec-init-body", feature = "codec-open-body")
+                ))]
+                {
+                    let admitted = match &frame {
+                        #[cfg(feature = "codec-init-body")]
+                        InboundFrame::Init {
+                            is_ack: true, body, ..
+                        } if engine.get_current_state()
+                            == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitSyn =>
+                        {
+                            actions.link_admitted(body.zid.as_slice())
+                        }
+                        #[cfg(all(
+                            feature = "codec-open-body",
+                            feature = "session-unicast-accept"
+                        ))]
+                        InboundFrame::Open { is_ack: false, .. }
+                            if engine.get_current_state()
+                                == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitAck =>
+                        {
+                            // A `match`, not `is_none_or`: stable since 1.82, and the
+                            // workspace's floor is 1.81.
+                            match actions.peer_zid() {
+                                Some(zid) => actions.link_admitted(&zid),
+                                None => true,
+                            }
+                        }
+                        #[cfg(feature = "codec-open-body")]
+                        InboundFrame::Open { is_ack: true, .. } => actions.link_confirmed(),
+                        _ => true,
+                    };
+                    if !admitted {
+                        actions.refuse_link();
+                        return DriverLoopOutcome::LinkRefused;
+                    }
+                }
                 // Item 751 — decide the bound this node announces for the peer
                 // on the Open the event below sends: the initiator's OpenSyn on
                 // the InitAck it is waiting for, the acceptor's OpenAck on the

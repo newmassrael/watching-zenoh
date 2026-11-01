@@ -175,6 +175,11 @@ struct Dialer {
     /// before its first wire byte.
     #[cfg(feature = "routing-namespace")]
     namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
+    /// The node's admission of a second link to a node it holds, taken by every link this dialer
+    /// opens before its first wire byte, as the accept loop's links take it, so the handshake
+    /// asks it at the InitAck and again before the OpenAck is taken. `None` for a client, which
+    /// holds one link.
+    admission: Option<Arc<dyn wz_session_core::link_admission::LinkAdmission>>,
 }
 
 impl Dialer {
@@ -233,9 +238,13 @@ impl Dialer {
         let auth = self.auth.clone();
         #[cfg(feature = "routing-namespace")]
         let namespace = self.namespace.clone();
+        let admission = self.admission.clone();
         let stage = move |actions: &Arc<wz_runtime_tokio::session_glue::SessionLinkActions>| {
             if let Some(zid) = expected {
                 actions.expect_peer_zid(zid);
+            }
+            if let Some(admission) = &admission {
+                actions.install_link_admission(Arc::clone(admission), true);
             }
             #[cfg(feature = "routing-namespace")]
             if let Some(namespace) = &namespace {
@@ -1417,6 +1426,12 @@ fn prepare_dial(
         auth: ctx.shared.node_auth().cloned(),
         #[cfg(feature = "routing-namespace")]
         namespace: ctx.shared.node_namespace().cloned(),
+        // A peer's links are the ones that collide: a client dials one node, once.
+        admission: if whatami == WhatAmI::Peer {
+            ctx.shared.link_admission()
+        } else {
+            None
+        },
     });
     Some(DialSetup { scheduled, dialer })
 }
@@ -4877,6 +4892,7 @@ mod tests {
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
                 namespace: None,
+                admission: None,
             };
             let opened = dialer
                 .open_scouted(&format!("tcp/{addr}"), expected)

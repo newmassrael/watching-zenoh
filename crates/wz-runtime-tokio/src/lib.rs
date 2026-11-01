@@ -2274,6 +2274,11 @@ pub mod accept_loop;
 /// node is kept, and when the winner is admitted. A pure state machine, tested without a runtime.
 #[cfg(feature = "routing-accept")]
 mod link_collision;
+/// A node's links to each remote node while their handshakes run and after: the admission that
+/// decides a second link to a held node before it carries anything
+/// ([`wz_session_core::link_admission::LinkAdmission`]).
+#[cfg(feature = "routing-accept")]
+pub mod link_registry;
 
 /// What an accepting node gives an inbound link before its handshake is complete (upstream's
 /// `accept_timeout` and `accept_pending`): plain configuration data that the C interfaces carry

@@ -2218,6 +2218,13 @@ pub struct LinkState<R: SessionRuntime> {
     /// drop gives back whatever it still holds, so no path leaks a slot.
     #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
     pub(crate) batch_slots: R::Mutex<[Option<crate::tx_lease::HeldSlot>; TX_CONDUITS]>,
+    /// This link's place in its node's [`crate::link_admission::LinkAdmission`], which the node
+    /// installs before the handshake ([`SessionLinkActions::install_link_admission`]) and asks while
+    /// the link is still being established. `None` for a node that decides the question after the
+    /// link is up, or that holds one link in any case. On the LINK, as the handshake it guards
+    /// is.
+    #[cfg(feature = "alloc")]
+    pub(crate) link_lease: R::Mutex<Option<crate::link_admission::LinkLease>>,
 }
 
 /// ARCHITECTURE section 9.1 -- a link that goes away gives back the batch slots
@@ -3442,6 +3449,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 batch_slots: R::new_mutex(
                     [const { None::<crate::tx_lease::HeldSlot> }; TX_CONDUITS],
                 ),
+                #[cfg(feature = "alloc")]
+                link_lease: R::new_mutex(None),
             } in_place {}
         );
     }
@@ -9289,7 +9298,71 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.close_and_take_down(CloseReason::MaxLinks);
     }
 
-    /// The close both of the above make: the keepalives stop now, the peer is told why on the
+    /// Give this link a place in its node's admission ([`crate::link_admission::LinkAdmission`]),
+    /// before the handshake runs: the handshake then asks the node twice, when the remote's zid is
+    /// known and (the initiator) when the OpenAck is about to be taken, and a link the node refuses
+    /// is closed with `MaxLinks` before the application has seen anything over it. `dialled` says
+    /// whether this session dialled the link. A second install replaces the first, which is released.
+    #[cfg(feature = "alloc")]
+    pub fn install_link_admission(
+        &self,
+        authority: alloc::sync::Arc<dyn crate::link_admission::LinkAdmission>,
+        dialled: bool,
+    ) {
+        let lease = crate::link_admission::LinkLease::new(authority, dialled);
+        R::with_mutex_mut(&self.link.link_lease, |slot| *slot = Some(lease));
+    }
+
+    /// The node's answer to the remote's zid, once known; `true` for a link the node does not
+    /// guard. See [`crate::link_admission::LinkAdmission::reserve`].
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-init-body",
+            all(feature = "codec-open-body", feature = "session-unicast-accept")
+        )
+    ))]
+    pub(crate) fn link_admitted(&self, remote_zid: &[u8]) -> bool {
+        R::with_mutex_mut(&self.link.link_lease, |slot| match slot {
+            Some(lease) => lease.reserve(remote_zid),
+            None => true,
+        })
+    }
+
+    /// The node's answer to an initiator that is about to take the OpenAck; `true` for a link the
+    /// node does not guard. See [`crate::link_admission::LinkAdmission::confirm`].
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
+    pub(crate) fn link_confirmed(&self) -> bool {
+        R::with_mutex_mut(&self.link.link_lease, |slot| match slot {
+            Some(lease) => lease.confirm(),
+            None => true,
+        })
+    }
+
+    /// This link has left its node's admission: its place is free for the next link to the same
+    /// node. The node calls it when the link's face goes; the lease's drop does it otherwise.
+    #[cfg(feature = "alloc")]
+    pub fn release_link_admission(&self) {
+        R::with_mutex_mut(&self.link.link_lease, |slot| {
+            if let Some(lease) = slot.as_ref() {
+                lease.release();
+            }
+        });
+    }
+
+    /// The node refused this link during its handshake: the peer is told why, with the reason
+    /// zenoh gives a link refused for the node it already holds (`MAX_LINKS`), and nothing was
+    /// declared over it by either end.
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    ))]
+    pub(crate) fn refuse_link(&self) {
+        self.send_close_with_reason(CloseReason::MaxLinks);
+    }
+
+    /// The close [`Self::close_for_capacity`] and [`Self::close_for_replacement`] make: the
+    /// keepalives stop now, the peer is told why on the
     /// urgent write, and the machine is asked to take the session down when its drive loop runs.
     fn close_and_take_down(&self, reason: CloseReason) {
         self.stop_keepalives();

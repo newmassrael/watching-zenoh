@@ -217,6 +217,17 @@ pub enum DriverLoopOutcome {
     /// parameters.
     #[cfg(feature = "codec-init-body")]
     InitAckPeerMismatch,
+    /// The node refused the link while its handshake was running
+    /// ([`crate::link_admission::LinkAdmission`]): it holds, or prefers, another link to the node
+    /// on the other end. The peer has been sent `Close(MAX_LINKS)`, the reason zenoh gives, and the
+    /// FSM stays where it was: nothing was sent or taken over the link that the application, or
+    /// the peer's, could have seen, which is what a refusal after the handshake cannot say.
+    ///
+    /// Its own variant because nothing was wrong with the peer or the link: the open ends, as
+    /// upstream's does with `Link` error `MaxLinks`, and an opener that dialled neither retries
+    /// nor reports it as a failure.
+    #[cfg(feature = "alloc")]
+    LinkRefused,
     /// R2539 — the peer's `init::ext::RegionName` (`0x8`) was PRESENT and its
     /// value is not a region name: not UTF-8, empty, or over
     /// [`crate::extregion::MAX_REGION_NAME_LEN`] bytes.

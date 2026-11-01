@@ -21,7 +21,8 @@
 //!
 //! The function takes the zids and the directions and nothing of an engine, which is what lets the
 //! cooperative engine's face table (`wz-capi-coop`) and a registry of another engine call the one
-//! rule. Ungated, because it allocates nothing.
+//! rule. The rule is ungated, because it allocates nothing; [`LinkAdmission`], which asks it while
+//! a link is still being established, is the heap profile's.
 
 use crate::credential_identity::zid_from_wire;
 
@@ -61,6 +62,88 @@ pub fn judge_second_link(
         SecondLink::Replace
     } else {
         SecondLink::Refuse
+    }
+}
+
+/// The node's say, DURING a link's handshake, on whether the link may become a face.
+///
+/// [`judge_second_link`] decides which of two links to one node is kept. WHEN it is asked decides
+/// what the application sees. Asked after both ends of a link have completed the handshake, each
+/// end admits the link that came up first on its side, exchanges declarations over it, and only
+/// then, when the rival comes up, closes the one the zid rule rejects: the declarations that crossed
+/// the closed link were delivered and are delivered again over the kept one.
+///
+/// Upstream asks while the link is still being established, and so does this: the acceptor before
+/// it sends the OpenAck, the initiator before it sends the OpenSyn and again before it takes the
+/// OpenAck (`io/zenoh-transport/src/unicast/manager.rs` @ `init_transport_unicast`). A link that a
+/// node refuses then carries nothing in either direction, because the acceptor that admitted it
+/// is answered by an initiator that closes before it declares anything. The same shape as a BGP
+/// session's collision detection, which is resolved before the session is Established
+/// (RFC 4271 section 6.8), and as a TCP simultaneous open, which is merged before the connection is.
+///
+/// One value is held for each link, through its [`LinkLease`], and it asks four things in the order
+/// of the handshake:
+///
+/// 1. [`LinkAdmission::open`]: a link of this direction exists (before any zid is known).
+/// 2. [`LinkAdmission::reserve`]: the zid of the node on the other end is known (the initiator at
+///    the InitAck, the acceptor at the OpenSyn). `false` closes the link.
+/// 3. [`LinkAdmission::confirm`]: the initiator is about to take the OpenAck. `false` closes the
+///    link, which a rival that the rule prefers has superseded since the reservation. The acceptor
+///    has nothing to confirm: its reservation is its admission.
+/// 4. [`LinkAdmission::release`]: the link is gone, or never got further than it did.
+///
+/// What an implementation decides, with the rule above, is [`judge_second_link`]'s for two links
+/// still in the handshake and the established one's for a link that has come up: a link that has
+/// is kept, as BGP keeps its Established one, which both ends read alike once both have it.
+#[cfg(feature = "alloc")]
+pub trait LinkAdmission: Send + Sync {
+    /// A link `dialled` (or taken off a port) begins its handshake. The token names it in the
+    /// calls below.
+    fn open(&self, dialled: bool) -> u64;
+    /// The link `token` learned the zid of its remote. `true` admits it to the node.
+    fn reserve(&self, token: u64, remote_zid: &[u8]) -> bool;
+    /// The initiator of the link `token` is about to take the OpenAck. `true` lets it.
+    fn confirm(&self, token: u64) -> bool;
+    /// The link `token` is gone. Harmless for a token that holds nothing.
+    fn release(&self, token: u64);
+}
+
+/// A link's place in a node's [`LinkAdmission`], released when the link's session is dropped.
+#[cfg(feature = "alloc")]
+pub struct LinkLease {
+    authority: alloc::sync::Arc<dyn LinkAdmission>,
+    token: u64,
+}
+
+#[cfg(feature = "alloc")]
+impl LinkLease {
+    /// The lease of a link `dialled` (or not), opened with `authority`.
+    pub fn new(authority: alloc::sync::Arc<dyn LinkAdmission>, dialled: bool) -> Self {
+        let token = authority.open(dialled);
+        Self { authority, token }
+    }
+
+    /// See [`LinkAdmission::reserve`].
+    pub fn reserve(&self, remote_zid: &[u8]) -> bool {
+        self.authority.reserve(self.token, remote_zid)
+    }
+
+    /// See [`LinkAdmission::confirm`].
+    pub fn confirm(&self) -> bool {
+        self.authority.confirm(self.token)
+    }
+
+    /// See [`LinkAdmission::release`]. Called by the node when the link's face leaves, and by the
+    /// drop of the lease when the session goes.
+    pub fn release(&self) {
+        self.authority.release(self.token);
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for LinkLease {
+    fn drop(&mut self) {
+        self.authority.release(self.token);
     }
 }
 

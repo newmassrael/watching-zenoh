@@ -1463,6 +1463,15 @@ pub struct SharedSession {
     clock: TokioTime,
     /// This session's zid — see [`SharedSession::zid`].
     zid: [u8; 16],
+    /// The node's links to each remote node, from the handshake that names it until the link is
+    /// gone: the node's say on a second link to a node it holds, asked while the link is still
+    /// being established ([`CApiForwarder::link_admission`]). A node that listens and dials runs
+    /// its loops over this one registry, and only a table the loops share sees the link another of
+    /// them is bringing up: two nodes that dial each other at once end with one link, and neither
+    /// application is told of a declaration twice. [`SharedSession::face_up`] states the rule that
+    /// still decides a link that came up while no rival was known.
+    #[cfg(feature = "peer")]
+    links: Arc<wz_runtime_tokio::link_registry::LinkRegistry>,
     /// R311y557 — THE FACE-INDEPENDENT LOCAL PLANE.
     ///
     /// One session-scope [`TokioSession`] over an [`InertLinkDriver`], carrying
@@ -1884,6 +1893,10 @@ impl SharedSession {
         };
         Ok(Self {
             zid: zid_bytes,
+            #[cfg(feature = "peer")]
+            links: Arc::new(wz_runtime_tokio::link_registry::LinkRegistry::new(
+                &zid_bytes,
+            )),
             inner: StdMutex::new(inner),
             clock,
             local,
@@ -2399,6 +2412,24 @@ impl SharedSession {
         true
     }
 
+    /// The node's registry of links as the admission its links' handshakes ask
+    /// ([`wz_session_core::link_admission::LinkAdmission`]), for both roles: the accept loop
+    /// installs it on the links it takes off its port, and the dial role on the links it
+    /// dials, so that the registry sees a link from the moment its handshake names the node.
+    /// `None` for a build that holds no peer links.
+    pub fn link_admission(
+        &self,
+    ) -> Option<Arc<dyn wz_session_core::link_admission::LinkAdmission>> {
+        #[cfg(feature = "peer")]
+        {
+            Some(Arc::clone(&self.links) as Arc<dyn wz_session_core::link_admission::LinkAdmission>)
+        }
+        #[cfg(not(feature = "peer"))]
+        {
+            None
+        }
+    }
+
     /// Whether some face already links this session to the node `zid`.
     ///
     /// The accept loop asks it before it admits an inbound link, so a node that
@@ -2496,6 +2527,13 @@ impl SharedSession {
         // an id, and once the entry drops nothing can say which peer it was.
         if let Some(snapshot) = removed.as_ref().and_then(|e| snapshot_of(&e.session)) {
             self.fire_face_event(FaceEventKind::Down, &snapshot);
+        }
+        // The link's place in the node's admission is free the moment its face is: the node that
+        // comes back is not refused for the link that left, however long the session's last holder
+        // keeps the entry.
+        #[cfg(feature = "peer")]
+        if let Some(entry) = &removed {
+            entry.session.actions().release_link_admission();
         }
         if let Some(entry) = &removed {
             // Both steps run BEFORE the drop: the sinks that must receive the
@@ -5206,6 +5244,14 @@ impl FaceForwarder for CApiForwarder {
     /// One face per remote node, across BOTH roles: see [`SharedSession::face_up`].
     fn dedups_faces_by_zid(&self) -> bool {
         true
+    }
+
+    /// The node's registry of links, asked by each link's handshake: a second link to a node the
+    /// node holds, or prefers another link to, is closed with `MaxLinks` before either end
+    /// has declared anything over it. [`Self::admit`] states what the registry still decides
+    /// after the link is up, which is the link that came up while no rival was known.
+    fn link_admission(&self) -> Option<Arc<dyn wz_session_core::link_admission::LinkAdmission>> {
+        self.shared.link_admission()
     }
 
     /// What the node's config asks of the peers its listener accepts.

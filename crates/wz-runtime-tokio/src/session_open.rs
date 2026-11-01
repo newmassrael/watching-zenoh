@@ -4369,6 +4369,11 @@ pub enum OpenError {
     /// `CloseReason::Invalid`, upstream's reason for this check) before any
     /// OpenSyn. Ungated, like its siblings above.
     InitAckPeerMismatch,
+    /// The node refused the link while its handshake ran: it holds, or prefers, another link to
+    /// the node on the other end ([`wz_session_core::link_admission::LinkAdmission`]). The peer
+    /// was sent `Close(MAX_LINKS)` and the FSM did not advance. Not a failure of the peer or of
+    /// the link, so an opener that dialled does not report it as one.
+    LinkRefused,
     /// R3b — a Z_EXT_AUTH method rejected the peer during the handshake (a bad
     /// usrpwd credential, unknown user, missing required sub-ext, or a malformed
     /// auth ext). The dispatcher took the `establishment.ext_rejected` arm
@@ -4643,6 +4648,11 @@ pub(crate) async fn drive_open_loop_within(
                     #[cfg(feature = "codec-init-body")]
                     DriverLoopOutcome::InitAckPeerMismatch => {
                         return Err(OpenError::InitAckPeerMismatch);
+                    }
+                    // The node holds, or prefers, another link to this peer; the peer has been
+                    // told (`MaxLinks`) and the handshake stops here, for both roles.
+                    DriverLoopOutcome::LinkRefused => {
+                        return Err(OpenError::LinkRefused);
                     }
                     // R3b — a usrpwd method rejected the peer; the FSM is already
                     // Closing(Invalid). Surface the typed reason (mirrors the
