@@ -304016,6 +304016,36 @@
         "D12 step 4 remains: the images that bind the verbs in band (deploy/mcu-admin-node and deploy/zephyr-admin-node bind the open alone under the write permit) take a list of commanders and bind Verbs over it; then D14, the kit lane's open by zid and read of the admin root's sessions on that image. Neither image can be run here. Open for the owner: whether the heap profile's key authority also takes the commander. Hosted CI for the tip is unread."
       ]
     },
+    "Round 4064": {
+      "decision_summary": "Step 4 of decision D12 is not buildable on the images that exist, and the design note now says why and what comes first. A commander is a zid a link's key proved, and only a secure channel proves one. The Zephyr admin node (lwIP, UDP) and the QEMU admin node accept datagrams and hold no TLS listener; the TLS of the Zephyr image belongs to its client node, and the socket stack has no slot-profile listener. A query through a router is therefore asked by no proven zid, so an image that bound the verbs there would deny every commander whatever list it was built with, and the witness D14 asks for could not pass. The step before 4 is a secure channel on the admin node's accepting side. No code changed: a helper that read a list of zids from a build text was written and removed, since nothing could use it.",
+      "changes_bullets": [
+        "docs/session-lifecycle-intent.md, section D12: a paragraph after step 3 that states why step 4 waits and the order that follows (secure channel on the admin node, then step 4 taking its lists from the build, then D14)."
+      ],
+      "verification_bullets": [
+        "Read from the tree: CONFIG_WZ_TLS in deploy/zephyr-admin-node/Kconfig depends on the client role and Zephyr's sockets; fixed_tls.rs is used by fixed_client.rs only; neither admin image names a TLS feature. A list parser for a build text was tested with the lifecycle-verbs build of wz-session-mcu and then removed, so no test changed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: a secure channel on the accepting side of the fixed admin node (the slot profile's TLS listener on lwIP), then D12 step 4 (the image binds Verbs over a list stated in its build), then D14. Open for the owner: whether the heap profile's key authority also takes the commander. Hosted CI of the previous push is unread; four reds of an earlier run (router-interest-qos, the ask_local_tokens link, slot_control_records allocations, the pico text budget) belong to the router and declare sessions."
+      ],
+      "publishable_decision_summary": "Step 4 of decision D12 is not buildable on the images that exist, and the design note now says why and what comes first. A commander is a zid a link's key proved, and only a secure channel proves one. The Zephyr admin node (lwIP, UDP) and the QEMU admin node accept datagrams and hold no TLS listener; the TLS of the Zephyr image belongs to its client node, and the socket stack has no slot-profile listener. A query through a router is therefore asked by no proven zid, so an image that bound the verbs there would deny every commander whatever list it was built with, and the witness D14 asks for could not pass. The step before 4 is a secure channel on the admin node's accepting side. No code changed: a helper that read a list of zids from a build text was written and removed, since nothing could use it.",
+      "publishable_changes_bullets": [
+        "docs/session-lifecycle-intent.md, section D12: a paragraph after step 3 that states why step 4 waits and the order that follows (secure channel on the admin node, then step 4 taking its lists from the build, then D14)."
+      ],
+      "publishable_verification_bullets": [
+        "Read from the tree: CONFIG_WZ_TLS in deploy/zephyr-admin-node/Kconfig depends on the client role and Zephyr's sockets; fixed_tls.rs is used by fixed_client.rs only; neither admin image names a TLS feature. A list parser for a build text was tested with the lifecycle-verbs build of wz-session-mcu and then removed, so no test changed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: a secure channel on the accepting side of the fixed admin node (the slot profile's TLS listener on lwIP), then D12 step 4 (the image binds Verbs over a list stated in its build), then D14. Open for the owner: whether the heap profile's key authority also takes the commander. Hosted CI of the previous push is unread; four reds of an earlier run (router-interest-qos, the ask_local_tokens link, slot_control_records allocations, the pico text budget) belong to the router and declare sessions."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
