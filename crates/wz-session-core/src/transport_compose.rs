@@ -506,7 +506,7 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
     wire.push(flags | wire_const::T_MID_INIT);
     {
         let mut sink = VecSink::new(&mut wire);
-        body.encode(&mut sink, (flags >> 6) & 1, (flags >> 5) & 1)
+        body.encode(&mut sink, (flags >> 6) & 1)
             .expect("VecSink is infallible");
     }
     wire.extend_from_slice(&chain);
@@ -554,8 +554,7 @@ pub fn compose_open(spec: &OpenSpec<'_>) -> Result<Vec<u8>, ComposeError> {
     wire.push(flags | wire_const::T_MID_OPEN);
     {
         let mut sink = VecSink::new(&mut wire);
-        body.encode(&mut sink, (flags >> 5) & 1)
-            .expect("VecSink is infallible");
+        body.encode(&mut sink).expect("VecSink is infallible");
     }
     wire.extend_from_slice(&chain);
     Ok(wire)

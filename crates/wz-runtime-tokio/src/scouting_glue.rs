@@ -361,7 +361,7 @@ mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection of owned Hello")
-            .encode_to_vec(l_flag)
+            .encode_to_vec()
             .expect("a fixture Hello encodes");
 
         let mut dgram = Vec::with_capacity(1 + body.len());

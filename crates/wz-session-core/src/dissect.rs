@@ -7183,11 +7183,7 @@ mod tests {
             cookie: None,
         };
         let mut bytes = alloc::vec![wz_codecs::wire_const::T_MID_INIT | 0x40];
-        bytes.extend_from_slice(
-            &init
-                .encode_to_vec(1, 0)
-                .expect("a fixture init is encodable"),
-        );
+        bytes.extend_from_slice(&init.encode_to_vec(1).expect("a fixture init is encodable"));
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the init");
         // The raw byte SURVIVES: the children are a reading of it, not a
         // replacement for it.

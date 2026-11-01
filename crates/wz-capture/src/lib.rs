@@ -11140,11 +11140,11 @@ mod datagram_tests {
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
-        // The S (resolution present) and A (is-ack) discriminators ride the
-        // parent header, so the codec takes them as arguments.
+        // The S (resolution present) discriminator rides the parent header, so
+        // the codec takes it as an argument. A (is-ack) is what the cookie says.
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0, u8::from(is_ack))
+                .encode_to_vec(0)
                 .expect("a fixture InitBody is encodable"),
         );
         wire.extend_from_slice(ext_bytes);
@@ -11173,8 +11173,7 @@ mod datagram_tests {
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: if is_ack { None } else { Some(&[]) },
             }
-            .encode_to_vec(u8::from(is_ack))
-            .expect("a fixture OpenBody is encodable"),
+            .encode_to_vec(),
         );
         wire
     }
@@ -11203,7 +11202,7 @@ mod datagram_tests {
         };
         wire.extend_from_slice(
             &body
-                .encode_to_vec(1, u8::from(is_ack))
+                .encode_to_vec(1)
                 .expect("a fixture InitBody is encodable"),
         );
         wire
@@ -13071,7 +13070,7 @@ mod datagram_tests {
             let mut w = alloc::vec![wc::T_MID_INIT];
             w.extend_from_slice(
                 &body
-                    .encode_to_vec(0, 0)
+                    .encode_to_vec(0)
                     .expect("a fixture InitBody is encodable"),
             );
             w
@@ -13084,11 +13083,7 @@ mod datagram_tests {
                 cookie: Some(&[0xAB, 0xCD]),
             };
             let mut w = alloc::vec![wc::T_MID_OPEN];
-            w.extend_from_slice(
-                &body
-                    .encode_to_vec(0)
-                    .expect("a fixture OpenBody is encodable"),
-            );
+            w.extend_from_slice(&body.encode_to_vec());
             w
         };
         let close = {
@@ -13891,7 +13886,7 @@ mod datagram_tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec(1)
+            .encode_to_vec()
             .expect("a fixture Hello is encodable");
         let mut wire = alloc::vec![
             wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L
@@ -13909,11 +13904,7 @@ mod datagram_tests {
             locators: None,
         };
         let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_HELLO];
-        wire.extend_from_slice(
-            &hello
-                .encode_to_vec(0)
-                .expect("a fixture Hello is encodable"),
-        );
+        wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture Hello is encodable"));
         wire
     }
 

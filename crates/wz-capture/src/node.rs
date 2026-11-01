@@ -2331,7 +2331,7 @@ pub(crate) mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec(l)
+            .encode_to_vec()
             .expect("a fixture Hello is encodable");
         let mut header = wz_session_core::wire_const::S_MID_HELLO;
         if l != 0 {
@@ -2808,7 +2808,7 @@ pub(crate) mod tests {
         }];
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0, u8::from(ack))
+                .encode_to_vec(0)
                 .expect("a fixture InitBody is encodable"),
         );
         let mut framed = (wire.len() as u16).to_le_bytes().to_vec();

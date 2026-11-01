@@ -205,8 +205,7 @@ pub fn encode_init_into(
 
     buf.append_byte(parent_flags | wire_const::T_MID_INIT)?;
     let s = (parent_flags >> 6) & 1;
-    let a = (parent_flags >> 5) & 1;
-    body.encode(&mut TxSink::new(&mut *buf), s, a)?;
+    body.encode(&mut TxSink::new(&mut *buf), s)?;
     encode_ext_chain_into(buf, extensions)
 }
 
@@ -292,8 +291,7 @@ pub fn encode_open_into(
     };
 
     buf.append_byte(parent_flags | wire_const::T_MID_OPEN)?;
-    let a = (parent_flags >> 5) & 1;
-    body.encode(&mut TxSink::new(&mut *buf), a)?;
+    body.encode(&mut TxSink::new(&mut *buf))?;
     encode_ext_chain_into(buf, extensions)
 }
 

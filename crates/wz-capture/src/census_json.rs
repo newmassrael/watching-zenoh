@@ -1933,7 +1933,7 @@ pub(crate) mod fed_tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec(1)
+            .encode_to_vec()
             .expect("a fixture Hello is encodable");
         let mut wire = alloc::vec![
             wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L

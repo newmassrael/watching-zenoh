@@ -251,17 +251,28 @@ impl<'a> Wireexpr<'a> {
     /// `src` presents, and a value the encoding cannot carry is refused
     /// before the first byte is written.
     pub fn encode_source<S: WireexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K, n: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::count_source(src, n)?;
         Self::write_source(src, w, n)
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: WireexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K, n: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        {
+            let _h: bool = n != 0;
+            if match src.body() { WireexprVariantSource::WireexprNonlocal(_b) => WireexprNonlocal::input_n(_b) != _h, _ => false, } {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        }
+        {
+            let _h: bool = n != 0;
+            if match src.body() { WireexprVariantSource::WireexprLocal(_b) => WireexprLocal::input_n(_b) != _h, _ => false, } {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        }
         let _ = n;
         match src.body() {
-            WireexprVariantSource::WireexprNonlocal(_b) => WireexprNonlocal::write_source(_b, w, n)?,
-            WireexprVariantSource::WireexprLocal(_b) => WireexprLocal::write_source(_b, w, n)?,
+            WireexprVariantSource::WireexprNonlocal(_b) => WireexprNonlocal::write_source(_b, w)?,
+            WireexprVariantSource::WireexprLocal(_b) => WireexprLocal::write_source(_b, w)?,
         }
         Ok(())
     }

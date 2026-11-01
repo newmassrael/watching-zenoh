@@ -310,7 +310,7 @@ mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection of owned Hello")
-            .encode_to_vec(l_flag)
+            .encode_to_vec()
             .expect("a fixture hello is encodable");
 
         let mut wire = vec![if l_flag == 1 {

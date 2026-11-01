@@ -13596,11 +13596,7 @@ mod tests {
             locators: None,
         };
         let mut wire = vec![wz_session_core::wire_const::S_MID_HELLO];
-        wire.extend_from_slice(
-            &hello
-                .encode_to_vec(0)
-                .expect("a fixture Hello is encodable"),
-        );
+        wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture Hello is encodable"));
         udp_packet(responder, 7447, asker, asker_port, &wire)
     }
 

@@ -4829,11 +4829,11 @@ mod tests {
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
-        // `encode(sink, s, a)`: the S (resolution present) and A (is-ack)
-        // discriminators ride the parent header, so the codec takes them.
+        // `encode(sink, s)`: the S (resolution present) discriminator rides the
+        // parent header, so the codec takes it. A (is-ack) is what the cookie says.
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0, u8::from(is_ack))
+                .encode_to_vec(0)
                 .expect("a fixture init body is encodable"),
         );
         if !exts.is_empty() {
@@ -4919,8 +4919,7 @@ mod tests {
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: if is_ack { None } else { Some(&[]) },
             }
-            .encode_to_vec(u8::from(is_ack))
-            .expect("a fixture open body is encodable"),
+            .encode_to_vec(),
         );
         wire
     }
@@ -7396,7 +7395,7 @@ mod tests {
         let mut wire = vec![flags | wz_codecs::wire_const::T_MID_INIT];
         wire.extend_from_slice(
             &body
-                .encode_to_vec(1, u8::from(is_ack))
+                .encode_to_vec(1)
                 .expect("a fixture init body is encodable"),
         );
         wire

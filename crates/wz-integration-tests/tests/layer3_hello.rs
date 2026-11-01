@@ -96,7 +96,7 @@ fn layer3_hello_l0_no_locators() {
         num_locators: None,
         locators: None,
     }
-    .encode_to_vec(0)
+    .encode_to_vec()
     .expect("a Hello without locators encodes");
 
     let pico = zenoh_pico_encode_hello(0u8, version, whatami, &zid);
@@ -126,7 +126,7 @@ fn layer3_hello_l1_empty_locator_array() {
     let wz = wz_owned
         .try_as_borrowed()
         .expect("test: empty locator chain")
-        .encode_to_vec(((FLAG_HELLO_L) >> 5) & 1)
+        .encode_to_vec()
         .expect("a Hello with an empty locator list encodes");
 
     let pico = zenoh_pico_encode_hello(FLAG_HELLO_L, version, whatami, &zid);
@@ -153,7 +153,7 @@ fn layer3_hello_l0_max_zid() {
         num_locators: None,
         locators: None,
     }
-    .encode_to_vec(0)
+    .encode_to_vec()
     .expect("a Hello without locators encodes");
 
     let pico = zenoh_pico_encode_hello(0u8, version, whatami, &zid);

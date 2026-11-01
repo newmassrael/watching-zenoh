@@ -576,7 +576,7 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
         };
         wire.extend_from_slice(
             &body
-                .encode_to_vec(0, u8::from(is_ack))
+                .encode_to_vec(0)
                 .expect("a fixture init body is encodable"),
         );
         wire
@@ -595,8 +595,7 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: if is_ack { None } else { Some(&[]) },
             }
-            .encode_to_vec(u8::from(is_ack))
-            .expect("a fixture open body is encodable"),
+            .encode_to_vec(),
         );
         wire
     };

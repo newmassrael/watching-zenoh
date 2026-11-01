@@ -363,11 +363,7 @@ mod tests {
         hello.set_zid_len_m1(3);
         hello.zid = &[1, 2, 3, 4];
         let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-        wire.extend_from_slice(
-            &hello
-                .encode_to_vec(0)
-                .expect("a fixture hello is encodable"),
-        );
+        wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
         match parse_scouting(&wire).expect("a well-formed HELLO must decode") {
             ScoutingFrame::Hello { body, .. } => {
                 assert_eq!(body.version, 0x09);
@@ -388,11 +384,7 @@ mod tests {
         hello.set_zid_len_m1(3);
         hello.zid = &[1, 2, 3, 4];
         let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-        wire.extend_from_slice(
-            &hello
-                .encode_to_vec(0)
-                .expect("a fixture hello is encodable"),
-        );
+        wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
         assert!(parse_scouting(&wire).is_ok());
         assert!(matches!(
             parse_scouting_observed(&wire),
@@ -456,11 +448,7 @@ mod tests {
             hello.set_zid_len_m1((len - 1) as u8);
             hello.zid = &zid;
             let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-            wire.extend_from_slice(
-                &hello
-                    .encode_to_vec(0)
-                    .expect("a fixture hello is encodable"),
-            );
+            wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
 
             match parse_scouting(&wire).expect("a well-formed HELLO must decode") {
                 ScoutingFrame::Hello { body, .. } => {
@@ -547,11 +535,7 @@ mod kind_name_tests {
             hello.set_zid_len_m1(3);
             hello.zid = &[0xA0, 0xA1, 0xA2, 0xA3];
             let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-            wire.extend_from_slice(
-                &hello
-                    .encode_to_vec(0)
-                    .expect("a fixture hello is encodable"),
-            );
+            wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
             cases.push((wire, "Hello"));
         }
 

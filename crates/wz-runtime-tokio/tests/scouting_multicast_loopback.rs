@@ -113,7 +113,7 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
     let body = owned
         .try_as_borrowed()
         .expect("borrowed projection of owned Hello")
-        .encode_to_vec(1 /* L flag projected */)
+        .encode_to_vec()
         .expect("a fixture Hello encodes");
 
     let mut dgram = Vec::with_capacity(1 + body.len());
@@ -139,7 +139,7 @@ fn craft_locator_less_hello(zid: &[u8]) -> Vec<u8> {
     let body = owned
         .try_as_borrowed()
         .expect("borrowed projection of owned Hello")
-        .encode_to_vec(0 /* L flag clear */)
+        .encode_to_vec()
         .expect("a fixture Hello encodes");
 
     let mut dgram = Vec::with_capacity(1 + body.len());

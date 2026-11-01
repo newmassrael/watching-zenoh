@@ -444,10 +444,9 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
         hello.locators = Some(locators);
     }
 
-    let l_flag = u8::from(has_locators);
     // The locators were cut to the codec's own bound above, so the encode has no refusal to give.
     let body = hello
-        .encode_to_vec(l_flag)
+        .encode_to_vec()
         .expect("a hello within the codec's own bounds encodes");
     let mut datagram = Vec::with_capacity(1 + body.len());
     let mut header = wire_const::S_MID_HELLO;
