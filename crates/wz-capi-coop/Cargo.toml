@@ -99,6 +99,8 @@ wz-session-mcu = { path = "../wz-session-mcu", default-features = false, feature
 wz-host-net = { path = "../wz-host-net", optional = true }
 # The window says which sockets it asks on and which it lost, as the host crate beneath it does.
 log = { version = "0.4", optional = true }
+# The secure channel (`tls-mbedtls` below): Mbed TLS, built from the pinned submodules.
+wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
 
 [features]
 # The host: `std`'s mutex, threads and sleep behind the port's `os`, and the process's lock behind
@@ -156,6 +158,12 @@ local-subscriber = []
 # The session machine compiles its accepting role only under `session-unicast-accept`, so the
 # feature asks the runtime for it: without that an acceptor would start on no event.
 listen = ["wz-runtime-coop/session-unicast-accept"]
+# The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
+# the PEM material a C ABI resolved, for both roles. The library is built from the pinned
+# submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the
+# engine's read tasks are threads and the library keeps process-wide state with no lock of its
+# own. Off, a `tls/` endpoint is the stack's `Unsupported`, and the text has none of it.
+tls-mbedtls = ["std", "dep:wz-tls-mbedtls", "wz-tls-mbedtls/vendored", "wz-tls-mbedtls/host-lock"]
 # Delivery of the session's own get to the session's own queryables (`Z_FEATURE_LOCAL_QUERYABLE`):
 # a get reaches the queryables of the session that made it, after it has gone out on the link,
 # and a querier's write filter or matching listener that counts the session's own entities counts
@@ -199,6 +207,10 @@ query = [
 ]
 
 [dev-dependencies]
+# The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end
+# certificates, as `wz-tls-mbedtls`'s own tests do, and share that crate's helper for it.
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # The tests run the engine against a router stand-in over the host's UDP sockets: a session that
 # accepts, which the engine itself never is, and holds a queryable a get asks.
 wz-runtime-posix = { path = "../wz-runtime-posix" }

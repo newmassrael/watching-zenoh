@@ -65,6 +65,8 @@ mod admission_gate;
 mod engine;
 #[cfg(feature = "scout")]
 pub mod scout;
+#[cfg(feature = "tls-mbedtls")]
+pub mod tls;
 // The tests are a host's: they run a router stand-in on threads of `std`.
 #[cfg(all(test, feature = "std"))]
 mod tests;

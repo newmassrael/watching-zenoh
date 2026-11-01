@@ -385,7 +385,9 @@ transport-link-unixpipe,transport-link-ws|"
     # 4, compiled with `query`, `queryable` and `local-queryable`), and the session that listens,
     # taking two clients of its own engine over loopback (`tests::listen::`, 5, compiled with
     # `listen`, `query` and `queryable`); the crate's own tests were 65 passed with all of them.
-    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker|"
+    # The `tls/` provider of a host (`tests/tls_provider.rs`, 8, compiled with `tls-mbedtls`) builds
+    # the pinned Mbed TLS from its submodules, which is why the feature is a leg of its own cost.
+    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
