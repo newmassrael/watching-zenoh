@@ -1253,6 +1253,16 @@ node does today changed: the write permit (`WritePermit`, `ControlledOpener`) an
 the heap profile's key authority judge every commander alike, which is what they
 did, and an image that names its commanders gives `Commanders` in their place.
 
+Step (3) built (the round that files this paragraph). A declaration names a
+commander as `[[endpoint]] role = "commander"` with a `zid` and the `verbs` it
+may command (docs/target-build-contract.md, section 5b). It is no endpoint the
+node reaches, so it has no locator, holds no session and raises no budget; a
+pair of a zid and a verb is declared once; and the validator refuses a commander
+for a node with no `tls` router or peer, since only a secure channel proves a
+zid. The generator emits `COMMANDERS_OPEN`, `_CLOSE`, `_RESET` and `_STATUS`,
+each a list of sixteen-byte zids, only for a node that names one. No registered
+node names a commander, so no generated file changed.
+
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the
 link-state flood), and a profile has the sources its build holds: AP has all

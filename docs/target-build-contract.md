@@ -1082,6 +1082,21 @@ with a daemon-less shape) or the fixed-memory slot profile (no allocator, the ki
 since the placing path's per-node budgets read as the second; and what the manifest's role is
 for it (a new role beside `session-node`, because its arguments are not a stock config).
 
+**Commander (landed, the list; owner, 2026-11-01, decision D12 of
+docs/session-lifecycle-intent.md).** `[[endpoint]] role = "commander"`, `zid` (lowercase hex, no
+leading 0, at most 32 digits) and `verbs` (a comma-separated list of `open`, `close`, `reset` and
+`status`): a node whose link's key proved that zid may command those verbs of this node in band.
+It is not an endpoint the node reaches or is reached at, so it has no locator, holds no session and
+raises no budget, and a node of commanders alone has no endpoint. The authority is a list per verb,
+empty unless stated, and a zid listed for one verb commands no other; a wildcard commander does not
+exist and a pair of a zid and a verb is declared once. A commander is a zid a key proved, and only a
+secure channel proves one (decision D2), so a node that names one declares a `tls` router or peer,
+and the validator refuses it for a node that has none. The generator emits `COMMANDERS_OPEN`,
+`COMMANDERS_CLOSE`, `COMMANDERS_RESET` and `COMMANDERS_STATUS`, each a list of the sixteen bytes of a
+zid, only for a node that names a commander; the image gives them to
+`wz_session_mcu::connect_manager::Commanders`. A node that names none is commanded by nobody in
+band, which is where it starts, and the owner of its control pipe is judged apart (`PipeOr`).
+
 ## 5c. The workload: what a node or a driver sends over time (owner, 2026-10-26)
 
 **Decision (owner, 2026-10-26: cost ignored, the textbook one).** A node declaration says what is

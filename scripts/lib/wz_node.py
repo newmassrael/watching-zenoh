@@ -40,7 +40,13 @@ not build the node.
                                build declares the peers and no verb asks for them; the locator is a
                                hint, every dial is made for the zid, and only a secure channel proves
                                the answer is the node, so it is `tls`; each peer raises MAX_PEER_NODES
-                               when the declaration states none)
+                               when the declaration states none);
+                               role = "commander", zid = "<lowercase hex>" and verbs = "<verb>[,<verb>]"
+                               (a node whose key proved this zid may command these lifecycle verbs of
+                               this node in band, decision D12 of docs/session-lifecycle-intent.md:
+                               open, close, reset or status, each a list of its own, empty unless
+                               stated, and no wildcard; a commander is a zid a key proved, so the
+                               node must have a secure channel, a `tls` router or peer)
     [[entity]]               kind = "queryable", key, and document_bytes (a fixed document) or
                                from = "<subscriber key>" (the latest sample of that subscription);
                                kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
@@ -205,7 +211,13 @@ ENDPOINT_SHAPES = {
     "multicast": {"keys": {"locator": _key("locator"), "members": _int(1, "max_members"),
                            "ttl": _int(1, 255, required=False, default=1)}},
     "peer": {"keys": {"locator": _key("locator"), "zid": _key("zid")}},
+    # Not an endpoint a node reaches or is reached at: the zid of a node it takes orders from, so it
+    # has no locator.
+    "commander": {"keys": {"zid": _key("zid"), "verbs": _key("verbs")}},
 }
+# The lifecycle verbs, in the order the node lists them (`wz_session_core::lifecycle_wire::VERBS`
+# names the same four) and the list of the image's `Commanders` each one fills.
+COMMANDER_VERBS = ("open", "close", "reset", "status")
 # `count` is how many of a kind one node holds: a target's field, or the budget (`limit`) a declaration
 # may raise.
 ENTITY_SHAPES = {
@@ -374,7 +386,7 @@ TARGETS = {
         # (each a connection machine of some 930 bytes and two rows of the locator directory,
         # `MAX_PEER_NODES`, which a declaration's peers set when it states none). The sessions of the node are
         # the dialled one and `accepts` more, which is the size of its session table.
-        "endpoint_limits": {"dial": 1, "listen": 1, "multicast": 1, "peer": 4},
+        "endpoint_limits": {"dial": 1, "listen": 1, "multicast": 1, "peer": 4, "commander": 8},
         "schemes": ("tcp", "udp", "tls"),
         # What the node asks of the device whatever it declares (docs/target-build-contract.md T9):
         # the posix runtime under it is one thread that keeps a monotonic clock, and the node draws
@@ -546,10 +558,13 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         out += policy_problems(decl, stated_policy)
 
     endpoints = data.get("endpoint", [])
-    if not endpoints:
+    # A commander is not a place the node reaches or is reached at, so a node of commanders alone has
+    # no endpoint.
+    if not [ep for ep in endpoints if isinstance(ep, dict) and ep.get("role") != "commander"]:
         out.append("a node with no endpoint neither reaches anything nor is reached: declare one [[endpoint]]")
     held: dict[str, int] = {}
     peer_zids: set[str] = set()
+    commanded: set[tuple[str, str]] = set()
     for n, ep in enumerate(endpoints, 1):
         who = f"endpoint {n}"
         for extra in sorted(set(ep) - ENDPOINT_KEYS):
@@ -579,6 +594,20 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                 out.append(f"{who}: zid {zid} is declared twice")
             else:
                 peer_zids.add(zid)
+        if role == "commander":
+            if not isinstance(zid, str) or ZID_RE.fullmatch(zid) is None:
+                out.append(f"{who}: zid is {zid!r}, not the lowercase hex of a zid (no leading 0, at most "
+                           "32 digits)")
+            verbs = ep.get("verbs")
+            named = [v.strip() for v in verbs.split(",")] if isinstance(verbs, str) else []
+            if not named or any(v not in COMMANDER_VERBS for v in named):
+                out.append(f"{who}: verbs is {verbs!r}, not a comma-separated list of "
+                           f"{', '.join(COMMANDER_VERBS)}")
+            for verb in named:
+                if (zid, verb) in commanded:
+                    out.append(f"{who}: zid {zid} is already a commander of `{verb}`")
+                commanded.add((zid, verb))
+            continue
         match = LOCATOR_RE.fullmatch(ep.get("locator", "")) if isinstance(ep.get("locator"), str) else None
         if match is None:
             out.append(f"{who}: locator {ep.get('locator')!r} is not <scheme>/<a.b.c.d>:<port>")
@@ -600,6 +629,13 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             elif role == "multicast" and not 224 <= int(match["a"]) <= 239:
                 out.append(f"{who}: locator {ep['locator']!r} is not a group: a multicast address is "
                            "224.0.0.0 to 239.255.255.255")
+    if held.get("commander") and not any(
+        isinstance(ep.get("locator"), str) and ep["locator"].startswith("tls/")
+        for ep in endpoints if isinstance(ep, dict) and ep.get("role") in ("dial", "peer")
+    ):
+        out.append("a commander is a zid a link's key proved, and only a secure channel proves one "
+                   "(decision D2 of docs/session-lifecycle-intent.md): declare a `tls` router or peer, "
+                   "or no commander")
     if "MAX_PEER_NODES" in data.get("limits", {}) and held.get("peer", 0) > values["MAX_PEER_NODES"]:
         out.append(f"limits: MAX_PEER_NODES is {values['MAX_PEER_NODES']}, the declaration holds "
                    f"{held['peer']} peers by their zid")
@@ -936,6 +972,33 @@ def replay_rows(data: dict) -> tuple[list[str], list[str]]:
     return replays, samples
 
 
+def verbs_of(commander: dict) -> list[str]:
+    """The lifecycle verbs a `commander` endpoint names, as written (valid input only)."""
+    return [verb.strip() for verb in commander["verbs"].split(",")]
+
+
+def commander_rows(commanders: list[dict]) -> list[str]:
+    """The lines of the lists of commanders, one per verb, in declaration order (decision D12): the
+    sixteen bytes of each zid, the little-endian bytes of the number its hex spells, which is the
+    form a key's proof gives. None when the node names no commander, so a node that names none has
+    no list for the image to read."""
+    if not commanders:
+        return []
+    rows = []
+    for verb in COMMANDER_VERBS:
+        zids = [
+            "[" + ", ".join(str(b) for b in int(ep["zid"], 16).to_bytes(16, "little")) + "]"
+            for ep in commanders
+            if verb in verbs_of(ep)
+        ]
+        rows += [
+            f"/// The nodes whose key may command `{verb}` of this node in band (decision D12), each as the",
+            "/// sixteen bytes of its zid.",
+            f"pub const COMMANDERS_{verb.upper()}: [[u8; 16]; {len(zids)}] = [{', '.join(zids)}];",
+        ]
+    return rows
+
+
 def emit(name: str, data: dict, declaration_sha256: str) -> str:
     """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
     dialed = [ep["locator"] for ep in data["endpoint"] if ep["role"] == "dial"]
@@ -946,6 +1009,9 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
         for zid, locator in peers
     )
     secure = any(d.startswith("tls/") for d in dialed) or bool(peers)
+    # The nodes that may command each lifecycle verb in band (decision D12). Generated only when the
+    # node names a commander: the image reads them under a feature that is on exactly then.
+    commanders =[ep for ep in data["endpoint"] if ep["role"] == "commander"]
     listens = [ep for ep in data["endpoint"] if ep["role"] == "listen"]
     listen_at = listens[0]["locator"] if listens else ""
     accepts = listens[0]["accepts"] if listens else 0
@@ -993,6 +1059,7 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
         f"pub const GROUP_TTL: u8 = {group_ttl};",
         f"pub const MEMBERS: usize = {members};",
     ] if groups else []
+    commander_lines = commander_rows(commanders)
     querier = [
         "/// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each",
         "/// keeps).",
@@ -1018,6 +1085,7 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const PEER_NODES: [([u8; 16], &str); {len(peers)}] = [{peer_nodes}];",
             "/// Whether a dialled endpoint or a peer is `tls/`, which the node's `tls` feature must be built for.",
             f"pub const TLS: bool = {'true' if secure else 'false'};",
+            *commander_lines,
             "/// Whether the node listens, the locator it listens on (empty when it does not) and how many",
             "/// sessions a peer opened it holds at once.",
             f"pub const LISTENS: bool = {'true' if listens else 'false'};",
@@ -1211,7 +1279,8 @@ def vocabulary(target_id: str, decl: dict) -> dict:
                 for key, spec in keys.items()}
 
     schemes = {"dial": target["schemes"], "listen": target["listen_schemes"],
-               "multicast": target["multicast_schemes"], "peer": target["peer_schemes"]}
+               "multicast": target["multicast_schemes"], "peer": target["peer_schemes"],
+               "commander": ()}
     endpoints = {}
     for role, shape in ENDPOINT_SHAPES.items():
         if role not in target["endpoint_limits"]:
@@ -1779,6 +1848,41 @@ document_bytes = 8
     refuses("more peers than the declaration's own budget",
             SAMPLE.replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 2\nMAX_PEER_NODES = 1")
             + peer + peer.replace("a1b2c3", "d4e5f6"), "MAX_PEER_NODES is 1")
+    # Decision D12: the nodes that may command the lifecycle verbs in band.
+    commander = '\n[[endpoint]]\nrole = "commander"\nzid = "1f"\nverbs = "open, status"\n'
+    secured = SAMPLE.replace("tcp/10.0.0.1:7447", "tls/10.0.0.1:7447")
+    expect("a commander over a secure channel is a valid declaration", problems(secured + commander) == [])
+    commanded = emit("n", wz_config.read_decl_toml(secured + commander), sha)
+    zid_1f = "[31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]"
+    expect("a commander is generated per verb, as its zid's sixteen bytes",
+           f"pub const COMMANDERS_OPEN: [[u8; 16]; 1] = [{zid_1f}];" in commanded
+           and f"pub const COMMANDERS_STATUS: [[u8; 16]; 1] = [{zid_1f}];" in commanded
+           and "pub const COMMANDERS_CLOSE: [[u8; 16]; 0] = [];" in commanded
+           and "pub const COMMANDERS_RESET: [[u8; 16]; 0] = [];" in commanded)
+    expect("a node that names no commander generates no list", "COMMANDERS_" not in emit(
+        "n", wz_config.read_decl_toml(secured), sha))
+    expect("a commander is not a place the node reaches, so it holds no session and no peer budget",
+           "pub const PEERS: usize = 0;" in commanded and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;"
+           in commanded)
+    refuses("a commander on a node with no secure channel", SAMPLE + commander, "only a secure channel proves")
+    refuses("a commander of a verb there is not", secured + commander.replace("open, status", "hold"),
+            "not a comma-separated list")
+    refuses("a commander of no verb", secured + commander.replace('verbs = "open, status"\n', ""),
+            "not a comma-separated list")
+    refuses("a commander named by a zid with a leading zero", secured + commander.replace('"1f"', '"01f"'),
+            "lowercase hex")
+    refuses("a commander named twice for a verb", secured + commander + commander.replace("open, status", "open"),
+            "already a commander of `open`")
+    expect("a commander of another verb is not a repeat",
+           problems(secured + commander + commander.replace("open, status", "close")) == [])
+    refuses("a commander with a locator", secured + commander + 'locator = "tls/10.0.0.9:7447"\n',
+            "only a `dial` or a `listen` or a `multicast` or a `peer` endpoint has `locator`")
+    refuses("more commanders than the target holds",
+            secured + "".join(commander.replace('"1f"', f'"{n:x}"') for n in range(0x10, 0x19)),
+            "more than 8 `commander`")
+    refuses("a node of commanders alone",
+            SAMPLE.replace('[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n', "") + commander,
+            "no endpoint")
     refuses("a key with an empty chunk", SAMPLE.replace("lab/doc/a", "lab//a"), "empty chunk")
     refuses("a key with a space", SAMPLE.replace("lab/doc/a", "lab doc"), "character a key expression does not")
     refuses("a key longer than the limit", SAMPLE.replace("lab/doc/a", "k" * 300), "MAX_KEYEXPR_BYTES")
