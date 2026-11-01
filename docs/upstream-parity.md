@@ -62,7 +62,13 @@ samples". A trial is valid only when the pinned CPUs were used by nothing else (
 time that is not the two processes', at most 10 percent): on the shared bench host pc2 (load 15 to 30)
 every trial was disturbed and the same search read values tens of times apart; on pc3 the three
 repetitions agree within 5 percent. The 8 B figure of wz is a lower bound (the search stops at its
-cap). The round trip of the same ABI against pico reads a tie at 10 to 11 microseconds.
+cap). The round trip of the same ABI against pico reads a tie at 10 to 11 microseconds. Read again
+after the lane of the pico ABI went to 8 batches (`scripts/pico-compare.sh rtt 3`, 8 B, 20,000 round
+trips, ping on CPUs 6,7 and pong on 8,9, one session on the bench host): pico 20.0, 20.0 and 20.0
+microseconds and wz 15.0, 15.0 and 15.0 (medians), so the deeper lane did not lengthen a round trip
+and wz was not the slower of the pair. Both values are twice the earlier session's, which the host
+accounts for (another session held a lock on it): the order of the pair is the reading, not the
+figure.
 
 **A cell wz still loses, by less: 1 KiB puts.** One by one, wz read 190 k against pico's 360 k; after
 the change below it reads 310 k (wz to wz and wz to pico) against 360 k, the same writer pipeline.
@@ -149,9 +155,9 @@ three, pc3, msg/s):
 The small sizes did not move (8 B and 64 B read as before within one search step), and 1 KiB and
 2048 B are ahead of pico from wz's side, so the 11 to 17 percent gap above is closed under this
 setting. What this does not say: the figure is the throughput of one host over loopback, with no
-latency reading; wz runs two threads where pico runs one; a lane now holds up to eight batches of
-heap while frames are queued; and pico to wz reads a tie with pico to pico (360 k at 1 KiB, 190 k at
-2048 B), because pico's publisher is what bounds it.
+latency reading beyond the 8 B round trip above; wz runs two threads where pico runs one; a lane
+now holds up to eight batches of heap while frames are queued; and pico to wz reads a tie with pico
+to pico (360 k at 1 KiB, 190 k at 2048 B), because pico's publisher is what bounds it.
 
 **CPU, corrected.** An earlier version of this section said wz spent about 27 percent more CPU than
 pico at the same rate and about five times its user time. Both came from a run where the publisher
