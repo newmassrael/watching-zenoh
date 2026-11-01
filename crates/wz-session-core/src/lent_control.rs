@@ -96,7 +96,9 @@ use wz_codecs::wire_const;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
 use crate::declare_ext_qos::{QOS_DECLARE, QOS_EXT_HEADER};
-use crate::interest_build::{interest_body_header, interest_header, InterestKinds};
+use crate::interest_build::{
+    interest_body_arm, interest_body_header, interest_header, InterestKinds,
+};
 use crate::sample::QosLevel;
 
 /// The chain a control message carries when it carries one extension: the one
@@ -621,17 +623,25 @@ pub fn interest<'a>(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&'a str>,
 ) -> Interest<'a> {
+    assert!(
+        current || future,
+        "an Interest with neither CURRENT nor FUTURE is a Final, which asks for nothing",
+    );
     Interest {
         header: interest_header(current, future),
         interest_id,
-        body: Some(InterestBody {
-            header: interest_body_header(
-                InterestKinds::KEYEXPRS | kinds,
-                Some(keyexpr_suffix.is_some()),
-                aggregate,
-            ),
-            keyexpr: Some(local(keyexpr_mapping_id, keyexpr_suffix)),
-        }),
+        header_c_or_f: interest_body_arm(
+            current,
+            future,
+            InterestBody {
+                header: interest_body_header(
+                    InterestKinds::KEYEXPRS | kinds,
+                    Some(keyexpr_suffix.is_some()),
+                    aggregate,
+                ),
+                keyexpr: Some(local(keyexpr_mapping_id, keyexpr_suffix)),
+            },
+        ),
         extensions: None,
     }
 }
@@ -647,13 +657,21 @@ pub fn interest_unrestricted<'a>(
     future: bool,
     aggregate: bool,
 ) -> Interest<'a> {
+    assert!(
+        current || future,
+        "an Interest with neither CURRENT nor FUTURE is a Final, which asks for nothing",
+    );
     Interest {
         header: interest_header(current, future),
         interest_id,
-        body: Some(InterestBody {
-            header: interest_body_header(InterestKinds::KEYEXPRS | kinds, None, aggregate),
-            keyexpr: None,
-        }),
+        header_c_or_f: interest_body_arm(
+            current,
+            future,
+            InterestBody {
+                header: interest_body_header(InterestKinds::KEYEXPRS | kinds, None, aggregate),
+                keyexpr: None,
+            },
+        ),
         extensions: None,
     }
 }
@@ -675,7 +693,7 @@ pub fn interest_final<'a>(interest_id: u64) -> Interest<'a> {
     Interest {
         header: interest_header(false, false),
         interest_id,
-        body: None,
+        header_c_or_f: None,
         extensions: None,
     }
 }
@@ -1046,6 +1064,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "neither CURRENT nor FUTURE")]
+    fn a_lent_interest_that_asks_for_nothing_is_refused() {
+        interest(
+            1,
+            crate::interest_build::InterestKinds::SUBSCRIBERS,
+            false,
+            false,
+            false,
+            0,
+            Some("demo/key"),
+        );
+    }
+
+    #[test]
     fn an_interest_is_written_as_its_builder_writes_it() {
         use crate::interest_build::InterestKinds as K;
         let kinds = [
@@ -1061,6 +1093,23 @@ mod tests {
                     for future in [false, true] {
                         for aggregate in [false, true] {
                             for (mapping, suffix) in keys() {
+                                let built = ibuild::build_interest_kinds_with_aggregate(
+                                    interest_id,
+                                    kind,
+                                    current,
+                                    future,
+                                    aggregate,
+                                    mapping,
+                                    suffix,
+                                );
+                                compared += 1;
+                                // C and F both clear is the Final form, which has no body: a
+                                // keyexpr asked on it is no message, and neither writer makes
+                                // one (the lent writer's refusal has a test of its own).
+                                if !current && !future {
+                                    assert_eq!(built.err(), Some(CodecError::PresentIfMismatch));
+                                    continue;
+                                }
                                 let lent = interest(
                                     interest_id,
                                     kind,
@@ -1071,32 +1120,12 @@ mod tests {
                                     suffix,
                                 )
                                 .encode_to_vec();
-                                let owned = owned_interest_result(
-                                    &ibuild::build_interest_kinds_with_aggregate(
-                                        interest_id,
-                                        kind,
-                                        current,
-                                        future,
-                                        aggregate,
-                                        mapping,
-                                        suffix,
-                                    )
-                                    .unwrap(),
+                                let owned = owned_interest_result(&built.unwrap());
+                                assert_eq!(
+                                    lent.expect("an interest is encodable"),
+                                    owned.expect("an interest is encodable"),
+                                    "{interest_id} {kind:?} c={current} f={future} a={aggregate} {mapping} {suffix:?}"
                                 );
-                                // C and F both clear is the Final form, which has no body: a
-                                // keyexpr asked on it is no message, and the codec refuses it
-                                // from either writer alike.
-                                if !current && !future {
-                                    assert_eq!(lent, Err(CodecError::PresentIfMismatch));
-                                    assert_eq!(owned, Err(CodecError::PresentIfMismatch));
-                                } else {
-                                    assert_eq!(
-                                        lent.expect("an interest is encodable"),
-                                        owned.expect("an interest is encodable"),
-                                        "{interest_id} {kind:?} c={current} f={future} a={aggregate} {mapping} {suffix:?}"
-                                    );
-                                }
-                                compared += 1;
                             }
                         }
                     }
@@ -1294,7 +1323,7 @@ mod tests {
             QOS_DECLARE,
             "the propagated interest carries the declare QoS"
         );
-        let body = decoded.body.as_ref().expect("a body");
+        let body = crate::interest_build::interest_body(&decoded.header_c_or_f).expect("a body");
         assert!(body.su() && !body.qu() && !body.to() && !body.ag());
         let keyexpr = body.keyexpr.as_ref().expect("a keyexpr");
         assert_eq!(

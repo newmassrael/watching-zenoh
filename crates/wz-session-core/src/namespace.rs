@@ -65,6 +65,7 @@ use hashbrown::{HashMap, HashSet};
 use sce_forge_runtime::codec::{CodecError, CodecStorage, SceStr};
 
 use crate::driver_loop::DriverLoopOutcome;
+use crate::interest_build::{interest_body, interest_body_mut};
 use crate::keyexpr_prefix::{strip_nonwild_prefix, OwnedNonWildKeyExpr};
 use crate::network_message::NetworkMessage;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
@@ -227,7 +228,7 @@ pub fn apply_egress_interest(
     ns: &OwnedNonWildKeyExpr,
     i: &mut wz_codecs::interest::InterestOwned,
 ) -> Result<(), CodecError> {
-    if let Some(we) = i.body.as_mut().and_then(|b| b.keyexpr.as_mut()) {
+    if let Some(we) = interest_body_mut(&mut i.header_c_or_f).and_then(|b| b.keyexpr.as_mut()) {
         if let Some(new) = literal_prefix(ns, we) {
             set_literal_suffix(we, new)?;
         }
@@ -663,13 +664,13 @@ impl NamespaceIngress {
         // A `match`, not `is_none_or`: that method is stable since 1.82 and this
         // workspace's MSRV is 1.81 (`crates/Cargo.toml`), which
         // `clippy::incompatible-msrv` enforces on this lane.
-        let sender = match i.body.as_ref() {
+        let sender = match interest_body(&i.header_c_or_f) {
             Some(b) => (b.header & INTEREST_BODY_M) != 0,
             // No body means no keyexpr, so the mapping is never consulted; this
             // is the value the decoded variant would have reported anyway.
             None => true,
         };
-        match i.body.as_mut().and_then(|b| b.keyexpr.as_mut()) {
+        match interest_body_mut(&mut i.header_c_or_f).and_then(|b| b.keyexpr.as_mut()) {
             Some(we) => {
                 if self.strip_mapped(we, None, sender) {
                     true
@@ -702,6 +703,7 @@ pub fn strip_outcome(ing: &mut NamespaceIngress, outcome: &mut DriverLoopOutcome
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interest_build::interest_body_arm;
     use crate::wireexpr_build::literal_wireexpr;
     use alloc::format;
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
@@ -922,19 +924,21 @@ mod tests {
         NetworkMessage::Interest(wz_codecs::interest::InterestOwned {
             header,
             interest_id: id,
-            body: ke.map(|k| wz_codecs::interest_body::InterestBodyOwned {
-                header: 0,
-                keyexpr: Some(literal(k)),
-            }),
+            header_c_or_f: interest_body_arm(
+                (header & INTEREST_C) != 0,
+                (header & INTEREST_F) != 0,
+                wz_codecs::interest_body::InterestBodyOwned {
+                    header: 0,
+                    keyexpr: ke.map(literal),
+                },
+            ),
             extensions: None,
         })
     }
 
     fn interest_ke(msg: &NetworkMessage) -> Option<String> {
         match msg {
-            NetworkMessage::Interest(i) => i
-                .body
-                .as_ref()
+            NetworkMessage::Interest(i) => interest_body(&i.header_c_or_f)
                 .and_then(|b| b.keyexpr.as_ref())
                 .map(|w| id_suffix(w).1.unwrap_or("").to_string()),
             _ => None,
@@ -1265,9 +1269,11 @@ mod tests {
             NetworkMessage::Interest(wz_codecs::interest::InterestOwned {
                 header: INTEREST_C,
                 interest_id: 1,
-                body: Some(wz_codecs::interest_body::InterestBodyOwned {
-                    header: body_header,
-                    keyexpr: Some(we),
+                header_c_or_f: Some(wz_codecs::interest::InterestHeaderCOrF::C {
+                    body: wz_codecs::interest_body::InterestBodyOwned {
+                        header: body_header,
+                        keyexpr: Some(we),
+                    },
                 }),
                 extensions: None,
             })

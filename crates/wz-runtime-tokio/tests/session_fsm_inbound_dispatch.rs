@@ -767,7 +767,7 @@ fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
 
 #[test]
 fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
-    use wz_codecs::interest::Interest;
+    use wz_codecs::interest::{Interest, InterestHeaderCOrF};
     use wz_codecs::interest_body::InterestBody;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
@@ -782,7 +782,9 @@ fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
     // advances past it before the (absent) ext-chain check.
     let interest = Interest {
         header: 0x19 | 0x20,
-        body: Some(InterestBody::default()),
+        header_c_or_f: Some(InterestHeaderCOrF::C {
+            body: InterestBody::default(),
+        }),
         ..Interest::default()
     };
     let bytes = interest
@@ -808,12 +810,13 @@ fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
     match &parsed[0] {
         NetworkMessage::Interest(interest) => {
             assert!(interest.c(), "C flag survived round-trip");
+            let body = wz_session_core::interest_build::interest_body(&interest.header_c_or_f);
             assert!(
-                interest.body.is_some(),
+                body.is_some(),
                 "C set => body decoded; got {:?}",
-                interest.body.is_some()
+                body.is_some()
             );
-            let body = interest.body.as_ref().unwrap();
+            let body = body.unwrap();
             assert_eq!(body.header, 0x00);
             assert!(body.keyexpr.is_none(), "R clear => keyexpr absent");
         }

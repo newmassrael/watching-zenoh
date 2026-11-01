@@ -1272,7 +1272,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         } = peer;
         let interest_id = interest.interest_id;
         let (current, future) = (interest.c(), interest.f());
-        let Some(body) = interest.body.as_ref() else {
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
             // No body and neither bit set is zenoh's interest FINAL: the peer
             // is CANCELLING `interest_id` (pico emits exactly this when a
             // declared publisher drops, `net/primitives.c`). Retire the row so
@@ -1324,7 +1324,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         } = peer;
         let interest_id = interest.interest_id;
         let (current, future) = (interest.c(), interest.f());
-        let Some(body) = interest.body.as_ref() else {
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
             if !current && !future {
                 interests.retire(interest_id);
             }
@@ -7549,7 +7549,6 @@ mod decode_isolation_tests {
 mod metadata_decode_isolation_tests {
     use super::*;
     use alloc::boxed::Box;
-    use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use wz_codecs::push::Push;

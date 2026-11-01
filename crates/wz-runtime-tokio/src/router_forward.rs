@@ -6895,7 +6895,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.finalize_brokered_future(inbound, Some(interest.interest_id));
             return;
         }
-        let Some(body) = interest.body.as_ref() else {
+        let Some(body) = wz_session_core::interest_build::interest_body(&interest.header_c_or_f)
+        else {
             return; // a C||F interest always carries a body (the C||F decode gate).
         };
         let interest_id = interest.interest_id;
@@ -19131,19 +19132,23 @@ mod tests {
         NetworkMessage::Interest(InterestOwned {
             header: outer,
             interest_id,
-            body: Some(wz_codecs::interest_body::InterestBodyOwned {
-                header: body_header,
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                        id: 0,
-                        suffix_len: Some(keyexpr.len() as u64),
-                        suffix: Some(
-                            sce_forge_runtime::codec::SceString::from_view(keyexpr)
-                                .expect("interest keyexpr fits the SceString capacity"),
-                        ),
+            header_c_or_f: wz_session_core::interest_build::interest_body_arm(
+                current,
+                future,
+                wz_codecs::interest_body::InterestBodyOwned {
+                    header: body_header,
+                    keyexpr: Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                            id: 0,
+                            suffix_len: Some(keyexpr.len() as u64),
+                            suffix: Some(
+                                sce_forge_runtime::codec::SceString::from_view(keyexpr)
+                                    .expect("interest keyexpr fits the SceString capacity"),
+                            ),
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         })
     }
@@ -21050,7 +21055,7 @@ mod tests {
             NetworkMessage::Interest(InterestOwned {
                 header: 0x19, // N_MID_INTEREST, no C/F
                 interest_id: 2,
-                body: None,
+                header_c_or_f: None,
                 extensions: None,
             }),
         );
@@ -23636,19 +23641,23 @@ mod tests {
         NetworkMessage::Interest(InterestOwned {
             header: outer,
             interest_id,
-            body: Some(wz_codecs::interest_body::InterestBodyOwned {
-                header: body_header,
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                        id: 0,
-                        suffix_len: Some(keyexpr.len() as u64),
-                        suffix: Some(
-                            sce_forge_runtime::codec::SceString::from_view(keyexpr)
-                                .expect("interest keyexpr fits the SceString capacity"),
-                        ),
+            header_c_or_f: wz_session_core::interest_build::interest_body_arm(
+                current,
+                future,
+                wz_codecs::interest_body::InterestBodyOwned {
+                    header: body_header,
+                    keyexpr: Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                            id: 0,
+                            suffix_len: Some(keyexpr.len() as u64),
+                            suffix: Some(
+                                sce_forge_runtime::codec::SceString::from_view(keyexpr)
+                                    .expect("interest keyexpr fits the SceString capacity"),
+                            ),
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         })
     }
@@ -28247,7 +28256,9 @@ mod tests {
         else {
             unreachable!("interest_msg builds an Interest");
         };
-        if let Some(body) = interest.body.as_mut() {
+        if let Some(body) =
+            wz_session_core::interest_build::interest_body_mut(&mut interest.header_c_or_f)
+        {
             body.keyexpr = Some(WireexprOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: 77,

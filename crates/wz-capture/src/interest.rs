@@ -904,13 +904,12 @@ impl InterestCensus {
             }
             return;
         }
-        let scope = interest.body.as_ref().map(|b| InterestScope::of(b.header));
+        let body = wz_session_core::interest_build::interest_body(&interest.header_c_or_f);
+        let scope = body.map(|b| InterestScope::of(b.header));
         // The restriction keyexpr travels in the ASKER's own message, so it
         // resolves exactly as a declaration's does — through the same tables,
         // with the mapping bit choosing the space.
-        let resolved = interest
-            .body
-            .as_ref()
+        let resolved = body
             .and_then(|b| b.keyexpr.as_ref())
             .map(|ke| spaces.resolve(direction, &ke.body));
         let (keyexpr, unresolved) = match resolved {
@@ -2276,10 +2275,14 @@ mod tests {
         let interest = wz_codecs::interest::Interest {
             header: wz_session_core::wire_const::N_MID_INTEREST | 0x20,
             interest_id: 8,
-            body: Some(wz_codecs::interest_body::InterestBody {
-                header: 0b0000_0001,
-                keyexpr: None,
-            }),
+            header_c_or_f: wz_session_core::interest_build::interest_body_arm(
+                true,
+                false,
+                wz_codecs::interest_body::InterestBody {
+                    header: 0b0000_0001,
+                    keyexpr: None,
+                },
+            ),
             extensions: None,
         }
         .encode_to_vec()
@@ -2449,10 +2452,14 @@ mod tests {
         wz_codecs::interest::Interest {
             header: wz_session_core::wire_const::N_MID_INTEREST | 0x20,
             interest_id: id,
-            body: Some(wz_codecs::interest_body::InterestBody {
-                header: 0b0000_0010,
-                keyexpr: None,
-            }),
+            header_c_or_f: wz_session_core::interest_build::interest_body_arm(
+                true,
+                false,
+                wz_codecs::interest_body::InterestBody {
+                    header: 0b0000_0010,
+                    keyexpr: None,
+                },
+            ),
             extensions: None,
         }
         .encode_to_vec()

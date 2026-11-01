@@ -82,11 +82,11 @@ pub(crate) fn resolve_governed_keyexpr_in(
         // mode is not Final (`zenoh-codec network/interest.rs:69-73`), so a Final
         // Interest answers `None` here — and is ungoverned at the action arm, the
         // same place zenoh leaves it unfiltered.
-        NetworkMessage::Interest(i) => i
-            .body
-            .as_ref()
-            .and_then(|b| b.keyexpr.as_ref())
-            .and_then(|we| resolve_wireexpr_in(&we.body, spaces)),
+        NetworkMessage::Interest(i) => {
+            wz_session_core::interest_build::interest_body(&i.header_c_or_f)
+                .and_then(|b| b.keyexpr.as_ref())
+                .and_then(|we| resolve_wireexpr_in(&we.body, spaces))
+        }
         _ => None,
     }
 }

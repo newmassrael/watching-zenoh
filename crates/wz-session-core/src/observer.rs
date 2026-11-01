@@ -456,7 +456,7 @@ impl ApplicationLayerObserver {
         if !interest.c() {
             return;
         }
-        let Some(body) = interest.body.as_ref() else {
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
             return;
         };
         if !body.qu() {

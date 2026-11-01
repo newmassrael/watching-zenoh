@@ -608,14 +608,16 @@ fn seen_of(message: &NetworkMessage) -> Seen {
             DeclareOwnedVariant::CodecZenohUndeclToken(_) => Seen::UndeclareToken,
             _ => Seen::Other("declare"),
         },
-        NetworkMessage::Interest(interest) => match &interest.body {
-            Some(body) => Seen::Interest {
-                mode: interest.header & 0x60,
-                options: body.header,
-                keyexpr: body.keyexpr.as_ref().map(|k| literal(&k.body)),
-            },
-            None => Seen::InterestFinal,
-        },
+        NetworkMessage::Interest(interest) => {
+            match wz_session_core::interest_build::interest_body(&interest.header_c_or_f) {
+                Some(body) => Seen::Interest {
+                    mode: interest.header & 0x60,
+                    options: body.header,
+                    keyexpr: body.keyexpr.as_ref().map(|k| literal(&k.body)),
+                },
+                None => Seen::InterestFinal,
+            }
+        }
         NetworkMessage::Request(request) => Seen::Request {
             keyexpr: literal(&request.keyexpr.body),
             target: wz_session_core::request_routing_context::read_request_target(request)

@@ -4576,7 +4576,7 @@ pub(crate) mod tests {
                 true,
                 wz_codecs::interest::Interest {
                     interest_id: 1,
-                    body: None,
+                    header_c_or_f: None,
                     ..Default::default()
                 }
                 .encode_to_vec()

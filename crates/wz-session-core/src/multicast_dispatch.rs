@@ -1221,7 +1221,9 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 }
                 // And an interest the member restricts to a key it declared.
                 NetworkMessage::Interest(interest) => {
-                    if let Some(body) = interest.body.as_mut() {
+                    if let Some(body) =
+                        crate::interest_build::interest_body_mut(&mut interest.header_c_or_f)
+                    {
                         if let Some(keyexpr) = body.keyexpr.as_mut() {
                             if let Some(literal) = crate::wireexpr_resolve::resolve_wireexpr(
                                 &keyexpr.body,
@@ -4345,9 +4347,7 @@ mod tests {
                         resolve_wireexpr(&request.keyexpr.body, &empty)
                     }
                     NetworkMessage::Interest(interest) => resolve_wireexpr(
-                        &interest
-                            .body
-                            .as_ref()
+                        &crate::interest_build::interest_body(&interest.header_c_or_f)
                             .and_then(|body| body.keyexpr.as_ref())
                             .expect("a restricted interest")
                             .body,

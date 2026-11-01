@@ -363,12 +363,12 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
     let (actions, mut engine) = fresh_setup();
     engine.process_event(E::OutboundStart);
 
-    // Frame with a single Unknown-MID record (0x1E = N_MID_DECLARE
-    // — the last network MID still uncodec'd post-R97; was 0x1B=
-    // RESPONSE pre-R97 and 0x1D=PUSH pre-R90) so
-    // FramePayload.messages.len() == 1 deterministically.
+    // Frame with a single Declare record (0x1E = N_MID_DECLARE) whose declaration
+    // is of an id no arm names, so FramePayload.messages.len() == 1
+    // deterministically. The declaration's `Z` (0x80) is clear: a set one promises
+    // an extension chain, and a frame that ends before its first entry is refused.
     let mut driver = QueueDriver::with(vec![
-        LinkEvent::Rx(RxFrame::new(vec![0x05, 0x00, 0x1E, 0xAA])),
+        LinkEvent::Rx(RxFrame::new(vec![0x05, 0x00, 0x1E, 0x2A])),
         LinkEvent::Lost {
             cause: LostCause::PeerClosed,
         },

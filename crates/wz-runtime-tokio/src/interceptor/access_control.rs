@@ -179,7 +179,9 @@ fn acl_action(msg: &NetworkMessage) -> Option<GovernedAction> {
         // `to` bit. A Final Interest has NO body at all, so it takes the
         // no-token exit and is admitted here, which is zenoh's unfiltered arm.
         NetworkMessage::Interest(i) => {
-            if !i.body.as_ref().is_some_and(|b| b.to()) {
+            if !wz_session_core::interest_build::interest_body(&i.header_c_or_f)
+                .is_some_and(|b| b.to())
+            {
                 return None;
             }
             match (i.c(), i.f()) {
@@ -1064,9 +1066,7 @@ mod tests {
         ) else {
             unreachable!("built as an Interest")
         };
-        let body = untokened
-            .body
-            .as_mut()
+        let body = wz_session_core::interest_build::interest_body_mut(&mut untokened.header_c_or_f)
             .expect("a FUTURE interest has a body");
         body.header &= !0x08;
         assert!(!body.to(), "precondition: the TOKENS bit is now clear");

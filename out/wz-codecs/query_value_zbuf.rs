@@ -164,9 +164,8 @@ impl<'a> QueryValueZbuf<'a> {
     }
 }
 
-/// The fields `after_shm` decides (docs/adr/0065 §6 R4b): a value holds the
-/// ones present while it holds, or the ones present while it does not,
-/// and `QueryValueZbuf` derives `after_shm` from which.
+/// The fields `after_shm` decide (docs/adr/0065 §6 R4b, R4c): a value holds the
+/// ones of one arm, and `QueryValueZbuf` derives the gates from which.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QueryValueZbufAfterShm<Encoding, Slices, Value> {
@@ -187,8 +186,7 @@ pub enum QueryValueZbufAfterShm<Encoding, Slices, Value> {
 }
 
 impl<Encoding: Default, Slices: Default, Value: Default> Default for QueryValueZbufAfterShm<Encoding, Slices, Value> {
-    /// The side present while `after_shm` does not hold, each field at its
-    /// type's default.
+    /// The arm held while `after_shm` does not hold, each field at its type's default.
     fn default() -> Self {
         Self::NotAfterShm { value: Default::default(), }
     }
@@ -199,7 +197,7 @@ impl<Encoding: Default, Slices: Default, Value: Default> Default for QueryValueZ
 /// or the flag a gated field is announced by is not among them; `QueryValueZbuf`
 /// computes those from what is ([`QueryValueZbuf::encode_source`]).
 pub trait QueryValueZbufSource {
-    /// The fields `after_shm` decides, held together (docs/adr/0065 §6 R4b).
+    /// The fields `after_shm` decides, held together (docs/adr/0065 §6 R4).
     fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, &[u8]>;
 }
 
@@ -215,7 +213,7 @@ impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct QueryValueZbufParts<'a> {
-    /// The fields `after_shm` decides, held together (docs/adr/0065 §6 R4b).
+    /// The fields `after_shm` decides, held together (docs/adr/0065 §6 R4).
     pub after_shm: QueryValueZbufAfterShm<&'a super::encoding::EncodingParts<'a>, ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4>, &'a [u8]>,
 }
 
@@ -231,7 +229,7 @@ impl<'a> QueryValueZbufSource for QueryValueZbufParts<'a> {
 impl<'a> QueryValueZbufSource for QueryValueZbuf<'a> {
     fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, &[u8]> {
         match &self.after_shm {
-            QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding: encoding, slices: ::sce_forge_runtime::codec::BoundedIter::from(slices), value_len: *value_len },
+            QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding, slices: ::sce_forge_runtime::codec::BoundedIter::from(slices), value_len: *value_len },
             QueryValueZbufAfterShm::NotAfterShm { value } => QueryValueZbufAfterShm::NotAfterShm { value: *value },
         }
     }
@@ -240,7 +238,7 @@ impl<'a> QueryValueZbufSource for QueryValueZbuf<'a> {
 impl<'a> QueryValueZbufSource for QueryValueZbufView<'a> {
     fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, &[u8]> {
         match &self.after_shm {
-            QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding: encoding, slices: slices.iter(), value_len: *value_len },
+            QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding, slices: slices.iter(), value_len: *value_len },
             QueryValueZbufAfterShm::NotAfterShm { value } => QueryValueZbufAfterShm::NotAfterShm { value: *value },
         }
     }
@@ -249,7 +247,7 @@ impl<'a> QueryValueZbufSource for QueryValueZbufView<'a> {
 impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryValueZbufSource for QueryValueZbufOwned<S> {
     fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, &[u8]> {
         match &self.after_shm {
-            QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding: encoding, slices: slices.list_iter(), value_len: *value_len },
+            QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding, slices: slices.list_iter(), value_len: *value_len },
             QueryValueZbufAfterShm::NotAfterShm { value } => QueryValueZbufAfterShm::NotAfterShm { value: ::sce_forge_runtime::codec::SceByteBuf::as_slice(value) },
         }
     }

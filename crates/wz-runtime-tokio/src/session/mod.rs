@@ -696,7 +696,9 @@ impl GroupKeyexprs {
             let NetworkMessage::Interest(interest) = message else {
                 continue;
             };
-            let Some(body) = interest.body.as_ref() else {
+            let Some(body) =
+                wz_session_core::interest_build::interest_body(&interest.header_c_or_f)
+            else {
                 continue;
             };
             if !interest.c() || !body.ke() {

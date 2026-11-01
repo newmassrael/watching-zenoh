@@ -6483,9 +6483,9 @@ layer_c1ay_cargo_test_router_hat() {
     # which no feature gates. Measured on this tree, arm by arm.
     # Phase 5b of docs/router-task-per-face.md: +2 on every arm, two ungated egress tests (a request
     # and a response probed come back whole; a routed query is held behind held data). PRINTED.
-    _runci_guarded_test "C1AY router_forward 289" 289 \
+    _runci_guarded_test "C1AY router_forward 292" 292 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward qos 294" 294 \
+    _runci_guarded_test "C1AY router_forward qos 297" 297 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -6520,7 +6520,7 @@ layer_c1ay_cargo_test_router_hat() {
     # Step (b), step 2: 258 -> 261 (+3, the peer placement tests); step 3: 264.
     # The network gate: 264 -> 266.
     # Step (b), step 5: 266 -> 267.
-    _runci_guarded_test "C1AY router_forward mcast-faces 315" 315 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 318" 318 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -6544,7 +6544,7 @@ layer_c1ay_cargo_test_router_hat() {
     # Item 751 step 7c -- 252 -> 253: `wzconfig_reconfigure_is_inert_without_config_mutate_runtime`,
     # moved from the retired single-net peer forwarder. Ungated apart from `access-acl`, and
     # `config-mutate-runtime` must be OFF, which this arm and the hotreload arm below both are.
-    _runci_guarded_test "C1AY router_forward 297" 297 \
+    _runci_guarded_test "C1AY router_forward 300" 300 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -6563,7 +6563,7 @@ layer_c1ay_cargo_test_router_hat() {
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
     # Item 751 step 7c -- 255 -> 256, the same inert witness as the arm above.
-    _runci_guarded_test "C1AY router_forward hotreload 300" 300 \
+    _runci_guarded_test "C1AY router_forward hotreload 303" 303 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -6581,13 +6581,13 @@ layer_c1ay_cargo_test_router_hat() {
     # 336 -> 341: the five tests of the node's own session asking tokens as an interest of its own
     # (`ask_local_tokens`, `forget_local_tokens`, `local_tokens_alive`); each is cfg(routing-token-tables),
     # so this arm alone moves. Measured on the build host.
-    _runci_guarded_test "C1AY router_forward 346" 346 \
+    _runci_guarded_test "C1AY router_forward 349" 349 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward multicast 289" 289 \
+    _runci_guarded_test "C1AY router_forward multicast 292" 292 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -6600,7 +6600,7 @@ layer_c1ay_cargo_test_router_hat() {
     # command itself, after that round's full sweep STALLED with an empty log on a
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
-    _runci_guarded_test "C1AY router_forward linkstate 291" 291 \
+    _runci_guarded_test "C1AY router_forward linkstate 294" 294 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -6621,7 +6621,7 @@ layer_c1ay_cargo_test_router_hat() {
     # R4006 -- 278 -> 280: the finalised flag's two tests (a key withheld is sent again when the
     # interest that finalized it ends; an interest that never finalized clears nothing), gated
     # on this feature through the same fixture. PRINTED by the command.
-    _runci_guarded_test "C1AY router_forward interest broker 301" 301 \
+    _runci_guarded_test "C1AY router_forward interest broker 305" 305 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -10402,7 +10402,7 @@ layer_c1g_cargo_test_observer() {
     # that command PRINTED); and the heap counted over each writer and its encode into
     # an array, zero, against the owned builder's, nonzero, as the instrument's
     # control (1 = what that PRINTED). Default features, the three the writers need.
-    _runci_guarded_test C1g 8 \
+    _runci_guarded_test C1g 9 \
         cargo test -p wz-session-core --lib --features codec-declare,declare-final,codec-response-final --quiet -- lent_control:: || return 1
     _runci_guarded_test C1g 1 \
         cargo test -p wz-session-core --test lent_control_alloc --features codec-declare,declare-final,codec-response-final --quiet || return 1

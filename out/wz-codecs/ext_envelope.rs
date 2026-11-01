@@ -95,7 +95,6 @@ impl<'a> ExtEnvelope<'a> {
             _vec.clear();
             let mut _more = false;
             for _ in 0..8u32 {
-                if cursor.remaining() == 0 { break; }
                 let _entry = ExtEntry::decode(cursor)?;
                 _more = _entry.z();
                 // Bounded by max-depth on both sides — loop count and `_vec`
@@ -354,7 +353,6 @@ impl<'a> ExtEnvelopeView<'a> {
             let mut _count: u32 = 0;
             let mut _more = false;
             for _ in 0..8u32 {
-                if cursor.remaining() == 0 { break; }
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;

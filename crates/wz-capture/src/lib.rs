@@ -13383,7 +13383,7 @@ mod datagram_tests {
         .expect("a fixture Declare is encodable");
         let interest = wz_codecs::interest::Interest {
             interest_id: 1,
-            body: None,
+            header_c_or_f: None,
             ..Default::default()
         }
         .encode_to_vec()

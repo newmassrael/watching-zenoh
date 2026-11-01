@@ -19,6 +19,7 @@
 
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::CodecError;
+use wz_codecs::interest::InterestHeaderCOrF;
 use wz_codecs::wire_const;
 
 #[cfg(feature = "alloc")]
@@ -392,18 +393,54 @@ fn build_interest_of_kinds(
         None => None,
     };
 
+    let body = InterestBodyOwned {
+        header: interest_body_header(
+            kinds,
+            keyexpr.map(|(_, suffix)| suffix.is_some()),
+            /*aggregate=*/ false,
+        ),
+        keyexpr: wireexpr,
+    };
+    // Neither flag is a Final, which holds no body: a body asked of one is refused,
+    // as the encode refused it before the flags were derived from the arm.
+    let Some(arm) = interest_body_arm(current, future, body) else {
+        return Err(CodecError::PresentIfMismatch);
+    };
     Ok(InterestOwned {
         header: interest_header(current, future),
         interest_id,
-        body: Some(InterestBodyOwned {
-            header: interest_body_header(
-                kinds,
-                keyexpr.map(|(_, suffix)| suffix.is_some()),
-                /*aggregate=*/ false,
-            ),
-            keyexpr: wireexpr,
-        }),
+        header_c_or_f: Some(arm),
         extensions: None,
+    })
+}
+
+/// `body` in the arm of an Interest's `header_c_or_f` group that `current` and `future` name:
+/// the encode derives the header's `C` and `F` from the arm, so an Interest is built with the arm
+/// and the `header` of the same two flags. `None` for neither, a Final, which holds no body.
+pub fn interest_body_arm<B>(current: bool, future: bool, body: B) -> Option<InterestHeaderCOrF<B>> {
+    match (current, future) {
+        (true, false) => Some(InterestHeaderCOrF::C { body }),
+        (false, true) => Some(InterestHeaderCOrF::F { body }),
+        (true, true) => Some(InterestHeaderCOrF::CF { body }),
+        (false, false) => None,
+    }
+}
+
+/// The body an Interest's `header_c_or_f` group holds, whichever arm it is. `None` for a Final.
+pub fn interest_body<B>(group: &Option<InterestHeaderCOrF<B>>) -> Option<&B> {
+    group.as_ref().map(|arm| match arm {
+        InterestHeaderCOrF::C { body }
+        | InterestHeaderCOrF::F { body }
+        | InterestHeaderCOrF::CF { body } => body,
+    })
+}
+
+/// [`interest_body`], to change the body in place: the arm, and so the wire's `C` and `F`, stay.
+pub fn interest_body_mut<B>(group: &mut Option<InterestHeaderCOrF<B>>) -> Option<&mut B> {
+    group.as_mut().map(|arm| match arm {
+        InterestHeaderCOrF::C { body }
+        | InterestHeaderCOrF::F { body }
+        | InterestHeaderCOrF::CF { body } => body,
     })
 }
 
@@ -470,7 +507,7 @@ fn build_interest_composed(
 ) -> Result<InterestOwned, CodecError> {
     let mut interest = build_restricted_interest(interest_id, kinds, current, future, keyexpr)?;
     if aggregate {
-        if let Some(body) = interest.body.as_mut() {
+        if let Some(body) = interest_body_mut(&mut interest.header_c_or_f) {
             body.header |= INTEREST_BODY_AGGREGATE;
         }
     }
@@ -664,7 +701,7 @@ pub fn build_interest_final(interest_id: u64) -> InterestOwned {
     InterestOwned {
         header: wire_const::N_MID_INTEREST,
         interest_id,
-        body: None,
+        header_c_or_f: None,
         extensions: None,
     }
 }
@@ -820,7 +857,7 @@ mod tests {
 
         // Structural assertions on Case 1 — verify the InterestBody
         // is present and carries the expected wireexpr arm.
-        match &future_only.body {
+        match interest_body(&future_only.header_c_or_f) {
             Some(body) => {
                 assert_eq!(
                     body.header, 0x79,
@@ -1002,7 +1039,7 @@ mod tests {
             "InterestFinal small-id wire bytes must equal [N_MID_INTEREST, VLE(id)]",
         );
         assert!(
-            small.body.is_none(),
+            small.header_c_or_f.is_none(),
             "InterestFinal must carry no inner body — C||F is clear",
         );
         assert!(
@@ -1062,10 +1099,10 @@ mod tests {
         )
         .unwrap();
         let (subs_body, tok_body) = (
-            subs.body.as_ref().expect("C||F set -> body present").header,
-            tokens
-                .body
-                .as_ref()
+            interest_body(&subs.header_c_or_f)
+                .expect("C||F set -> body present")
+                .header,
+            interest_body(&tokens.header_c_or_f)
                 .expect("C||F set -> body present")
                 .header,
         );
@@ -1110,7 +1147,9 @@ mod tests {
             Some("demo/**"),
         )
         .unwrap();
-        let body = qabl.body.as_ref().expect("C||F set -> body present").header;
+        let body = interest_body(&qabl.header_c_or_f)
+            .expect("C||F set -> body present")
+            .header;
         assert_eq!(body, 0x75, "body must be KE | QU | R | N | M");
         assert_eq!(
             body & InterestKinds::SUBSCRIBERS.bits(),
@@ -1140,7 +1179,7 @@ mod tests {
     /// is satisfied by a builder that sets every bit.
     #[cfg(feature = "codec-declare")]
     fn kind_readers(msg: &InterestOwned) -> (bool, bool, bool) {
-        let body = msg.body.as_ref().expect("C||F set -> body present");
+        let body = interest_body(&msg.header_c_or_f).expect("C||F set -> body present");
         (body.su(), body.qu(), body.to())
     }
 
@@ -1198,7 +1237,9 @@ mod tests {
             Some("demo/**"),
         )
         .unwrap();
-        let body = both.body.as_ref().expect("C||F set -> body present").header;
+        let body = interest_body(&both.header_c_or_f)
+            .expect("C||F set -> body present")
+            .header;
         assert_eq!(body, 0x77, "body must be KE | SU | QU | R | N | M");
         assert_eq!(
             body & InterestKinds::TOKENS.bits(),
@@ -1230,7 +1271,9 @@ mod tests {
                 "outer header for (current={current}, future={future})",
             );
             assert_eq!(
-                msg.body.as_ref().expect("C||F set -> body present").header,
+                interest_body(&msg.header_c_or_f)
+                    .expect("C||F set -> body present")
+                    .header,
                 0x73,
                 "the kind byte must not move with the mode",
             );

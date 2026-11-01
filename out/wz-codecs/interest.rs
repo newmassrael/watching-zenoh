@@ -38,7 +38,7 @@ use super::interest_body::InterestBodyView;
 pub struct Interest<'a> {
     pub header: u8,
     pub interest_id: u64,
-    pub body: Option<InterestBody<'a>>,
+    pub header_c_or_f: Option<InterestHeaderCOrF<InterestBody<'a>>>,
     pub extensions: Option<HeaplessVec<ExtEntry<'a>, 8>>,
 }
 
@@ -54,7 +54,7 @@ impl<'a> Default for Interest<'a> {
         Self {
             header: 0x19u8,
             interest_id: Default::default(),
-            body: Default::default(),
+            header_c_or_f: Default::default(),
             extensions: Default::default(),
         }
     }
@@ -113,16 +113,16 @@ impl<'a> Interest<'a> {
             _v
         };
         let interest_id = cursor.read_vle_u64()?;
+        let mut body: Option<InterestBody<'a>> = None;
         if (header & 0x20u8) != 0 || (header & 0x40u8) != 0 {
-            InterestBody::decode_into(cursor, _out.body.insert(InterestBody::default()))?;
+            InterestBody::decode_into(cursor, body.insert(InterestBody::default()))?;
         } else {
-            _out.body = None;
+            body = None;
         }
         if (header & 0x80u8) != 0 {
             let _vec = _out.extensions.insert(HeaplessVec::<ExtEntry<'a>, 8>::new());
             let mut _more = false;
             for _ in 0..8u32 {
-                if cursor.remaining() == 0 { break; }
                 let _entry = ExtEntry::decode(cursor)?;
                 _more = _entry.z();
                 // Bounded by max-depth on both sides — loop count and `_vec`
@@ -142,6 +142,7 @@ impl<'a> Interest<'a> {
         }
         _out.header = header;
         _out.interest_id = interest_id;
+        _out.header_c_or_f = match ((header & 0x20u8) != 0, (header & 0x40u8) != 0) { (true, false) => Some(InterestHeaderCOrF::C { body: body.unwrap_or_default() }), (false, true) => Some(InterestHeaderCOrF::F { body: body.unwrap_or_default() }), (true, true) => Some(InterestHeaderCOrF::CF { body: body.unwrap_or_default() }), _ => None, };
         Ok(())
     }
 
@@ -233,31 +234,26 @@ impl<'a> Interest<'a> {
     }
 }
 
-/// Flags of `Interest` a parent sets in place of the ones a value presents:
-/// the end flag of a chain whose entries are `Interest`, which the chain
-/// derives from where an entry stands.
-#[doc(hidden)]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct InterestOverrides {
-    /// The `C` flag of `header`, when a parent sets it.
-    pub header_c: Option<bool>,
-    /// The `F` flag of `header`, when a parent sets it.
-    pub header_f: Option<bool>,
-}
-
+/// The fields `header.C`, `header.F` decide (docs/adr/0065 §6 R4b, R4c): a value holds the
+/// ones of one arm, and `Interest` derives the gates from which. A value holds no arm while `header.C` does not hold and `header.F` does not hold.
 #[allow(dead_code)]
-impl InterestOverrides {
-    /// Sets `C` of `header` and nothing else.
-    #[allow(clippy::needless_update)]
-    pub fn header_c(value: bool) -> Self {
-        Self { header_c: Some(value), ..Self::default() }
-    }
-
-    /// Sets `F` of `header` and nothing else.
-    #[allow(clippy::needless_update)]
-    pub fn header_f(value: bool) -> Self {
-        Self { header_f: Some(value), ..Self::default() }
-    }
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InterestHeaderCOrF<Body> {
+    /// While `header.C` holds and `header.F` does not hold.
+    C {
+        /// The `body` field.
+        body: Body,
+    },
+    /// While `header.C` does not hold and `header.F` holds.
+    F {
+        /// The `body` field.
+        body: Body,
+    },
+    /// While `header.C` holds and `header.F` holds.
+    CF {
+        /// The `body` field.
+        body: Body,
+    },
 }
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
@@ -269,10 +265,10 @@ pub trait InterestSource {
     fn header(&self) -> u8;
     /// The `interest_id` field.
     fn interest_id(&self) -> u64;
-    /// The `body` field.
-    fn body(&self) -> Option<&impl super::interest_body::InterestBodySource>;
     /// The `extensions` field.
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
+    /// The fields `header.C || header.F` decides, held together (docs/adr/0065 §6 R4).
+    fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>>;
 }
 
 impl<T: InterestSource + ?Sized> InterestSource for &T {
@@ -282,11 +278,11 @@ impl<T: InterestSource + ?Sized> InterestSource for &T {
     fn interest_id(&self) -> u64 {
         (**self).interest_id()
     }
-    fn body(&self) -> Option<&impl super::interest_body::InterestBodySource> {
-        (**self).body()
-    }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         (**self).extensions()
+    }
+    fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
+        (**self).header_c_or_f()
     }
 }
 
@@ -300,21 +296,25 @@ pub struct InterestParts<'a> {
     pub header: u8,
     /// The `interest_id` field.
     pub interest_id: u64,
-    /// The `body` field.
-    pub body: Option<&'a super::interest_body::InterestBodyParts<'a>>,
     /// The `extensions` field.
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
+    /// The fields `header.C || header.F` decides, held together (docs/adr/0065 §6 R4).
+    pub header_c_or_f: Option<InterestHeaderCOrF<&'a super::interest_body::InterestBodyParts<'a>>>,
 }
 
 impl<'a> InterestSource for InterestParts<'a> {
+    fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
+        self.header_c_or_f.as_ref().map(|_g| match _g {
+            InterestHeaderCOrF::C { body } => InterestHeaderCOrF::C { body: *body },
+            InterestHeaderCOrF::F { body } => InterestHeaderCOrF::F { body: *body },
+            InterestHeaderCOrF::CF { body } => InterestHeaderCOrF::CF { body: *body },
+        })
+    }
     fn header(&self) -> u8 {
         self.header
     }
     fn interest_id(&self) -> u64 {
         self.interest_id
-    }
-    fn body(&self) -> Option<&impl super::interest_body::InterestBodySource> {
-        self.body
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
@@ -322,14 +322,18 @@ impl<'a> InterestSource for InterestParts<'a> {
 }
 
 impl<'a> InterestSource for Interest<'a> {
+    fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
+        self.header_c_or_f.as_ref().map(|_g| match _g {
+            InterestHeaderCOrF::C { body } => InterestHeaderCOrF::C { body },
+            InterestHeaderCOrF::F { body } => InterestHeaderCOrF::F { body },
+            InterestHeaderCOrF::CF { body } => InterestHeaderCOrF::CF { body },
+        })
+    }
     fn header(&self) -> u8 {
         self.header
     }
     fn interest_id(&self) -> u64 {
         self.interest_id
-    }
-    fn body(&self) -> Option<&impl super::interest_body::InterestBodySource> {
-        self.body.as_ref()
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
@@ -337,14 +341,18 @@ impl<'a> InterestSource for Interest<'a> {
 }
 
 impl<'a> InterestSource for InterestView<'a> {
+    fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
+        self.header_c_or_f.as_ref().map(|_g| match _g {
+            InterestHeaderCOrF::C { body } => InterestHeaderCOrF::C { body },
+            InterestHeaderCOrF::F { body } => InterestHeaderCOrF::F { body },
+            InterestHeaderCOrF::CF { body } => InterestHeaderCOrF::CF { body },
+        })
+    }
     fn header(&self) -> u8 {
         self.header
     }
     fn interest_id(&self) -> u64 {
         self.interest_id
-    }
-    fn body(&self) -> Option<&impl super::interest_body::InterestBodySource> {
-        self.body.as_ref()
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
@@ -352,14 +360,18 @@ impl<'a> InterestSource for InterestView<'a> {
 }
 
 impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestSource for InterestOwned<S> {
+    fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
+        self.header_c_or_f.as_ref().map(|_g| match _g {
+            InterestHeaderCOrF::C { body } => InterestHeaderCOrF::C { body },
+            InterestHeaderCOrF::F { body } => InterestHeaderCOrF::F { body },
+            InterestHeaderCOrF::CF { body } => InterestHeaderCOrF::CF { body },
+        })
+    }
     fn header(&self) -> u8 {
         self.header
     }
     fn interest_id(&self) -> u64 {
         self.interest_id
-    }
-    fn body(&self) -> Option<&impl super::interest_body::InterestBodySource> {
-        self.body.as_ref()
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.list_iter())
@@ -381,28 +393,17 @@ impl<'a> Interest<'a> {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: InterestSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::write_source_in(src, w, &InterestOverrides::default())
-    }
-
-    /// [`Self::write_source`] with the flags a parent sets in place of the
-    /// ones `src` presents.
-    #[doc(hidden)]
-    pub fn write_source_in<S: InterestSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &InterestOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _m_body = src.header_c_or_f().map(|_g| match _g {
+            InterestHeaderCOrF::C { body } | InterestHeaderCOrF::F { body } | InterestHeaderCOrF::CF { body } => body,
+        });
         let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
+        let _d_header_c: bool = matches!(src.header_c_or_f(), Some(InterestHeaderCOrF::C { .. } | InterestHeaderCOrF::CF { .. }));
+        let _d_header_f: bool = matches!(src.header_c_or_f(), Some(InterestHeaderCOrF::F { .. } | InterestHeaderCOrF::CF { .. }));
         let _p_header_z_0: bool = src.extensions().is_some();
-        let mut _c_header: u8 = (src.header() & !0x80) | (u8::from(_p_header_z_0) << 7);
-        if let Some(_o) = over.header_c {
-            _c_header = (_c_header & !0x20) | (u8::from(_o) << 5);
-        }
-        if let Some(_o) = over.header_f {
-            _c_header = (_c_header & !0x40) | (u8::from(_o) << 6);
-        }
-        if ((_c_header & 0x20) != 0 || (_c_header & 0x40) != 0) != src.body().is_some() {
-            return Err(CodecError::PresentIfMismatch);
-        }
+        let _c_header: u8 = (((((src.header() & !0x20) | (u8::from(_d_header_c) << 5)) & !0x40) | (u8::from(_d_header_f) << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         w.write_vle_u64(src.interest_id())?;
-        if let Some(_v) = src.body() {
+        if let Some(_v) = _m_body {
             InterestBody::write_source(_v, w)?;
         }
         if let Some(_v) = src.extensions() {
@@ -479,7 +480,7 @@ impl ListWalk<0> for InterestExtensionsWalk {
 pub struct InterestView<'a> {
     pub header: u8,
     pub interest_id: u64,
-    pub body: Option<InterestBodyView<'a>>,
+    pub header_c_or_f: Option<InterestHeaderCOrF<InterestBodyView<'a>>>,
     pub extensions: Option<Bounded<ListView<'a, InterestExtensionsWalk, 0>, 8>>,
 }
 
@@ -488,7 +489,7 @@ impl<'a> Default for InterestView<'a> {
         Self {
             header: 0x19u8,
             interest_id: Default::default(),
-            body: Default::default(),
+            header_c_or_f: Default::default(),
             extensions: Default::default(),
         }
     }
@@ -534,17 +535,17 @@ impl<'a> InterestView<'a> {
             _v
         };
         let interest_id = cursor.read_vle_u64()?;
+        let mut body: Option<InterestBodyView<'a>> = None;
         if (header & 0x20u8) != 0 || (header & 0x40u8) != 0 {
-            InterestBodyView::decode_into(cursor, _out.body.insert(InterestBodyView::default()))?;
+            InterestBodyView::decode_into(cursor, body.insert(InterestBodyView::default()))?;
         } else {
-            _out.body = None;
+            body = None;
         }
         if (header & 0x80u8) != 0 {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
             for _ in 0..8u32 {
-                if cursor.remaining() == 0 { break; }
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -562,6 +563,7 @@ impl<'a> InterestView<'a> {
         }
         _out.header = header;
         _out.interest_id = interest_id;
+        _out.header_c_or_f = match ((header & 0x20u8) != 0, (header & 0x40u8) != 0) { (true, false) => Some(InterestHeaderCOrF::C { body: body.unwrap_or_default() }), (false, true) => Some(InterestHeaderCOrF::F { body: body.unwrap_or_default() }), (true, true) => Some(InterestHeaderCOrF::CF { body: body.unwrap_or_default() }), _ => None, };
         Ok(())
     }
 
@@ -578,9 +580,23 @@ impl<'a> InterestView<'a> {
     pub fn into_builder(&self, _out: &mut Interest<'a>) -> Result<(), CodecError> {
         _out.header = self.header;
         _out.interest_id = self.interest_id;
-        match &self.body {
-            Some(_b) => _b.into_builder(_out.body.insert(InterestBody::default()))?,
-            None => _out.body = None,
+        match &self.header_c_or_f {
+            Some(InterestHeaderCOrF::C { body }) => {
+                let mut _o_body: InterestBody<'a> = Default::default();
+                body.into_builder(&mut _o_body)?;
+                _out.header_c_or_f = Some(InterestHeaderCOrF::C { body: _o_body });
+            }
+            Some(InterestHeaderCOrF::F { body }) => {
+                let mut _o_body: InterestBody<'a> = Default::default();
+                body.into_builder(&mut _o_body)?;
+                _out.header_c_or_f = Some(InterestHeaderCOrF::F { body: _o_body });
+            }
+            Some(InterestHeaderCOrF::CF { body }) => {
+                let mut _o_body: InterestBody<'a> = Default::default();
+                body.into_builder(&mut _o_body)?;
+                _out.header_c_or_f = Some(InterestHeaderCOrF::CF { body: _o_body });
+            }
+            None => _out.header_c_or_f = None,
         }
         match &self.extensions {
             Some(_l) => {
@@ -681,7 +697,7 @@ use super::interest_body::InterestBodyOwned;
 pub struct InterestOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
     pub header: u8,
     pub interest_id: u64,
-    pub body: Option<InterestBodyOwned<S>>,
+    pub header_c_or_f: Option<InterestHeaderCOrF<InterestBodyOwned<S>>>,
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
 }
 
@@ -727,7 +743,7 @@ impl<'a> Interest<'a> {
         Ok(InterestOwned {
             header: self.header,
             interest_id: self.interest_id,
-            body: self.body.map(|_v| _v.try_into_owned_in::<S>()).transpose()?,
+            header_c_or_f: match self.header_c_or_f { Some(InterestHeaderCOrF::C { body }) => Some(InterestHeaderCOrF::C { body: body.try_into_owned_in::<S>()? }), Some(InterestHeaderCOrF::F { body }) => Some(InterestHeaderCOrF::F { body: body.try_into_owned_in::<S>()? }), Some(InterestHeaderCOrF::CF { body }) => Some(InterestHeaderCOrF::CF { body: body.try_into_owned_in::<S>()? }), None => None },
             extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
@@ -769,9 +785,23 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestOwned<S> {
     pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Interest<'o>) -> Result<(), CodecError> {
         _out.header = self.header;
         _out.interest_id = self.interest_id;
-        match &self.body {
-            Some(_v) => _v.as_borrowed_into(_out.body.insert(Default::default())),
-            None => _out.body = None,
+        match &self.header_c_or_f {
+            Some(InterestHeaderCOrF::C { body }) => {
+                let mut _o_body: InterestBody<'o> = Default::default();
+                body.as_borrowed_into(&mut _o_body);
+                _out.header_c_or_f = Some(InterestHeaderCOrF::C { body: _o_body });
+            }
+            Some(InterestHeaderCOrF::F { body }) => {
+                let mut _o_body: InterestBody<'o> = Default::default();
+                body.as_borrowed_into(&mut _o_body);
+                _out.header_c_or_f = Some(InterestHeaderCOrF::F { body: _o_body });
+            }
+            Some(InterestHeaderCOrF::CF { body }) => {
+                let mut _o_body: InterestBody<'o> = Default::default();
+                body.as_borrowed_into(&mut _o_body);
+                _out.header_c_or_f = Some(InterestHeaderCOrF::CF { body: _o_body });
+            }
+            None => _out.header_c_or_f = None,
         }
         match &self.extensions {
             Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
@@ -839,7 +869,7 @@ impl<'a> Interest<'a> {
         Ok(InterestOwned {
             header: self.header,
             interest_id: self.interest_id,
-            body: self.body.map(|_v| _v.try_into_owned_in_origin::<S>(origin)).transpose()?,
+            header_c_or_f: match self.header_c_or_f { Some(InterestHeaderCOrF::C { body }) => Some(InterestHeaderCOrF::C { body: body.try_into_owned_in_origin::<S>(origin)? }), Some(InterestHeaderCOrF::F { body }) => Some(InterestHeaderCOrF::F { body: body.try_into_owned_in_origin::<S>(origin)? }), Some(InterestHeaderCOrF::CF { body }) => Some(InterestHeaderCOrF::CF { body: body.try_into_owned_in_origin::<S>(origin)? }), None => None },
             extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }

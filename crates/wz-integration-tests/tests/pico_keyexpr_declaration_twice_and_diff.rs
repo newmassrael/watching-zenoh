@@ -1482,23 +1482,25 @@ fn render(
                 // a pico peer retracts some of its interests and not others.
                 NetworkMessage::Interest(i) => {
                     let name = names.name("I", i.interest_id);
-                    lines.push(match &i.body {
-                        Some(body) => {
-                            // A Final has no body and, in both libraries, no
-                            // extension chain, so only the others are pinned.
-                            interest_headers.push((i.header, body.header));
-                            let key = match body.keyexpr.as_ref() {
-                                Some(k) => wire(&mut names, k),
-                                None => String::from("(no key)"),
-                            };
-                            format!(
-                                "Interest hdr={:#04x} body={:#04x} on {key} as {name}",
-                                i.header & !INTEREST_EXTENSION_BIT,
-                                body.header
-                            )
-                        }
-                        None => format!("Interest (final) {name}"),
-                    })
+                    lines.push(
+                        match wz_session_core::interest_build::interest_body(&i.header_c_or_f) {
+                            Some(body) => {
+                                // A Final has no body and, in both libraries, no
+                                // extension chain, so only the others are pinned.
+                                interest_headers.push((i.header, body.header));
+                                let key = match body.keyexpr.as_ref() {
+                                    Some(k) => wire(&mut names, k),
+                                    None => String::from("(no key)"),
+                                };
+                                format!(
+                                    "Interest hdr={:#04x} body={:#04x} on {key} as {name}",
+                                    i.header & !INTEREST_EXTENSION_BIT,
+                                    body.header
+                                )
+                            }
+                            None => format!("Interest (final) {name}"),
+                        },
+                    )
                 }
                 _ => {}
             }

@@ -43,7 +43,7 @@ use wz_codecs::decl_queryable::{DeclQueryable, DeclQueryableOwned};
 use wz_codecs::decl_subscriber::{DeclSubscriber, DeclSubscriberOwned};
 use wz_codecs::decl_token::{DeclToken, DeclTokenOwned};
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::interest::{Interest, InterestOwned};
+use wz_codecs::interest::{Interest, InterestHeaderCOrF, InterestOwned};
 use wz_codecs::interest_body::InterestBody;
 use wz_codecs::undecl_kexpr::{UndeclKexpr, UndeclKexprOwned};
 use wz_codecs::undecl_queryable::{UndeclQueryable, UndeclQueryableOwned};
@@ -121,7 +121,12 @@ pub fn interest_subscriber(
     interest.interest_id = interest_id;
     interest.set_c(current);
     interest.set_f(future);
-    interest.body = Some(body);
+    interest.header_c_or_f = match (current, future) {
+        (true, false) => Some(InterestHeaderCOrF::C { body }),
+        (false, true) => Some(InterestHeaderCOrF::F { body }),
+        (true, true) => Some(InterestHeaderCOrF::CF { body }),
+        (false, false) => None,
+    };
     interest.try_into_owned().unwrap()
 }
 

@@ -342,7 +342,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
             // on `mode.current()` (hat/client/token.rs).
             return Ok(());
         }
-        let body = match &interest.body {
+        let body = match crate::interest_build::interest_body(&interest.header_c_or_f) {
             Some(b) => b,
             // A non-final Interest with no body targets nothing
             // resolvable; the declarer has nothing to reply with.
@@ -385,7 +385,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
         if !interest.c() {
             return Ok(());
         }
-        let Some(body) = interest.body.as_ref() else {
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
             return Ok(());
         };
         if !body.to() {
@@ -796,25 +796,12 @@ mod tests {
     #[cfg(feature = "storage-profile")]
     #[test]
     fn final_interest_is_noop() {
-        use wz_codecs::interest_body::InterestBodyOwned;
-        use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-        use wz_codecs::wireexpr_local::WireexprLocalOwned;
-
         let mut reg = LocalTokenRegistry::new();
         reg.register(1, "group1/zenoh-pico").unwrap();
         let interest = InterestOwned {
             header: 0x19, // C/F cleared → final
             interest_id: 3,
-            body: Some(InterestBodyOwned {
-                header: 0x08, // tokens bit
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                        id: 0,
-                        suffix_len: Some(9),
-                        suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
-                    }),
-                }),
-            }),
+            header_c_or_f: None,
             extensions: None,
         };
         let mut pending = new_pending();
@@ -836,10 +823,14 @@ mod tests {
         let interest = InterestOwned {
             header: 0x19 | 0x20, // CURRENT
             interest_id: 4,
-            body: Some(InterestBodyOwned {
-                header: 0x00, // tokens bit clear
-                keyexpr: None,
-            }),
+            header_c_or_f: crate::interest_build::interest_body_arm(
+                true,
+                false,
+                InterestBodyOwned {
+                    header: 0x00, // tokens bit clear
+                    keyexpr: None,
+                },
+            ),
             extensions: None,
         };
         let mut pending = new_pending();
@@ -870,16 +861,20 @@ mod tests {
         let interest = InterestOwned {
             header: 0x19 | 0x40, // FUTURE only — no CURRENT bit
             interest_id: 7,
-            body: Some(InterestBodyOwned {
-                header: 0x08, // tokens bit
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                        id: 0,
-                        suffix_len: Some(9),
-                        suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+            header_c_or_f: crate::interest_build::interest_body_arm(
+                false,
+                true,
+                InterestBodyOwned {
+                    header: 0x08, // tokens bit
+                    keyexpr: Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                            id: 0,
+                            suffix_len: Some(9),
+                            suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         };
         let mut pending = new_pending();
@@ -905,16 +900,20 @@ mod tests {
         let interest = InterestOwned {
             header: 0x19 | 0x20, // CURRENT
             interest_id: 42,
-            body: Some(InterestBodyOwned {
-                header: 0x08, // tokens bit
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                        id: 0,
-                        suffix_len: Some(9),
-                        suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+            header_c_or_f: crate::interest_build::interest_body_arm(
+                true,
+                false,
+                InterestBodyOwned {
+                    header: 0x08, // tokens bit
+                    keyexpr: Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                            id: 0,
+                            suffix_len: Some(9),
+                            suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         };
         let mut pending = new_pending();
@@ -944,10 +943,14 @@ mod tests {
             NetworkMessage::Interest(InterestOwned {
                 header: 0x19 | 0x20, // CURRENT
                 interest_id,
-                body: Some(InterestBodyOwned {
-                    header: 0x08, // tokens bit; no keyexpr = match-all
-                    keyexpr: None,
-                }),
+                header_c_or_f: crate::interest_build::interest_body_arm(
+                    true,
+                    false,
+                    InterestBodyOwned {
+                        header: 0x08, // tokens bit; no keyexpr = match-all
+                        keyexpr: None,
+                    },
+                ),
                 extensions: None,
             })
         };
@@ -999,16 +1002,20 @@ mod tests {
         let interest = InterestOwned {
             header: 0x19 | 0x20, // CURRENT
             interest_id: 42,
-            body: Some(InterestBodyOwned {
-                header: 0x08, // tokens bit
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
-                        id: 7,
-                        suffix_len: None,
-                        suffix: None,
+            header_c_or_f: crate::interest_build::interest_body_arm(
+                true,
+                false,
+                InterestBodyOwned {
+                    header: 0x08, // tokens bit
+                    keyexpr: Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+                            id: 7,
+                            suffix_len: None,
+                            suffix: None,
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         };
 
@@ -1056,16 +1063,20 @@ mod tests {
         let interest = InterestOwned {
             header: 0x19 | 0x20,
             interest_id: 42,
-            body: Some(InterestBodyOwned {
-                header: 0x08,
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
-                        id: 7,
-                        suffix_len: None,
-                        suffix: None,
+            header_c_or_f: crate::interest_build::interest_body_arm(
+                true,
+                false,
+                InterestBodyOwned {
+                    header: 0x08,
+                    keyexpr: Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+                            id: 7,
+                            suffix_len: None,
+                            suffix: None,
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         };
 

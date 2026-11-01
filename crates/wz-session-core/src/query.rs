@@ -6378,7 +6378,6 @@ mod tests {
 ))]
 mod request_decode_isolation_tests {
     use super::*;
-    use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use hashbrown::HashMap;
     use std::sync::Arc;

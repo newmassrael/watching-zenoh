@@ -2628,16 +2628,20 @@ mod tests {
         let interest = Interest {
             header: 0x19 | 0x40, // FUTURE
             interest_id: 1,
-            body: Some(InterestBody {
-                header: 0x01 | 0x08 | 0x10 | 0x40,
-                keyexpr: Some(Wireexpr {
-                    body: WireexprVariant::WireexprLocal(WireexprLocal {
-                        id: 0,
-                        suffix_len: Some(1),
-                        suffix: Some("x"),
+            header_c_or_f: crate::interest_build::interest_body_arm(
+                false,
+                true,
+                InterestBody {
+                    header: 0x01 | 0x08 | 0x10 | 0x40,
+                    keyexpr: Some(Wireexpr {
+                        body: WireexprVariant::WireexprLocal(WireexprLocal {
+                            id: 0,
+                            suffix_len: Some(1),
+                            suffix: Some("x"),
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         }
         .try_into_owned()
@@ -2762,16 +2766,20 @@ mod tests {
         let interest = InterestOwned {
             header: 0x19 | 0x20 | 0x40, // CurrentFuture: CURRENT + FUTURE
             interest_id: sub_interest_id,
-            body: Some(InterestBodyOwned {
-                header: 0x08, // tokens
-                keyexpr: Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                        id: 0,
-                        suffix_len: Some(7),
-                        suffix: Some(crate::codec_owned::owned_string("live/**").unwrap()),
+            header_c_or_f: crate::interest_build::interest_body_arm(
+                true,
+                true,
+                InterestBodyOwned {
+                    header: 0x08, // tokens
+                    keyexpr: Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                            id: 0,
+                            suffix_len: Some(7),
+                            suffix: Some(crate::codec_owned::owned_string("live/**").unwrap()),
+                        }),
                     }),
-                }),
-            }),
+                },
+            ),
             extensions: None,
         };
         let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =

@@ -138,7 +138,6 @@ impl<'a> MsgPut<'a> {
             let _vec = _out.extensions.insert(HeaplessVec::<ExtEntry<'a>, 8>::new());
             let mut _more = false;
             for _ in 0..8u32 {
-                if cursor.remaining() == 0 { break; }
                 let _entry = ExtEntry::decode(cursor)?;
                 _more = _entry.z();
                 // Bounded by max-depth on both sides — loop count and `_vec`
@@ -646,7 +645,6 @@ impl<'a> MsgPutView<'a> {
             let mut _count: u32 = 0;
             let mut _more = false;
             for _ in 0..8u32 {
-                if cursor.remaining() == 0 { break; }
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;

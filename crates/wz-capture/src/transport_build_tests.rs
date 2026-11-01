@@ -1477,7 +1477,17 @@ fn the_kind_table_covers_every_field_of_the_generated_codecs() {
     let renames: [(&str, &str); 1] = [("payload_len", "unit_length")];
     let mut covered = 0usize;
     for (source, strukt, file) in codecs {
-        let fields = codec_fields(source, strukt);
+        // A field a gate groups is held in the struct of its group, whose members are the rows.
+        let fields: Vec<String> = codec_fields(source, strukt)
+            .into_iter()
+            .flat_map(|field| {
+                if field == "s" {
+                    codec_fields(source, &format!("{strukt}S"))
+                } else {
+                    alloc::vec![field]
+                }
+            })
+            .collect();
         assert!(!fields.is_empty(), "{file}: no fields read");
         for field in fields {
             let name = renames
