@@ -797,7 +797,7 @@ mod tests {
                 );
                 for info in infos() {
                     let mut built = owned::build_declare_queryable(id, mapping, suffix).unwrap();
-                    owned::set_declare_queryable_info(&mut built, info);
+                    owned::set_declare_queryable_info(&mut built, info).expect("within the bound");
                     assert_eq!(
                         declare_queryable(id, mapping, suffix, info)
                             .encode_to_vec()
@@ -1224,14 +1224,8 @@ mod tests {
             for qos in levels {
                 let built = crate::response_final_build::build_response_final(request_id, qos);
                 assert_eq!(
-                    response_final(request_id, qos)
-                        .encode_to_vec()
-                        .expect("a response final is encodable"),
-                    built
-                        .try_as_borrowed()
-                        .expect("a view")
-                        .encode_to_vec()
-                        .expect("a response final is encodable"),
+                    response_final(request_id, qos).encode_to_vec(),
+                    built.try_as_borrowed().expect("a view").encode_to_vec(),
                     "{request_id} {qos:?}"
                 );
             }
@@ -1239,12 +1233,8 @@ mod tests {
         // The default level writes no extension and the others do: the pair is what
         // makes the equality above mean something.
         assert_ne!(
-            response_final(1, levels[0])
-                .encode_to_vec()
-                .expect("a response final is encodable"),
-            response_final(1, levels[1])
-                .encode_to_vec()
-                .expect("a response final is encodable")
+            response_final(1, levels[0]).encode_to_vec(),
+            response_final(1, levels[1]).encode_to_vec()
         );
     }
 
@@ -1278,7 +1268,7 @@ mod tests {
             (9, Some("q/k"))
         );
         assert!(
-            crate::queryable_info::read_queryable_info(queryable.extensions.as_ref()).complete,
+            crate::queryable_info::read_queryable_info(queryable.extensions.as_deref()).complete,
             "the completeness rides the info extension"
         );
 

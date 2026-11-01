@@ -162,7 +162,8 @@ impl<T: WireexprNonlocalSource + ?Sized> WireexprNonlocalSource for &T {
 }
 
 /// A value of `WireexprNonlocal` held in the types a caller already has: a source
-/// ([`WireexprNonlocalSource`]) whose lists are slices and whose bodies are references.
+/// ([`WireexprNonlocalSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct WireexprNonlocalParts<'a> {

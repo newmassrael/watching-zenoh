@@ -415,9 +415,10 @@ use crate::linkstate_forward::{
     compute_self_publish_forward, declare_queryable_wireexpr, declare_subscriber_wireexpr,
     emit_current_interest_replies, is_tree_forward_target, peer_acl_username, peer_whatami_routing,
     peer_zid_routing, query_candidates, re_advertise_interest_into, resolve_governed_keyexpr,
-    resolve_source_in, resolve_source_zid_in, select_best_matching, synthesize_drained_fan_finals,
-    synthesize_expired_query_returns, Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable,
-    ClientRoutes, ClientSubStore, DataRoutes, QueryCandidate, QueryRoutes,
+    resolve_source_in, resolve_source_zid_in, select_best_matching, stamped,
+    synthesize_drained_fan_finals, synthesize_expired_query_returns, Cached, ClientQablStore,
+    ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore, DataRoutes, QueryCandidate,
+    QueryRoutes,
 };
 #[cfg(feature = "router-multicast-faces")]
 use crate::routing_region::is_primary_gateway;
@@ -2608,7 +2609,10 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(token) => Some(LocalFaceEvent::TokenDown {
                 id: token.id,
-                keyexpr: resolve_ext_keyexpr(token.extensions.as_ref(), &hashbrown::HashMap::new()),
+                keyexpr: resolve_ext_keyexpr(
+                    token.extensions.as_deref(),
+                    &hashbrown::HashMap::new(),
+                ),
             }),
             _ => None,
         },
@@ -5245,7 +5249,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// The QoS overwrite of the INGRESS chain, applied to a message that arrived on face `id`:
     /// the message as it should be routed when a rule changed its QoS (a copy, because the frame
     /// the message came in is borrowed), and the band it is routed at, which follows the QoS the
-    /// message now carries. A message no rule changed is `None` and keeps the band it arrived on.
+    /// message now carries. A message no rule changed is `Some((None, band))` and keeps the band
+    /// it arrived on. `None` drops the message: its chain has no room for the QoS and the edit
+    /// has taken the chain out of the copy.
     ///
     /// Upstream runs the chain over the message in place at the demultiplexer, so everything
     /// downstream of it, the route computation and the fan-out, sees the rewritten QoS. Here the
@@ -5257,49 +5263,77 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         message: &NetworkMessage,
         reliable: bool,
         band: Priority,
-    ) -> (Option<NetworkMessage>, Priority) {
+    ) -> Option<(Option<NetworkMessage>, Priority)> {
         let chain = self.ingress_interceptors.read();
         if !chain.overwrites_qos() {
-            return (None, band);
+            return Some((None, band));
         }
         let Some(face) = self.tables.faces.get(&id) else {
-            return (None, band);
+            return Some((None, band));
         };
         let ctx = RouterFaceContext { face, known: None };
         let Some(qos) = chain.overwritten_qos(&ctx, message, reliable) else {
-            return (None, band);
+            return Some((None, band));
         };
         let Some(mut owned) = crate::interceptor::qos_overwrite::clone_for_rewrite(message) else {
-            return (None, band);
+            return Some((None, band));
         };
-        crate::interceptor::qos_overwrite::apply_qos(&mut owned, qos);
-        (Some(owned), qos.priority())
+        stamped(
+            crate::interceptor::qos_overwrite::apply_qos(&mut owned, qos),
+            "an ingress message rewritten by a QoS rule",
+        )
+        .ok()?;
+        Some((Some(owned), qos.priority()))
     }
 
     /// The QoS overwrite of the EGRESS chain, applied to a message about to leave toward the
     /// face whose `state` the caller holds. The message is the caller's own, so it is rewritten
     /// in place; the band and the express flag it is sent with follow the QoS it now carries.
+    /// `None` drops the message for the face `id`: its chain has no room for the QoS, and a
+    /// Request's branch held for the face is let go ([`Self::let_go_unsent_branch`]).
     #[cfg(feature = "access-qos-overwrite")]
+    #[allow(clippy::too_many_arguments)]
     fn overwritten_egress(
         &self,
+        id: FaceId,
         state: &RouterFaceState,
         mut msg: NetworkMessage,
         reliable: bool,
         express: bool,
         priority: Priority,
         known: Option<&str>,
-    ) -> (NetworkMessage, bool, Priority) {
+    ) -> Option<(NetworkMessage, bool, Priority)> {
         let chain = self.egress_interceptors.read();
         if !chain.overwrites_qos() {
-            return (msg, express, priority);
+            return Some((msg, express, priority));
         }
         let ctx = RouterFaceContext { face: state, known };
-        match chain.overwritten_qos(&ctx, &msg, reliable) {
-            Some(qos) => {
-                crate::interceptor::qos_overwrite::apply_qos(&mut msg, qos);
-                (msg, qos.is_express(), qos.priority())
-            }
-            None => (msg, express, priority),
+        let Some(qos) = chain.overwritten_qos(&ctx, &msg, reliable) else {
+            return Some((msg, express, priority));
+        };
+        // The pending table is not taken with the chain held.
+        drop(chain);
+        let stamp = stamped(
+            crate::interceptor::qos_overwrite::apply_qos(&mut msg, qos),
+            "an egress message rewritten by a QoS rule",
+        );
+        if stamp.is_err() {
+            self.let_go_unsent_branch(id, &msg);
+            return None;
+        }
+        Some((msg, qos.is_express(), qos.priority()))
+    }
+
+    /// A Request that does not leave toward face `id`, refused by the egress chain or with no room
+    /// for its QoS, is answered as if the face's queryable had ended it, as upstream's multiplexer
+    /// does (`zenoh/src/net/primitives/mux.rs` @ `face.send_response_final(&mut ResponseFinal {`):
+    /// the branch of the query held for this face closes now and not at its timeout. The branch is
+    /// let go and no final is sent here, because the router's own hold on the query is still open
+    /// while its branches are sent (upstream sends them after it dropped its hold): the final of
+    /// the query is sent by the last branch to go, or by `route_request` when none is left.
+    fn let_go_unsent_branch(&self, id: FaceId, msg: &NetworkMessage) {
+        if let NetworkMessage::Request(request) = msg {
+            let _ = self.pending.guard().take(id, request.rid);
         }
     }
 
@@ -5685,23 +5719,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 kind,
                 InterceptorFlow::Egress,
             );
-            // A query that the egress chain refuses is answered as if the face's queryable had
-            // ended it, as upstream's multiplexer does (`zenoh/src/net/primitives/mux.rs` @
-            // `face.send_response_final(&mut ResponseFinal {`): the branch of the query held for
-            // this face closes now and not at its timeout. The branch is let go and no final is
-            // sent here, because the router's own hold on the query is still open while its
-            // branches are sent (upstream sends them after it dropped its hold): the final of the
-            // query is sent by the last branch to go, or by `route_request` when none is left.
-            if let NetworkMessage::Request(request) = &msg {
-                let _ = self.pending.guard().take(id, request.rid);
-            }
+            self.let_go_unsent_branch(id, &msg);
             return false;
         }
         // The QoS overwrite of the egress chain: the message leaves with the QoS the rules give it
         // for THIS destination, and is sent at the band and the express flag that QoS names.
         #[cfg(feature = "access-qos-overwrite")]
-        let (msg, express, priority) =
-            self.overwritten_egress(state, msg, reliable, express, priority, known);
+        let Some((msg, express, priority)) =
+            self.overwritten_egress(id, state, msg, reliable, express, priority, known)
+        else {
+            return false;
+        };
         // `pubsub-ts-stack` -- this router is a node the message passes on its way: it records
         // its routing on the stack the message carries, once for each destination it goes to
         // (upstream's dispatcher does, as it hands the message to each face).
@@ -5771,8 +5799,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(new_link) = self.tables.faces.get(&new_face).and_then(|s| s.link) else {
             return Ok(0);
         };
-        let full = build_linkstate_oam_owned(&net.build_new_link_bootstrap(new_link))?;
-        let delta = match net.build_link_added_delta_for_existing(neighbour, neighbour_was_new) {
+        let full = build_linkstate_oam_owned(&net.build_new_link_bootstrap(new_link)?)?;
+        let delta = match net.build_link_added_delta_for_existing(neighbour, neighbour_was_new)? {
             Some(list) => Some(build_linkstate_oam_owned(&list)?),
             None => None,
         };
@@ -5798,7 +5826,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return Ok(0);
         };
         // R2893 — nothing to tell in a single-hop gossip `Network`.
-        let Some(list) = net.build_link_removed_delta() else {
+        let Some(list) = net.build_link_removed_delta()? else {
             return Ok(0);
         };
         let oam = build_linkstate_oam_owned(&list)?;
@@ -5868,7 +5896,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // found and repaired on the peer side only: psid space is per sender,
         // so the source must get the `new` half back to learn self's psids.
         self.fan_out_tier(tier, true, |id, zid| {
-            match net.build_reflood_for(changes, zid, id == source) {
+            match net.build_reflood_for(changes, zid, id == source)? {
                 Some(list) => Ok(Some(NetworkMessage::Oam(build_linkstate_oam_owned(&list)?))),
                 None => Ok(None),
             }
@@ -6403,7 +6431,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let (decl_id, exts) = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => (u.id, u.extensions.as_ref()),
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => (u.id, u.extensions.as_deref()),
             _ => return,
         };
         let Some(declared) = self.resolve_withdrawn(
@@ -6489,7 +6517,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         let (decl_id, info) = match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
-                (dq.id, read_queryable_info(dq.extensions.as_ref()))
+                (dq.id, read_queryable_info(dq.extensions.as_deref()))
             }
             _ => return,
         };
@@ -6566,7 +6594,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let (decl_id, exts) = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => (u.id, u.extensions.as_ref()),
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => (u.id, u.extensions.as_deref()),
             _ => return,
         };
         let Some(declared) = self.resolve_withdrawn(
@@ -6760,7 +6788,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let (decl_id, exts) = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclToken(u) => (u.id, u.extensions.as_ref()),
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => (u.id, u.extensions.as_deref()),
             _ => return,
         };
         let Some(declared) = self.resolve_withdrawn(
@@ -7499,7 +7527,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Ok(mut carrier) = build(keyexpr) else {
             return;
         };
-        set_declare_source(&mut carrier, out_node_id);
+        if stamped(
+            set_declare_source(&mut carrier, out_node_id),
+            "a re-flooded declaration",
+        )
+        .is_err()
+        {
+            return;
+        }
         let _ = self.fan_out_tier(tier, reliable, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
@@ -8202,7 +8237,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // mandatory ext_nodeid id 0x03). Faithful to zenoh pubsub.rs (a client-sub
         // data-route direction node-id is NodeId::default()=0). The DATA-plane twin of
         // the R311y179 forward_request_to_client_queryables source-reset fix.
-        set_push_source(&mut carrier, 0);
+        if stamped(
+            set_push_source(&mut carrier, 0),
+            "a Push for the client faces",
+        )
+        .is_err()
+        {
+            return;
+        }
         // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
         // the published K, excluding the inbound face (never echo a client's own
         // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects_target`
@@ -11296,8 +11338,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         if client_gate {
             let mut template = request.clone();
-            set_request_source(&mut template, 0);
-            if set_request_keyexpr_literal(&mut template, keyexpr).is_ok() {
+            if stamped(
+                set_request_source(&mut template, 0),
+                "a Request for the client faces",
+            )
+            .is_ok()
+                && set_request_keyexpr_literal(&mut template, keyexpr).is_ok()
+            {
                 for ((region, _hat), leg) in self.client_regions().zip(&route.clients) {
                     forwarded +=
                         match Self::first_complete_client(inbound, std::slice::from_ref(leg)) {
@@ -11440,7 +11487,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return 0;
         }
         let mut template = request.clone();
-        set_request_source(&mut template, block.source_psid);
+        if stamped(
+            set_request_source(&mut template, block.source_psid),
+            "a Request for a mesh tier",
+        )
+        .is_err()
+        {
+            return 0;
+        }
         if set_request_keyexpr_literal(&mut template, keyexpr).is_err() {
             return 0;
         }
@@ -11484,7 +11538,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         deadline: Instant,
     ) -> usize {
         let mut template = request.clone();
-        set_request_source(&mut template, 0);
+        if stamped(
+            set_request_source(&mut template, 0),
+            "a Request for the client faces",
+        )
+        .is_err()
+        {
+            return 0;
+        }
         if set_request_keyexpr_literal(&mut template, keyexpr).is_err() {
             return 0;
         }
@@ -11594,7 +11655,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return 0;
         }
         let mut carrier = request.clone();
-        set_request_source(&mut carrier, source_psid);
+        if stamped(
+            set_request_source(&mut carrier, source_psid),
+            "a Request for one face",
+        )
+        .is_err()
+        {
+            return 0;
+        }
         if set_request_keyexpr_literal(&mut carrier, keyexpr).is_err() {
             return 0;
         }
@@ -12935,7 +13003,11 @@ impl RouterForwarder {
                 // The QoS overwrite of the ingress chain: what is routed from here on is the
                 // message with the QoS the rules give it, at the band that QoS names.
                 #[cfg(feature = "access-qos-overwrite")]
-                let (rewritten, band) = on.overwritten_ingress(id, message, *reliable, *priority);
+                let Some((rewritten, band)) =
+                    on.overwritten_ingress(id, message, *reliable, *priority)
+                else {
+                    continue;
+                };
                 #[cfg(feature = "access-qos-overwrite")]
                 let (message, priority) = (rewritten.as_ref().unwrap_or(message), &band);
                 match message {
@@ -13693,13 +13765,16 @@ mod tests {
         e.options |= OPT_L;
         e.num_locators = Some(locators.len() as u64);
         e.locators = Some(
-            locators
-                .iter()
-                .map(|s| wz_codecs::locator::LocatorOwned {
-                    locator_len: s.len() as u64,
-                    locator: sce_forge_runtime::codec::SceString::from_view(s).unwrap(),
-                })
-                .collect(),
+            wz_session_core::held_list::held(
+                locators
+                    .iter()
+                    .map(|s| wz_codecs::locator::LocatorOwned {
+                        locator_len: s.len() as u64,
+                        locator: sce_forge_runtime::codec::SceString::from_view(s).unwrap(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("a fixture's locators are within the bound"),
         );
         e
     }
@@ -13717,7 +13792,13 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: links.len() as u64,
-            links: links.iter().map(|&psid| LinkstateLink { psid }).collect(),
+            links: wz_session_core::held_list::held(
+                links
+                    .iter()
+                    .map(|&psid| LinkstateLink { psid })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("a fixture's links are within the bound"),
             weights: None,
         }
     }
@@ -13725,7 +13806,8 @@ mod tests {
     fn list(entries: Vec<LinkstateOwned>) -> LinkstateListOwned {
         LinkstateListOwned {
             num_link_states: entries.len() as u64,
-            link_states: entries,
+            link_states: wz_session_core::held_list::held(entries)
+                .expect("a fixture's entries are within the bound"),
         }
     }
 
@@ -14647,7 +14729,7 @@ mod tests {
         let msgs = parse_frame_payload(&payload).expect("parse frame payload");
         match msgs.first() {
             Some(NetworkMessage::Oam(oam)) => match try_parse_linkstate_oam(oam) {
-                LinkstateOam::Decoded(list) => list.link_states,
+                LinkstateOam::Decoded(list) => list.link_states.into_inner(),
                 other => panic!("OAM did not decode as a link-state list: {other:?}"),
             },
             other => panic!("expected a flooded OAM, got {other:?}"),
@@ -14667,7 +14749,7 @@ mod tests {
             for msg in parse_frame_payload(&payload).expect("parse frame payload") {
                 if let NetworkMessage::Oam(oam) = msg {
                     if let LinkstateOam::Decoded(list) = try_parse_linkstate_oam(&oam) {
-                        out.extend(list.link_states);
+                        out.extend(list.link_states.into_inner());
                     }
                 }
             }
@@ -17999,7 +18081,7 @@ mod tests {
             sink_r.reset();
             let mut push = wz_session_core::push_build::build_push_literal("demo/k", b"payload")
                 .expect("push");
-            set_push_source(&mut push, source_psid);
+            set_push_source(&mut push, source_psid).expect("within the bound");
             forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
             sink_r.frame_count()
         };
@@ -19398,7 +19480,7 @@ mod tests {
                     _ => panic!("push keyexpr must be literal"),
                 }
                 assert!(
-                    read_queryable_info(d.extensions.as_ref()).complete,
+                    read_queryable_info(d.extensions.as_deref()).complete,
                     "the folded completeness (complete=true) rides the push"
                 );
             }
@@ -19431,7 +19513,7 @@ mod tests {
         let first_id = match &forwarded_declare(&sink_c.frame_bytes(0)).body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
                 assert!(
-                    !read_queryable_info(d.extensions.as_ref()).complete,
+                    !read_queryable_info(d.extensions.as_deref()).complete,
                     "the first push carries complete=false"
                 );
                 d.id
@@ -19448,7 +19530,7 @@ mod tests {
                     "the re-push reuses the SAME decl id (pico updates the target in place)"
                 );
                 assert!(
-                    read_queryable_info(d.extensions.as_ref()).complete,
+                    read_queryable_info(d.extensions.as_deref()).complete,
                     "the re-push carries complete=true"
                 );
             }
@@ -19763,7 +19845,7 @@ mod tests {
         sink_c.reset(); // clear the empty-dump DeclareFinal
                         // A router-native sub for demo/** sourced from the DISTANT router Rd (node_id 7).
         let mut decl = build_declare_subscriber(0, 0, Some("demo/**")).expect("build");
-        set_declare_source(&mut decl, 7);
+        set_declare_source(&mut decl, 7).expect("within the bound");
         forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
             sink_c.frame_count(),
@@ -21789,7 +21871,8 @@ mod tests {
         sink_client.reset();
         let mut push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
-        wz_session_core::push_routing_context::set_push_source(&mut push, 5); // NON-ZERO peer source
+        wz_session_core::push_routing_context::set_push_source(&mut push, 5)
+            .expect("within the bound"); // NON-ZERO peer source
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
         assert_eq!(
             sink_client.frame_count(),
@@ -22112,7 +22195,7 @@ mod tests {
         // The distant node 0xDD subscribes demo/data (a sourced DeclareSubscriber
         // whose node_id 7 resolves via the inbound link's psid map to 0xDD).
         let mut decl = build_declare_subscriber(0, 0, Some("demo/data")).expect("build");
-        set_declare_source(&mut decl, 7);
+        set_declare_source(&mut decl, 7).expect("within the bound");
         forward_one(&fwd, FaceId(1), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
             fwd.on_tables()
@@ -22475,7 +22558,7 @@ mod tests {
         fwd.tick();
         // A router-native sub for K sourced from the DISTANT router Rd (node_id 7).
         let mut decl = build_declare_subscriber(0, 0, Some("demo/data")).expect("build");
-        set_declare_source(&mut decl, 7);
+        set_declare_source(&mut decl, 7).expect("within the bound");
         forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
             fwd.on_tables()
@@ -24715,7 +24798,7 @@ mod tests {
         match msgs.first() {
             Some(NetworkMessage::Declare(d)) => match &d.body {
                 DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
-                    read_queryable_info(q.extensions.as_ref())
+                    read_queryable_info(q.extensions.as_deref())
                 }
                 _ => panic!("forwarded Declare is not a DeclareQueryable"),
             },
@@ -25107,7 +25190,7 @@ mod tests {
         fwd.register(FaceId(0), &a);
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xBB, 7, 5); // psid 7 = 0xBB on A's link
         let mut decl = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
-        set_declare_source(&mut decl, 7); // node_id 7 = A's psid for B
+        set_declare_source(&mut decl, 7).expect("within the bound"); // node_id 7 = A's psid for B
         forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
             fwd.on_tables()
@@ -26335,7 +26418,7 @@ mod tests {
         // source resolves to None -> the within-tier peer leg is dropped.
         let mut req = wz_session_core::request_build::build_request_query(90, 0, Some("demo/q"))
             .expect("build request");
-        set_request_source(&mut req, 99);
+        set_request_source(&mut req, 99).expect("within the bound");
         forward_one(&fwd, FaceId(0), NetworkMessage::Request(Box::new(req)));
         assert_eq!(
             sink_client.frame_count(),
@@ -28950,7 +29033,7 @@ mod tests {
             DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
                 assert_eq!(u.id, pushed_id, "under the id the token was pushed with");
                 assert!(
-                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
+                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_deref())
                         .is_none(),
                     "an id-only retraction carries no keyexpr"
                 );
@@ -29094,7 +29177,7 @@ mod tests {
             DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
                 assert_eq!(u.id, 0, "a one-shot id");
                 assert_eq!(
-                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
+                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_deref())
                         .map(|k| k.to_string()),
                     Some("group/member/a".to_owned()),
                     "the keyexpr rides in the extension"

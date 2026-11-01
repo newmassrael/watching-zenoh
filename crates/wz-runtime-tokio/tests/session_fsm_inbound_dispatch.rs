@@ -649,7 +649,7 @@ fn parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder()
         header: 0x1A,
         ..ResponseFinal::default()
     };
-    let bytes = rf.encode_to_vec().expect("a fixture ResponseFinal encodes");
+    let bytes = rf.encode_to_vec();
     assert_eq!(
         bytes.len(),
         2,
@@ -679,7 +679,7 @@ fn parse_frame_payload_dispatches_oam_mid_to_oam_decoder() {
         header: 0x1F,
         ..Oam::default()
     };
-    let bytes = oam.encode_to_vec().expect("a fixture Oam encodes");
+    let bytes = oam.encode_to_vec();
 
     let parsed = parse_frame_payload(&bytes).expect("OAM envelope parses");
     assert_eq!(

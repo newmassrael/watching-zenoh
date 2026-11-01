@@ -295,13 +295,16 @@ mod tests {
             zid: crate::codec_owned::owned_bytes(ZID).unwrap(),
             num_locators: (!locators.is_empty()).then_some(locators.len() as u64),
             locators: (!locators.is_empty()).then(|| {
-                locators
-                    .iter()
-                    .map(|l| LocatorOwned {
-                        locator_len: l.len() as u64,
-                        locator: crate::codec_owned::owned_string(l).unwrap(),
-                    })
-                    .collect()
+                crate::held_list::held(
+                    locators
+                        .iter()
+                        .map(|l| LocatorOwned {
+                            locator_len: l.len() as u64,
+                            locator: crate::codec_owned::owned_string(l).unwrap(),
+                        })
+                        .collect(),
+                )
+                .expect("within the bound")
             }),
         };
         let body = owned

@@ -1918,7 +1918,6 @@ fn response_final(request_id: u64) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// A cleartext TCP capture of ONE query exchange: the client asks, the server

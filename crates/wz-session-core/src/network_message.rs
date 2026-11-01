@@ -34,6 +34,10 @@ use alloc::boxed::Box;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+// Not every build reads a held chain here: the arms that do are gated on the body codecs.
+#[cfg(feature = "storage-profile")]
+#[allow(unused_imports)]
+use crate::held_list::HeldList;
 #[cfg(all(feature = "codec-frame", feature = "alloc"))]
 use sce_forge_runtime::codec::CodecError;
 // The owned walks (`alloc`) and the walks that lend a record where its payload lies.
@@ -442,11 +446,11 @@ impl NetworkMessage {
                 use wz_codecs::request::RequestOwnedVariant as B;
                 let body = match &request.body {
                     #[cfg(feature = "request-put-del")]
-                    B::CodecZenohMsgPut(put) => RequestBodyChain::Put(put.extensions.as_deref()),
+                    B::CodecZenohMsgPut(put) => RequestBodyChain::Put(put.extensions.entries()),
                     #[cfg(feature = "request-put-del")]
-                    B::CodecZenohMsgDel(del) => RequestBodyChain::Del(del.extensions.as_deref()),
+                    B::CodecZenohMsgDel(del) => RequestBodyChain::Del(del.extensions.entries()),
                     B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
-                        RequestBodyChain::Query(query.extensions.as_deref())
+                        RequestBodyChain::Query(query.extensions.entries())
                     }
                     // This build does not name a Put or a Del body, so it has no space to judge
                     // one against. The codec may still build the arms (another crate of the
@@ -456,18 +460,18 @@ impl NetworkMessage {
                     #[allow(unreachable_patterns)]
                     _ => return ExtAdmission::Unjudged,
                 };
-                judge_request_chains(request.extensions.as_deref(), body)
+                judge_request_chains(request.extensions.entries(), body)
             }
             #[cfg(feature = "codec-push")]
             Self::Push(push) => {
                 use wz_codecs::push::PushOwnedVariant as B;
                 let (body, chain) = match &push.body {
                     B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => {
-                        (Z::Put, put.extensions.as_deref())
+                        (Z::Put, put.extensions.entries())
                     }
-                    B::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+                    B::CodecZenohMsgDel(del) => (Z::Del, del.extensions.entries()),
                 };
-                judge_push_chains(push.extensions.as_deref(), body, chain)
+                judge_push_chains(push.extensions.entries(), body, chain)
             }
             #[cfg(feature = "codec-response")]
             Self::Response(response) => {
@@ -477,50 +481,48 @@ impl NetworkMessage {
                     B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
                         let (data, chain) = match &reply.body {
                             R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
-                                (Z::Put, put.extensions.as_deref())
+                                (Z::Put, put.extensions.entries())
                             }
-                            R::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+                            R::CodecZenohMsgDel(del) => (Z::Del, del.extensions.entries()),
                         };
                         ResponseBodyChain::Reply {
-                            reply: reply.extensions.as_deref(),
+                            reply: reply.extensions.entries(),
                             data,
                             chain,
                         }
                     }
-                    B::CodecZenohErr(err) => ResponseBodyChain::Err(err.extensions.as_deref()),
+                    B::CodecZenohErr(err) => ResponseBodyChain::Err(err.extensions.entries()),
                 };
-                judge_response_chains(response.extensions.as_deref(), body)
+                judge_response_chains(response.extensions.entries(), body)
             }
             #[cfg(feature = "codec-response-final")]
             Self::ResponseFinal(done) => {
-                judge_chain(C::Network(N::ResponseFinal), done.extensions.as_deref())
+                judge_chain(C::Network(N::ResponseFinal), done.extensions.entries())
             }
-            Self::Oam(oam) => judge_chain(C::Network(N::Oam), oam.extensions.as_deref()),
+            Self::Oam(oam) => judge_chain(C::Network(N::Oam), oam.extensions.entries()),
             Self::Interest(interest) => {
-                judge_chain(C::Network(N::Interest), interest.extensions.as_deref())
+                judge_chain(C::Network(N::Interest), interest.extensions.entries())
             }
             #[cfg(feature = "codec-declare")]
             Self::Declare(declare) => {
                 use crate::ext_admit::DeclarationKind as K;
                 use wz_codecs::declare::DeclareOwnedVariant as B;
                 let (kind, chain) = match &declare.body {
-                    B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.as_deref()),
-                    B::CodecZenohUndeclKexpr(d) => (K::UndeclKeyExpr, d.extensions.as_deref()),
-                    B::CodecZenohDeclSubscriber(d) => (K::Subscriber, d.extensions.as_deref()),
+                    B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.entries()),
+                    B::CodecZenohUndeclKexpr(d) => (K::UndeclKeyExpr, d.extensions.entries()),
+                    B::CodecZenohDeclSubscriber(d) => (K::Subscriber, d.extensions.entries()),
                     B::CodecZenohUndeclSubscriber(d) => {
-                        (K::UndeclSubscriber, d.extensions.as_deref())
+                        (K::UndeclSubscriber, d.extensions.entries())
                     }
-                    B::CodecZenohDeclQueryable(d) => (K::Queryable, d.extensions.as_deref()),
-                    B::CodecZenohUndeclQueryable(d) => {
-                        (K::UndeclQueryable, d.extensions.as_deref())
-                    }
-                    B::CodecZenohDeclToken(d) => (K::Token, d.extensions.as_deref()),
-                    B::CodecZenohUndeclToken(d) => (K::UndeclToken, d.extensions.as_deref()),
+                    B::CodecZenohDeclQueryable(d) => (K::Queryable, d.extensions.entries()),
+                    B::CodecZenohUndeclQueryable(d) => (K::UndeclQueryable, d.extensions.entries()),
+                    B::CodecZenohDeclToken(d) => (K::Token, d.extensions.entries()),
+                    B::CodecZenohUndeclToken(d) => (K::UndeclToken, d.extensions.entries()),
                     B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
-                        (K::Final, d.extensions.as_deref())
+                        (K::Final, d.extensions.entries())
                     }
                 };
-                judge_declare_chains(declare.extensions.as_deref(), kind, chain)
+                judge_declare_chains(declare.extensions.entries(), kind, chain)
             }
             Self::Unknown { .. } => ExtAdmission::Unjudged,
         }
@@ -565,19 +567,19 @@ fn declare_view_admission(
     use crate::ext_admit::DeclarationKind as K;
     use wz_codecs::declare::DeclareVariant as B;
     let (kind, chain) = match &declare.body {
-        B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.as_deref()),
-        B::CodecZenohUndeclKexpr(d) => (K::UndeclKeyExpr, d.extensions.as_deref()),
-        B::CodecZenohDeclSubscriber(d) => (K::Subscriber, d.extensions.as_deref()),
-        B::CodecZenohUndeclSubscriber(d) => (K::UndeclSubscriber, d.extensions.as_deref()),
-        B::CodecZenohDeclQueryable(d) => (K::Queryable, d.extensions.as_deref()),
-        B::CodecZenohUndeclQueryable(d) => (K::UndeclQueryable, d.extensions.as_deref()),
-        B::CodecZenohDeclToken(d) => (K::Token, d.extensions.as_deref()),
-        B::CodecZenohUndeclToken(d) => (K::UndeclToken, d.extensions.as_deref()),
+        B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.entries()),
+        B::CodecZenohUndeclKexpr(d) => (K::UndeclKeyExpr, d.extensions.entries()),
+        B::CodecZenohDeclSubscriber(d) => (K::Subscriber, d.extensions.entries()),
+        B::CodecZenohUndeclSubscriber(d) => (K::UndeclSubscriber, d.extensions.entries()),
+        B::CodecZenohDeclQueryable(d) => (K::Queryable, d.extensions.entries()),
+        B::CodecZenohUndeclQueryable(d) => (K::UndeclQueryable, d.extensions.entries()),
+        B::CodecZenohDeclToken(d) => (K::Token, d.extensions.entries()),
+        B::CodecZenohUndeclToken(d) => (K::UndeclToken, d.extensions.entries()),
         B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
-            (K::Final, d.extensions.as_deref())
+            (K::Final, d.extensions.entries())
         }
     };
-    judge_declare_chains(declare.extensions.as_deref(), kind, chain)
+    judge_declare_chains(declare.extensions.entries(), kind, chain)
 }
 
 /// [`NetworkMessage::ext_admission`] for an Interest read where its frame lies.
@@ -595,7 +597,7 @@ fn interest_view_admission(
     interest: &wz_codecs::interest::Interest<'_>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
-    judge_chain(C::Network(N::Interest), interest.extensions.as_deref())
+    judge_chain(C::Network(N::Interest), interest.extensions.entries())
 }
 
 /// [`NetworkMessage::ext_admission`] for a ResponseFinal read where its frame
@@ -617,7 +619,7 @@ fn response_final_view_admission(
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
     judge_chain(
         C::Network(N::ResponseFinal),
-        response_final.extensions.as_deref(),
+        response_final.extensions.entries(),
     )
 }
 
@@ -634,7 +636,7 @@ fn response_final_view_admission(
 ))]
 fn oam_view_admission(oam: &wz_codecs::oam::Oam<'_>) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
-    judge_chain(C::Network(N::Oam), oam.extensions.as_deref())
+    judge_chain(C::Network(N::Oam), oam.extensions.entries())
 }
 
 /// The verdict on a Push: its own chain, then the chain of the body it carries
@@ -670,11 +672,11 @@ fn push_view_admission(push: &wz_codecs::push::Push<'_>) -> crate::ext_admit::Ex
     use wz_codecs::push::PushVariant as B;
     let (body, chain) = match &push.body {
         B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => {
-            (Z::Put, put.extensions.as_deref())
+            (Z::Put, put.extensions.entries())
         }
-        B::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+        B::CodecZenohMsgDel(del) => (Z::Del, del.extensions.entries()),
     };
-    judge_push_chains(push.extensions.as_deref(), body, chain)
+    judge_push_chains(push.extensions.entries(), body, chain)
 }
 
 /// The chain a Request's body carries, for [`judge_request_chains`]: a Put's or a
@@ -855,19 +857,19 @@ fn response_view_admission(
         B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
             let (data, chain) = match &reply.body {
                 R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
-                    (Z::Put, put.extensions.as_deref())
+                    (Z::Put, put.extensions.entries())
                 }
-                R::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+                R::CodecZenohMsgDel(del) => (Z::Del, del.extensions.entries()),
             };
             ResponseBodyChain::Reply {
-                reply: reply.extensions.as_deref(),
+                reply: reply.extensions.entries(),
                 data,
                 chain,
             }
         }
-        B::CodecZenohErr(err) => ResponseBodyChain::Err(err.extensions.as_deref()),
+        B::CodecZenohErr(err) => ResponseBodyChain::Err(err.extensions.entries()),
     };
-    judge_response_chains(response.extensions.as_deref(), body)
+    judge_response_chains(response.extensions.entries(), body)
 }
 
 /// The batch a participant may act on: `messages` itself, or the refusal of the
@@ -2098,8 +2100,7 @@ mod chain_saturation_tests {
             id: 7,
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture oam record is encodable");
+        .encode_to_vec();
         wire.extend_from_slice(&push_with_put_exts(
             crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1,
         ));
@@ -2408,7 +2409,7 @@ fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid:
 fn put_payload_size(put: &crate::wire::parts::MsgPutOwned) -> usize {
     crate::put_payload::payload_len(put)
         + zbuf_ext_len(
-            put.extensions.as_deref(),
+            put.extensions.entries(),
             crate::ext_header::body_eid::PUT_ATTACHMENT,
         )
 }
@@ -2445,14 +2446,14 @@ where
             StatMessage::Put,
             space,
             put_payload_size(b),
-            b.extensions.as_deref(),
+            b.extensions.entries(),
         ),
         V::CodecZenohMsgDel(b) => stats_data_class(
             MessageLabel::Del,
             StatMessage::Del,
             space,
-            del_payload_size(b.extensions.as_deref()),
-            b.extensions.as_deref(),
+            del_payload_size(b.extensions.entries()),
+            b.extensions.entries(),
         ),
     }
 }
@@ -2478,14 +2479,14 @@ where
             StatMessage::Put,
             space,
             put_payload_size(b),
-            b.extensions.as_deref(),
+            b.extensions.entries(),
         ),
         V::CodecZenohMsgDel(b) => stats_data_class(
             MessageLabel::Query,
             StatMessage::Del,
             space,
-            del_payload_size(b.extensions.as_deref()),
-            b.extensions.as_deref(),
+            del_payload_size(b.extensions.entries()),
+            b.extensions.entries(),
         ),
         // The marker that precedes a Query's value is its own extension, not a
         // Put's (`ext_header::body_ext_id::QUERY_SHM`), and upstream's `is_shm`
@@ -2494,8 +2495,8 @@ where
             MessageLabel::Query,
             StatMessage::Query,
             space,
-            query_payload_size(b.extensions.as_deref()),
-            b.extensions.as_deref(),
+            query_payload_size(b.extensions.entries()),
+            b.extensions.entries(),
             crate::ext_header::body_ext_id::QUERY_SHM,
         ),
     }
@@ -2539,14 +2540,14 @@ where
                     StatMessage::Reply,
                     space,
                     put_payload_size(p),
-                    p.extensions.as_deref(),
+                    p.extensions.entries(),
                 ),
                 RV::CodecZenohMsgDel(d) => stats_data_class(
                     MessageLabel::Reply,
                     StatMessage::Reply,
                     space,
-                    del_payload_size(d.extensions.as_deref()),
-                    d.extensions.as_deref(),
+                    del_payload_size(d.extensions.entries()),
+                    d.extensions.entries(),
                 ),
             }
         }
@@ -2556,7 +2557,7 @@ where
             StatMessage::Reply,
             space,
             b.payload_len as usize,
-            b.extensions.as_deref(),
+            b.extensions.entries(),
         ),
     }
 }
@@ -2580,7 +2581,6 @@ mod record_walk_tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture oam record is encodable")
     }
 
     /// What `for_each_record` hands over, one entry per call: the OAM id, or
@@ -2802,10 +2802,7 @@ mod record_walk_tests {
         }
 
         fn response_final_bytes(done: &wz_codecs::response_final::ResponseFinalOwned) -> Vec<u8> {
-            done.try_as_borrowed()
-                .expect("a view")
-                .encode_to_vec()
-                .expect("a fixture response final is encodable")
+            done.try_as_borrowed().expect("a view").encode_to_vec()
         }
 
         /// A DeclSubscriber of `id` on a literal keyexpr.
@@ -2950,12 +2947,12 @@ mod record_walk_tests {
             let before = subscriber(1);
             let declare = {
                 let mut d = build_declare_final();
-                d.extensions = Some(alloc::vec![mandatory_unknown()]);
+                d.extensions = Some(crate::held_list::one_entry(mandatory_unknown()));
                 declare_bytes(&d)
             };
             let interest = {
                 let mut i = build_interest_subscribers(3, true, true, 0, Some("k")).expect("build");
-                i.extensions = Some(alloc::vec![mandatory_unknown()]);
+                i.extensions = Some(crate::held_list::one_entry(mandatory_unknown()));
                 i.header |= wire_const::FLAG_N_Z;
                 interest_bytes(&i)
             };
@@ -2964,7 +2961,7 @@ mod record_walk_tests {
                     4,
                     crate::sample::QosLevel::default(),
                 );
-                done.extensions = Some(alloc::vec![mandatory_unknown()]);
+                done.extensions = Some(crate::held_list::one_entry(mandatory_unknown()));
                 done.header |= wire_const::FLAG_N_Z;
                 response_final_bytes(&done)
             };
@@ -2982,7 +2979,6 @@ mod record_walk_tests {
                     ..Default::default()
                 }
                 .encode_to_vec()
-                .expect("a fixture oam with an unknown ext is encodable")
             };
             for (name, bad) in [
                 ("declare", declare),
@@ -3191,7 +3187,6 @@ mod best_effort_batch_tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture oam record is encodable")
     }
 
     fn oam_ids(messages: &[NetworkMessage]) -> Vec<u64> {
@@ -3589,11 +3584,12 @@ mod payload_size_tests {
     fn twelve_byte_put_with(exts: alloc::vec::Vec<ExtEntryOwned>) -> MsgPutOwned {
         let mut put: MsgPutOwned =
             crate::put_payload::inline(b"twelve bytes").expect("a literal put");
-        for ext in exts {
-            put.extensions
-                .get_or_insert_with(Default::default)
-                .push(ext);
-        }
+        crate::held_list::edit_chain(&mut put.extensions, |chain| {
+            for ext in exts {
+                chain.get_or_insert_with(Default::default).push(ext);
+            }
+        })
+        .expect("within the bound");
         put
     }
 
@@ -3653,9 +3649,12 @@ mod payload_size_tests {
             .expect("build a literal put");
         match &mut push.body {
             V::CodecZenohMsgPut(b) | V::Default { body: b, .. } => {
-                b.extensions
-                    .get_or_insert_with(Default::default)
-                    .push(zbuf_ext(body_ext_id::PUT_ATTACHMENT, b"attached"));
+                crate::held_list::edit_chain(&mut b.extensions, |chain| {
+                    chain
+                        .get_or_insert_with(Default::default)
+                        .push(zbuf_ext(body_ext_id::PUT_ATTACHMENT, b"attached"));
+                })
+                .expect("within the bound");
             }
             V::CodecZenohMsgDel(_) => unreachable!("a literal put"),
         }
@@ -4000,14 +3999,14 @@ mod mandatory_extension_rule_tests {
         every_header(
             "push envelope",
             &[NODE_ID],
-            push(|p, h| p.extensions = Some(alloc::vec![entry(h)])),
+            push(|p, h| p.extensions = Some(crate::held_list::one_entry(entry(h)))),
         );
         every_header(
             "push put body",
             SHM,
             push(|p, h| match &mut p.body {
                 crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
-                    put.extensions = Some(alloc::vec![entry(h)]);
+                    put.extensions = Some(crate::held_list::one_entry(entry(h)));
                 }
                 other => panic!("a literal push carries a Put, got {other:?}"),
             }),
@@ -4020,7 +4019,7 @@ mod mandatory_extension_rule_tests {
             let mut push = crate::push_build::build_push_del_literal("k").unwrap();
             match &mut push.body {
                 crate::wire::PushOwnedVariant::CodecZenohMsgDel(del) => {
-                    del.extensions = Some(alloc::vec![entry(header)]);
+                    del.extensions = Some(crate::held_list::one_entry(entry(header)));
                 }
                 other => panic!("a literal del carries a Del, got {other:?}"),
             }
@@ -4033,14 +4032,14 @@ mod mandatory_extension_rule_tests {
         let request = || crate::request_build::build_request_query(1, 0, Some("k")).unwrap();
         every_header("request envelope", &[NODE_ID, TARGET], |header| {
             let mut request = request();
-            request.extensions = Some(alloc::vec![entry(header)]);
+            request.extensions = Some(crate::held_list::one_entry(entry(header)));
             NetworkMessage::Request(Box::new(request))
         });
         every_header("request query body", &[], |header| {
             let mut request = request();
             match &mut request.body {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
-                    query.extensions = Some(alloc::vec![query_entry(header)]);
+                    query.extensions = Some(crate::held_list::one_entry(query_entry(header)));
                 }
                 other => panic!("a query request carries a Query, got {other:?}"),
             }
@@ -4053,14 +4052,14 @@ mod mandatory_extension_rule_tests {
         let reply = || crate::response_build::build_response_reply_literal(1, "k", b"v").unwrap();
         every_header("response envelope", &[], |header| {
             let mut response = reply();
-            response.extensions = Some(alloc::vec![entry(header)]);
+            response.extensions = Some(crate::held_list::one_entry(entry(header)));
             NetworkMessage::Response(Box::new(response))
         });
         every_header("reply envelope", &[], |header| {
             let mut response = reply();
             match &mut response.body {
                 crate::wire::ResponseOwnedVariant::CodecZenohReply(reply) => {
-                    reply.extensions = Some(alloc::vec![entry(header)]);
+                    reply.extensions = Some(crate::held_list::one_entry(entry(header)));
                 }
                 other => panic!("a reply carries a Reply, got {other:?}"),
             }
@@ -4072,7 +4071,7 @@ mod mandatory_extension_rule_tests {
                 crate::wire::ResponseOwnedVariant::CodecZenohReply(reply) => {
                     match &mut reply.body {
                         crate::wire::parts::ReplyOwnedVariant::CodecZenohMsgPut(put) => {
-                            put.extensions = Some(alloc::vec![entry(header)]);
+                            put.extensions = Some(crate::held_list::one_entry(entry(header)));
                         }
                         other => panic!("a literal reply carries a Put, got {other:?}"),
                     }
@@ -4086,7 +4085,7 @@ mod mandatory_extension_rule_tests {
                 crate::response_build::build_response_err_literal(1, "k", b"e").unwrap();
             match &mut response.body {
                 crate::wire::ResponseOwnedVariant::CodecZenohErr(err) => {
-                    err.extensions = Some(alloc::vec![entry(header)]);
+                    err.extensions = Some(crate::held_list::one_entry(entry(header)));
                 }
                 other => panic!("an err response carries an Err, got {other:?}"),
             }
@@ -4101,17 +4100,17 @@ mod mandatory_extension_rule_tests {
                 1,
                 crate::sample::QosLevel::DEFAULT,
             );
-            done.extensions = Some(alloc::vec![entry(header)]);
+            done.extensions = Some(crate::held_list::one_entry(entry(header)));
             NetworkMessage::ResponseFinal(done)
         });
         every_header("oam", &[], |header| {
             let mut oam = wz_codecs::oam::Oam::default().try_into_owned().unwrap();
-            oam.extensions = Some(alloc::vec![entry(header)]);
+            oam.extensions = Some(crate::held_list::one_entry(entry(header)));
             NetworkMessage::Oam(oam)
         });
         every_header("interest", &[NODE_ID], |header| {
             let mut interest = crate::interest_build::build_interest_final(1);
-            interest.extensions = Some(alloc::vec![entry(header)]);
+            interest.extensions = Some(crate::held_list::one_entry(entry(header)));
             NetworkMessage::Interest(interest)
         });
     }
@@ -4120,14 +4119,14 @@ mod mandatory_extension_rule_tests {
     fn a_declare_defines_the_node_id_and_only_an_undeclare_the_wire_expression() {
         every_header("declare envelope", &[NODE_ID], |header| {
             let mut declare = crate::declare_build::build_declare_final();
-            declare.extensions = Some(alloc::vec![entry(header)]);
+            declare.extensions = Some(crate::held_list::one_entry(entry(header)));
             NetworkMessage::Declare(Box::new(declare))
         });
         every_header("undeclare subscriber", &[WIRE_EXPR], |header| {
             let mut declare = crate::declare_build::build_undeclare_subscriber(1);
             match &mut declare.body {
                 wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(d) => {
-                    d.extensions = Some(alloc::vec![entry(header)]);
+                    d.extensions = Some(crate::held_list::one_entry(entry(header)));
                 }
                 other => panic!("an undeclare carries its body, got {other:?}"),
             }
@@ -4138,7 +4137,7 @@ mod mandatory_extension_rule_tests {
                 crate::declare_build::build_declare_subscriber(1, 0, Some("k")).unwrap();
             match &mut declare.body {
                 wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
-                    d.extensions = Some(alloc::vec![entry(header)]);
+                    d.extensions = Some(crate::held_list::one_entry(entry(header)));
                 }
                 other => panic!("a declare carries its body, got {other:?}"),
             }
@@ -4162,7 +4161,7 @@ mod mandatory_extension_rule_tests {
             let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
             match &mut push.body {
                 crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
-                    put.extensions = Some(alloc::vec![entry(header)]);
+                    put.extensions = Some(crate::held_list::one_entry(entry(header)));
                     put.header |= 0x80;
                 }
                 _ => unreachable!(),

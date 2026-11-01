@@ -169,7 +169,8 @@ impl<T: OpenBodySource + ?Sized> OpenBodySource for &T {
 }
 
 /// A value of `OpenBody` held in the types a caller already has: a source
-/// ([`OpenBodySource`]) whose lists are slices and whose bodies are references.
+/// ([`OpenBodySource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct OpenBodyParts<'a> {

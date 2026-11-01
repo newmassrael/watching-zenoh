@@ -317,14 +317,12 @@ pub fn attach_query_value_shm(
     use wz_codecs::ext_unit::ExtUnit;
     use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
 
-    let existing = query.extensions.take().unwrap_or_default();
     if crate::ext_view::find_by_eid(
-        sce_forge_runtime::codec::SceList::as_slice(&existing),
+        crate::held_list::HeldList::entries(&query.extensions).unwrap_or(&[]),
         crate::ext_header::body_eid::QUERY_VALUE,
     )
     .is_some()
     {
-        query.extensions = Some(existing);
         // The chain already describes a value, and so does the one asked for: two
         // descriptions of one wire that contradict each other, which is what
         // this error says of a chain and a field.
@@ -352,7 +350,13 @@ pub fn attach_query_value_shm(
     };
 
     let mut chain = alloc::vec![marker, value];
-    chain.extend(existing);
+    chain.extend(
+        query
+            .extensions
+            .take()
+            .map(sce_forge_runtime::codec::Bounded::into_inner)
+            .unwrap_or_default(),
+    );
     let last = chain.len() - 1;
     for (i, ext) in chain.iter_mut().enumerate() {
         ext.header = if i == last {
@@ -362,7 +366,7 @@ pub fn attach_query_value_shm(
         };
     }
     query.header |= 0x80; // Q_Z: the chain is present
-    query.extensions = Some(chain);
+    query.extensions = Some(crate::held_list::held(chain)?);
     Ok(())
 }
 
@@ -376,21 +380,19 @@ fn sliced_query_value(
     &[wz_codecs::zbuf_slice::ZbufSliceOwned<crate::wire::WireStorage>],
 )> {
     use crate::ext_header::body_eid;
+    use crate::held_list::HeldList;
     use crate::wire::parts::QueryExtEntryOwnedVariant;
-    use sce_forge_runtime::codec::SceList;
 
-    let chain = query.extensions.as_ref()?;
-    SceList::as_slice(chain)
+    query
+        .extensions
+        .entries()?
         .iter()
         .enumerate()
         .find_map(|(index, ext)| match &ext.body {
             QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value)
                 if crate::ext_view::ExtEntryView::eid(ext) == body_eid::QUERY_VALUE =>
             {
-                value
-                    .slices
-                    .as_ref()
-                    .map(|slices| (index, SceList::as_slice(slices)))
+                value.slices.entries().map(|slices| (index, slices))
             }
             _ => None,
         })
@@ -436,7 +438,6 @@ pub fn relay_query_value_shm(
         has_shared_slice, join_slices, remake_slices, slice_list, RelayFault,
     };
     use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
-    use sce_forge_runtime::codec::SceList;
     use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
 
     let Some((index, slices)) = sliced_query_value(query) else {
@@ -444,11 +445,8 @@ pub fn relay_query_value_shm(
     };
     let remade = remake_slices(slices, decide)?;
     let unrepresentable = |_| RelayFault::Unrepresentable;
-    let chain = query
-        .extensions
-        .as_ref()
+    let entries = crate::held_list::HeldList::entries(&query.extensions)
         .ok_or(RelayFault::Unrepresentable)?;
-    let entries = SceList::as_slice(chain);
     let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &entries[index].body else {
         return Err(RelayFault::Unrepresentable);
     };
@@ -514,23 +512,10 @@ pub fn relay_query_value_shm(
 fn query_chain(
     entries: Vec<crate::wire::parts::QueryExtEntryOwned>,
 ) -> Result<
-    <crate::wire::WireStorage as sce_forge_runtime::codec::CodecStorage>::List<
-        crate::wire::parts::QueryExtEntryOwned,
-        16,
-    >,
+    sce_forge_runtime::codec::Bounded<Vec<crate::wire::parts::QueryExtEntryOwned>, 8>,
     crate::put_payload::RelayFault,
 > {
-    use sce_forge_runtime::codec::SceList;
-
-    let mut list = <<crate::wire::WireStorage as sce_forge_runtime::codec::CodecStorage>::List<
-        crate::wire::parts::QueryExtEntryOwned,
-        16,
-    > as SceList<_>>::empty();
-    for ext in entries {
-        list.try_push(ext)
-            .map_err(|_| crate::put_payload::RelayFault::Unrepresentable)?;
-    }
-    Ok(list)
+    crate::held_list::held(entries).map_err(|_| crate::put_payload::RelayFault::Unrepresentable)
 }
 
 /// R121j-2a — fluent builder for `Request(Query)` that composes the
@@ -964,12 +949,12 @@ impl RequestQueryBuilder {
                 // ZBuf arm reads a value differently after a shared-memory
                 // marker). The three entries built above are all plain, so each
                 // becomes the plain shape of the Query's entry.
-                query.extensions = Some(
+                query.extensions = Some(crate::held_list::held(
                     query_exts
                         .into_iter()
                         .map(crate::ext_view::query_ext_from_generic)
                         .collect(),
-                );
+                )?);
             }
         } else {
             unreachable!(
@@ -1068,7 +1053,7 @@ impl RequestQueryBuilder {
                     ext.header |= 0x80;
                 }
             }
-            request.extensions = Some(request_exts);
+            request.extensions = Some(crate::held_list::held(request_exts)?);
         }
 
         Ok(request)

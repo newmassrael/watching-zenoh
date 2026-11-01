@@ -47,18 +47,25 @@ use crate::query_mode::TARGET_EXT_HEADER;
 /// the shared [`ext_nodeid::read_source`].
 #[cfg(feature = "alloc")]
 pub fn read_request_source(request: &RequestOwned) -> u16 {
-    ext_nodeid::read_source(request.extensions.as_ref())
+    ext_nodeid::read_source(request.extensions.as_deref())
 }
 
 /// Set the routing-context source `node_id` on a Request's `ext_nodeid`
 /// extension (`node_id == 0` removes it — zenoh's omit-on-DEFAULT). The shared
 /// [`ext_nodeid::set_source`] owns the chain
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
-/// Request-level header `Z` flag to the resulting chain.
+/// Request-level header `Z` flag to the resulting chain. An `Err` is a chain at its bound with no
+/// room for the entry ([`crate::held_list::edit_chain`]): the Request cannot be sent.
 #[cfg(feature = "alloc")]
-pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
-    let present = ext_nodeid::set_source(&mut request.extensions, node_id);
+pub fn set_request_source(
+    request: &mut RequestOwned,
+    node_id: u16,
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    let present = crate::held_list::edit_chain(&mut request.extensions, |chain| {
+        ext_nodeid::set_source(chain, node_id)
+    })?;
     ext_nodeid::sync_header_z(&mut request.header, present);
+    Ok(())
 }
 
 /// Read the [`QueryTarget`] a routed Query carries in its `ext_target`
@@ -73,7 +80,7 @@ pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
 /// target-specific decoder.
 #[cfg(feature = "alloc")]
 pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
-    read_target_in(request.extensions.as_deref())
+    read_target_in(crate::held_list::HeldList::entries(&request.extensions))
 }
 
 /// [`read_request_target`] over any chain a reader can ask, the owned one or a
@@ -124,7 +131,7 @@ pub const TIMEOUT_EXT_HEADER: u8 =
 /// [`TIMEOUT_EXT_HEADER`].
 #[cfg(feature = "alloc")]
 pub fn read_request_timeout_ms(request: &RequestOwned) -> Option<u64> {
-    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TIMEOUT_EXT_HEADER)
+    ext_nodeid::read_z64_ext(request.extensions.as_deref(), TIMEOUT_EXT_HEADER)
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -133,7 +140,6 @@ mod tests {
     use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};
     use crate::request_build::build_request_query;
     use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant};
-    use alloc::vec;
     use wz_codecs::ext_zint::ExtZint;
 
     /// A routed Query Request (rid 42, literal keyexpr via mapping id 0) — the
@@ -169,14 +175,14 @@ mod tests {
     #[test]
     fn set_then_read_round_trips() {
         let mut r = request();
-        set_request_source(&mut r, 7);
+        set_request_source(&mut r, 7).unwrap();
         assert_eq!(read_request_source(&r), 7);
     }
 
     #[test]
     fn nodeid_header_is_id_mandatory_z64_terminal() {
         let mut r = request();
-        set_request_source(&mut r, 7);
+        set_request_source(&mut r, 7).unwrap();
         let exts = r.extensions.as_ref().expect("ext present after set");
         assert_eq!(exts.len(), 1, "only the nodeid ext");
         // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (sole / last entry).
@@ -231,7 +237,7 @@ mod tests {
         let mut r =
             build_request_query_with_target(42, 0, Some("demo/q"), QueryTarget::AllComplete)
                 .expect("build");
-        set_request_source(&mut r, 7); // add the nodeid ext alongside the target ext
+        set_request_source(&mut r, 7).unwrap(); // add the nodeid ext alongside the target ext
         assert_eq!(read_request_source(&r), 7, "the nodeid still reads");
         assert_eq!(
             read_request_target(&r),
@@ -243,8 +249,8 @@ mod tests {
     #[test]
     fn set_zero_removes_the_ext() {
         let mut r = request();
-        set_request_source(&mut r, 7);
-        set_request_source(&mut r, 0);
+        set_request_source(&mut r, 7).unwrap();
+        set_request_source(&mut r, 0).unwrap();
         assert_eq!(read_request_source(&r), 0);
         assert!(r.extensions.is_none(), "the sole ext is dropped to None");
         assert_eq!(r.header & MESSAGE_FLAG_Z, 0, "Request Z bit cleared");
@@ -253,8 +259,8 @@ mod tests {
     #[test]
     fn set_replaces_an_existing_nodeid() {
         let mut r = request();
-        set_request_source(&mut r, 7);
-        set_request_source(&mut r, 9);
+        set_request_source(&mut r, 7).unwrap();
+        set_request_source(&mut r, 9).unwrap();
         assert_eq!(read_request_source(&r), 9);
         let exts = r.extensions.as_ref().expect("ext present");
         assert_eq!(exts.len(), 1, "replaced, not duplicated");
@@ -264,10 +270,10 @@ mod tests {
     fn coexists_with_another_ext_and_fixes_chain_z_bits() {
         let mut r = request();
         // Seed a pre-existing (non-nodeid) extension.
-        r.extensions = Some(vec![other_ext()]);
+        r.extensions = Some(crate::held_list::one_entry(other_ext()));
         r.header |= MESSAGE_FLAG_Z;
 
-        set_request_source(&mut r, 7);
+        set_request_source(&mut r, 7).unwrap();
         let exts = r.extensions.as_ref().expect("chain present");
         assert_eq!(exts.len(), 2, "other ext kept, nodeid appended");
         // The non-last entry carries the continuation bit; nodeid terminates.
@@ -276,7 +282,7 @@ mod tests {
         assert_eq!(read_request_source(&r), 7);
 
         // Removing the nodeid leaves the other ext as a terminal entry.
-        set_request_source(&mut r, 0);
+        set_request_source(&mut r, 0).unwrap();
         let exts = r.extensions.as_ref().expect("other ext remains");
         assert_eq!(exts.len(), 1);
         assert_eq!(exts[0].header, 0x01 | EXT_ENC_Z64, "Z bit cleared (last)");
@@ -295,7 +301,7 @@ mod tests {
         use wz_codecs_test_support::TestWire;
 
         let mut r = request();
-        set_request_source(&mut r, 7);
+        set_request_source(&mut r, 7).unwrap();
         let bytes = r.wire();
 
         let mut cursor = SceCursor::new(&bytes);

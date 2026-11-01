@@ -76,7 +76,7 @@ use std::num::NonZeroU16;
 use petgraph::dot::Dot;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableUnGraph;
-use sce_forge_runtime::codec::{SceBytes, SceStr, SceString};
+use sce_forge_runtime::codec::{Bounded, CodecError, SceBytes, SceStr, SceString};
 use wz_codecs::linkstate::LinkstateOwned;
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_codecs::linkstate_list::LinkstateListOwned;
@@ -151,11 +151,24 @@ fn local_psid(idx: NodeIndex) -> u64 {
 /// ([`build_linkstate_list`](LinkstateNetwork::build_linkstate_list) /
 /// [`build_linkstate_split`](LinkstateNetwork::build_linkstate_split)). zenoh
 /// `make_msg` writes the list the same way (`network.rs:355-357`).
-fn into_list(link_states: Vec<LinkstateOwned>) -> LinkstateListOwned {
-    LinkstateListOwned {
+///
+/// The graph has no cap on its nodes, so a list can be past the bound of the
+/// codec's: `TooManyElements`, as is an entry that could not be built, and the
+/// list is not sent.
+fn into_list(
+    entries: impl IntoIterator<Item = Result<LinkstateOwned, CodecError>>,
+) -> Result<LinkstateListOwned, CodecError> {
+    let link_states = entries.into_iter().collect::<Result<Vec<_>, _>>()?;
+    Ok(LinkstateListOwned {
         num_link_states: link_states.len() as u64,
-        link_states,
-    }
+        link_states: within_bound(link_states)?,
+    })
+}
+
+/// `list` within the bound of the codec's list it fills, which a list of this
+/// graph's own nodes or links is not by construction.
+fn within_bound<T, const MAX: usize>(list: Vec<T>) -> Result<Bounded<Vec<T>, MAX>, CodecError> {
+    Bounded::new(list).ok_or(CodecError::TooManyElements)
 }
 
 /// Project a node's host locators (`&[String]`) into the codec's owned
@@ -174,7 +187,9 @@ fn into_list(link_states: Vec<LinkstateOwned>) -> LinkstateListOwned {
 /// codec ([`MAX_LOCATOR_LEN`] = the `SceString<N>` width, [`MAX_LOCATORS_PER_NODE`]
 /// = the list `max-count`), so this never hand-copies a literal that could
 /// silently drift from the generated type.
-fn locators_to_wire(locators: &[String]) -> Option<Vec<LocatorOwned>> {
+fn locators_to_wire(
+    locators: &[String],
+) -> Option<Bounded<Vec<LocatorOwned>, MAX_LOCATORS_PER_NODE>> {
     let owned: Vec<LocatorOwned> = locators
         .iter()
         .filter_map(|loc| {
@@ -197,7 +212,8 @@ fn locators_to_wire(locators: &[String]) -> Option<Vec<LocatorOwned>> {
         })
         .take(MAX_LOCATORS_PER_NODE)
         .collect();
-    (!owned.is_empty()).then_some(owned)
+    (!owned.is_empty())
+        .then(|| Bounded::new(owned).expect("`take` stopped the list at MAX_LOCATORS_PER_NODE"))
 }
 
 /// Project a decoded entry's `LocatorOwned` list back into host `String`s for
@@ -1049,13 +1065,12 @@ impl LinkstateNetwork {
     /// gossip-mode counterpart of
     /// [`build_linkstate_split`](Self::build_linkstate_split), which is the
     /// linkstate-mode shape.
-    pub fn build_linkstate_gossip(&self, nodes: &[Zid]) -> LinkstateListOwned {
+    pub fn build_linkstate_gossip(&self, nodes: &[Zid]) -> Result<LinkstateListOwned, CodecError> {
         into_list(
             nodes
                 .iter()
                 .filter_map(|zid| self.get_idx(zid))
-                .map(|idx| self.make_link_state(idx, Details::ZidOnly))
-                .collect(),
+                .map(|idx| self.make_link_state(idx, Details::ZidOnly)),
         )
     }
 
@@ -1541,7 +1556,14 @@ impl LinkstateNetwork {
     /// new neighbour's links). Locators ride the FULL form only (a node's dial
     /// addresses, advertised when it is first introduced); the ingest's
     /// preserve-on-None rule keeps them across the links-only updates that follow.
-    fn make_link_state(&self, idx: NodeIndex, details: Details) -> LinkstateOwned {
+    ///
+    /// Self has no cap on its links, so its entry can be past the bound of the
+    /// codec's `links`: `TooManyElements`, and the list it belongs to is not sent.
+    fn make_link_state(
+        &self,
+        idx: NodeIndex,
+        details: Details,
+    ) -> Result<LinkstateOwned, CodecError> {
         let node = &self.graph[idx];
         let (want_zid, want_links) = details.fields();
         // links: resolve each neighbour zid to its local psid, with a weight per
@@ -1610,7 +1632,7 @@ impl LinkstateNetwork {
         if node.is_gateway {
             options |= OPT_G;
         }
-        LinkstateOwned {
+        Ok(LinkstateOwned {
             options,
             psid: local_psid(idx),
             sn: node.sn,
@@ -1627,9 +1649,9 @@ impl LinkstateNetwork {
             num_locators: locators.as_ref().map(|l| l.len() as u64),
             locators,
             links_len: links.len() as u64,
-            links,
-            weights: has_weight.then_some(weights),
-        }
+            links: within_bound(links)?,
+            weights: has_weight.then(|| within_bound(weights)).transpose()?,
+        })
     }
 
     /// Whether node `idx`'s dial locators may ride a FULL link-state entry this
@@ -1672,25 +1694,23 @@ impl LinkstateNetwork {
     /// pin's bootstrap "carries none" and registered that as a divergence: the
     /// pin's own send overwrites the bootstrap's locator choice with the gate,
     /// so it carries them exactly as wz's full list does.
-    pub fn build_new_link_bootstrap(&self, new_link: LinkId) -> LinkstateListOwned {
+    pub fn build_new_link_bootstrap(
+        &self,
+        new_link: LinkId,
+    ) -> Result<LinkstateListOwned, CodecError> {
         if self.is_single_hop_gossip() {
             let to_gateway = self
                 .links
                 .get(&new_link)
                 .is_some_and(|l| l.remote_is_gateway);
-            return into_list(
-                self.graph
-                    .node_indices()
-                    .map(|idx| {
-                        let details = if idx == self.idx && to_gateway {
-                            Details::Full
-                        } else {
-                            Details::ZidOnly
-                        };
-                        self.make_link_state(idx, details)
-                    })
-                    .collect(),
-            );
+            return into_list(self.graph.node_indices().map(|idx| {
+                let details = if idx == self.idx && to_gateway {
+                    Details::Full
+                } else {
+                    Details::ZidOnly
+                };
+                self.make_link_state(idx, details)
+            }));
         }
         if !self.is_single_hop_network() {
             return self.build_linkstate_list();
@@ -1699,8 +1719,7 @@ impl LinkstateNetwork {
             self.graph
                 .node_indices()
                 .filter(|&idx| self.is_direct_neighbour(&self.graph[idx].zid))
-                .map(|idx| self.make_link_state(idx, Details::ZidOnly))
-                .collect(),
+                .map(|idx| self.make_link_state(idx, Details::ZidOnly)),
         )
     }
 
@@ -1709,12 +1728,11 @@ impl LinkstateNetwork {
     /// [`ingest_linkstate_list`](Self::ingest_linkstate_list)). Every graph
     /// node, full state. Mirrors zenoh `make_msg` over all nodes
     /// (`network.rs:350-365`).
-    pub fn build_linkstate_list(&self) -> LinkstateListOwned {
+    pub fn build_linkstate_list(&self) -> Result<LinkstateListOwned, CodecError> {
         into_list(
             self.graph
                 .node_indices()
-                .map(|idx| self.make_link_state(idx, Details::Full))
-                .collect(),
+                .map(|idx| self.make_link_state(idx, Details::Full)),
         )
     }
 
@@ -1728,7 +1746,11 @@ impl LinkstateNetwork {
     /// zids are skipped. Mirrors zenoh `make_msg` over the `propagate_link_states`
     /// per-link `out` list (`network.rs:645-678`: new = `Details{zid:true}`,
     /// updated = `Details{zid:false}`).
-    pub fn build_linkstate_split(&self, new: &[Zid], updated: &[Zid]) -> LinkstateListOwned {
+    pub fn build_linkstate_split(
+        &self,
+        new: &[Zid],
+        updated: &[Zid],
+    ) -> Result<LinkstateListOwned, CodecError> {
         into_list(
             new.iter()
                 .filter_map(|zid| self.get_idx(zid))
@@ -1738,8 +1760,7 @@ impl LinkstateNetwork {
                         .iter()
                         .filter_map(|zid| self.get_idx(zid))
                         .map(|idx| self.make_link_state(idx, Details::LinksOnly)),
-                )
-                .collect(),
+                ),
         )
     }
 
@@ -1750,8 +1771,8 @@ impl LinkstateNetwork {
     /// driver flood paths share one construction (the self-links-only delta is one
     /// concept). Equivalent to `build_linkstate_split(&[], &[self_zid])` without
     /// the zid round-trip.
-    pub fn build_self_links_delta(&self) -> LinkstateListOwned {
-        into_list(vec![self.make_link_state(self.idx, Details::LinksOnly)])
+    pub fn build_self_links_delta(&self) -> Result<LinkstateListOwned, CodecError> {
+        into_list([self.make_link_state(self.idx, Details::LinksOnly)])
     }
 
     /// Build the minimal delta zenoh `add_link` sends to its EXISTING links when
@@ -1765,7 +1786,10 @@ impl LinkstateNetwork {
     /// two-pass ingest tolerates either order, but this matches zenoh). If the
     /// neighbour is not in the graph the delta degrades to self's links-only
     /// entry alone.
-    pub fn build_link_added_delta(&self, neighbour: &Zid) -> LinkstateListOwned {
+    pub fn build_link_added_delta(
+        &self,
+        neighbour: &Zid,
+    ) -> Result<LinkstateListOwned, CodecError> {
         let mut entries = Vec::with_capacity(2);
         if let Some(n_idx) = self.get_idx(neighbour) {
             entries.push(self.make_link_state(n_idx, Details::ZidOnly));
@@ -1790,24 +1814,27 @@ impl LinkstateNetwork {
         &self,
         neighbour: &Zid,
         neighbour_was_new: bool,
-    ) -> Option<LinkstateListOwned> {
+    ) -> Result<Option<LinkstateListOwned>, CodecError> {
         if self.is_single_hop_network() {
-            return None;
+            return Ok(None);
         }
         let gossip_introduces =
             self.object == NetObject::Gossip && !*self.full_linkstate && !self.gossip_multihop;
-        Some(if neighbour_was_new || gossip_introduces {
+        let delta = if neighbour_was_new || gossip_introduces {
             self.build_link_added_delta(neighbour)
         } else {
             self.build_self_links_delta()
-        })
+        };
+        delta.map(Some)
     }
 
     /// R2893 — what the surviving links are told when self LOSES a link, or
     /// `None` in a single-hop gossip `Network`, where the pin removes the node
     /// and sends nothing (`zenoh/src/net/protocol/network.rs` @ `pub(crate) fn remove_link`).
-    pub fn build_link_removed_delta(&self) -> Option<LinkstateListOwned> {
-        (!self.is_single_hop_network()).then(|| self.build_self_links_delta())
+    pub fn build_link_removed_delta(&self) -> Result<Option<LinkstateListOwned>, CodecError> {
+        (!self.is_single_hop_network())
+            .then(|| self.build_self_links_delta())
+            .transpose()
     }
 
     /// R2893 — the re-flood an ingest's `changes` owe the face whose neighbour
@@ -1828,7 +1855,7 @@ impl LinkstateNetwork {
         changes: &Changes,
         target: Option<Zid>,
         target_is_source: bool,
-    ) -> Option<LinkstateListOwned> {
+    ) -> Result<Option<LinkstateListOwned>, CodecError> {
         let not_target = |z: &&Zid| target != Some(**z);
         // A multihop net floods links as a link-state one does: the pin reads both flags in the
         // one test (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`).
@@ -1841,7 +1868,9 @@ impl LinkstateNetwork {
                 .filter(|z| self.gossip_reflood_admits(z))
                 .cloned()
                 .collect();
-            return (!nodes.is_empty()).then(|| self.build_linkstate_gossip(&nodes));
+            return (!nodes.is_empty())
+                .then(|| self.build_linkstate_gossip(&nodes))
+                .transpose();
         }
         let new: Vec<Zid> = changes.new.iter().filter(not_target).cloned().collect();
         let updated: Vec<Zid> = if target_is_source {
@@ -1851,6 +1880,7 @@ impl LinkstateNetwork {
         };
         (!(new.is_empty() && updated.is_empty()))
             .then(|| self.build_linkstate_split(&new, &updated))
+            .transpose()
     }
 
     /// Resolve a received list from psid-space to zid-space against the
@@ -1883,7 +1913,7 @@ impl LinkstateNetwork {
                 .get_mut(&src_link_id)
                 .expect("link present (checked above)");
             let mut resolved = Vec::with_capacity(list.link_states.len());
-            for entry in list.link_states {
+            for entry in list.link_states.into_inner() {
                 // The G bit, read before any field moves out of `entry`.
                 let is_gateway = entry.g();
                 // The entry's own zid: present (register the psid->zid
@@ -1944,11 +1974,11 @@ impl LinkstateNetwork {
                     whatami,
                     is_gateway,
                     sn: entry.sn,
-                    links: entry.links,
-                    weights: entry.weights,
+                    links: entry.links.into_inner(),
+                    weights: entry.weights.map(Bounded::into_inner),
                     // a `None`/empty `L` field projects to `None`, which the
                     // apply step reads as "keep the node's existing locators".
-                    locators: locators_from_wire(entry.locators),
+                    locators: locators_from_wire(entry.locators.map(Bounded::into_inner)),
                 });
             }
             resolved
@@ -2991,7 +3021,13 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: links.len() as u64,
-            links: links.iter().map(|&p| LinkstateLink { psid: p }).collect(),
+            links: Bounded::new(
+                links
+                    .iter()
+                    .map(|&p| LinkstateLink { psid: p })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("a fixture's links are within the bound"),
             weights: None,
         }
     }
@@ -2999,7 +3035,7 @@ mod tests {
     fn list(entries: Vec<LinkstateOwned>) -> LinkstateListOwned {
         LinkstateListOwned {
             num_link_states: entries.len() as u64,
-            link_states: entries,
+            link_states: Bounded::new(entries).expect("a fixture's entries are within the bound"),
         }
     }
 
@@ -3031,13 +3067,16 @@ mod tests {
         e.options |= OPT_L;
         e.num_locators = Some(locators.len() as u64);
         e.locators = Some(
-            locators
-                .iter()
-                .map(|s| LocatorOwned {
-                    locator_len: s.len() as u64,
-                    locator: SceString::from_view(s).unwrap(),
-                })
-                .collect(),
+            Bounded::new(
+                locators
+                    .iter()
+                    .map(|s| LocatorOwned {
+                        locator_len: s.len() as u64,
+                        locator: SceString::from_view(s).unwrap(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("a fixture's locators are within the bound"),
         );
         e
     }
@@ -3231,12 +3270,15 @@ mod tests {
     ) -> LinkstateOwned {
         let mut e = entry(psid, sn, zid, whatami, links);
         e.weights = Some(
-            weights
-                .iter()
-                .map(|&w| LinkstateWeight {
-                    weight: u64::from(w),
-                })
-                .collect(),
+            Bounded::new(
+                weights
+                    .iter()
+                    .map(|&w| LinkstateWeight {
+                        weight: u64::from(w),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("a fixture's weights are within the bound"),
         );
         e
     }
@@ -3339,7 +3381,7 @@ mod tests {
     /// The weight emitted for `peer` in self's links-only delta, or `None`
     /// when the entry carries no weights at all (no link is set).
     fn advertised_weight(net: &LinkstateNetwork, peer: u8) -> Option<u64> {
-        let delta = net.build_self_links_delta();
+        let delta = net.build_self_links_delta().expect("within the bound");
         let entry = &delta.link_states[0];
         let psid = net.local_psid_of(&zid(peer)).expect("peer indexed");
         let slot = entry
@@ -3492,15 +3534,21 @@ mod tests {
             "routed off the link"
         );
         network.ensure_node(near); // `near` has announced itself; `quiet` has not
-        let bootstrap = network.build_new_link_bootstrap(quiet_link);
+        let bootstrap = network
+            .build_new_link_bootstrap(quiet_link)
+            .expect("within the bound");
         assert_eq!(bootstrap.link_states.len(), 1, "announced neighbours only");
         let entry = &bootstrap.link_states[0];
         assert_ne!(entry.psid, 0, "self is not in the bootstrap");
         assert!(entry.zid.is_some() && entry.links.is_empty() && entry.locators.is_none());
         assert!(network
             .build_link_added_delta_for_existing(&near, true)
+            .expect("within the bound")
             .is_none());
-        assert!(network.build_link_removed_delta().is_none());
+        assert!(network
+            .build_link_removed_delta()
+            .expect("within the bound")
+            .is_none());
         assert_eq!(
             network.remove_link(quiet_link),
             vec![quiet],
@@ -3519,13 +3567,18 @@ mod tests {
         );
         assert!(gossip
             .build_new_link_bootstrap(gossip_link)
+            .expect("within the bound")
             .link_states
             .iter()
             .any(|e| e.psid == 0));
         assert!(gossip
             .build_link_added_delta_for_existing(&near, false)
+            .expect("within the bound")
             .is_some());
-        assert!(gossip.build_link_removed_delta().is_some());
+        assert!(gossip
+            .build_link_removed_delta()
+            .expect("within the bound")
+            .is_some());
     }
 
     /// R2897 — locators are decided per NODE, never per form: the pin
@@ -3550,22 +3603,28 @@ mod tests {
         let mut far_graph = LinkstateNetwork::new(far, WhatAmI::Router);
         far_graph.set_self_locators(vec!["tcp/10.0.0.3:7447".to_string()]);
         let far_link = near_graph.add_link(far, WhatAmI::Router);
-        near_graph.ingest_linkstate_list(far_link, far_graph.build_linkstate_list());
+        near_graph.ingest_linkstate_list(
+            far_link,
+            far_graph.build_linkstate_list().expect("within the bound"),
+        );
         let link_from_near = net
             .links
             .iter()
             .find(|(_, l)| l.zid == near)
             .map(|(id, _)| *id)
             .expect("the link to near");
-        net.ingest_linkstate_list(link_from_near, near_graph.build_linkstate_list());
+        net.ingest_linkstate_list(
+            link_from_near,
+            near_graph.build_linkstate_list().expect("within the bound"),
+        );
         assert!(net.get_node(&far).is_some(), "far is known");
 
-        let self_update = net.build_self_links_delta();
+        let self_update = net.build_self_links_delta().expect("within the bound");
         assert!(
             self_update.link_states[0].locators.is_some(),
             "self's links-only update carries self's locators"
         );
-        let introduction = net.build_link_added_delta(&near);
+        let introduction = net.build_link_added_delta(&near).expect("within the bound");
         let near_entry = introduction
             .link_states
             .iter()
@@ -3576,7 +3635,9 @@ mod tests {
             "a direct neighbour's zid-only introduction carries its locators"
         );
         let far_idx = net.get_idx(&far).expect("far indexed");
-        let far_entry = net.make_link_state(far_idx, Details::Full);
+        let far_entry = net
+            .make_link_state(far_idx, Details::Full)
+            .expect("within the bound");
         assert!(
             far_entry.locators.is_none(),
             "a distant node's locators are withheld even on the full form"
@@ -3608,8 +3669,16 @@ mod tests {
                 .map(|e| (e.psid, e.links.len()))
                 .collect()
         };
-        let to_gateway = links_of(&gossip.build_new_link_bootstrap(to_router));
-        let to_sibling = links_of(&gossip.build_new_link_bootstrap(to_peer));
+        let to_gateway = links_of(
+            &gossip
+                .build_new_link_bootstrap(to_router)
+                .expect("within the bound"),
+        );
+        let to_sibling = links_of(
+            &gossip
+                .build_new_link_bootstrap(to_peer)
+                .expect("within the bound"),
+        );
         assert_eq!(to_gateway.len(), 3, "every node, to a gateway");
         assert_eq!(to_sibling.len(), 3, "every node, to a sibling peer");
         assert!(
@@ -3856,10 +3925,13 @@ mod tests {
 
     /// Weights at the WIRE's width — the codec field is the full zint since
     /// R311y880, and [`entry_weighted`] takes the value width its callers mean.
-    fn alloc_weights(raw: &[u64]) -> Vec<LinkstateWeight> {
-        raw.iter()
-            .map(|&weight| LinkstateWeight { weight })
-            .collect()
+    fn alloc_weights(raw: &[u64]) -> Bounded<Vec<LinkstateWeight>, 64> {
+        Bounded::new(
+            raw.iter()
+                .map(|&weight| LinkstateWeight { weight })
+                .collect::<Vec<_>>(),
+        )
+        .expect("a fixture's weights are within the bound")
     }
 
     // ── d spanning-tree forwarding ──────────────────────────────────
@@ -4457,8 +4529,12 @@ mod tests {
         // the receiver applies the update against its existing psid->zid map.
         let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         net.add_link(zid(0xAA), WhatAmI::Peer); // self advertises a link, so it has one
-        let full = net.build_linkstate_split(&[zid(0x01)], &[]); // self as NEW
-        let links_only = net.build_linkstate_split(&[], &[zid(0x01)]); // self as UPDATED
+        let full = net
+            .build_linkstate_split(&[zid(0x01)], &[]) // self as NEW
+            .expect("within the bound");
+        let links_only = net
+            .build_linkstate_split(&[], &[zid(0x01)]) // self as UPDATED
+            .expect("within the bound");
         let fe = &full.link_states[0];
         let le = &links_only.link_states[0];
         assert!(fe.zid.is_some(), "full carries the zid");
@@ -4484,7 +4560,9 @@ mod tests {
         let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         net.add_link(zid(0x0C), WhatAmI::Peer); // an unrelated existing neighbour C
         net.add_link(zid(0x0B), WhatAmI::Peer); // the just-added neighbour B
-        let delta = net.build_link_added_delta(&zid(0x0B));
+        let delta = net
+            .build_link_added_delta(&zid(0x0B))
+            .expect("within the bound");
         assert_eq!(
             delta.link_states.len(),
             2,
@@ -4518,7 +4596,7 @@ mod tests {
         let mut r = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
         a.add_link(zid(0x0B), WhatAmI::Peer); // A knows R
         let ra = r.add_link(zid(0x0A), WhatAmI::Peer); // R knows A
-        r.ingest_linkstate_list(ra, a.build_linkstate_list()); // bootstrap: R maps A
+        r.ingest_linkstate_list(ra, a.build_linkstate_list().expect("within the bound")); // bootstrap: R maps A
         assert!(
             r.get_node(&zid(0x0A)).is_some(),
             "R mapped A from the bootstrap"
@@ -4527,7 +4605,9 @@ mod tests {
 
         // A gains a NEW neighbour C -> the 2-entry delta to its existing link R.
         a.add_link(zid(0x0C), WhatAmI::Peer);
-        let delta = a.build_link_added_delta(&zid(0x0C));
+        let delta = a
+            .build_link_added_delta(&zid(0x0C))
+            .expect("within the bound");
         assert_eq!(delta.link_states.len(), 2, "[C zid-only, A links-only]");
         let changes = r.ingest_linkstate_list(ra, delta);
 
@@ -4560,9 +4640,13 @@ mod tests {
         t.add_link(zid(0x0A), WhatAmI::Peer);
         let mut s = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
         let st = s.add_link(third, WhatAmI::Peer);
-        s.ingest_linkstate_list(st, t.build_linkstate_list());
+        s.ingest_linkstate_list(st, t.build_linkstate_list().expect("within the bound"));
         s.set_full_linkstate(false);
-        (s.build_linkstate_gossip(&[third]), third)
+        (
+            s.build_linkstate_gossip(&[third])
+                .expect("within the bound"),
+            third,
+        )
     }
 
     #[test]
@@ -4662,12 +4746,16 @@ mod tests {
         let mut r = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
         a.add_link(zid(0x0B), WhatAmI::Peer);
         let ra = r.add_link(zid(0x0A), WhatAmI::Peer);
-        r.ingest_linkstate_list(ra, a.build_linkstate_list());
+        r.ingest_linkstate_list(ra, a.build_linkstate_list().expect("within the bound"));
         a.add_link(zid(0x0C), WhatAmI::Peer);
 
-        let mut delta = a.build_link_added_delta(&zid(0x0C));
-        delta.link_states.reverse(); // self links-only now precedes C zid-only
-        r.ingest_linkstate_list(ra, delta);
+        let mut reversed = a
+            .build_link_added_delta(&zid(0x0C))
+            .expect("within the bound")
+            .link_states
+            .into_inner();
+        reversed.reverse(); // self links-only now precedes C zid-only
+        r.ingest_linkstate_list(ra, list(reversed));
 
         assert!(
             r.get_node(&zid(0x0C)).is_some(),
@@ -4692,7 +4780,7 @@ mod tests {
         let _la = a.add_link(zid(0x0B), WhatAmI::Peer);
         let lb = b.add_link(zid(0x0A), WhatAmI::Peer);
 
-        b.ingest_linkstate_list(lb, a.build_linkstate_list()); // A full -> B maps A
+        b.ingest_linkstate_list(lb, a.build_linkstate_list().expect("within the bound")); // A full -> B maps A
         assert!(
             b.get_idx(&zid(0x0A)).is_some(),
             "B mapped A from the full flood"
@@ -4700,7 +4788,9 @@ mod tests {
         let sn_before = b.get_node(&zid(0x0A)).unwrap().sn;
 
         a.add_link(zid(0x0C), WhatAmI::Peer); // bumps A's sn so the re-advertise is newer
-        let links_only = a.build_linkstate_split(&[], &[zid(0x0A)]);
+        let links_only = a
+            .build_linkstate_split(&[], &[zid(0x0A)])
+            .expect("within the bound");
         assert!(
             links_only.link_states[0].zid.is_none(),
             "A's re-flood omits its zid (links-only)"
@@ -4738,7 +4828,7 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: 0,
-            links: Vec::new(),
+            links: Bounded::default(),
             weights: None,
         };
         let changes = net.ingest_linkstate_list(l, list(vec![links_only_unmapped]));
@@ -4951,9 +5041,9 @@ mod tests {
 
         // Two flood rounds (linkstate is idempotent under re-flood).
         for _ in 0..2 {
-            let a_msg = a.build_linkstate_list();
+            let a_msg = a.build_linkstate_list().expect("within the bound");
             b.ingest_linkstate_list(lb_a, a_msg);
-            let b_msg = b.build_linkstate_list();
+            let b_msg = b.build_linkstate_list().expect("within the bound");
             a.ingest_linkstate_list(la_b, b_msg);
         }
         a.compute_trees();
@@ -4986,13 +5076,13 @@ mod tests {
 
         // Flood until converged: neighbours feed B, then B feeds the far ends.
         for _ in 0..3 {
-            let c_msg = c.build_linkstate_list();
+            let c_msg = c.build_linkstate_list().expect("within the bound");
             b.ingest_linkstate_list(lb_c, c_msg);
-            let a_msg = a.build_linkstate_list();
+            let a_msg = a.build_linkstate_list().expect("within the bound");
             b.ingest_linkstate_list(lb_a, a_msg);
-            let b_to_a = b.build_linkstate_list();
+            let b_to_a = b.build_linkstate_list().expect("within the bound");
             a.ingest_linkstate_list(la_b, b_to_a);
-            let b_to_c = b.build_linkstate_list();
+            let b_to_c = b.build_linkstate_list().expect("within the bound");
             c.ingest_linkstate_list(lc_b, b_to_c);
         }
         a.compute_trees();
@@ -5022,7 +5112,7 @@ mod tests {
         let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
         let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
 
-        b.ingest_linkstate_list(lb_a, a.build_linkstate_list());
+        b.ingest_linkstate_list(lb_a, a.build_linkstate_list().expect("within the bound"));
 
         assert_eq!(
             b.node_locators(&zid(0x0A)),
@@ -5080,7 +5170,7 @@ mod tests {
         // A fresh receiver R links to S and ingests S's full re-flood.
         let mut r = LinkstateNetwork::new(zid(0x02), WhatAmI::Peer);
         let link_s = r.add_link(zid(0x01), WhatAmI::Peer);
-        r.ingest_linkstate_list(link_s, s.build_linkstate_list());
+        r.ingest_linkstate_list(link_s, s.build_linkstate_list().expect("within the bound"));
 
         assert!(
             r.node_locators(&zid(0x20)).is_some(),
@@ -5125,7 +5215,7 @@ mod tests {
         );
         let mut r = LinkstateNetwork::new(zid(0x02), WhatAmI::Peer);
         let link_s = r.add_link(zid(0x01), WhatAmI::Peer);
-        r.ingest_linkstate_list(link_s, s.build_linkstate_list());
+        r.ingest_linkstate_list(link_s, s.build_linkstate_list().expect("within the bound"));
         assert!(
             r.node_locators(&zid(0x30)).is_some(),
             "multihop gossip advertises even a distant node's locators",
@@ -5193,7 +5283,7 @@ mod tests {
         let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
         let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
 
-        b.ingest_linkstate_list(lb_a, a.build_linkstate_list());
+        b.ingest_linkstate_list(lb_a, a.build_linkstate_list().expect("within the bound"));
 
         assert_eq!(
             b.node_locators(&zid(0x0A)),
@@ -5219,6 +5309,7 @@ mod tests {
         // TX: build A's full link-state list, then ENCODE it to wire bytes.
         let wire = a
             .build_linkstate_list()
+            .expect("within the bound")
             .try_as_borrowed()
             .expect("re-borrow A's list for encode")
             .encode_to_vec()
@@ -5259,6 +5350,7 @@ mod tests {
         assert!(
             north
                 .build_linkstate_list()
+                .expect("within the bound")
                 .link_states
                 .iter()
                 .all(|e| !e.g()),
@@ -5274,6 +5366,7 @@ mod tests {
         a.add_link(zid(0x0B), WhatAmI::Peer);
         let wire = a
             .build_linkstate_list()
+            .expect("within the bound")
             .try_as_borrowed()
             .expect("borrow built list")
             .encode_to_vec()
@@ -5324,9 +5417,15 @@ mod tests {
                 relay(1, &[10]),
             ]),
         );
-        let full = net.build_linkstate_split(&[zid(0xAA)], &[]);
-        let links_only = net.build_linkstate_split(&[], &[zid(0xAA)]);
-        let gossip = net.build_linkstate_gossip(&[zid(0xAA), zid(0x07)]);
+        let full = net
+            .build_linkstate_split(&[zid(0xAA)], &[])
+            .expect("within the bound");
+        let links_only = net
+            .build_linkstate_split(&[], &[zid(0xAA)])
+            .expect("within the bound");
+        let gossip = net
+            .build_linkstate_gossip(&[zid(0xAA), zid(0x07)])
+            .expect("within the bound");
         assert!(full.link_states[0].g(), "full");
         assert!(links_only.link_states[0].g(), "links-only");
         assert!(gossip.link_states[0].g(), "node-only (gossip)");
@@ -5565,7 +5664,7 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: 0,
-            links: Vec::new(),
+            links: Bounded::default(),
             weights: None,
         };
         let changes = net.ingest_linkstate_list(link, list(vec![oversized]));
@@ -5597,7 +5696,7 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: 0,
-            links: Vec::new(),
+            links: Bounded::default(),
             weights: None,
         };
         let changes = net.ingest_linkstate_list(link, list(vec![zero_zid]));
@@ -5633,6 +5732,7 @@ mod tests {
         a.add_link(zid(0x0B), WhatAmI::Peer);
         let wire = a
             .build_linkstate_list()
+            .expect("within the bound")
             .try_as_borrowed()
             .expect("borrow built list")
             .encode_to_vec()
@@ -5718,6 +5818,55 @@ mod tests {
         assert_eq!(
             from_wire, me,
             "self recognition is what keeps the spanning-tree next-hop correct"
+        );
+    }
+
+    /// The graph has no cap on its nodes, so a list can be past the codec's
+    /// bound: it is refused when it is built, with the error its encode gave
+    /// before the bound was a type, and not cut short.
+    #[test]
+    fn a_list_of_more_nodes_than_the_bound_is_refused_when_it_is_built() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let mut nodes: Vec<Zid> = (0..64u8).map(|n| zid(0x10 + n)).collect();
+        for node in &nodes {
+            net.add_link(*node, WhatAmI::Peer);
+        }
+        assert_eq!(
+            net.build_linkstate_gossip(&nodes)
+                .map(|list| list.link_states.len()),
+            Ok(64),
+            "a list at the bound is built"
+        );
+        nodes.push(zid(0x01));
+        assert_eq!(
+            net.build_linkstate_gossip(&nodes)
+                .map(|list| list.link_states.len()),
+            Err(CodecError::TooManyElements)
+        );
+    }
+
+    /// Self has no cap on its links, so its own entry can be past the bound of
+    /// the codec's `links`, and any list carrying it is then refused the same way.
+    #[test]
+    fn a_self_with_more_links_than_the_bound_is_refused_when_it_is_built() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        for n in 0..64u8 {
+            net.add_link(zid(0x10 + n), WhatAmI::Peer);
+        }
+        assert_eq!(
+            net.build_self_links_delta()
+                .map(|list| list.link_states[0].links.len()),
+            Ok(64),
+            "an entry at the bound is built"
+        );
+        net.add_link(zid(0x80), WhatAmI::Peer);
+        assert_eq!(
+            net.build_self_links_delta().map(|_| ()),
+            Err(CodecError::TooManyElements)
+        );
+        assert_eq!(
+            net.build_linkstate_split(&[zid(0x01)], &[]).map(|_| ()),
+            Err(CodecError::TooManyElements)
         );
     }
 }

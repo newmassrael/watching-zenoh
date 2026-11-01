@@ -129,7 +129,8 @@ impl<T: LinkstateWeightSource + ?Sized> LinkstateWeightSource for &T {
 }
 
 /// A value of `LinkstateWeight` held in the types a caller already has: a source
-/// ([`LinkstateWeightSource`]) whose lists are slices and whose bodies are references.
+/// ([`LinkstateWeightSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct LinkstateWeightParts {

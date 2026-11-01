@@ -87,6 +87,10 @@
 // `from_view`); the no-alloc control plane stores only `Pending` rows in a
 // `BoundedVec` and fires through the borrowed `ReplyView` seam, so the
 // owned-collection imports are `alloc`-gated.
+// Not every build reads a held chain here: the arms that do are gated on the body codecs.
+#[cfg(feature = "storage-profile")]
+#[allow(unused_imports)]
+use crate::held_list::HeldList;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
@@ -1342,7 +1346,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     },
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
-                    source_info: reply_body_source_info(put.extensions.as_ref()),
+                    source_info: reply_body_source_info(put.extensions.as_deref()),
                     // R311y321 — the reply RECEIVE leg of `pubsub-timestamp`.
                     // The codec already decodes `MsgPutOwned.timestamp`; this
                     // arm simply never read it, so every inbound reply stamp
@@ -1352,7 +1356,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => InboundReplyBody::Del {
                     attachment: del_reply_attachment(del),
-                    source_info: reply_body_source_info(del.extensions.as_ref()),
+                    source_info: reply_body_source_info(del.extensions.as_deref()),
                     timestamp: reply_body_timestamp(del.timestamp.as_ref()),
                 },
                 // Default arm carries a runtime tag whose MID falls
@@ -1377,7 +1381,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             // See ResponseVariant::Default rationale on Reply arm.
             ResponseOwnedVariant::Default { .. } => return,
         };
-        let extensions = response.extensions.as_deref().unwrap_or(&[]);
+        let extensions = response.extensions.entries().unwrap_or(&[]);
         let inbound = InboundReply {
             rid: response.request_id,
             keyexpr_literal: resolved,
@@ -1408,7 +1412,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         #[cfg(feature = "transport-shm")]
         if crate::put_payload::is_sliced(put) {
             let band =
-                crate::put_payload::priority_band(response.extensions.as_deref().unwrap_or(&[]));
+                crate::put_payload::priority_band(response.extensions.entries().unwrap_or(&[]));
             return self.shm.unswap_put(put, band);
         }
         #[cfg(not(feature = "transport-shm"))]
@@ -2421,9 +2425,9 @@ mod tests {
                     value: u64::from(raw),
                 },
             );
-            response.extensions = Some(vec![ext
-                .try_into_owned_in::<crate::wire::WireStorage>()
-                .unwrap()]);
+            response.extensions = Some(crate::held_list::one_entry(
+                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+            ));
             response.header |= 0x80;
         }
         response
@@ -2567,7 +2571,9 @@ mod tests {
         let ResponseOwnedVariant::CodecZenohErr(err) = &mut response.body else {
             panic!("an err builder builds an Err body");
         };
-        err.extensions = Some(vec![crate::extshm::encode_shm_marker_ext()]);
+        err.extensions = Some(crate::held_list::one_entry(
+            crate::extshm::encode_shm_marker_ext(),
+        ));
         err.header |= 0x80; // the Z chain bit, as the generated chain requires
         let wire = response.wire();
 

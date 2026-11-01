@@ -13016,8 +13016,7 @@ mod tests {
                     request_id: 1,
                     ..Default::default()
                 }
-                .encode_to_vec()
-                .expect("a fixture ResponseFinal is encodable"),
+                .encode_to_vec(),
             ),
             (
                 "Interest",
@@ -13046,13 +13045,7 @@ mod tests {
                 .encode_to_vec()
                 .expect("a built interest is encodable"),
             ),
-            (
-                "Oam",
-                None,
-                wz_codecs::oam::Oam::default()
-                    .encode_to_vec()
-                    .expect("a default Oam is encodable"),
-            ),
+            ("Oam", None, wz_codecs::oam::Oam::default().encode_to_vec()),
         ]
     }
 

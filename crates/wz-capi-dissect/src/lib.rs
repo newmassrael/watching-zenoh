@@ -7519,8 +7519,7 @@ mod tests {
                 request_id: 7,
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture ResponseFinal is encodable"),
+            .encode_to_vec(),
         );
 
         // R311y870 — the QUESTION, and one NOBODY ANSWERS: A asks B for its
@@ -16128,7 +16127,6 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture ResponseFinal is encodable")
         };
         let push = |body: wz_codecs::push::PushVariant<'static>| {
             wz_codecs::push::Push {
@@ -17432,8 +17430,7 @@ mod tests {
                 request_id: 7,
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture ResponseFinal is encodable"),
+            .encode_to_vec(),
         );
         let answer = framed_frame(0, &answer_records);
         let (init_a, init_b) = (framed_init(&[1, 2, 3, 4]), framed_init(&[5, 6, 7, 8]));

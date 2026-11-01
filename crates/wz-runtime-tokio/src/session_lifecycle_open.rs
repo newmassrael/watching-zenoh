@@ -228,7 +228,7 @@ impl PeerOpener for LinkstateOpener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sce_forge_runtime::codec::{SceBytes, SceStr, SceString};
+    use sce_forge_runtime::codec::{Bounded, SceBytes, SceStr, SceString};
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::linkstate_list::LinkstateListOwned;
@@ -252,7 +252,13 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: links.len() as u64,
-            links: links.iter().map(|&psid| LinkstateLink { psid }).collect(),
+            links: Bounded::new(
+                links
+                    .iter()
+                    .map(|&psid| LinkstateLink { psid })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("a fixture's links are within the bound"),
             weights: None,
         }
     }
@@ -268,12 +274,15 @@ mod tests {
         if !locs.is_empty() {
             peer.num_locators = Some(locs.len() as u64);
             peer.locators = Some(
-                locs.iter()
-                    .map(|s| LocatorOwned {
-                        locator_len: s.len() as u64,
-                        locator: SceString::from_view(s).unwrap(),
-                    })
-                    .collect(),
+                Bounded::new(
+                    locs.iter()
+                        .map(|s| LocatorOwned {
+                            locator_len: s.len() as u64,
+                            locator: SceString::from_view(s).unwrap(),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("a fixture's locators are within the bound"),
             );
         }
         let entries = vec![
@@ -283,7 +292,7 @@ mod tests {
         ];
         LinkstateListOwned {
             num_link_states: entries.len() as u64,
-            link_states: entries,
+            link_states: Bounded::new(entries).expect("a fixture's entries are within the bound"),
         }
     }
 

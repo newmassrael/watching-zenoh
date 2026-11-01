@@ -200,7 +200,8 @@ impl<T: ScoutSource + ?Sized> ScoutSource for &T {
 }
 
 /// A value of `Scout` held in the types a caller already has: a source
-/// ([`ScoutSource`]) whose lists are slices and whose bodies are references.
+/// ([`ScoutSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ScoutParts<'a> {

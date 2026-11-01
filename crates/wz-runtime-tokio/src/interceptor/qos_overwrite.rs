@@ -46,6 +46,7 @@
 //! `new_peer_multicast` answer none), and neither does this: a group's traffic is not rewritten
 //! whatever `govern_multicast` says.
 
+use sce_forge_runtime::codec::CodecError;
 use wz_routing_graph::Zid;
 use wz_session_core::declare_ext_qos::{
     read_push_qos, read_request_qos, set_push_qos, set_request_qos,
@@ -290,12 +291,14 @@ pub fn message_qos(msg: &NetworkMessage) -> Option<QosLevel> {
     }
 }
 
-/// Write `qos` into `msg`'s QoS extension. A message that carries none is left as it was.
-pub fn apply_qos(msg: &mut NetworkMessage, qos: QosLevel) {
+/// Write `qos` into `msg`'s QoS extension. A message that carries none is left as it was. An `Err`
+/// is a chain at its bound with no room for the entry, which the edit has taken out of the message:
+/// the caller drops the message, as its encode refused it before the bound was a type.
+pub fn apply_qos(msg: &mut NetworkMessage, qos: QosLevel) -> Result<(), CodecError> {
     match msg {
         NetworkMessage::Push(push) => set_push_qos(push, qos),
         NetworkMessage::Request(request) => set_request_qos(request, qos),
-        _ => {}
+        _ => Ok(()),
     }
 }
 
@@ -370,6 +373,8 @@ impl Interceptor for QosOverwriteInterceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_unit::ExtUnit;
     use wz_session_core::push_build::{build_push_del_literal, build_push_literal};
     use wz_session_core::request_build::build_request_query;
 
@@ -516,7 +521,7 @@ mod tests {
         let face = Face::keyed("a/test");
         let qos = run(rules, &face, &query, true);
         assert_eq!(qos.priority(), Priority::RealTime);
-        apply_qos(&mut query, qos);
+        apply_qos(&mut query, qos).expect("within the bound");
         assert_eq!(
             message_qos(&query),
             Some(qos),
@@ -720,6 +725,54 @@ mod tests {
         assert!(message_qos(&declare).is_none());
         assert!(clone_for_rewrite(&declare).is_none());
         assert!(clone_for_rewrite(&put("a/x", b"x")).is_some());
+    }
+
+    /// A Push whose chain holds `count` unit extensions, none of them the QoS.
+    fn put_with_units(count: u8) -> NetworkMessage {
+        let mut push = build_push_literal("a/x", b"x").expect("build put");
+        let chain = (0..count)
+            .map(|n| ExtEntryOwned {
+                header: 0x02 + n,
+                body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+            })
+            .collect::<Vec<_>>();
+        push.extensions = Some(wz_session_core::held_list::held(chain).expect("within the bound"));
+        NetworkMessage::Push(Box::new(push))
+    }
+
+    fn chain_len(msg: &NetworkMessage) -> Option<usize> {
+        match msg {
+            NetworkMessage::Push(push) => push.extensions.as_ref().map(|chain| chain.len()),
+            other => panic!("a Push, got {other:?}"),
+        }
+    }
+
+    /// Every forwarder drops a message on this `Err`: a chain at its bound has no room for a QoS
+    /// entry, and the edit has taken the chain out of the message, so what is left is not the
+    /// message that arrived and does not carry the QoS the rule gave it.
+    #[test]
+    fn a_rewrite_with_no_room_in_a_chain_at_its_bound_is_refused() {
+        let qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
+        let mut msg = put_with_units(8);
+        assert_eq!(chain_len(&msg), Some(8), "the chain is at its bound");
+        assert_eq!(apply_qos(&mut msg, qos), Err(CodecError::TlvChainOverflow));
+        assert_eq!(chain_len(&msg), None, "the chain is gone from the message");
+        assert_ne!(message_qos(&msg), Some(qos), "and the QoS is not on it");
+    }
+
+    /// The control of the test above, which would pass as well if every rewrite were refused: a
+    /// chain at its bound that already holds a QoS entry has that entry replaced, grows by nothing,
+    /// and keeps every other entry.
+    #[test]
+    fn a_rewrite_that_replaces_the_qos_entry_of_a_chain_at_its_bound_goes_through() {
+        let first = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
+        let second = QosLevel::from_parts(Priority::Control, CongestionControl::Block, false);
+        let mut msg = put_with_units(7);
+        apply_qos(&mut msg, first).expect("the eighth entry fits");
+        assert_eq!(chain_len(&msg), Some(8), "the chain is at its bound");
+        assert_eq!(apply_qos(&mut msg, second), Ok(()));
+        assert_eq!(chain_len(&msg), Some(8));
+        assert_eq!(message_qos(&msg), Some(second));
     }
 
     #[test]

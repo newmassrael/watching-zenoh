@@ -36,6 +36,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use sce_forge_runtime::codec::CodecError;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::whatami::WhatAmIMatcher;
@@ -333,10 +334,12 @@ impl GossipCore {
             },
         );
 
-        let full = self.net.build_new_link_bootstrap(link);
-        let delta = self
-            .net
-            .build_link_added_delta_for_existing(&neighbour, was_new);
+        let full = Self::built(self.net.build_new_link_bootstrap(link));
+        let delta = Self::built(
+            self.net
+                .build_link_added_delta_for_existing(&neighbour, was_new),
+        )
+        .flatten();
         let mut effects = Effects::default();
         for (id, held) in &self.faces {
             if !self.gossips_to(held.whatami) {
@@ -344,7 +347,7 @@ impl GossipCore {
             }
             let list = if *id == face {
                 // The new link is told every node.
-                Some(&full)
+                full.as_ref()
             } else if held.zid == Some(neighbour) {
                 // Another link to the same node: it learns of this change from the new link's
                 // own bootstrap.
@@ -418,7 +421,8 @@ impl GossipCore {
             if !self.gossips_to(held.whatami) {
                 continue;
             }
-            let reflood = self.net.build_reflood_for(&changes, held.zid, *id == face);
+            let reflood =
+                Self::built(self.net.build_reflood_for(&changes, held.zid, *id == face)).flatten();
             if let Some(oam) = reflood.as_ref().and_then(Self::carrier) {
                 effects.sends.push(Outbound { face: *id, oam });
             }
@@ -426,9 +430,21 @@ impl GossipCore {
         effects
     }
 
-    /// `list` as the message that carries it. A list the codec cannot encode is not sent: the
-    /// graph builds none, so this is a node that cannot be told rather than a node that is
-    /// lied to.
+    /// The list the graph built, or nothing for one past the bound, which the graph refuses when
+    /// it builds it. A list that was not built is not sent: this is a node that cannot be told
+    /// rather than a node that is lied to.
+    fn built<T>(list: Result<T, CodecError>) -> Option<T> {
+        match list {
+            Ok(list) => Some(list),
+            Err(err) => {
+                log::debug!("gossip: a topology list was not built: {err:?}");
+                None
+            }
+        }
+    }
+
+    /// `list` as the message that carries it. A list past the bound never gets here, it is
+    /// refused when it is built; one the codec cannot encode is not sent either.
     fn carrier(list: &LinkstateListOwned) -> Option<OamOwned> {
         match build_linkstate_oam_owned(list) {
             Ok(oam) => Some(oam),
@@ -541,7 +557,9 @@ mod tests {
 
     /// A list that says nothing, built by the graph as it builds the list of no nodes.
     fn empty_list() -> LinkstateListOwned {
-        LinkstateNetwork::new(Zid::from_slice(&zid(9)), WhatAmI::Peer).build_linkstate_gossip(&[])
+        LinkstateNetwork::new(Zid::from_slice(&zid(9)), WhatAmI::Peer)
+            .build_linkstate_gossip(&[])
+            .expect("no node is within the bound")
     }
 
     fn identity(zid: &[u8], wire: u8) -> FaceIdentity {

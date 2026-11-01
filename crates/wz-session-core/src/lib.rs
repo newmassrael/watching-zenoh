@@ -1120,6 +1120,11 @@ pub mod wireexpr_build;
 #[cfg(feature = "storage-profile")]
 pub mod ext_nodeid;
 
+/// A list a message holds, kept within its bound as a type: how this crate reads, makes and edits
+/// one.
+#[cfg(feature = "storage-profile")]
+pub mod held_list;
+
 /// The timestamp stack a Push, a Request or a Response may carry (extension `0x7`): the bytes of
 /// its body, and its place in a chain of extensions. What a node records in it, and with what
 /// clock, is the host's.

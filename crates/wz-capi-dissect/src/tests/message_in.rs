@@ -119,7 +119,6 @@ fn response_final_message() -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture ResponseFinal is encodable")
 }
 
 /// Init, InitAck, OpenSyn, OpenAck, laid out byte by byte from the transport

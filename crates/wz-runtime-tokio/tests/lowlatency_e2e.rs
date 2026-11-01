@@ -364,8 +364,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
         id: 7,
         ..Default::default()
     }
-    .encode_to_vec()
-    .expect("an OAM with no body encodes");
+    .encode_to_vec();
     let one_put = push(b"lean");
     let two_puts = [push(b"one"), push(b"two")].concat();
     let put_then_oam = [push(b"three"), oam.clone()].concat();
@@ -507,8 +506,7 @@ fn record_bytes(message: &wz_session_core::network_message::NetworkMessage) -> V
         NetworkMessage::Oam(oam) => oam
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec()
-            .expect("a decoded OAM re-encodes"),
+            .encode_to_vec(),
         other => panic!("only Puts and an OAM were encoded: {other:?}"),
     }
 }

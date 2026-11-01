@@ -320,7 +320,8 @@ impl<T: InterestBodySource + ?Sized> InterestBodySource for &T {
 }
 
 /// A value of `InterestBody` held in the types a caller already has: a source
-/// ([`InterestBodySource`]) whose lists are slices and whose bodies are references.
+/// ([`InterestBodySource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct InterestBodyParts<'a> {

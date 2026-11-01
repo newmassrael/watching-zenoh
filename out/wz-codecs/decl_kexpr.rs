@@ -25,7 +25,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use super::wireexpr::Wireexpr;
 use super::ext_entry::ExtEntry;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
 
@@ -230,7 +230,7 @@ pub trait DeclKexprSource {
     /// The `keyexpr` field.
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
 }
 
 impl<T: DeclKexprSource + ?Sized> DeclKexprSource for &T {
@@ -243,13 +243,14 @@ impl<T: DeclKexprSource + ?Sized> DeclKexprSource for &T {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         (**self).keyexpr()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         (**self).extensions()
     }
 }
 
 /// A value of `DeclKexpr` held in the types a caller already has: a source
-/// ([`DeclKexprSource`]) whose lists are slices and whose bodies are references.
+/// ([`DeclKexprSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct DeclKexprParts<'a> {
@@ -260,7 +261,7 @@ pub struct DeclKexprParts<'a> {
     /// The `keyexpr` field.
     pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
     /// The `extensions` field.
-    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
 }
 
 impl<'a> DeclKexprSource for DeclKexprParts<'a> {
@@ -273,8 +274,8 @@ impl<'a> DeclKexprSource for DeclKexprParts<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.map(<[_]>::iter)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
@@ -288,8 +289,8 @@ impl<'a> DeclKexprSource for DeclKexpr<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| _l.iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
 }
 
@@ -303,7 +304,7 @@ impl<'a> DeclKexprSource for DeclKexprView<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
@@ -318,8 +319,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclKexprSource for DeclKexprO
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -345,10 +346,7 @@ impl<'a> DeclKexpr<'a> {
     /// ones `src` presents.
     #[doc(hidden)]
     pub fn write_source_in<S: DeclKexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &DeclKexprOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
-        if _k_extensions > 8 {
-            return Err(CodecError::TlvChainOverflow);
-        }
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
         let _p_header_z_0: bool = src.extensions().is_some();
         let mut _c_header: u8 = (src.header() & !0x80) | (u8::from(_p_header_z_0) << 7);
         if let Some(_o) = over.header_n {
@@ -432,7 +430,7 @@ pub struct DeclKexprView<'a> {
     pub header: u8,
     pub id: u64,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<ListView<'a, DeclKexprExtensionsWalk, 0>>,
+    pub extensions: Option<Bounded<ListView<'a, DeclKexprExtensionsWalk, 0>, 8>>,
 }
 
 #[allow(dead_code)]
@@ -493,7 +491,7 @@ impl<'a> DeclKexprView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, []));
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TlvChainOverflow)?);
         } else {
             _out.extensions = None;
         }
@@ -612,7 +610,7 @@ pub struct DeclKexprOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_fo
     pub header: u8,
     pub id: u64,
     pub keyexpr: WireexprOwned<S>,
-    pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
 }
 
 #[allow(dead_code)]
@@ -654,7 +652,7 @@ impl<'a> DeclKexpr<'a> {
             header: self.header,
             id: self.id,
             keyexpr: self.keyexpr.try_into_owned_in::<S>()?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
 
@@ -697,7 +695,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclKexprOwned<S> {
         _out.id = self.id;
         self.keyexpr.as_borrowed_into(&mut _out.keyexpr);
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.extensions = None,
         }
         Ok(())
@@ -763,7 +761,7 @@ impl<'a> DeclKexpr<'a> {
             header: self.header,
             id: self.id,
             keyexpr: self.keyexpr.try_into_owned_in_origin::<S>(origin)?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }
 }

@@ -143,7 +143,8 @@ impl<T: FragmentSource + ?Sized> FragmentSource for &T {
 }
 
 /// A value of `Fragment` held in the types a caller already has: a source
-/// ([`FragmentSource`]) whose lists are slices and whose bodies are references.
+/// ([`FragmentSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct FragmentParts<'a> {

@@ -115,7 +115,8 @@ impl<T: HumidityPayloadSource + ?Sized> HumidityPayloadSource for &T {
 }
 
 /// A value of `HumidityPayload` held in the types a caller already has: a source
-/// ([`HumidityPayloadSource`]) whose lists are slices and whose bodies are references.
+/// ([`HumidityPayloadSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct HumidityPayloadParts {

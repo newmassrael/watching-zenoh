@@ -60,7 +60,8 @@ pub fn build_response_final(request_id: u64, qos: crate::sample::QosLevel) -> Re
         request_id,
         extensions: None,
     };
-    crate::declare_ext_qos::set_response_final_qos(&mut response_final, qos);
+    // An edit of an empty chain leaves one entry at most, which every bound holds.
+    let _ = crate::declare_ext_qos::set_response_final_qos(&mut response_final, qos);
     response_final
 }
 

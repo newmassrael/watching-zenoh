@@ -1030,7 +1030,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
                 // (`build_declare_queryable_reply_with_id`, pico
                 // `net/filtering.c:202`).
                 let complete =
-                    crate::queryable_info::read_queryable_info(decl.extensions.as_ref()).complete;
+                    crate::queryable_info::read_queryable_info(decl.extensions.as_deref()).complete;
                 self.apply_declared(peer, decl.id, resolved, complete, local_matching);
             }
             DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
@@ -1729,13 +1729,16 @@ mod tests {
     /// arms of every test below differ in one bit and nothing else.
     fn decl_queryable_complete(id: u64, keyexpr: &str, complete: bool) -> DeclareOwnedVariant {
         let mut dq = decl_queryable(id, 0, Some(keyexpr));
-        crate::queryable_info::set_queryable_info(
-            &mut dq.extensions,
-            crate::queryable_info::QueryableInfo {
-                complete,
-                distance: 0,
-            },
-        );
+        crate::held_list::edit_chain(&mut dq.extensions, |chain| {
+            crate::queryable_info::set_queryable_info(
+                chain,
+                crate::queryable_info::QueryableInfo {
+                    complete,
+                    distance: 0,
+                },
+            )
+        })
+        .expect("within the bound");
         DeclareOwnedVariant::CodecZenohDeclQueryable(dq)
     }
 

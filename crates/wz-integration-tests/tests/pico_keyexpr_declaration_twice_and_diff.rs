@@ -52,6 +52,7 @@ use wz_integration_tests::common::{
     zenoh_pico_library_dir,
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy};
+use wz_session_core::held_list::HeldList;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
@@ -1320,9 +1321,9 @@ fn valued_extensions<S: wz_codecs::CodecStorage>(
 fn push_whole(p: &wz_session_core::wire::PushOwned, valued: bool) -> String {
     use wz_codecs::push::PushOwnedVariant;
     let envelope = if valued {
-        valued_extensions(p.extensions.as_deref())
+        valued_extensions(p.extensions.entries())
     } else {
-        extensions(p.extensions.as_deref())
+        extensions(p.extensions.entries())
     };
     let body = match &p.body {
         PushOwnedVariant::CodecZenohMsgPut(put) => format!(
@@ -1336,7 +1337,7 @@ fn push_whole(p: &wz_session_core::wire::PushOwned, valued: bool) -> String {
                     e.schema.as_ref().map(|s| s.to_string())
                 )
             ),
-            body_extensions(put.extensions.as_deref()),
+            body_extensions(put.extensions.entries()),
             // Both layouts a Put can carry its payload in, rendered so that two
             // sessions that agree on the wire render the same line: the inline
             // bytes, or each slice as its kind and bytes.
@@ -1354,7 +1355,7 @@ fn push_whole(p: &wz_session_core::wire::PushOwned, valued: bool) -> String {
         PushOwnedVariant::CodecZenohMsgDel(del) => format!(
             " del ts={} body{}",
             del.timestamp.is_some(),
-            body_extensions(del.extensions.as_deref())
+            body_extensions(del.extensions.entries())
         ),
         PushOwnedVariant::Default { tag, .. } => format!(" unknown-body {:#04x}", tag.get()),
     };
@@ -1409,40 +1410,40 @@ fn render(
                         DeclareOwnedVariant::CodecZenohUndeclKexpr(k) => format!(
                             "UndeclKexpr {}{}",
                             names.name("K", k.id),
-                            extensions(k.extensions.as_deref())
+                            extensions(k.extensions.entries())
                         ),
                         DeclareOwnedVariant::CodecZenohDeclSubscriber(e) => format!(
                             "DeclSubscriber {} on {}{}",
                             names.name("S", e.id),
                             wire(&mut names, &e.keyexpr),
-                            extensions(e.extensions.as_deref())
+                            extensions(e.extensions.entries())
                         ),
                         DeclareOwnedVariant::CodecZenohUndeclSubscriber(e) => format!(
                             "UndeclSubscriber {}{}",
                             names.name("S", e.id),
-                            extensions(e.extensions.as_deref())
+                            extensions(e.extensions.entries())
                         ),
                         DeclareOwnedVariant::CodecZenohDeclQueryable(e) => format!(
                             "DeclQueryable {} on {}{}",
                             names.name("Q", e.id),
                             wire(&mut names, &e.keyexpr),
-                            extensions(e.extensions.as_deref())
+                            extensions(e.extensions.entries())
                         ),
                         DeclareOwnedVariant::CodecZenohUndeclQueryable(e) => format!(
                             "UndeclQueryable {}{}",
                             names.name("Q", e.id),
-                            extensions(e.extensions.as_deref())
+                            extensions(e.extensions.entries())
                         ),
                         DeclareOwnedVariant::CodecZenohDeclToken(e) => format!(
                             "DeclToken {} on {}{}",
                             names.name("T", e.id),
                             wire(&mut names, &e.keyexpr),
-                            extensions(e.extensions.as_deref())
+                            extensions(e.extensions.entries())
                         ),
                         DeclareOwnedVariant::CodecZenohUndeclToken(e) => format!(
                             "UndeclToken {}{}",
                             names.name("T", e.id),
-                            extensions(e.extensions.as_deref())
+                            extensions(e.extensions.entries())
                         ),
                         // A final closes an interest reply; it names no keyexpr.
                         DeclareOwnedVariant::CodecZenohDeclFinal(_) => continue,

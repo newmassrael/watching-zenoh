@@ -1229,10 +1229,10 @@ mod batch_walk_tests {
             let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
                 panic!("a literal put carries a Put body");
             };
-            put.extensions = Some(alloc::vec![ExtEntryOwned {
+            put.extensions = Some(crate::held_list::one_entry(ExtEntryOwned {
                 header,
                 body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-            }]);
+            }));
             put.header |= 0x80;
             let mut datagram = peer_join(&[0x22; 4]);
             datagram.extend_from_slice(&crate::frame_encode::encode_frame_with_push(0, push, true));

@@ -26,7 +26,7 @@ use super::ext_entry::ExtEntry;
 use super::msg_put::MsgPut;
 use super::msg_del::MsgDel;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 use super::msg_put::MsgPutView;
 use super::msg_del::MsgDelView;
@@ -339,7 +339,7 @@ pub trait ReplySource {
     /// The `consolidation` field.
     fn consolidation(&self) -> Option<u8>;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
     /// The arm of the variant this value holds.
     fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource>;
 }
@@ -351,7 +351,7 @@ impl<T: ReplySource + ?Sized> ReplySource for &T {
     fn consolidation(&self) -> Option<u8> {
         (**self).consolidation()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         (**self).extensions()
     }
     fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
@@ -370,7 +370,8 @@ pub enum ReplyPartsBody<'a> {
 }
 
 /// A value of `Reply` held in the types a caller already has: a source
-/// ([`ReplySource`]) whose lists are slices and whose bodies are references.
+/// ([`ReplySource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ReplyParts<'a> {
@@ -379,7 +380,7 @@ pub struct ReplyParts<'a> {
     /// The `consolidation` field.
     pub consolidation: Option<u8>,
     /// The `extensions` field.
-    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
     /// The arm of the variant this value holds.
     pub body: ReplyPartsBody<'a>,
 }
@@ -391,8 +392,8 @@ impl<'a> ReplySource for ReplyParts<'a> {
     fn consolidation(&self) -> Option<u8> {
         self.consolidation
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.map(<[_]>::iter)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
         match &self.body {
@@ -410,8 +411,8 @@ impl<'a> ReplySource for Reply<'a> {
     fn consolidation(&self) -> Option<u8> {
         self.consolidation
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| _l.iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
     fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
         match &self.body {
@@ -429,7 +430,7 @@ impl<'a> ReplySource for ReplyView<'a> {
     fn consolidation(&self) -> Option<u8> {
         self.consolidation
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
@@ -448,8 +449,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ReplySource for ReplyOwned<S> 
     fn consolidation(&self) -> Option<u8> {
         self.consolidation
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
     fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
         match &self.body {
@@ -475,10 +476,7 @@ impl<'a> Reply<'a> {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: ReplySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
-        if _k_extensions > 8 {
-            return Err(CodecError::TlvChainOverflow);
-        }
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
         let _p_header_c_0: bool = src.consolidation().is_some();
         let _p_header_z_0: bool = src.extensions().is_some();
         let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
@@ -582,7 +580,7 @@ impl ListWalk<0> for ReplyExtensionsWalk {
 pub struct ReplyView<'a> {
     pub header: u8,
     pub consolidation: Option<u8>,
-    pub extensions: Option<ListView<'a, ReplyExtensionsWalk, 0>>,
+    pub extensions: Option<Bounded<ListView<'a, ReplyExtensionsWalk, 0>, 8>>,
     pub body: ReplyViewVariant<'a>,
 }
 
@@ -656,7 +654,7 @@ impl<'a> ReplyView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, []));
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TlvChainOverflow)?);
         } else {
             _out.extensions = None;
         }
@@ -828,7 +826,7 @@ use super::msg_del::MsgDelOwned;
 pub struct ReplyOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
     pub header: u8,
     pub consolidation: Option<u8>,
-    pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
     pub body: ReplyOwnedVariant<S>,
 }
 
@@ -954,7 +952,7 @@ impl<'a> Reply<'a> {
         Ok(ReplyOwned {
             header: self.header,
             consolidation: self.consolidation,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
             body: self.body.try_into_owned_in::<S>()?,
         })
     }
@@ -997,7 +995,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ReplyOwned<S> {
         _out.header = self.header;
         _out.consolidation = self.consolidation;
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.extensions = None,
         }
         self.body.try_as_borrowed_into(&mut _out.body)?;
@@ -1076,7 +1074,7 @@ impl<'a> Reply<'a> {
         Ok(ReplyOwned {
             header: self.header,
             consolidation: self.consolidation,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
             body: self.body.try_into_owned_in_origin::<S>(origin)?,
         })
     }

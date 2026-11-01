@@ -11475,7 +11475,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             NetworkMessage::Push(push) => match &push.body {
                 crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => (
                     crate::put_payload::shm_descriptors(put),
-                    push.extensions.as_deref().unwrap_or(&[]),
+                    crate::held_list::HeldList::entries(&push.extensions).unwrap_or(&[]),
                     push_priority,
                 ),
                 _ => return None,
@@ -11484,7 +11484,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             NetworkMessage::Request(request) => match &request.body {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
                     crate::request_build::query_value_shm_descriptors(query),
-                    request.extensions.as_deref().unwrap_or(&[]),
+                    crate::held_list::HeldList::entries(&request.extensions).unwrap_or(&[]),
                     Self::REQUEST_ROUTE_PRIORITY,
                 ),
                 _ => return None,
@@ -11492,7 +11492,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "codec-response")]
             NetworkMessage::Response(response) => (
                 crate::response_build::response_shm_descriptors(response),
-                response.extensions.as_deref().unwrap_or(&[]),
+                crate::held_list::HeldList::entries(&response.extensions).unwrap_or(&[]),
                 crate::declare_ext_qos::read_response_qos(response).priority(),
             ),
             _ => return None,
@@ -13129,7 +13129,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         set_declare_queryable_info(
             &mut declare,
             crate::queryable_info::QueryableInfo::local(complete),
-        );
+        )?;
         Ok(declare)
     }
 
@@ -15274,7 +15274,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     set_declare_queryable_info(
                         &mut declare,
                         crate::queryable_info::QueryableInfo::local(complete),
-                    );
+                    )
+                    .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     #[cfg(feature = "routing-namespace")]
                     let declare = self
                         .namespace_egress_declare(declare)

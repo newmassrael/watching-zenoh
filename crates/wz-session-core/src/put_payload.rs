@@ -35,7 +35,7 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf, SceList};
+use sce_forge_runtime::codec::{Bounded, CodecError, CodecStorage, SceByteBuf, SceList};
 use wz_codecs::msg_put::MsgPutOwned;
 use wz_codecs::zbuf_slice::ZbufSliceOwned;
 
@@ -74,8 +74,8 @@ pub enum PutPayload<'a, S: CodecStorage> {
 /// The layout `put` carries. A Put with neither pair populated reads as an empty
 /// inline payload, which is what a decoder gives for a zero-length one.
 pub fn layout<S: CodecStorage>(put: &MsgPutOwned<S>) -> PutPayload<'_, S> {
-    match put.slices.as_ref() {
-        Some(slices) => PutPayload::Sliced(SceList::as_slice(slices)),
+    match crate::held_list::HeldList::entries(&put.slices) {
+        Some(slices) => PutPayload::Sliced(slices),
         None => PutPayload::Inline(
             put.payload
                 .as_ref()
@@ -189,14 +189,14 @@ pub fn shm<S: CodecStorage>(descriptor: &[u8]) -> Result<MsgPutOwned<S>, CodecEr
 /// here and no site spells a slice by hand (R3048).
 pub fn shm_slices<S: CodecStorage>(
     descriptor: &[u8],
-) -> Result<S::List<ZbufSliceOwned<S>, 4>, CodecError> {
+) -> Result<Bounded<S::List<ZbufSliceOwned<S>, 4>, 4>, CodecError> {
     let mut slices = <S::List<ZbufSliceOwned<S>, 4> as SceList<ZbufSliceOwned<S>>>::empty();
     slices.try_push(ZbufSliceOwned {
         kind: u32::from(SLICE_KIND_SHM_PTR),
         len: descriptor.len() as u64,
         bytes: <S::Bytes<256> as SceByteBuf>::from_slice(descriptor)?,
     })?;
-    Ok(slices)
+    Bounded::new(slices).ok_or(CodecError::TlvChainOverflow)
 }
 
 /// Why the payload of a received Put could not be assembled.
@@ -410,10 +410,10 @@ pub fn relay_shm_slices(
     put: &mut MsgPutOwned<crate::wire::WireStorage>,
     mut decide: impl FnMut(&[u8]) -> Option<Relayed>,
 ) -> Result<(), RelayFault> {
-    let Some(slices) = put.slices.as_ref() else {
+    let Some(slices) = crate::held_list::HeldList::entries(&put.slices) else {
         return Ok(());
     };
-    let remade = remake_slices(SceList::as_slice(slices), &mut decide)?;
+    let remade = remake_slices(slices, &mut decide)?;
     let unrepresentable = |_| RelayFault::Unrepresentable;
     if has_shared_slice(&remade) {
         put.slice_count = Some(remade.len() as u32);
@@ -482,25 +482,17 @@ pub(crate) fn join_slices(remade: Vec<(u8, Vec<u8>)>) -> Vec<u8> {
 #[cfg(feature = "transport-shm")]
 pub(crate) fn slice_list(
     remade: &[(u8, Vec<u8>)],
-) -> Result<
-    <crate::wire::WireStorage as CodecStorage>::List<ZbufSliceOwned<crate::wire::WireStorage>, 4>,
-    RelayFault,
-> {
-    type Slices = <crate::wire::WireStorage as CodecStorage>::List<
-        ZbufSliceOwned<crate::wire::WireStorage>,
-        4,
-    >;
+) -> Result<Bounded<Vec<ZbufSliceOwned<crate::wire::WireStorage>>, 4>, RelayFault> {
     let unrepresentable = |_| RelayFault::Unrepresentable;
-    let mut list = <Slices as SceList<_>>::empty();
+    let mut list = Vec::with_capacity(remade.len());
     for (kind, bytes) in remade {
-        list.try_push(ZbufSliceOwned {
+        list.push(ZbufSliceOwned {
             kind: u32::from(*kind),
             len: bytes.len() as u64,
             bytes: crate::wire::wire_bytes(bytes).map_err(unrepresentable)?,
-        })
-        .map_err(unrepresentable)?;
+        });
     }
-    Ok(list)
+    crate::held_list::held(list).map_err(unrepresentable)
 }
 
 /// The serialized descriptor of every shared-memory slice of a Put's payload, in order. Empty for
@@ -528,17 +520,17 @@ pub fn shm_descriptors_of<S: CodecStorage>(slices: &[ZbufSliceOwned<S>]) -> Vec<
 /// nothing is left. A Put without the marker is left as it is.
 #[cfg(feature = "transport-shm")]
 fn remove_shm_marker(put: &mut MsgPutOwned<crate::wire::WireStorage>) -> Result<(), CodecError> {
-    let Some(chain) = put.extensions.as_ref() else {
+    let Some(chain) = crate::held_list::HeldList::entries(&put.extensions) else {
         return Ok(());
     };
     let marker =
         crate::ext_header::ext_eid(crate::extshm::SHM_BODY_EXT_ID | crate::ext_header::EXT_FLAG_M);
-    let mut kept: Vec<_> = SceList::as_slice(chain)
+    let mut kept: Vec<_> = chain
         .iter()
         .filter(|entry| crate::ext_header::ext_eid(entry.header) != marker)
         .cloned()
         .collect();
-    if kept.len() == SceList::as_slice(chain).len() {
+    if kept.len() == chain.len() {
         return Ok(());
     }
     if kept.is_empty() {
@@ -547,15 +539,7 @@ fn remove_shm_marker(put: &mut MsgPutOwned<crate::wire::WireStorage>) -> Result<
         return Ok(());
     }
     crate::ext_nodeid::apply_chain_z_bits(&mut kept);
-    type Chain = <crate::wire::WireStorage as CodecStorage>::List<
-        wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage>,
-        16,
-    >;
-    let mut list = <Chain as SceList<_>>::empty();
-    for entry in kept {
-        list.try_push(entry)?;
-    }
-    put.extensions = Some(list);
+    put.extensions = Some(crate::held_list::held(kept)?);
     Ok(())
 }
 
@@ -588,14 +572,8 @@ mod tests {
     type Heap = sce_forge_runtime::codec::Heap;
 
     /// A chain holding the one extension the shared-memory marker is.
-    fn marker_chain() -> <Heap as CodecStorage>::List<ExtEntryOwned<Heap>, 16> {
-        let mut chain = <<Heap as CodecStorage>::List<ExtEntryOwned<Heap>, 16> as SceList<
-            ExtEntryOwned<Heap>,
-        >>::empty();
-        chain
-            .try_push(crate::extshm::encode_shm_marker_ext())
-            .expect("one extension fits");
-        chain
+    fn marker_chain() -> Bounded<Vec<ExtEntryOwned<Heap>>, 8> {
+        crate::held_list::one_entry(crate::extshm::encode_shm_marker_ext())
     }
 
     /// The shared-memory Put an upstream `z_pub_shm` publisher sent, as it was
@@ -687,8 +665,13 @@ mod tests {
             bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(b"hi")
                 .expect("two bytes fit"),
         };
-        let slices = put.slices.as_mut().expect("shm() populates the slices");
-        slices.try_push(raw).expect("a second slice fits");
+        crate::held_list::edit_chain(&mut put.slices, |slices| {
+            slices
+                .as_mut()
+                .expect("shm() populates the slices")
+                .push(raw);
+        })
+        .expect("a second slice fits");
         let got = collect_payload(&put, |d| {
             assert_eq!(d, &[0x01], "the resolver sees the descriptor bytes");
             Some(b"SHM".to_vec())
@@ -700,16 +683,18 @@ mod tests {
         assert_eq!(unresolved, Err(PayloadFault::Unresolved));
 
         let mut odd = shm::<Heap>(&[0x01]).expect("one slice fits");
-        odd.slices
-            .as_mut()
-            .expect("populated")
-            .try_push(ZbufSliceOwned::<Heap> {
-                kind: 7,
-                len: 0,
-                bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(&[])
-                    .expect("empty fits"),
-            })
-            .expect("a second slice fits");
+        crate::held_list::edit_chain(&mut odd.slices, |slices| {
+            slices
+                .as_mut()
+                .expect("populated")
+                .push(ZbufSliceOwned::<Heap> {
+                    kind: 7,
+                    len: 0,
+                    bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(&[])
+                        .expect("empty fits"),
+                });
+        })
+        .expect("a second slice fits");
         assert_eq!(
             collect_payload(&odd, |_| Some(Vec::new())),
             Err(PayloadFault::UnknownKind(7))
@@ -727,19 +712,20 @@ mod tests {
         use alloc::vec;
 
         let mut put = shm::<Heap>(&[0x01]).expect("one slice fits");
-        let slices = put.slices.as_mut().expect("shm() populates the slices");
-        for descriptor in [&[0x02u8][..], &[0x03u8][..]] {
-            slices
-                .try_push(ZbufSliceOwned::<Heap> {
+        crate::held_list::edit_chain(&mut put.slices, |slices| {
+            let slices = slices.as_mut().expect("shm() populates the slices");
+            for descriptor in [&[0x02u8][..], &[0x03u8][..]] {
+                slices.push(ZbufSliceOwned::<Heap> {
                     kind: u32::from(SLICE_KIND_SHM_PTR),
                     len: 1,
                     bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(
                         descriptor,
                     )
                     .expect("one byte fits"),
-                })
-                .expect("a further slice fits");
-        }
+                });
+            }
+        })
+        .expect("the further slices fit");
 
         // The FIRST of three fails; the other two must still be offered.
         let mut offered = Vec::new();
@@ -761,23 +747,22 @@ mod tests {
         // An unknown kind in the middle: the fault is ITS, and the shared-memory
         // slice behind it is still offered.
         let mut odd = shm::<Heap>(&[0x09]).expect("one slice fits");
-        let slices = odd.slices.as_mut().expect("populated");
-        slices
-            .try_push(ZbufSliceOwned::<Heap> {
+        crate::held_list::edit_chain(&mut odd.slices, |slices| {
+            let slices = slices.as_mut().expect("populated");
+            slices.push(ZbufSliceOwned::<Heap> {
                 kind: 7,
                 len: 0,
                 bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(&[])
                     .expect("empty fits"),
-            })
-            .expect("fits");
-        slices
-            .try_push(ZbufSliceOwned::<Heap> {
+            });
+            slices.push(ZbufSliceOwned::<Heap> {
                 kind: u32::from(SLICE_KIND_SHM_PTR),
                 len: 1,
                 bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(&[0x0a])
                     .expect("one byte fits"),
-            })
-            .expect("fits");
+            });
+        })
+        .expect("fits");
         let mut offered = Vec::new();
         let result = collect_payload(&odd, |d| {
             offered.push(d.to_vec());
@@ -830,17 +815,18 @@ mod tests {
         assert_eq!(payload_len(&shm_put), 53);
 
         let mut mixed = shm::<Heap>(&[0x35, 0xCA, 0xC3, 0x01, 0x00, 0x00]).expect("one slice");
-        mixed
-            .slices
-            .as_mut()
-            .expect("shm() populates the slices")
-            .try_push(ZbufSliceOwned::<Heap> {
-                kind: u32::from(SLICE_KIND_RAW),
-                len: 2,
-                bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(b"hi")
-                    .expect("two bytes fit"),
-            })
-            .expect("a second slice fits");
+        crate::held_list::edit_chain(&mut mixed.slices, |slices| {
+            slices
+                .as_mut()
+                .expect("shm() populates the slices")
+                .push(ZbufSliceOwned::<Heap> {
+                    kind: u32::from(SLICE_KIND_RAW),
+                    len: 2,
+                    bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(b"hi")
+                        .expect("two bytes fit"),
+                });
+        })
+        .expect("a second slice fits");
         assert_eq!(payload_len(&mixed), 55, "the slices add up in the receiver");
 
         let garbage = shm::<Heap>(&[0x80]).expect("one slice fits");
@@ -861,8 +847,6 @@ mod relay_tests {
     use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
     use wz_codecs::ext_unit::ExtUnit;
 
-    type Chain = <WireStorage as CodecStorage>::List<ExtEntryOwned<WireStorage>, 16>;
-
     fn slice(kind: u8, bytes: &[u8]) -> ZbufSliceOwned<WireStorage> {
         ZbufSliceOwned {
             kind: u32::from(kind),
@@ -874,21 +858,17 @@ mod relay_tests {
     /// A Put as a router receives one: sliced, with the marker the only entry of its chain.
     fn received(slices: &[(u8, &[u8])]) -> MsgPutOwned<WireStorage> {
         let mut put = shm::<WireStorage>(slices[0].1).expect("one slice fits");
-        let list = put.slices.as_mut().expect("populated");
         // `shm` made the first slice SHM_PTR; make it what the caller said.
-        *list = <<WireStorage as CodecStorage>::List<ZbufSliceOwned<WireStorage>, 4> as SceList<
-            _,
-        >>::empty();
-        for (kind, bytes) in slices {
-            list.try_push(slice(*kind, bytes)).expect("a slice fits");
-        }
+        let list = slices
+            .iter()
+            .map(|(kind, bytes)| slice(*kind, bytes))
+            .collect();
+        put.slices = Some(crate::held_list::held(list).expect("a slice fits"));
         put.slice_count = Some(slices.len() as u32);
         put.header |= 0x80;
-        let mut chain = <Chain as SceList<_>>::empty();
-        chain
-            .try_push(crate::extshm::encode_shm_marker_ext())
-            .expect("fits");
-        put.extensions = Some(chain);
+        put.extensions = Some(crate::held_list::one_entry(
+            crate::extshm::encode_shm_marker_ext(),
+        ));
         put
     }
 
@@ -916,11 +896,13 @@ mod relay_tests {
             "the descriptor of the reference taken for THIS peer"
         );
         assert!(crate::extshm::body_has_shm_marker(SceList::as_slice(
-            put.extensions.as_ref().expect("the chain stays")
+            put.extensions.as_ref().expect("the chain stays").inner()
         )));
         assert_ne!(put.header & 0x80, 0, "the chain still needs its Z flag");
         assert_eq!(
-            put.slices.as_ref().map(|s| SceList::as_slice(s)[0].len),
+            put.slices
+                .as_ref()
+                .map(|s| SceList::as_slice(s.inner())[0].len),
             Some(2)
         );
     }
@@ -949,14 +931,12 @@ mod relay_tests {
             header: 0x04 | crate::ext_header::EXT_FLAG_Z,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };
-        let mut chain = <Chain as SceList<_>>::empty();
-        chain.try_push(other).expect("fits");
-        chain
-            .try_push(crate::extshm::encode_shm_marker_ext())
-            .expect("fits");
-        put.extensions = Some(chain);
+        put.extensions = Some(
+            crate::held_list::held(vec![other, crate::extshm::encode_shm_marker_ext()])
+                .expect("fits"),
+        );
         relay_shm_slices(&mut put, |_| Some(Relayed::Bytes(vec![7]))).expect("relayed");
-        let left = SceList::as_slice(put.extensions.as_ref().expect("one entry is left"));
+        let left = SceList::as_slice(put.extensions.as_ref().expect("one entry is left").inner());
         assert_eq!(left.len(), 1);
         assert_eq!(
             left[0].header, 0x04,
@@ -1011,6 +991,7 @@ mod relay_tests {
             put.extensions
                 .as_ref()
                 .expect("a descriptor is left, so is the marker")
+                .inner()
         )));
     }
 

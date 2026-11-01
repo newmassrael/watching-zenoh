@@ -13373,8 +13373,7 @@ mod datagram_tests {
             request_id: 1,
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture ResponseFinal is encodable");
+        .encode_to_vec();
         let declare = wz_codecs::declare::Declare {
             body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
                 wz_codecs::decl_kexpr::DeclKexpr {
@@ -13396,9 +13395,7 @@ mod datagram_tests {
         }
         .encode_to_vec()
         .expect("a fixture Interest is encodable");
-        let oam = wz_codecs::oam::Oam::default()
-            .encode_to_vec()
-            .expect("a default Oam is encodable");
+        let oam = wz_codecs::oam::Oam::default().encode_to_vec();
 
         alloc::vec![
             ("Push", push),
@@ -13884,10 +13881,12 @@ mod datagram_tests {
             cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
             zid: owned_bytes(&zid).expect("zid"),
             num_locators: Some(1),
-            locators: Some(alloc::vec![wz_codecs::locator::LocatorOwned {
-                locator_len: PEER_LOCATOR.len() as u64,
-                locator: owned_string(PEER_LOCATOR).expect("locator"),
-            }]),
+            locators: Some(wz_session_core::held_list::one_entry(
+                wz_codecs::locator::LocatorOwned {
+                    locator_len: PEER_LOCATOR.len() as u64,
+                    locator: owned_string(PEER_LOCATOR).expect("locator"),
+                },
+            )),
         };
         let body = owned
             .try_as_borrowed()

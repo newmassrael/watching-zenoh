@@ -300,11 +300,16 @@ pub fn apply_egress_declare(
         DV::CodecZenohUndeclQueryable(m) => {
             // Read then write: `read_ext_keyexpr` borrows out of the extension
             // it is about to be replaced in.
-            let literal = crate::declare_ext_keyexpr::read_ext_keyexpr(m.extensions.as_ref())
+            let literal = crate::declare_ext_keyexpr::read_ext_keyexpr(m.extensions.as_deref())
                 .map(String::from);
-            if let (Some(literal), Some(exts)) = (literal, m.extensions.as_mut()) {
+            if let Some(literal) = literal {
                 let prefixed = ns.prepend(&literal);
-                crate::declare_ext_keyexpr::set_ext_keyexpr_literal(exts, &prefixed)?;
+                crate::held_list::edit_chain(&mut m.extensions, |chain| match chain {
+                    Some(exts) => {
+                        crate::declare_ext_keyexpr::set_ext_keyexpr_literal(exts, &prefixed)
+                    }
+                    None => Ok(false),
+                })??;
             }
         }
         // ⚠ THE ASYMMETRY IS UPSTREAM'S, and these arms are written out rather
@@ -1204,7 +1209,7 @@ mod tests {
             panic!("the builder produced the wrong variant");
         };
         assert_eq!(
-            read_ext_keyexpr(m.extensions.as_ref()),
+            read_ext_keyexpr(m.extensions.as_deref()),
             Some("myns/demo/q"),
             "the retracted keyexpr must leave under the namespace, as upstream's does"
         );
@@ -1231,7 +1236,7 @@ mod tests {
         let DV::CodecZenohUndeclSubscriber(m) = &sub.body else {
             panic!("the builder produced the wrong variant");
         };
-        assert_eq!(read_ext_keyexpr(m.extensions.as_ref()), Some("demo/s"));
+        assert_eq!(read_ext_keyexpr(m.extensions.as_deref()), Some("demo/s"));
 
         let mut token = crate::declare_build::build_undeclare_token_with_keyexpr("demo/t")
             .expect("build the sourced token retraction");
@@ -1239,7 +1244,7 @@ mod tests {
         let DV::CodecZenohUndeclToken(m) = &token.body else {
             panic!("the builder produced the wrong variant");
         };
-        assert_eq!(read_ext_keyexpr(m.extensions.as_ref()), Some("demo/t"));
+        assert_eq!(read_ext_keyexpr(m.extensions.as_deref()), Some("demo/t"));
     }
 
     /// An interest whose keyexpr is an alias in OUR OWN table (`M = 0`,

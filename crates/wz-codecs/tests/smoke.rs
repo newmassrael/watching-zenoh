@@ -88,7 +88,7 @@ fn msg_put_default_encode_decode_roundtrip() {
 #[test]
 fn msg_del_default_encode_decode_roundtrip() {
     let del = MsgDel::default();
-    let encoded = del.encode_to_vec().expect("a default Del encodes");
+    let encoded = del.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "Default MsgDel encode produced 0 bytes — at minimum the \
@@ -254,7 +254,7 @@ fn err_default_encode_decode_roundtrip() {
     use wz_codecs::err::Err;
 
     let err = Err::default();
-    let encoded = err.encode_to_vec().expect("a default Err encodes");
+    let encoded = err.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "default Err encode produced 0 bytes — header expected"

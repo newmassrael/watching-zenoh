@@ -112,9 +112,9 @@ fn declare_governed_keyexpr(declare: &DeclareOwned, spaces: MappingSpaces<'_>) -
         return resolve_wireexpr_in(&we.body, spaces);
     }
     let exts = match &declare.body {
-        DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
-        DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
-        DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.extensions.as_ref(),
+        DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_deref(),
+        DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_deref(),
+        DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.extensions.as_deref(),
         _ => return None,
     };
     // The extension names its key in the SENDER's space (`M=1`), which is the `peer` slot.

@@ -2089,7 +2089,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 reliable,
                 express,
                 wz_session_core::qos::Priority::DEFAULT,
-            );
+            )?;
             Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
         }
         #[cfg(not(all(feature = "access-acl", feature = "access-qos-overwrite")))]
@@ -2178,7 +2178,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // The QoS overwrite of the egress chain: the message is sent with the QoS the rules give
         // it, at the band and express flag that QoS names.
         #[cfg(all(feature = "access-acl", feature = "access-qos-overwrite"))]
-        let (msg, express, priority) = self.overwritten_egress(msg, reliable, express, priority);
+        let (msg, express, priority) = self.overwritten_egress(msg, reliable, express, priority)?;
         Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
     }
 
@@ -2299,18 +2299,28 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 )
             });
             // The QoS overwrite of the ingress chain, on what the chain admitted. The batch is
-            // owned here, so a message is rewritten where it lies.
+            // owned here, so a message is rewritten where it lies, and one whose chain has no
+            // room for the QoS leaves the batch: the edit has taken its chain out of it.
             #[cfg(feature = "access-qos-overwrite")]
-            for msg in messages.iter_mut() {
-                if let Some(qos) = self.overwritten_qos_on(
+            messages.retain_mut(|msg| {
+                let Some(qos) = self.overwritten_qos_on(
                     &self.interceptors_ingress,
                     msg,
                     *reliable,
                     crate::interceptor::InterceptorFlow::Ingress,
-                ) {
-                    crate::interceptor::qos_overwrite::apply_qos(msg, qos);
+                ) else {
+                    return true;
+                };
+                match crate::interceptor::qos_overwrite::apply_qos(msg, qos) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        log::debug!(
+                            "session: DROP an ingress message, no room for its QoS: {err:?}"
+                        );
+                        false
+                    }
                 }
-            }
+            });
             #[cfg(not(feature = "access-qos-overwrite"))]
             let _ = reliable;
         }
@@ -2430,7 +2440,8 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     }
 
     /// `msg` as this session sends it: the message with the QoS its egress chain gives it, and the
-    /// band and express flag that QoS names. A message no rule changes is returned as it came.
+    /// band and express flag that QoS names. A message no rule changes is returned as it came. A
+    /// chain with no room for the QoS is the error of the send, which does not go on.
     #[cfg(all(feature = "access-acl", feature = "access-qos-overwrite"))]
     fn overwritten_egress(
         &self,
@@ -2438,11 +2449,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         reliable: bool,
         express: bool,
         priority: wz_session_core::qos::Priority,
-    ) -> (
-        wz_session_core::network_message::NetworkMessage,
-        bool,
-        wz_session_core::qos::Priority,
-    ) {
+    ) -> Result<
+        (
+            wz_session_core::network_message::NetworkMessage,
+            bool,
+            wz_session_core::qos::Priority,
+        ),
+        wz_session_core::send_wire_error::SendWireError,
+    > {
         match self.overwritten_qos_on(
             &self.interceptors_egress,
             &msg,
@@ -2450,10 +2464,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             crate::interceptor::InterceptorFlow::Egress,
         ) {
             Some(qos) => {
-                crate::interceptor::qos_overwrite::apply_qos(&mut msg, qos);
-                (msg, qos.is_express(), qos.priority())
+                crate::interceptor::qos_overwrite::apply_qos(&mut msg, qos)
+                    .map_err(wz_session_core::send_wire_error::SendWireError::Codec)?;
+                Ok((msg, qos.is_express(), qos.priority()))
             }
-            None => (msg, express, priority),
+            None => Ok((msg, express, priority)),
         }
     }
 
@@ -3288,12 +3303,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             #[cfg(feature = "declare-queryable")]
             GroupDeclaration::Queryable { complete } => {
                 wz_session_core::declare_build::build_declare_queryable(id, mapping_id, suffix)
-                    .map(|mut declare| {
+                    .and_then(|mut declare| {
                         wz_session_core::declare_build::set_declare_queryable_info(
                             &mut declare,
                             wz_session_core::queryable_info::QueryableInfo::local(complete),
-                        );
-                        declare
+                        )?;
+                        Ok(declare)
                     })
                     .map_err(SendWireError::Codec)
             }

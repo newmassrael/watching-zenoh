@@ -20,7 +20,7 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::{Bounded, CodecError};
 use wz_codecs::wire_const;
 
 // R3011 — every part of a message built here is spelled at the wire profile
@@ -54,6 +54,9 @@ use crate::source_info_ext::encode_source_info_ext_entry;
 use crate::wire::parts::ExtEntryOwnedVariant;
 #[cfg(feature = "pubsub-qos")]
 use wz_codecs::ext_zint::ExtZint;
+
+/// A Push's extension chain, or its body's, within the bound the codec declares.
+type ExtChain = Bounded<Vec<ExtEntryOwned>, 8>;
 
 /// R121e — build a `Push` network-message with a literal keyexpr
 /// (id=0 + inline suffix) and a `Put` body carrying `value` as
@@ -368,7 +371,7 @@ fn build_body_extensions(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
     body: PushBodyKind,
-) -> Result<Option<Vec<ExtEntryOwned>>, CodecError> {
+) -> Result<Option<ExtChain>, CodecError> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
     // Push source_info ext (id 0x01) — gated on `pubsub-source-info` so a
     // codec-push subset that does not compose source identification carries
@@ -413,7 +416,7 @@ fn build_body_extensions(
         return Ok(None);
     }
     crate::ext_nodeid::apply_chain_z_bits(&mut exts);
-    Ok(Some(exts))
+    crate::held_list::held(exts).map(Some)
 }
 
 // R233 / R311ru — the per-entry chain-continuation `Z`-bit normalisation that
@@ -430,7 +433,7 @@ fn build_body_extensions(
 fn build_push_outer_extensions(
     qos: Option<crate::sample::QosLevel>,
     #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&crate::ts_stack::TsStack>,
-) -> Option<Vec<ExtEntryOwned>> {
+) -> Result<Option<ExtChain>, CodecError> {
     // Only the QoS ext is pushed here, and it is gated: with `pubsub-qos` off the chain is empty.
     #[cfg_attr(not(feature = "pubsub-qos"), allow(unused_mut))]
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
@@ -473,12 +476,12 @@ fn build_push_outer_extensions(
     if let Some(exts) = chain.as_mut() {
         crate::ext_nodeid::apply_chain_z_bits(exts);
     }
-    chain
+    chain.map(crate::held_list::held).transpose()
 }
 
 /// The outer extension chain of a Push built from `meta`: its QoS, and with `pubsub-ts-stack` the
 /// timestamp stack it starts.
-fn outer_extensions_of(meta: &PushMetadata) -> Option<Vec<ExtEntryOwned>> {
+fn outer_extensions_of(meta: &PushMetadata) -> Result<Option<ExtChain>, CodecError> {
     build_push_outer_extensions(
         meta.qos,
         #[cfg(feature = "pubsub-ts-stack")]
@@ -720,7 +723,7 @@ pub fn build_push_literal_with_meta(
     value: &[u8],
     meta: &PushMetadata,
 ) -> Result<PushOwned, CodecError> {
-    let outer_exts = outer_extensions_of(meta);
+    let outer_exts = outer_extensions_of(meta)?;
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
@@ -759,8 +762,9 @@ pub(crate) fn build_msg_put_shm(
     let descriptor_bytes = crate::extshm::encode_shm_descriptor(descriptor);
     // Reuse the source_info / attachment SSOT, then append the 0x2 marker and
     // re-normalise the chain-continuation Z bits over the full chain.
-    let mut exts =
-        build_body_extensions(source_info, attachment, PushBodyKind::Put)?.unwrap_or_default();
+    let mut exts = build_body_extensions(source_info, attachment, PushBodyKind::Put)?
+        .map(Bounded::into_inner)
+        .unwrap_or_default();
     exts.push(crate::extshm::encode_shm_marker_ext());
     crate::ext_nodeid::apply_chain_z_bits(&mut exts);
     // The marker in the chain is what makes the payload SLICED: the descriptor
@@ -770,7 +774,7 @@ pub(crate) fn build_msg_put_shm(
     let mut put = MsgPutOwned {
         timestamp: gated_timestamp_field(timestamp)?,
         encoding: gated_encoding_field(encoding)?,
-        extensions: Some(exts),
+        extensions: Some(crate::held_list::held(exts)?),
         ..crate::put_payload::shm(&descriptor_bytes)?
     };
     if put.timestamp.is_some() {
@@ -793,7 +797,7 @@ pub fn build_push_shm_literal(
     descriptor: &crate::extshm::ShmDescriptor,
     meta: &PushMetadata,
 ) -> Result<PushOwned, CodecError> {
-    let outer_exts = outer_extensions_of(meta);
+    let outer_exts = outer_extensions_of(meta)?;
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
@@ -838,7 +842,7 @@ pub fn build_push_shm_aliased(
         "build_push_shm_aliased requires a non-zero mapping id; \
          use build_push_shm_literal for id=0",
     );
-    let outer_exts = outer_extensions_of(meta);
+    let outer_exts = outer_extensions_of(meta)?;
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
     let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
@@ -876,7 +880,7 @@ pub fn build_push_aliased_with_meta(
         "build_push_aliased_with_meta requires a non-zero mapping id; \
          use build_push_literal_with_meta for id=0",
     );
-    let outer_exts = outer_extensions_of(meta);
+    let outer_exts = outer_extensions_of(meta)?;
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
     let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
@@ -909,7 +913,7 @@ pub fn build_push_del_literal_with_meta(
     keyexpr_suffix: &str,
     meta: &PushMetadata,
 ) -> Result<PushOwned, CodecError> {
-    let outer_exts = outer_extensions_of(meta);
+    let outer_exts = outer_extensions_of(meta)?;
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
@@ -940,7 +944,7 @@ pub fn build_push_del_aliased_with_meta(
         "build_push_del_aliased_with_meta requires a non-zero mapping id; \
          use build_push_del_literal_with_meta for id=0",
     );
-    let outer_exts = outer_extensions_of(meta);
+    let outer_exts = outer_extensions_of(meta)?;
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
     let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
@@ -1041,7 +1045,7 @@ mod tests {
             }
         }
         assert_eq!(put.payload_len, None, "the inline pair is absent");
-        let exts = put.extensions.as_deref().unwrap_or(&[]);
+        let exts = crate::held_list::HeldList::entries(&put.extensions).unwrap_or(&[]);
         assert!(
             crate::extshm::body_has_shm_marker(exts),
             "the Put body carries the ext_shm 0x2 marker"
@@ -1105,7 +1109,9 @@ mod tests {
                 }
             }
             assert!(
-                crate::extshm::body_has_shm_marker(put.extensions.as_deref().unwrap_or(&[])),
+                crate::extshm::body_has_shm_marker(
+                    crate::held_list::HeldList::entries(&put.extensions).unwrap_or(&[])
+                ),
                 "the body carries the ext_shm 0x2 marker"
             );
         }
@@ -1383,12 +1389,13 @@ mod tests {
     }
 
     /// The chain of a Push that starts no timestamp stack.
-    fn outer_chain_of(qos: Option<QosLevel>) -> Option<Vec<ExtEntryOwned>> {
+    fn outer_chain_of(qos: Option<QosLevel>) -> Option<ExtChain> {
         build_push_outer_extensions(
             qos,
             #[cfg(feature = "pubsub-ts-stack")]
             None,
         )
+        .expect("two entries at most")
     }
 
     #[cfg(all(feature = "codec-push", feature = "pubsub-qos"))]
@@ -1436,7 +1443,9 @@ mod tests {
         let mut stack = TsStack::new(point::SEND | point::RECEIVE);
         stack.record(point::SEND, alloc::vec![1, 2], false);
         // Alone, it is the one extension of the chain, and nothing follows it.
-        let alone = build_push_outer_extensions(None, Some(&stack)).expect("a chain");
+        let alone = build_push_outer_extensions(None, Some(&stack))
+            .expect("within the bound")
+            .expect("a chain");
         assert_eq!(alone.len(), 1);
         assert_eq!(alone[0].header & 0x7f, crate::ts_stack::TS_STACK_EXT_HEADER);
         assert_eq!(read_ts_stack(alone.iter()), Some(stack.clone()));
@@ -1444,6 +1453,7 @@ mod tests {
         #[cfg(feature = "pubsub-qos")]
         {
             let both = build_push_outer_extensions(Some(QosLevel::from_raw(0x11)), Some(&stack))
+                .expect("within the bound")
                 .expect("a chain");
             assert_eq!(both.len(), 2);
             assert_eq!(both[0].header & 0x0f, 0x01, "the QoS first");

@@ -121,7 +121,7 @@ fn layer3_hello_l1_empty_locator_array() {
         cbyte,
         zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
         num_locators: Some(0),
-        locators: Some(vec![]),
+        locators: Some(Default::default()),
     };
     let wz = wz_owned
         .try_as_borrowed()

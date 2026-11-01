@@ -342,7 +342,8 @@ pub enum QueryExtEntryPartsBody<'a> {
 }
 
 /// A value of `QueryExtEntry` held in the types a caller already has: a source
-/// ([`QueryExtEntrySource`]) whose lists are slices and whose bodies are references.
+/// ([`QueryExtEntrySource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct QueryExtEntryParts<'a> {

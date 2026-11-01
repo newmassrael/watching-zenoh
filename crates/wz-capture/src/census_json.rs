@@ -1923,10 +1923,12 @@ pub(crate) mod fed_tests {
             cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
             zid: owned_bytes(&zid).expect("zid"),
             num_locators: Some(1),
-            locators: Some(alloc::vec![wz_codecs::locator::LocatorOwned {
-                locator_len: locator.len() as u64,
-                locator: owned_string(locator).expect("locator"),
-            }]),
+            locators: Some(wz_session_core::held_list::one_entry(
+                wz_codecs::locator::LocatorOwned {
+                    locator_len: locator.len() as u64,
+                    locator: owned_string(locator).expect("locator"),
+                },
+            )),
         };
         let body = owned
             .try_as_borrowed()

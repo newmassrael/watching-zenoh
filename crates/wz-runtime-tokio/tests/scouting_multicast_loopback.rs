@@ -105,10 +105,10 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
         cbyte,
         zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
         num_locators: Some(1),
-        locators: Some(vec![LocatorOwned {
+        locators: Some(wz_session_core::held_list::one_entry(LocatorOwned {
             locator_len: locator.len() as u64,
             locator: wz_session_core::codec_owned::owned_string(locator).unwrap(),
-        }]),
+        })),
     };
     let body = owned
         .try_as_borrowed()

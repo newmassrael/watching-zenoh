@@ -235,6 +235,8 @@ pub fn record_interception<S: CodecStorage>(
 
 /// [`record_interception`] on the message a node is about to send: a Push, a Request or a
 /// Response. Any other message carries no stack, and a message that carries none is left alone.
+/// The stack replaces the entry that held it, so the chain does not grow and stays within its
+/// bound.
 pub fn record_on_message(
     message: &mut crate::network_message::NetworkMessage,
     at: u8,
@@ -245,15 +247,24 @@ pub fn record_on_message(
     match message {
         #[cfg(feature = "codec-push")]
         crate::network_message::NetworkMessage::Push(push) => {
-            record_interception(&mut push.extensions, at, timestamp)
+            crate::held_list::edit_chain(&mut push.extensions, |chain| {
+                record_interception(chain, at, timestamp)
+            })
+            .unwrap_or(false)
         }
         #[cfg(feature = "codec-request")]
         crate::network_message::NetworkMessage::Request(request) => {
-            record_interception(&mut request.extensions, at, timestamp)
+            crate::held_list::edit_chain(&mut request.extensions, |chain| {
+                record_interception(chain, at, timestamp)
+            })
+            .unwrap_or(false)
         }
         #[cfg(feature = "codec-response")]
         crate::network_message::NetworkMessage::Response(response) => {
-            record_interception(&mut response.extensions, at, timestamp)
+            crate::held_list::edit_chain(&mut response.extensions, |chain| {
+                record_interception(chain, at, timestamp)
+            })
+            .unwrap_or(false)
         }
         _ => {
             let _ = (at, timestamp);

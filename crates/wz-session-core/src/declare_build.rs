@@ -302,22 +302,26 @@ pub fn build_declare_queryable(
 /// output), any other value rides the body's `Z`-gated ext chain (R311ui
 /// capacity). Returns whether an ext is now present; a no-op `false` if `declare`
 /// is not a DeclQueryable. The post-build twin of `set_declare_source` (the
-/// envelope routing-context ext setter), here on the BODY's ext chain.
+/// envelope routing-context ext setter), here on the BODY's ext chain. An `Err` is
+/// a chain at its bound with no room for the entry
+/// ([`crate::held_list::edit_chain`]): the Declare cannot be sent.
 #[cfg(feature = "codec-declare")]
 pub fn set_declare_queryable_info(
     declare: &mut DeclareOwned,
     info: crate::queryable_info::QueryableInfo,
-) -> bool {
+) -> Result<bool, CodecError> {
     let DeclareOwnedVariant::CodecZenohDeclQueryable(d) = &mut declare.body else {
-        return false;
+        return Ok(false);
     };
-    let present = crate::queryable_info::set_queryable_info(&mut d.extensions, info);
+    let present = crate::held_list::edit_chain(&mut d.extensions, |chain| {
+        crate::queryable_info::set_queryable_info(chain, info)
+    })?;
     // Sync the body header's message-level Z bit to chain presence via the SSOT
     // helper (MESSAGE_FLAG_Z — the body HEADER bit, distinct from the per-entry
     // EXT_FLAG_Z: for a single ext the header Z is set while that ext's own Z is
     // clear).
     crate::ext_nodeid::sync_header_z(&mut d.header, present);
-    present
+    Ok(present)
 }
 
 /// R121i-b — build a `Declare` network-message that registers a
@@ -689,7 +693,7 @@ pub fn build_undeclare_subscriber_with_keyexpr(keyexpr: &str) -> Result<DeclareO
             // Z (bit 7): the inner declaration carries an extension chain.
             header: wire_const::D_MID_UNDECL_SUBSCRIBER | 0x80,
             id: 0, // sourced subscriptions use no id; the keyexpr is the identity
-            extensions: Some(alloc::vec![ext]),
+            extensions: Some(crate::held_list::one_entry(ext)),
         }),
     })
 }
@@ -744,7 +748,7 @@ pub fn build_undeclare_queryable_with_keyexpr(keyexpr: &str) -> Result<DeclareOw
             // Z (bit 7): the inner declaration carries an extension chain.
             header: wire_const::D_MID_UNDECL_QUERYABLE | 0x80,
             id: 0, // sourced queryables use no id; the keyexpr is the identity
-            extensions: Some(alloc::vec![ext]),
+            extensions: Some(crate::held_list::one_entry(ext)),
         }),
     })
 }
@@ -775,7 +779,7 @@ pub fn build_undeclare_subscriber_on_wire(
             // Z (bit 7): the inner declaration carries an extension chain.
             header: wire_const::D_MID_UNDECL_SUBSCRIBER | 0x80,
             id: subscriber_id,
-            extensions: Some(alloc::vec![ext]),
+            extensions: Some(crate::held_list::one_entry(ext)),
         }),
     })
 }
@@ -800,7 +804,7 @@ pub fn build_undeclare_queryable_on_wire(
             // Z (bit 7): the inner declaration carries an extension chain.
             header: wire_const::D_MID_UNDECL_QUERYABLE | 0x80,
             id: queryable_id,
-            extensions: Some(alloc::vec![ext]),
+            extensions: Some(crate::held_list::one_entry(ext)),
         }),
     })
 }
@@ -856,7 +860,7 @@ pub fn build_undeclare_token_with_keyexpr(keyexpr: &str) -> Result<DeclareOwned,
             // Z (bit 7): the inner declaration carries an extension chain.
             header: wire_const::D_MID_UNDECL_TOKEN | 0x80,
             id: 0, // sourced tokens use no id; the keyexpr is the identity
-            extensions: Some(alloc::vec![ext]),
+            extensions: Some(crate::held_list::one_entry(ext)),
         }),
     })
 }
@@ -886,7 +890,7 @@ pub fn build_undeclare_token_on_wire(
             // Z (bit 7): the inner declaration carries an extension chain.
             header: wire_const::D_MID_UNDECL_TOKEN | 0x80,
             id: token_id,
-            extensions: Some(alloc::vec![ext]),
+            extensions: Some(crate::held_list::one_entry(ext)),
         }),
     })
 }
@@ -1054,7 +1058,7 @@ pub fn build_declare_queryable_reply(
     info: crate::queryable_info::QueryableInfo,
 ) -> Result<DeclareOwned, CodecError> {
     let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
-    set_declare_queryable_info(&mut declare, info);
+    set_declare_queryable_info(&mut declare, info)?;
     stamp_interest_reply(&mut declare, interest_id);
     Ok(declare)
 }
@@ -1075,7 +1079,7 @@ pub fn build_declare_queryable_reply_with_id(
     info: crate::queryable_info::QueryableInfo,
 ) -> Result<DeclareOwned, CodecError> {
     let mut declare = build_declare_queryable(queryable_id, 0, Some(keyexpr))?;
-    set_declare_queryable_info(&mut declare, info);
+    set_declare_queryable_info(&mut declare, info)?;
     stamp_interest_reply(&mut declare, interest_id);
     Ok(declare)
 }
@@ -1094,7 +1098,7 @@ pub fn build_declare_queryable_with_id_info(
     info: crate::queryable_info::QueryableInfo,
 ) -> Result<DeclareOwned, CodecError> {
     let mut declare = build_declare_queryable(queryable_id, 0, Some(keyexpr))?;
-    set_declare_queryable_info(&mut declare, info);
+    set_declare_queryable_info(&mut declare, info)?;
     Ok(declare)
 }
 
@@ -1468,7 +1472,7 @@ mod tests {
         };
         let mut declare = build_declare_queryable(9, 0, Some("demo/q")).unwrap();
         assert!(
-            set_declare_queryable_info(&mut declare, info),
+            set_declare_queryable_info(&mut declare, info).expect("within the bound"),
             "a non-default QueryableInfo rides the body ext chain",
         );
 
@@ -1481,7 +1485,7 @@ mod tests {
             panic!("body must survive as a DeclQueryable");
         };
         assert_eq!(
-            read_queryable_info(d.extensions.as_ref()),
+            read_queryable_info(d.extensions.as_deref()),
             info,
             "the typed QueryableInfo survived the wire round-trip (zenoh-exact packing)",
         );
@@ -1490,7 +1494,8 @@ mod tests {
         // byte-identical no-info shape.
         let mut plain = build_declare_queryable(9, 0, Some("demo/q")).unwrap();
         assert!(
-            !set_declare_queryable_info(&mut plain, QueryableInfo::DEFAULT),
+            !set_declare_queryable_info(&mut plain, QueryableInfo::DEFAULT)
+                .expect("within the bound"),
             "DEFAULT omits the ext",
         );
         let DeclareOwnedVariant::CodecZenohDeclQueryable(dp) = &plain.body else {
@@ -2007,7 +2012,7 @@ mod tests {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
                 assert_eq!(u.id, 0, "sourced retraction carries no id");
                 assert_eq!(
-                    read_ext_keyexpr(u.extensions.as_ref()),
+                    read_ext_keyexpr(u.extensions.as_deref()),
                     Some("demo/sub"),
                     "ext_keyexpr survived the wire round-trip",
                 );
@@ -2060,7 +2065,7 @@ mod tests {
             DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
                 assert_eq!(u.id, 0, "sourced retraction carries no id");
                 assert_eq!(
-                    read_ext_keyexpr(u.extensions.as_ref()),
+                    read_ext_keyexpr(u.extensions.as_deref()),
                     Some("live/tok"),
                     "ext_keyexpr survived the wire round-trip",
                 );
@@ -2194,7 +2199,7 @@ mod tests {
             DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
                 assert_eq!(u.id, 0, "sourced retraction carries no id");
                 assert_eq!(
-                    read_ext_keyexpr(u.extensions.as_ref()),
+                    read_ext_keyexpr(u.extensions.as_deref()),
                     Some("demo/qbl"),
                     "ext_keyexpr survived the wire round-trip",
                 );

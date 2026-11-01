@@ -115,7 +115,8 @@ impl<T: TempReadingCodecSource + ?Sized> TempReadingCodecSource for &T {
 }
 
 /// A value of `TempReadingCodec` held in the types a caller already has: a source
-/// ([`TempReadingCodecSource`]) whose lists are slices and whose bodies are references.
+/// ([`TempReadingCodecSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct TempReadingCodecParts {

@@ -84,12 +84,13 @@ impl<'a> Routed<'a> {
     fn extensions(
         &self,
     ) -> &'a [wz_codecs::ext_entry::ExtEntryOwned<wz_session_core::wire::WireStorage>] {
+        use wz_session_core::held_list::HeldList;
         match *self {
-            Routed::Push(push) => push.extensions.as_deref().unwrap_or(&[]),
+            Routed::Push(push) => push.extensions.entries().unwrap_or(&[]),
             #[cfg(feature = "codec-request")]
-            Routed::Request(request) => request.extensions.as_deref().unwrap_or(&[]),
+            Routed::Request(request) => request.extensions.entries().unwrap_or(&[]),
             #[cfg(feature = "codec-response")]
-            Routed::Response(response) => response.extensions.as_deref().unwrap_or(&[]),
+            Routed::Response(response) => response.extensions.entries().unwrap_or(&[]),
         }
     }
 }

@@ -3514,10 +3514,10 @@ mod mandatory_extension_seam_tests {
         let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
         match &mut push.body {
             crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
-                put.extensions = Some(alloc::vec![ExtEntryOwned {
+                put.extensions = Some(crate::held_list::one_entry(ExtEntryOwned {
                     header,
                     body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-                }]);
+                }));
                 put.header |= 0x80;
             }
             other => panic!("a literal push carries a Put, got {other:?}"),

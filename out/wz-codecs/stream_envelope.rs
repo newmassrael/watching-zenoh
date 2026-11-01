@@ -147,7 +147,8 @@ impl<T: StreamEnvelopeSource + ?Sized> StreamEnvelopeSource for &T {
 }
 
 /// A value of `StreamEnvelope` held in the types a caller already has: a source
-/// ([`StreamEnvelopeSource`]) whose lists are slices and whose bodies are references.
+/// ([`StreamEnvelopeSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct StreamEnvelopeParts<'a> {

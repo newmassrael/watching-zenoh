@@ -414,7 +414,7 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
     let (_id, suffix) = crate::wireexpr_resolve::id_and_suffix(&push.keyexpr.body);
     let mut bytes = FIXED + VLE + VLE + suffix.map_or(0, str::len);
     if let Some(entries) = &push.extensions {
-        bytes += ext_chain(SceList::as_slice(entries).iter());
+        bytes += ext_chain(SceList::as_slice(entries.inner()).iter());
     }
     // A timestamp is a time, a zid length and a zid of at most sixteen bytes.
     const TIMESTAMP: usize = VLE + VLE + 16;
@@ -433,7 +433,7 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
                         .map_or(0, |schema| SceStr::as_str(schema).len());
             }
             if let Some(entries) = &put.extensions {
-                put_bytes += ext_chain(SceList::as_slice(entries).iter());
+                put_bytes += ext_chain(SceList::as_slice(entries.inner()).iter());
             }
             put_bytes += VLE;
             if let Some(payload) = &put.payload {
@@ -441,7 +441,7 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
             }
             if let Some(slices) = &put.slices {
                 put_bytes += VLE
-                    + SceList::as_slice(slices)
+                    + SceList::as_slice(slices.inner())
                         .iter()
                         .map(|slice| VLE + VLE + SceByteBuf::as_slice(&slice.bytes).len())
                         .sum::<usize>();
@@ -454,7 +454,7 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
                 del_bytes += TIMESTAMP;
             }
             if let Some(entries) = &del.extensions {
-                del_bytes += ext_chain(SceList::as_slice(entries).iter());
+                del_bytes += ext_chain(SceList::as_slice(entries.inner()).iter());
             }
             del_bytes
         }

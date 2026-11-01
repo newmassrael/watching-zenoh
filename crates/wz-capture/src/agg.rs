@@ -55,6 +55,8 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+#[cfg(feature = "network-codecs")]
+use wz_session_core::held_list::HeldList;
 use wz_session_core::network_message::{BatchParse, NetworkMessage};
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
 
@@ -2174,7 +2176,7 @@ pub(crate) fn put_bytes(put: &wz_session_core::wire::parts::MsgPutOwned) -> &[u8
 /// sliced Put is never reported as a measured payload of zero bytes.
 #[cfg(feature = "network-codecs")]
 pub(crate) fn put_payload_is_elsewhere(put: &wz_session_core::wire::parts::MsgPutOwned) -> bool {
-    wz_session_core::put_payload::is_sliced(put) || carries_shm_marker(put.extensions.as_deref())
+    wz_session_core::put_payload::is_sliced(put) || carries_shm_marker(put.extensions.entries())
 }
 
 /// What one `Put`'s payload slot is worth to the totals: the inline bytes
@@ -2302,7 +2304,7 @@ pub(crate) fn payload_content(message: &NetworkMessage) -> Content<'_> {
         NetworkMessage::Request(r) => match &r.body {
             RequestOwnedVariant::CodecZenohMsgPut(put) => put_content(put),
             RequestOwnedVariant::CodecZenohQuery(q) => {
-                match query_body_bytes(q.extensions.as_deref()).map(query_value_payload) {
+                match query_body_bytes(q.extensions.entries()).map(query_value_payload) {
                     Some(Ok(payload)) => Content::Whole(payload),
                     _ => Content::Unavailable,
                 }
@@ -2319,7 +2321,7 @@ pub(crate) fn payload_content(message: &NetworkMessage) -> Content<'_> {
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => Content::Unavailable,
             },
             ResponseOwnedVariant::CodecZenohErr(err) => {
-                if carries_shm_marker(err.extensions.as_deref()) {
+                if carries_shm_marker(err.extensions.entries()) {
                     Content::Unavailable
                 } else {
                     Content::Whole(err.payload.as_slice())
@@ -2477,7 +2479,7 @@ pub(crate) fn classify(
                     // only reach the first half and so reported every valued
                     // query as unmeasurable; the payload's own z32 prefix was on
                     // the wire inside the ext the whole time.
-                    if let Some(body) = query_body_bytes(q.extensions.as_deref()) {
+                    if let Some(body) = query_body_bytes(q.extensions.entries()) {
                         counts.record_payload(query_value_bytes(body));
                     }
                     RecordKind::Query
@@ -2526,7 +2528,7 @@ pub(crate) fn classify(
                     // carrier (`zenoh-protocol-1.5.0/src/zenoh/err.rs:49-68`).
                     counts.record_payload(measured_payload(
                         err.payload.as_slice(),
-                        err.extensions.as_deref(),
+                        err.extensions.entries(),
                     ));
                     RecordKind::Err
                 }
@@ -3125,7 +3127,7 @@ pub(crate) mod tests {
         if let Some(body) = value {
             // R3044 -- a Query's chain holds its own kind of entry; the plain one
             // is the generic entry's ZBuf body moved across.
-            owned.extensions = Some(alloc::vec![
+            owned.extensions = Some(wz_session_core::held_list::one_entry(
                 wz_session_core::ext_view::query_ext_from_generic(ExtEntryOwned {
                     header: body_ext_id::QUERY_BODY | EXT_ENC_ZBUF,
                     body: ExtEntryOwnedVariant::CodecZenohExtZbuf(
@@ -3133,10 +3135,10 @@ pub(crate) mod tests {
                             value_len: body.len() as u64,
                             value: wz_session_core::codec_owned::owned_bytes(&body)
                                 .expect("the fixture value is within the owned bound"),
-                        }
+                        },
                     ),
-                })
-            ]);
+                }),
+            ));
             owned.header |= 0x80;
         }
         let query = owned.try_as_borrowed().expect("the chain is within bounds");
@@ -4567,15 +4569,9 @@ pub(crate) mod tests {
                     request_id: 1,
                     ..Default::default()
                 }
-                .encode_to_vec()
-                .expect("a fixture ResponseFinal is encodable"),
+                .encode_to_vec(),
             ),
-            (
-                true,
-                wz_codecs::oam::Oam::default()
-                    .encode_to_vec()
-                    .expect("a default Oam is encodable"),
-            ),
+            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
             (
                 true,
                 wz_codecs::interest::Interest {
@@ -4615,12 +4611,7 @@ pub(crate) mod tests {
             (true, declare_kexpr(1, "accounted/topic")),
             (true, push(sender_space(1, None), &[0u8; 4])),
             (true, undeclare_kexpr(1)),
-            (
-                true,
-                wz_codecs::oam::Oam::default()
-                    .encode_to_vec()
-                    .expect("a default Oam is encodable"),
-            ),
+            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
         ]);
 
         let (declared, undeclared) = table.declarations();

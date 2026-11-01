@@ -90,11 +90,7 @@ fn declare_dispatch_does_not_swallow_subsequent_records() {
             .encode_to_vec()
             .expect("a default Declare encodes"),
     );
-    wire.extend_from_slice(
-        &ResponseFinal::default()
-            .encode_to_vec()
-            .expect("a default ResponseFinal encodes"),
-    );
+    wire.extend_from_slice(&ResponseFinal::default().encode_to_vec());
 
     let messages = parse_frame_payload(&wire).expect("parse 3-record batch");
     assert_eq!(messages.len(), 3, "all three records must be dispatched");

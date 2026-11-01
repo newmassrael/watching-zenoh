@@ -118,10 +118,17 @@ impl<'c, T: ExtEntryView + ?Sized> ExtEntryBytes<'c> for &'c T {
 ///
 /// `W` is the list's walk marker (`ExtEntryWalk` for an extension chain), which says how an entry is
 /// read and names the entry view it yields.
-pub fn walked<'a, W: sce_forge_runtime::codec::ListWalk<K> + 'a, const K: usize>(
-    chain: Option<&sce_forge_runtime::codec::ListView<'a, W, K>>,
+pub fn walked<
+    'a,
+    W: sce_forge_runtime::codec::ListWalk<K> + 'a,
+    const K: usize,
+    const MAX: usize,
+>(
+    chain: Option<
+        &sce_forge_runtime::codec::Bounded<sce_forge_runtime::codec::ListView<'a, W, K>, MAX>,
+    >,
 ) -> impl Iterator<Item = W::Entry<'a>> + 'a {
-    chain.map(|list| list.iter()).into_iter().flatten()
+    chain.map(|list| list.inner().iter()).into_iter().flatten()
 }
 
 /// [`find_by_eid`] over the entries a chain yields, by value or by reference: the first whose
@@ -378,7 +385,7 @@ mod query {
                                 .map_or(0, |(_, payload)| payload.len())
                         }
                         (None, Some(slices)) => {
-                            crate::put_payload::slices_len(SceList::as_slice(slices))
+                            crate::put_payload::slices_len(SceList::as_slice(slices.inner()))
                         }
                         (None, None) => 0,
                     }

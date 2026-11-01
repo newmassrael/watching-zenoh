@@ -33,7 +33,7 @@ use super::undecl_subscriber::UndeclSubscriber;
 use super::undecl_queryable::UndeclQueryable;
 use super::undecl_token::UndeclToken;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 use super::decl_final::DeclFinalView;
 use super::decl_kexpr::DeclKexprView;
@@ -407,7 +407,7 @@ pub trait DeclareSource {
     /// The `interest_id` field.
     fn interest_id(&self) -> Option<u64>;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
     /// The arm of the variant this value holds.
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource>;
 }
@@ -419,7 +419,7 @@ impl<T: DeclareSource + ?Sized> DeclareSource for &T {
     fn interest_id(&self) -> Option<u64> {
         (**self).interest_id()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         (**self).extensions()
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
@@ -445,7 +445,8 @@ pub enum DeclarePartsBody<'a> {
 }
 
 /// A value of `Declare` held in the types a caller already has: a source
-/// ([`DeclareSource`]) whose lists are slices and whose bodies are references.
+/// ([`DeclareSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct DeclareParts<'a> {
@@ -454,7 +455,7 @@ pub struct DeclareParts<'a> {
     /// The `interest_id` field.
     pub interest_id: Option<u64>,
     /// The `extensions` field.
-    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
     /// The arm of the variant this value holds.
     pub body: DeclarePartsBody<'a>,
 }
@@ -466,8 +467,8 @@ impl<'a> DeclareSource for DeclareParts<'a> {
     fn interest_id(&self) -> Option<u64> {
         self.interest_id
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.map(<[_]>::iter)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
         match &self.body {
@@ -492,8 +493,8 @@ impl<'a> DeclareSource for Declare<'a> {
     fn interest_id(&self) -> Option<u64> {
         self.interest_id
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| _l.iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
         match &self.body {
@@ -518,7 +519,7 @@ impl<'a> DeclareSource for DeclareView<'a> {
     fn interest_id(&self) -> Option<u64> {
         self.interest_id
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
@@ -544,8 +545,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareSource for DeclareOwned
     fn interest_id(&self) -> Option<u64> {
         self.interest_id
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
         match &self.body {
@@ -578,10 +579,7 @@ impl<'a> Declare<'a> {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: DeclareSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
-        if _k_extensions > 8 {
-            return Err(CodecError::TlvChainOverflow);
-        }
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
         let _p_header_i_0: bool = src.interest_id().is_some();
         let _p_header_z_0: bool = src.extensions().is_some();
         let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_i_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
@@ -699,7 +697,7 @@ impl ListWalk<0> for DeclareExtensionsWalk {
 pub struct DeclareView<'a> {
     pub header: u8,
     pub interest_id: Option<u64>,
-    pub extensions: Option<ListView<'a, DeclareExtensionsWalk, 0>>,
+    pub extensions: Option<Bounded<ListView<'a, DeclareExtensionsWalk, 0>, 8>>,
     pub body: DeclareViewVariant<'a>,
 }
 
@@ -771,7 +769,7 @@ impl<'a> DeclareView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, []));
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TlvChainOverflow)?);
         } else {
             _out.extensions = None;
         }
@@ -1034,7 +1032,7 @@ use super::undecl_token::UndeclTokenOwned;
 pub struct DeclareOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
     pub header: u8,
     pub interest_id: Option<u64>,
-    pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
     pub body: DeclareOwnedVariant<S>,
 }
 
@@ -1216,7 +1214,7 @@ impl<'a> Declare<'a> {
         Ok(DeclareOwned {
             header: self.header,
             interest_id: self.interest_id,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
             body: self.body.try_into_owned_in::<S>()?,
         })
     }
@@ -1259,7 +1257,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwned<S> {
         _out.header = self.header;
         _out.interest_id = self.interest_id;
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.extensions = None,
         }
         self.body.try_as_borrowed_into(&mut _out.body)?;
@@ -1345,7 +1343,7 @@ impl<'a> Declare<'a> {
         Ok(DeclareOwned {
             header: self.header,
             interest_id: self.interest_id,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
             body: self.body.try_into_owned_in_origin::<S>(origin)?,
         })
     }

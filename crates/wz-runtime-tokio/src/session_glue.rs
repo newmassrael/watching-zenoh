@@ -5717,7 +5717,7 @@ mod reconnect_tx_tests {
             {
                 Some(NetworkMessage::Declare(d)) => match &d.body {
                     DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
-                        read_queryable_info(q.extensions.as_ref())
+                        read_queryable_info(q.extensions.as_deref())
                     }
                     _ => panic!("not a DeclareQueryable"),
                 },

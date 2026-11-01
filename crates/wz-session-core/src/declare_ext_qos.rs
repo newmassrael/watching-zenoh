@@ -88,6 +88,8 @@
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::CodecStorage;
+#[cfg(feature = "alloc")]
+use sce_forge_runtime::codec::{Bounded, CodecError};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use wz_codecs::declare::DeclareOwned;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -172,8 +174,8 @@ pub fn qos_ext<S: CodecStorage>(qos: QosLevel) -> ExtEntryOwned<S> {
 /// change reverted.
 #[cfg(feature = "alloc")]
 #[inline(never)]
-pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
-    alloc::vec![qos_ext(QOS_DECLARE)]
+pub fn declare_envelope_extensions() -> Bounded<Vec<ExtEntryOwned>, 8> {
+    crate::held_list::one_entry(qos_ext(QOS_DECLARE))
 }
 
 /// Read the `ext_qos` out of a message's extension chain. `QosLevel::DEFAULT`
@@ -225,19 +227,25 @@ pub(crate) fn qos_of_raw(raw: Option<u64>) -> QosLevel {
 /// The header byte is passed in rather than the message, because WHICH header
 /// carries the bit is the only thing the Declare and Interest arms do not
 /// share; everything above it does, which is why it is one function.
+///
+/// An `Err` is a chain at its bound with no room for the entry
+/// ([`crate::held_list::edit_chain`]): the message cannot be sent.
 #[cfg(feature = "alloc")]
-fn set_qos_chain<S: CodecStorage>(
-    exts: &mut Option<Vec<ExtEntryOwned<S>>>,
+fn set_qos_chain<S: CodecStorage, const MAX: usize>(
+    exts: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX>>,
     header: &mut u8,
     qos: QosLevel,
-) {
+) -> Result<(), CodecError> {
     let value = if qos == QosLevel::DEFAULT {
         None
     } else {
         Some(qos.raw as u64)
     };
-    let present = ext_nodeid::set_z64_ext(exts, QOS_EXT_HEADER, value);
+    let present = crate::held_list::edit_chain(exts, |chain| {
+        ext_nodeid::set_z64_ext(chain, QOS_EXT_HEADER, value)
+    })?;
     ext_nodeid::sync_header_z(header, present);
+    Ok(())
 }
 
 /// Read an `Interest`'s `ext_qos`. Absent means `QosLevel::DEFAULT`, which is
@@ -247,13 +255,13 @@ fn set_qos_chain<S: CodecStorage>(
 /// pinned 1.10.0 reference; the earlier "five of six" was the 1.5.0-era count).
 #[cfg(feature = "alloc")]
 pub fn read_interest_qos(interest: &InterestOwned) -> QosLevel {
-    read_qos_chain(interest.extensions.as_ref())
+    read_qos_chain(interest.extensions.as_deref())
 }
 
 /// Set an `Interest`'s `ext_qos` (`QosLevel::DEFAULT` removes it).
 #[cfg(feature = "alloc")]
-pub fn set_interest_qos(interest: &mut InterestOwned, qos: QosLevel) {
-    set_qos_chain(&mut interest.extensions, &mut interest.header, qos);
+pub fn set_interest_qos(interest: &mut InterestOwned, qos: QosLevel) -> Result<(), CodecError> {
+    set_qos_chain(&mut interest.extensions, &mut interest.header, qos)
 }
 
 /// Read a Declare's `ext_qos`. Absent means `QosLevel::DEFAULT` — the state
@@ -261,13 +269,13 @@ pub fn set_interest_qos(interest: &mut InterestOwned, qos: QosLevel) {
 /// emits at all.
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub fn read_declare_qos(declare: &DeclareOwned) -> QosLevel {
-    read_qos_chain(declare.extensions.as_ref())
+    read_qos_chain(declare.extensions.as_deref())
 }
 
 /// Set a Declare's `ext_qos` (`QosLevel::DEFAULT` REMOVES it).
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) {
-    set_qos_chain(&mut declare.extensions, &mut declare.header, qos);
+pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) -> Result<(), CodecError> {
+    set_qos_chain(&mut declare.extensions, &mut declare.header, qos)
 }
 
 /// R2594 — read a `Request`'s `ext_qos`: the QoS the QUERY arrived with, and
@@ -282,7 +290,7 @@ pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) {
 /// carries the extension too.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 pub fn read_request_qos(request: &crate::wire::RequestOwned) -> QosLevel {
-    read_qos_chain(request.extensions.as_ref())
+    read_qos_chain(request.extensions.as_deref())
 }
 
 /// R2825 — read a `Push`'s `ext_qos`. Absent means `QosLevel::DEFAULT`, as
@@ -291,7 +299,7 @@ pub fn read_request_qos(request: &crate::wire::RequestOwned) -> QosLevel {
 /// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `self.ext_qos.get_priority()`).
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub fn read_push_qos(push: &crate::wire::PushOwned) -> QosLevel {
-    read_qos_chain(push.extensions.as_ref())
+    read_qos_chain(push.extensions.as_deref())
 }
 
 /// Set a `Push`'s `ext_qos` in place (`QosLevel::DEFAULT` REMOVES it, the omit-on-DEFAULT gate every
@@ -299,20 +307,23 @@ pub fn read_push_qos(push: &crate::wire::PushOwned) -> QosLevel {
 /// its way through (`zenoh/src/net/routing/interceptor/qos_overwrite.rs` @
 /// `self.overwrite_qos(QosOverwriteMessage::Put, ext_qos);`).
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
-pub fn set_push_qos(push: &mut crate::wire::PushOwned, qos: QosLevel) {
-    set_qos_chain(&mut push.extensions, &mut push.header, qos);
+pub fn set_push_qos(push: &mut crate::wire::PushOwned, qos: QosLevel) -> Result<(), CodecError> {
+    set_qos_chain(&mut push.extensions, &mut push.header, qos)
 }
 
 /// Set a `Request`'s `ext_qos` in place, as `set_push_qos` does a `Push`'s.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
-pub fn set_request_qos(request: &mut crate::wire::RequestOwned, qos: QosLevel) {
-    set_qos_chain(&mut request.extensions, &mut request.header, qos);
+pub fn set_request_qos(
+    request: &mut crate::wire::RequestOwned,
+    qos: QosLevel,
+) -> Result<(), CodecError> {
+    set_qos_chain(&mut request.extensions, &mut request.header, qos)
 }
 
 /// R2825 — read an `OAM`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
 #[cfg(feature = "alloc")]
 pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
-    read_qos_chain(oam.extensions.as_ref())
+    read_qos_chain(oam.extensions.as_deref())
 }
 
 /// R2594 — read a `Response`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
@@ -331,7 +342,7 @@ pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
 /// it through [`set_response_qos`].
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub fn read_response_qos(response: &crate::wire::ResponseOwned) -> QosLevel {
-    read_qos_chain(response.extensions.as_ref())
+    read_qos_chain(response.extensions.as_deref())
 }
 
 /// R2906 — set a `Response`'s `ext_qos` in place, keeping every other entry
@@ -348,21 +359,26 @@ pub fn read_response_qos(response: &crate::wire::ResponseOwned) -> QosLevel {
 /// upstream router emits. Receivers accept either order; the bytes are what
 /// a capture compares.
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
-pub fn set_response_qos(response: &mut crate::wire::ResponseOwned, qos: QosLevel) {
-    let exts = &mut response.extensions;
-    if let Some(list) = exts.as_mut() {
-        list.retain(|e| crate::ext_header::ext_eid(e.header) != QOS_EXT_HEADER);
-    }
-    if qos != QosLevel::DEFAULT {
-        exts.get_or_insert_with(Vec::new).insert(0, qos_ext(qos));
-    }
-    if exts.as_ref().is_some_and(|list| list.is_empty()) {
-        *exts = None;
-    }
-    if let Some(list) = exts.as_mut() {
-        ext_nodeid::apply_chain_z_bits(list);
-    }
-    ext_nodeid::sync_header_z(&mut response.header, exts.is_some());
+pub fn set_response_qos(
+    response: &mut crate::wire::ResponseOwned,
+    qos: QosLevel,
+) -> Result<(), CodecError> {
+    crate::held_list::edit_chain(&mut response.extensions, |exts| {
+        if let Some(list) = exts.as_mut() {
+            list.retain(|e| crate::ext_header::ext_eid(e.header) != QOS_EXT_HEADER);
+        }
+        if qos != QosLevel::DEFAULT {
+            exts.get_or_insert_with(Vec::new).insert(0, qos_ext(qos));
+        }
+        if exts.as_ref().is_some_and(|list| list.is_empty()) {
+            *exts = None;
+        }
+        if let Some(list) = exts.as_mut() {
+            ext_nodeid::apply_chain_z_bits(list);
+        }
+    })?;
+    ext_nodeid::sync_header_z(&mut response.header, response.extensions.is_some());
+    Ok(())
 }
 
 /// R2595 — read a `ResponseFinal`'s `ext_qos`. Absent means `QosLevel::DEFAULT`,
@@ -371,7 +387,7 @@ pub fn set_response_qos(response: &mut crate::wire::ResponseOwned, qos: QosLevel
 pub fn read_response_final_qos(
     response_final: &wz_codecs::response_final::ResponseFinalOwned,
 ) -> QosLevel {
-    read_qos_chain(response_final.extensions.as_ref())
+    read_qos_chain(response_final.extensions.as_deref())
 }
 
 /// R2595 — set a `ResponseFinal`'s `ext_qos` (`QosLevel::DEFAULT` REMOVES it,
@@ -383,12 +399,12 @@ pub fn read_response_final_qos(
 pub fn set_response_final_qos(
     response_final: &mut wz_codecs::response_final::ResponseFinalOwned,
     qos: QosLevel,
-) {
+) -> Result<(), CodecError> {
     set_qos_chain(
         &mut response_final.extensions,
         &mut response_final.header,
         qos,
-    );
+    )
 }
 
 /// The Interest arm's own tests — separate from the Declare module below
@@ -410,7 +426,7 @@ mod interest_tests {
         let i = build_interest_liveliness_subscriber(4, true, 0, Some("live/**")).expect("build");
         assert_eq!(read_interest_qos(&i), QOS_DECLARE);
         assert_eq!(i.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z);
-        assert_eq!(i.extensions.as_ref().map(|e| e.len()), Some(1));
+        assert_eq!(i.extensions.as_deref().map(|e| e.len()), Some(1));
     }
 
     /// The discriminating half. Upstream's liveliness GET
@@ -487,10 +503,10 @@ mod overwrite_tests {
     fn a_push_carries_the_qos_it_was_set_to_and_loses_it_on_the_default() {
         let mut push = build_push_literal("demo/k", b"v").expect("build");
         assert_eq!(read_push_qos(&push), QosLevel::DEFAULT);
-        set_push_qos(&mut push, express_real_time());
+        set_push_qos(&mut push, express_real_time()).unwrap();
         assert_eq!(read_push_qos(&push), express_real_time());
         assert_eq!(push.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z);
-        set_push_qos(&mut push, QosLevel::DEFAULT);
+        set_push_qos(&mut push, QosLevel::DEFAULT).unwrap();
         assert_eq!(read_push_qos(&push), QosLevel::DEFAULT);
         assert_eq!(push.header & MESSAGE_FLAG_Z, 0);
         assert!(push.extensions.is_none());
@@ -499,9 +515,9 @@ mod overwrite_tests {
     #[test]
     fn a_request_carries_the_qos_it_was_set_to_and_loses_it_on_the_default() {
         let mut request = build_request_query(7, 0, Some("demo/k")).expect("build");
-        set_request_qos(&mut request, express_real_time());
+        set_request_qos(&mut request, express_real_time()).unwrap();
         assert_eq!(read_request_qos(&request), express_real_time());
-        set_request_qos(&mut request, QosLevel::DEFAULT);
+        set_request_qos(&mut request, QosLevel::DEFAULT).unwrap();
         assert_eq!(read_request_qos(&request), QosLevel::DEFAULT);
     }
 }
@@ -554,7 +570,7 @@ mod tests {
     #[test]
     fn setting_the_default_removes_the_ext_and_clears_the_header_bit() {
         let mut d = build_declare_kexpr(3, "demo/example").expect("build");
-        set_declare_qos(&mut d, QosLevel::DEFAULT);
+        set_declare_qos(&mut d, QosLevel::DEFAULT).unwrap();
         assert!(d.extensions.is_none(), "omit-on-DEFAULT drops the sole ext");
         assert_eq!(d.header & MESSAGE_FLAG_Z, 0);
         // Reading it back still answers DEFAULT — the encode gate and the read
@@ -567,8 +583,8 @@ mod tests {
     #[test]
     fn qos_precedes_nodeid_in_the_production_chain() {
         let mut d = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
-        set_declare_source(&mut d, 7);
-        let exts = d.extensions.as_ref().expect("chain present");
+        set_declare_source(&mut d, 7).unwrap();
+        let exts = d.extensions.as_deref().expect("chain present");
         assert_eq!(exts.len(), 2);
         assert_eq!(exts[0].header, QOS_EXT_HEADER | EXT_FLAG_Z, "qos leads");
         assert_eq!(exts[1].header, 0x33, "nodeid terminates");

@@ -24,7 +24,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::linkstate::Linkstate;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::linkstate::LinkstateView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -141,45 +141,46 @@ impl<'a> LinkstateList<'a> {
 /// computes those from what is ([`LinkstateList::encode_source`]).
 pub trait LinkstateListSource {
     /// The `link_states` field.
-    fn link_states(&self) -> impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone;
+    fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64>;
 }
 
 impl<T: LinkstateListSource + ?Sized> LinkstateListSource for &T {
-    fn link_states(&self) -> impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone {
+    fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64> {
         (**self).link_states()
     }
 }
 
 /// A value of `LinkstateList` held in the types a caller already has: a source
-/// ([`LinkstateListSource`]) whose lists are slices and whose bodies are references.
+/// ([`LinkstateListSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct LinkstateListParts<'a> {
     /// The `link_states` field.
-    pub link_states: &'a [super::linkstate::LinkstateParts<'a>],
+    pub link_states: ::sce_forge_runtime::codec::Bounded<&'a [super::linkstate::LinkstateParts<'a>], 64>,
 }
 
 impl<'a> LinkstateListSource for LinkstateListParts<'a> {
-    fn link_states(&self) -> impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone {
+    fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64> {
         self.link_states.iter()
     }
 }
 
 impl<'a> LinkstateListSource for LinkstateList<'a> {
-    fn link_states(&self) -> impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone {
-        self.link_states.iter()
+    fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64> {
+        ::sce_forge_runtime::codec::BoundedIter::from(&self.link_states)
     }
 }
 
 impl<'a> LinkstateListSource for LinkstateListView<'a> {
-    fn link_states(&self) -> impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone {
+    fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64> {
         self.link_states.iter()
     }
 }
 
 impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListSource for LinkstateListOwned<S> {
-    fn link_states(&self) -> impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone {
-        ::sce_forge_runtime::codec::SceList::as_slice(&self.link_states).iter()
+    fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64> {
+        self.link_states.list_iter()
     }
 }
 
@@ -198,10 +199,7 @@ impl<'a> LinkstateList<'a> {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: LinkstateListSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_link_states: usize = src.link_states().count();
-        if _k_link_states > 64 {
-            return Err(CodecError::TooManyElements);
-        }
+        let _k_link_states: usize = src.link_states().len();
         let _d_num_link_states: u64 = ::sce_forge_runtime::codec::widen_usize(_k_link_states);
         w.write_vle_u64(_d_num_link_states)?;
         for _e in src.link_states() {
@@ -275,7 +273,7 @@ impl ListWalk<0> for LinkstateListLinkStatesWalk {
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkstateListView<'a> {
     pub num_link_states: u64,
-    pub link_states: ListView<'a, LinkstateListLinkStatesWalk, 0>,
+    pub link_states: Bounded<ListView<'a, LinkstateListLinkStatesWalk, 0>, 64>,
 }
 
 #[allow(dead_code)]
@@ -322,7 +320,7 @@ impl<'a> LinkstateListView<'a> {
                 }
                 _count += 1;
             }
-            _out.link_states = ListView::new(_rest, _count, []);
+            _out.link_states = Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?;
         }
         _out.num_link_states = num_link_states;
         Ok(())
@@ -414,7 +412,7 @@ use super::linkstate::LinkstateOwned;
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkstateListOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
     pub num_link_states: u64,
-    pub link_states: S::List<LinkstateOwned<S>, 64>,
+    pub link_states: ::sce_forge_runtime::codec::Bounded<S::List<LinkstateOwned<S>, 64>, 64>,
 }
 
 #[allow(dead_code)]
@@ -433,7 +431,7 @@ impl<'a> LinkstateList<'a> {
     pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<LinkstateListOwned<S>, CodecError> {
         Ok(LinkstateListOwned {
             num_link_states: self.num_link_states,
-            link_states: ::sce_forge_runtime::codec::try_collect_list(self.link_states, |_e| _e.try_into_owned_in::<S>())?,
+            link_states: ::sce_forge_runtime::codec::try_collect_bounded(self.link_states, |_e| _e.try_into_owned_in::<S>())?,
         })
     }
 
@@ -473,7 +471,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListOwned<S> {
     /// and is not to be read.
     pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut LinkstateList<'o>) -> Result<(), CodecError> {
         _out.num_link_states = self.num_link_states;
-        ::sce_forge_runtime::codec::try_project_bounded_into(&mut _out.link_states, &self.link_states, |_e| _e.try_as_borrowed())?;
+        ::sce_forge_runtime::codec::try_project_bounded_into(&mut _out.link_states, self.link_states.inner(), |_e| _e.try_as_borrowed())?;
         Ok(())
     }
 
@@ -535,7 +533,7 @@ impl<'a> LinkstateList<'a> {
     pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<LinkstateListOwned<S>, CodecError> {
         Ok(LinkstateListOwned {
             num_link_states: self.num_link_states,
-            link_states: ::sce_forge_runtime::codec::try_collect_list(self.link_states, |_e| _e.try_into_owned_in_origin::<S>(origin))?,
+            link_states: ::sce_forge_runtime::codec::try_collect_bounded(self.link_states, |_e| _e.try_into_owned_in_origin::<S>(origin))?,
         })
     }
 }

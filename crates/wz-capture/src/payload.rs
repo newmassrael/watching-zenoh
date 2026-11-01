@@ -1601,7 +1601,7 @@ fn carried_payload(
                 &r.keyexpr.body,
                 e.encoding.as_ref(),
                 e.payload.as_slice(),
-                carries_shm_marker(e.extensions.as_deref()),
+                carries_shm_marker(wz_session_core::held_list::HeldList::entries(&e.extensions)),
             )),
         },
         _ => None,

@@ -46,17 +46,24 @@ use crate::ext_nodeid;
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
 /// the shared [`ext_nodeid::read_source`].
 pub fn read_declare_source(declare: &DeclareOwned) -> u16 {
-    ext_nodeid::read_source(declare.extensions.as_ref())
+    ext_nodeid::read_source(declare.extensions.as_deref())
 }
 
 /// Set the routing-context source `node_id` on a Declare's `ext_nodeid`
 /// extension (`node_id == 0` removes it — zenoh's omit-on-DEFAULT). The shared
 /// [`ext_nodeid::set_source`] owns the chain
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
-/// Declare-level header `Z` flag to the resulting chain.
-pub fn set_declare_source(declare: &mut DeclareOwned, node_id: u16) {
-    let present = ext_nodeid::set_source(&mut declare.extensions, node_id);
+/// Declare-level header `Z` flag to the resulting chain. An `Err` is a chain at its bound with no
+/// room for the entry ([`crate::held_list::edit_chain`]): the Declare cannot be sent.
+pub fn set_declare_source(
+    declare: &mut DeclareOwned,
+    node_id: u16,
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    let present = crate::held_list::edit_chain(&mut declare.extensions, |chain| {
+        ext_nodeid::set_source(chain, node_id)
+    })?;
     ext_nodeid::sync_header_z(&mut declare.header, present);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -97,14 +104,14 @@ mod tests {
     #[test]
     fn set_then_read_round_trips() {
         let mut d = declare_sub();
-        set_declare_source(&mut d, 7);
+        set_declare_source(&mut d, 7).unwrap();
         assert_eq!(read_declare_source(&d), 7);
     }
 
     #[test]
     fn nodeid_header_is_id_mandatory_z64_terminal() {
         let mut d = declare_sub();
-        set_declare_source(&mut d, 7);
+        set_declare_source(&mut d, 7).unwrap();
         let exts = d.extensions.as_ref().expect("ext present after set");
         assert_eq!(exts.len(), 2, "the builder's ext_qos, then the nodeid");
         // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (last entry).
@@ -116,8 +123,8 @@ mod tests {
     #[test]
     fn set_zero_removes_the_ext() {
         let mut d = declare_sub();
-        set_declare_source(&mut d, 7);
-        set_declare_source(&mut d, 0);
+        set_declare_source(&mut d, 7).unwrap();
+        set_declare_source(&mut d, 0).unwrap();
         assert_eq!(read_declare_source(&d), 0);
         // R311y801 — the nodeid entry is dropped, the builder's ext_qos stays,
         // so the chain (and the header Z bit) survive. Removing one ext must
@@ -137,8 +144,8 @@ mod tests {
     #[test]
     fn set_replaces_an_existing_nodeid() {
         let mut d = declare_sub();
-        set_declare_source(&mut d, 7);
-        set_declare_source(&mut d, 9);
+        set_declare_source(&mut d, 7).unwrap();
+        set_declare_source(&mut d, 9).unwrap();
         assert_eq!(read_declare_source(&d), 9);
         let exts = d.extensions.as_ref().expect("ext present");
         assert_eq!(exts.len(), 2, "replaced, not duplicated (ext_qos + nodeid)");
@@ -148,10 +155,10 @@ mod tests {
     fn coexists_with_another_ext_and_fixes_chain_z_bits() {
         let mut d = declare_sub();
         // Seed a pre-existing (non-nodeid) extension.
-        d.extensions = Some(vec![other_ext()]);
+        d.extensions = Some(crate::held_list::one_entry(other_ext()));
         d.header |= MESSAGE_FLAG_Z;
 
-        set_declare_source(&mut d, 7);
+        set_declare_source(&mut d, 7).unwrap();
         let exts = d.extensions.as_ref().expect("chain present");
         assert_eq!(exts.len(), 2, "other ext kept, nodeid appended");
         // The non-last entry carries the continuation bit; nodeid terminates.
@@ -160,7 +167,7 @@ mod tests {
         assert_eq!(read_declare_source(&d), 7);
 
         // Removing the nodeid leaves the other ext as a terminal entry.
-        set_declare_source(&mut d, 0);
+        set_declare_source(&mut d, 0).unwrap();
         let exts = d.extensions.as_ref().expect("other ext remains");
         assert_eq!(exts.len(), 1);
         assert_eq!(exts[0].header, 0x01 | EXT_ENC_Z64, "Z bit cleared (last)");
@@ -184,7 +191,7 @@ mod tests {
         use wz_codecs_test_support::TestWire;
 
         let mut d = declare_sub();
-        set_declare_source(&mut d, 7);
+        set_declare_source(&mut d, 7).unwrap();
         let bytes = d.wire();
 
         let mut cursor = SceCursor::new(&bytes);
@@ -224,7 +231,7 @@ mod tests {
         use wz_codecs_test_support::TestWire;
 
         let mut d = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build declare sub");
-        set_declare_source(&mut d, 7);
+        set_declare_source(&mut d, 7).unwrap();
         let mut expected = vec![
             0x9E, // Declare header: N_MID_DECLARE 0x1E | Z 0x80 (ext chain present)
             // R311y801 — the builder's ext_qos leads the chain, which is also

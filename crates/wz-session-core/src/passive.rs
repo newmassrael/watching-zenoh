@@ -4872,7 +4872,6 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture oam record is encodable")
     }
 
     /// Drive a session to Established so the post-handshake contracts are in

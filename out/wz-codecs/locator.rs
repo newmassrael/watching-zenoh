@@ -139,7 +139,8 @@ impl<T: LocatorSource + ?Sized> LocatorSource for &T {
 }
 
 /// A value of `Locator` held in the types a caller already has: a source
-/// ([`LocatorSource`]) whose lists are slices and whose bodies are references.
+/// ([`LocatorSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct LocatorParts<'a> {

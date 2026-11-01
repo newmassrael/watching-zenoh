@@ -25,7 +25,7 @@
 use super::*;
 use crate::runtime_impl::TokioRuntime;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
-use sce_forge_runtime::codec::SceBytes;
+use sce_forge_runtime::codec::{Bounded, SceBytes};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wz_codecs::linkstate::LinkstateOwned;
@@ -596,7 +596,7 @@ fn seen_of(message: &NetworkMessage) -> Seen {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => Seen::UndeclareSubscriber,
             DeclareOwnedVariant::CodecZenohDeclQueryable(q) => Seen::DeclareQueryable {
                 keyexpr: literal(&q.keyexpr.body),
-                complete: read_queryable_info(q.extensions.as_ref()).complete,
+                complete: read_queryable_info(q.extensions.as_deref()).complete,
                 answer_to: declare.interest_id,
             },
             #[cfg(feature = "routing-token-tables")]
@@ -707,7 +707,13 @@ fn entry(psid: u64, sn: u64, node: u8, links: &[u64]) -> LinkstateOwned {
         num_locators: None,
         locators: None,
         links_len: links.len() as u64,
-        links: links.iter().map(|&psid| LinkstateLink { psid }).collect(),
+        links: Bounded::new(
+            links
+                .iter()
+                .map(|&psid| LinkstateLink { psid })
+                .collect::<Vec<_>>(),
+        )
+        .expect("a fixture's links are within the bound"),
         weights: None,
     }
 }
@@ -715,7 +721,7 @@ fn entry(psid: u64, sn: u64, node: u8, links: &[u64]) -> LinkstateOwned {
 fn list(entries: Vec<LinkstateOwned>) -> LinkstateListOwned {
     LinkstateListOwned {
         num_link_states: entries.len() as u64,
-        link_states: entries,
+        link_states: Bounded::new(entries).expect("a fixture's entries are within the bound"),
     }
 }
 

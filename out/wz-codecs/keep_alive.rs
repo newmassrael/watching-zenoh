@@ -107,7 +107,8 @@ impl<T: KeepAliveSource + ?Sized> KeepAliveSource for &T {
 }
 
 /// A value of `KeepAlive` held in the types a caller already has: a source
-/// ([`KeepAliveSource`]) whose lists are slices and whose bodies are references.
+/// ([`KeepAliveSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct KeepAliveParts {

@@ -20,7 +20,6 @@
 //! — without the Response codec there is no wire frame to build.
 
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
 
 // R3011 — a Response is built at the wire profile (`crate::wire`); see
@@ -136,7 +135,7 @@ pub fn relay_response(
         set_response_keyexpr_literal(&mut out, keyexpr)?;
     }
     out.request_id = src_rid;
-    crate::declare_ext_qos::set_response_qos(&mut out, src_qos);
+    crate::declare_ext_qos::set_response_qos(&mut out, src_qos)?;
     Ok(out)
 }
 
@@ -782,7 +781,7 @@ fn stamp_envelope_extensions(
     }
     crate::ext_nodeid::apply_chain_z_bits(&mut exts);
     response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
-    response.extensions = Some(exts);
+    response.extensions = Some(crate::held_list::held(exts)?);
     Ok(())
 }
 
@@ -1116,7 +1115,7 @@ impl ResponseReplyBuilder {
                     }
                     if !exts.is_empty() {
                         crate::ext_nodeid::apply_chain_z_bits(&mut exts);
-                        put.extensions = Some(exts);
+                        put.extensions = Some(crate::held_list::held(exts)?);
                         put.header |= 0x80; // _Z_FLAG_Z_Z
                     }
                 }
@@ -1145,7 +1144,7 @@ impl ResponseReplyBuilder {
                     }
                     if !exts.is_empty() {
                         crate::ext_nodeid::apply_chain_z_bits(&mut exts);
-                        del.extensions = Some(exts);
+                        del.extensions = Some(crate::held_list::held(exts)?);
                         del.header |= 0x80; // _Z_FLAG_Z_Z
                     }
                 }
@@ -1360,7 +1359,9 @@ impl ResponseErrBuilder {
                 // (the chain-plumb step lands once a second Err ext exists,
                 // mirroring RequestQueryBuilder.build at
                 // session_glue.rs:2772-2782).
-                err.extensions = Some(vec![encode_source_info_ext_entry(&zid, eid, sn)?]);
+                err.extensions = Some(crate::held_list::one_entry(encode_source_info_ext_entry(
+                    &zid, eid, sn,
+                )?));
             }
         } else {
             unreachable!(

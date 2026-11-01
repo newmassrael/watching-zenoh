@@ -162,7 +162,8 @@ impl<T: WireexprLocalSource + ?Sized> WireexprLocalSource for &T {
 }
 
 /// A value of `WireexprLocal` held in the types a caller already has: a source
-/// ([`WireexprLocalSource`]) whose lists are slices and whose bodies are references.
+/// ([`WireexprLocalSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct WireexprLocalParts<'a> {

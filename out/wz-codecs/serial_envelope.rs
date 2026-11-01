@@ -172,7 +172,8 @@ impl<T: SerialEnvelopeSource + ?Sized> SerialEnvelopeSource for &T {
 }
 
 /// A value of `SerialEnvelope` held in the types a caller already has: a source
-/// ([`SerialEnvelopeSource`]) whose lists are slices and whose bodies are references.
+/// ([`SerialEnvelopeSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct SerialEnvelopeParts<'a> {

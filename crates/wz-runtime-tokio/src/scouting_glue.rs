@@ -346,13 +346,16 @@ mod tests {
             zid: wz_session_core::codec_owned::owned_bytes(zid).unwrap(),
             num_locators: (!locators.is_empty()).then_some(locators.len() as u64),
             locators: (!locators.is_empty()).then(|| {
-                locators
-                    .iter()
-                    .map(|l| LocatorOwned {
-                        locator_len: l.len() as u64,
-                        locator: wz_session_core::codec_owned::owned_string(l).unwrap(),
-                    })
-                    .collect()
+                wz_session_core::held_list::held(
+                    locators
+                        .iter()
+                        .map(|l| LocatorOwned {
+                            locator_len: l.len() as u64,
+                            locator: wz_session_core::codec_owned::owned_string(l).unwrap(),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("a fixture's locators are within the bound")
             }),
         };
         let body = owned

@@ -138,7 +138,8 @@ impl<T: ExtZbufSource + ?Sized> ExtZbufSource for &T {
 }
 
 /// A value of `ExtZbuf` held in the types a caller already has: a source
-/// ([`ExtZbufSource`]) whose lists are slices and whose bodies are references.
+/// ([`ExtZbufSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ExtZbufParts<'a> {

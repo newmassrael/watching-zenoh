@@ -146,7 +146,8 @@ impl<T: TimestampSource + ?Sized> TimestampSource for &T {
 }
 
 /// A value of `Timestamp` held in the types a caller already has: a source
-/// ([`TimestampSource`]) whose lists are slices and whose bodies are references.
+/// ([`TimestampSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct TimestampParts<'a> {

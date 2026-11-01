@@ -99,6 +99,24 @@ macro_rules! lent_window {
     }};
 }
 
+/// What an owned mirror's encode gives: the bytes, or a `Result` of them on a
+/// message whose encode can refuse a value.
+trait Encoded {
+    fn into_encoded(self) -> Vec<u8>;
+}
+
+impl Encoded for Vec<u8> {
+    fn into_encoded(self) -> Vec<u8> {
+        self
+    }
+}
+
+impl Encoded for Result<Vec<u8>, sce_forge_runtime::codec::CodecError> {
+    fn into_encoded(self) -> Vec<u8> {
+        self.expect("the builder's message is encodable")
+    }
+}
+
 /// The same message through its owned builder and the owned mirror's own encode.
 macro_rules! owned_window {
     ($build:expr) => {{
@@ -108,7 +126,7 @@ macro_rules! owned_window {
                 .try_as_borrowed()
                 .expect("a view")
                 .encode_to_vec()
-                .expect("the builder's message is encodable");
+                .into_encoded();
             encoded
         });
         (bytes, allocations)
@@ -174,7 +192,7 @@ fn every_control_writer_costs_the_heap_nothing_and_its_builder_costs_it_somethin
         lent::declare_queryable(2, 0, Some(key), info),
         {
             let mut built = owned::build_declare_queryable(2, 0, Some(key)).unwrap();
-            owned::set_declare_queryable_info(&mut built, info);
+            owned::set_declare_queryable_info(&mut built, info).expect("within the bound");
             built
         }
     );

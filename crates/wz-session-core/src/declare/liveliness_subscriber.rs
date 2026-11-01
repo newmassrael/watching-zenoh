@@ -771,7 +771,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                 self.apply_token_undeclared(
                     peer,
                     undecl.id,
-                    undecl.extensions.as_deref(),
+                    crate::held_list::HeldList::entries(&undecl.extensions),
                     peer_keyexpr_table,
                     historical,
                 );
@@ -823,7 +823,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                 self.apply_token_undeclared(
                     peer,
                     undecl.id,
-                    undecl.extensions.as_deref(),
+                    crate::held_list::HeldList::entries(&undecl.extensions),
                     peer_keyexpr_table,
                     historical,
                 );
@@ -2455,7 +2455,7 @@ mod tests {
         let msg = || {
             let mut u = undecl_token(0);
             u.header |= 0x80; // Z: the inner declaration carries an ext chain
-            u.extensions = Some(vec![aliased()]);
+            u.extensions = Some(crate::held_list::one_entry(aliased()));
             DeclareOwnedVariant::CodecZenohUndeclToken(u)
         };
 

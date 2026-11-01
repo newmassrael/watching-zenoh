@@ -27,7 +27,7 @@ use super::encoding::Encoding;
 use super::ext_entry::ExtEntry;
 use super::zbuf_slice::ZbufSlice;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::timestamp::TimestampView;
 use super::encoding::EncodingView;
 use super::ext_entry::ExtEntryView;
@@ -295,11 +295,11 @@ pub trait MsgPutSource {
     /// The `encoding` field.
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource>;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
     /// The `payload` field.
     fn payload(&self) -> Option<&[u8]>;
     /// The `slices` field.
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone>;
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>>;
 }
 
 impl<T: MsgPutSource + ?Sized> MsgPutSource for &T {
@@ -312,19 +312,20 @@ impl<T: MsgPutSource + ?Sized> MsgPutSource for &T {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         (**self).encoding()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         (**self).extensions()
     }
     fn payload(&self) -> Option<&[u8]> {
         (**self).payload()
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
         (**self).slices()
     }
 }
 
 /// A value of `MsgPut` held in the types a caller already has: a source
-/// ([`MsgPutSource`]) whose lists are slices and whose bodies are references.
+/// ([`MsgPutSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct MsgPutParts<'a> {
@@ -335,11 +336,11 @@ pub struct MsgPutParts<'a> {
     /// The `encoding` field.
     pub encoding: Option<&'a super::encoding::EncodingParts<'a>>,
     /// The `extensions` field.
-    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
     /// The `payload` field.
     pub payload: Option<&'a [u8]>,
     /// The `slices` field.
-    pub slices: Option<&'a [super::zbuf_slice::ZbufSliceParts<'a>]>,
+    pub slices: Option<::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4>>,
 }
 
 impl<'a> MsgPutSource for MsgPutParts<'a> {
@@ -352,14 +353,14 @@ impl<'a> MsgPutSource for MsgPutParts<'a> {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.map(<[_]>::iter)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn payload(&self) -> Option<&[u8]> {
         self.payload
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
-        self.slices.map(<[_]>::iter)
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
+        self.slices.as_ref().map(|_l| _l.iter())
     }
 }
 
@@ -373,14 +374,14 @@ impl<'a> MsgPutSource for MsgPut<'a> {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding.as_ref()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| _l.iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
     fn payload(&self) -> Option<&[u8]> {
         self.payload
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
-        self.slices.as_ref().map(|_l| _l.iter())
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
+        self.slices.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
 }
 
@@ -394,13 +395,13 @@ impl<'a> MsgPutSource for MsgPutView<'a> {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding.as_ref()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn payload(&self) -> Option<&[u8]> {
         self.payload
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
         self.slices.as_ref().map(|_l| _l.iter())
     }
 }
@@ -415,14 +416,14 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> MsgPutSource for MsgPutOwned<S
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding.as_ref()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
     fn payload(&self) -> Option<&[u8]> {
         self.payload.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice)
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
-        self.slices.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
+        self.slices.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -440,14 +441,8 @@ impl<'a> MsgPut<'a> {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: MsgPutSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
-        if _k_extensions > 8 {
-            return Err(CodecError::TlvChainOverflow);
-        }
-        let _k_slices: usize = src.slices().map_or(0, |_l| _l.count());
-        if _k_slices > 4 {
-            return Err(CodecError::TooManyElements);
-        }
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
+        let _k_slices: usize = src.slices().map_or(0, |_l| _l.len());
         let _p_header_t_0: bool = src.timestamp().is_some();
         let _p_header_e_0: bool = src.encoding().is_some();
         let _p_header_z_0: bool = src.extensions().is_some();
@@ -575,11 +570,11 @@ pub struct MsgPutView<'a> {
     pub header: u8,
     pub timestamp: Option<TimestampView<'a>>,
     pub encoding: Option<EncodingView<'a>>,
-    pub extensions: Option<ListView<'a, MsgPutExtensionsWalk, 0>>,
+    pub extensions: Option<Bounded<ListView<'a, MsgPutExtensionsWalk, 0>, 8>>,
     pub payload_len: Option<u64>,
     pub payload: Option<&'a [u8]>,
     pub slice_count: Option<u32>,
-    pub slices: Option<ListView<'a, MsgPutSlicesWalk, 0>>,
+    pub slices: Option<Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4>>,
 }
 
 impl<'a> Default for MsgPutView<'a> {
@@ -663,7 +658,7 @@ impl<'a> MsgPutView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, []));
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TlvChainOverflow)?);
         } else {
             _out.extensions = None;
         }
@@ -700,7 +695,7 @@ impl<'a> MsgPutView<'a> {
                 }
                 _count += 1;
             }
-            _out.slices = Some(ListView::new(_rest, _count, []));
+            _out.slices = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
             _out.slices = None;
         }
@@ -849,11 +844,11 @@ pub struct MsgPutOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge
     pub header: u8,
     pub timestamp: Option<TimestampOwned<S>>,
     pub encoding: Option<EncodingOwned<S>>,
-    pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
     pub payload_len: Option<u64>,
     pub payload: Option<S::Bytes<256>>,
     pub slice_count: Option<u32>,
-    pub slices: Option<S::List<ZbufSliceOwned<S>, 4>>,
+    pub slices: Option<::sce_forge_runtime::codec::Bounded<S::List<ZbufSliceOwned<S>, 4>, 4>>,
 }
 
 #[allow(dead_code)]
@@ -899,11 +894,11 @@ impl<'a> MsgPut<'a> {
             header: self.header,
             timestamp: self.timestamp.map(|_v| _v.try_into_owned_in::<S>()).transpose()?,
             encoding: self.encoding.map(|_v| _v.try_into_owned_in::<S>()).transpose()?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
             payload_len: self.payload_len,
             payload: self.payload.map(<S::Bytes<256> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
             slice_count: self.slice_count,
-            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
 
@@ -952,14 +947,14 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> MsgPutOwned<S> {
             None => _out.encoding = None,
         }
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.extensions = None,
         }
         _out.payload_len = self.payload_len;
         _out.payload = self.payload.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice);
         _out.slice_count = self.slice_count;
         match &self.slices {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.slices.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.slices.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.slices = None,
         }
         Ok(())
@@ -1025,11 +1020,11 @@ impl<'a> MsgPut<'a> {
             header: self.header,
             timestamp: self.timestamp.map(|_v| _v.try_into_owned_in_origin::<S>(origin)).transpose()?,
             encoding: self.encoding.map(|_v| _v.try_into_owned_in_origin::<S>(origin)).transpose()?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
             payload_len: self.payload_len,
             payload: self.payload.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<256>(origin, _v)).transpose()?,
             slice_count: self.slice_count,
-            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }
 }

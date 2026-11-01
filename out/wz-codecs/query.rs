@@ -24,7 +24,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::query_ext_entry::QueryExtEntry;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::query_ext_entry::QueryExtEntryView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -266,7 +266,7 @@ pub trait QuerySource {
     /// The `parameters` field.
     fn parameters(&self) -> Option<&[u8]>;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>>;
 }
 
 impl<T: QuerySource + ?Sized> QuerySource for &T {
@@ -279,13 +279,14 @@ impl<T: QuerySource + ?Sized> QuerySource for &T {
     fn parameters(&self) -> Option<&[u8]> {
         (**self).parameters()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
         (**self).extensions()
     }
 }
 
 /// A value of `Query` held in the types a caller already has: a source
-/// ([`QuerySource`]) whose lists are slices and whose bodies are references.
+/// ([`QuerySource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct QueryParts<'a> {
@@ -296,7 +297,7 @@ pub struct QueryParts<'a> {
     /// The `parameters` field.
     pub parameters: Option<&'a [u8]>,
     /// The `extensions` field.
-    pub extensions: Option<&'a [super::query_ext_entry::QueryExtEntryParts<'a>]>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::query_ext_entry::QueryExtEntryParts<'a>], 8>>,
 }
 
 impl<'a> QuerySource for QueryParts<'a> {
@@ -309,8 +310,8 @@ impl<'a> QuerySource for QueryParts<'a> {
     fn parameters(&self) -> Option<&[u8]> {
         self.parameters
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone> {
-        self.extensions.map(<[_]>::iter)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
@@ -324,8 +325,8 @@ impl<'a> QuerySource for Query<'a> {
     fn parameters(&self) -> Option<&[u8]> {
         self.parameters
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| _l.iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
 }
 
@@ -339,7 +340,7 @@ impl<'a> QuerySource for QueryView<'a> {
     fn parameters(&self) -> Option<&[u8]> {
         self.parameters
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
@@ -354,8 +355,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QuerySource for QueryOwned<S> 
     fn parameters(&self) -> Option<&[u8]> {
         self.parameters.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice)
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -374,10 +375,7 @@ impl<'a> Query<'a> {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: QuerySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
-        if _k_extensions > 8 {
-            return Err(CodecError::TlvChainOverflow);
-        }
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
         let _p_header_c_0: bool = src.consolidation().is_some();
         let _p_header_p_0: bool = src.parameters().is_some();
         let _p_header_z_0: bool = src.extensions().is_some();
@@ -476,7 +474,7 @@ pub struct QueryView<'a> {
     pub consolidation: Option<u8>,
     pub parameters_len: Option<u64>,
     pub parameters: Option<&'a [u8]>,
-    pub extensions: Option<ListView<'a, QueryExtensionsWalk, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, QueryExtensionsWalk, 1>, 8>>,
 }
 
 impl<'a> Default for QueryView<'a> {
@@ -572,7 +570,7 @@ impl<'a> QueryView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [0]));
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [0])).ok_or(CodecError::TlvChainOverflow)?);
         } else {
             _out.extensions = None;
         }
@@ -698,7 +696,7 @@ pub struct QueryOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_
     pub consolidation: Option<u8>,
     pub parameters_len: Option<u64>,
     pub parameters: Option<S::Bytes<256>>,
-    pub extensions: Option<S::List<QueryExtEntryOwned<S>, 16>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<QueryExtEntryOwned<S>, 8>, 8>>,
 }
 
 #[allow(dead_code)]
@@ -745,7 +743,7 @@ impl<'a> Query<'a> {
             consolidation: self.consolidation,
             parameters_len: self.parameters_len,
             parameters: self.parameters.map(<S::Bytes<256> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
 
@@ -789,7 +787,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryOwned<S> {
         _out.parameters_len = self.parameters_len;
         _out.parameters = self.parameters.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice);
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| _e.try_as_borrowed())?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| _e.try_as_borrowed())?,
             None => _out.extensions = None,
         }
         Ok(())
@@ -856,7 +854,7 @@ impl<'a> Query<'a> {
             consolidation: self.consolidation,
             parameters_len: self.parameters_len,
             parameters: self.parameters.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<256>(origin, _v)).transpose()?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }
 }

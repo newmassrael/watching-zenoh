@@ -90,6 +90,10 @@
 // `BoundedVec`, so the owned-collection imports are `alloc`-gated.
 // `ToString` (`.to_string()`) is reached only from the
 // `codec-request` + `alloc` dispatch / responder path.
+// Not every build reads a held chain here: the arms that do are gated on the body codecs.
+#[cfg(feature = "storage-profile")]
+#[allow(unused_imports)]
+use crate::held_list::HeldList;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
@@ -324,7 +328,7 @@ impl RequestQueryView {
             value: extract_query_value(query).map(|(encoding, bytes)| (encoding, bytes.to_vec())),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: crate::ts_stack::read_ts_stack(
-                request.extensions.as_deref().unwrap_or(&[]).iter(),
+                request.extensions.entries().unwrap_or(&[]).iter(),
             ),
         })
     }
@@ -2685,7 +2689,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         // The timestamp stack the Request carries: the nodes it crossed recorded on it.
         #[cfg(feature = "pubsub-ts-stack")]
         let ts_stack =
-            crate::ts_stack::read_ts_stack(request.extensions.as_deref().unwrap_or(&[]).iter());
+            crate::ts_stack::read_ts_stack(request.extensions.entries().unwrap_or(&[]).iter());
         let projection = Self::project_owned_query(
             query,
             unswapped_value,
@@ -2742,7 +2746,10 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     packed_id: 0,
                     schema: None,
                 });
-            return match self.shm.unswap_slices(SceList::as_slice(slices), band) {
+            return match self
+                .shm
+                .unswap_slices(SceList::as_slice(slices.inner()), band)
+            {
                 Some(bytes) => Ok(Some((encoding, bytes))),
                 None => Err(()),
             };
@@ -3496,9 +3503,11 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
-            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-        )]);
+        query.extensions = Some(crate::held_list::one_entry(
+            crate::ext_view::query_ext_from_generic(
+                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+            ),
+        ));
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -3930,9 +3939,11 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
-            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-        )]);
+        query.extensions = Some(crate::held_list::one_entry(
+            crate::ext_view::query_ext_from_generic(
+                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+            ),
+        ));
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -6155,9 +6166,11 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
-            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-        )]);
+        query.extensions = Some(crate::held_list::one_entry(
+            crate::ext_view::query_ext_from_generic(
+                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+            ),
+        ));
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -6403,9 +6416,11 @@ mod request_decode_isolation_tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
-            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-        )]);
+        query.extensions = Some(crate::held_list::one_entry(
+            crate::ext_view::query_ext_from_generic(
+                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+            ),
+        ));
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -6518,9 +6533,11 @@ mod request_decode_isolation_tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
-            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-        )]);
+        query.extensions = Some(crate::held_list::one_entry(
+            crate::ext_view::query_ext_from_generic(
+                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+            ),
+        ));
         let mut request = Request {
             header: 0x1c,
             rid,

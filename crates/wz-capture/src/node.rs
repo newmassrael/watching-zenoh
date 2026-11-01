@@ -2315,13 +2315,16 @@ pub(crate) mod tests {
             zid: owned_bytes(zid).expect("zid"),
             num_locators: (!locators.is_empty()).then_some(locators.len() as u64),
             locators: (!locators.is_empty()).then(|| {
-                locators
-                    .iter()
-                    .map(|l| wz_codecs::locator::LocatorOwned {
-                        locator_len: l.len() as u64,
-                        locator: owned_string(l).expect("locator"),
-                    })
-                    .collect()
+                wz_session_core::held_list::held(
+                    locators
+                        .iter()
+                        .map(|l| wz_codecs::locator::LocatorOwned {
+                            locator_len: l.len() as u64,
+                            locator: owned_string(l).expect("locator"),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("within the bound")
             }),
         };
         let l = u8::from(!locators.is_empty());

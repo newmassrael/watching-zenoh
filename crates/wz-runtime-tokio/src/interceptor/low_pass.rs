@@ -319,30 +319,30 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             PushOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
                 put_payload_len(put),
-                attachment_len(put.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
+                attachment_len(put.extensions.as_deref(), ATTACHMENT_EXT_ID_PUSH),
             )),
             PushOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_DEL),
+                attachment_len(del.extensions.as_deref(), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
         NetworkMessage::Request(r) => match &r.body {
             RequestOwnedVariant::CodecZenohQuery(query) => Some((
                 LowPassMessage::Query,
-                query_value_len(query.extensions.as_ref()),
-                attachment_len(query.extensions.as_ref(), ATTACHMENT_EXT_ID_QUERY),
+                query_value_len(query.extensions.as_deref()),
+                attachment_len(query.extensions.as_deref(), ATTACHMENT_EXT_ID_QUERY),
             )),
             RequestOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
                 put_payload_len(put),
-                attachment_len(put.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
+                attachment_len(put.extensions.as_deref(), ATTACHMENT_EXT_ID_PUSH),
             )),
             RequestOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_DEL),
+                attachment_len(del.extensions.as_deref(), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
@@ -351,12 +351,12 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => Some((
                     LowPassMessage::Reply,
                     put_payload_len(put),
-                    attachment_len(put.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
+                    attachment_len(put.extensions.as_deref(), ATTACHMENT_EXT_ID_PUSH),
                 )),
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => Some((
                     LowPassMessage::Reply,
                     0,
-                    attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_DEL),
+                    attachment_len(del.extensions.as_deref(), ATTACHMENT_EXT_ID_DEL),
                 )),
                 _ => None,
             },
@@ -633,11 +633,9 @@ mod tests {
         let PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
             panic!("build_push_literal emits a Put body");
         };
-        put.extensions = Some(vec![encode_attachment_ext(
-            ATTACHMENT_EXT_ID_PUSH,
-            attachment,
-        )
-        .expect("encode attachment")]);
+        put.extensions = Some(wz_session_core::held_list::one_entry(
+            encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, attachment).expect("encode attachment"),
+        ));
         put.header |= 0x80; // the Z chain bit, as `build_msg_put_with_meta` sets it
 
         let msg = NetworkMessage::Push(Box::new(push));
@@ -676,11 +674,9 @@ mod tests {
         let PushOwnedVariant::CodecZenohMsgDel(del) = &mut push.body else {
             panic!("build_push_del_literal emits a Del body");
         };
-        del.extensions = Some(vec![encode_attachment_ext(
-            ATTACHMENT_EXT_ID_DEL,
-            attachment,
-        )
-        .expect("encode attachment")]);
+        del.extensions = Some(wz_session_core::held_list::one_entry(
+            encode_attachment_ext(ATTACHMENT_EXT_ID_DEL, attachment).expect("encode attachment"),
+        ));
         del.header |= 0x80; // the Z chain bit
 
         let msg = NetworkMessage::Push(Box::new(push));

@@ -223,11 +223,11 @@ fn answers_on_the_answerer_half(recording: &Recording) -> Answers {
         };
         for record in records {
             match record {
-                NetworkMessage::Response(r) => {
-                    answers.responses.push(effective_qos(r.extensions.as_ref()))
-                }
+                NetworkMessage::Response(r) => answers
+                    .responses
+                    .push(effective_qos(r.extensions.as_deref())),
                 NetworkMessage::ResponseFinal(f) => {
-                    answers.finals.push(effective_qos(f.extensions.as_ref()))
+                    answers.finals.push(effective_qos(f.extensions.as_deref()))
                 }
                 _ => {}
             }

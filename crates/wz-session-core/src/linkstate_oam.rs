@@ -115,25 +115,23 @@ const fn bound_of<T, const N: usize>(
 //
 // So the carrier walks the list an entry at a time and never materialises the
 // bounded view. The wire is the codec's, unchanged: a VLE count, then each
-// entry by the generated `Linkstate` codec. What the list codec checks is
-// checked here in its order (each entry projected, then the bound), so a list
-// the codec refuses is refused here with the same error and no byte written.
+// entry by the generated `Linkstate` codec. The bound the list codec checks is
+// the type of the owned list, and what is left, each entry projected, is
+// checked here first, so a list the codec refuses is refused here with the
+// same error and no byte written.
 // The parity tests below pin both directions against the generated list codec.
 
 /// Encode `list` as the LinkStateList wire, entry by entry.
 ///
 /// The bytes the generated `LinkstateList::encode` writes for
 /// `list.try_as_borrowed()?`, and the same refusals: every entry is projected
-/// first, in order, and an entry past [`LINK_STATES_CAP`] is
-/// `TooManyElements` (`sce_forge_runtime::codec::try_project_bounded`). An
-/// entry the generated encode refuses is the same `Err` here, which the
-/// generated `encode_to_vec` returns too since the codec declares it may fail.
+/// first, in order. A list past the bound is not a value of the owned list's
+/// type, so it has no refusal here. An entry the generated encode refuses is
+/// the same `Err` here, which the generated `encode_to_vec` returns too since
+/// the codec declares it may fail.
 fn encode_linkstate_list(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
-    for (index, entry) in list.link_states.iter().enumerate() {
+    for entry in list.link_states.iter() {
         entry.try_as_borrowed()?;
-        if index >= LINK_STATES_CAP {
-            return Err(CodecError::TooManyElements);
-        }
     }
     let mut bytes = Vec::new();
     let mut sink = VecSink::new(&mut bytes);
@@ -169,7 +167,8 @@ fn decode_linkstate_list_owned(
         .collect::<Result<Vec<LinkstateOwned>, CodecError>>()?;
     Ok(LinkstateListOwned {
         num_link_states,
-        link_states,
+        link_states: sce_forge_runtime::codec::Bounded::new(link_states)
+            .ok_or(CodecError::TooManyElements)?,
     })
 }
 
@@ -180,9 +179,9 @@ fn decode_linkstate_list_owned(
 /// separately. Owned input (the topology graph in step c2 holds owned
 /// link-state records); `alloc`-only, like the sibling builders.
 pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
-    build_linkstate_oam_owned(list)?
+    Ok(build_linkstate_oam_owned(list)?
         .try_as_borrowed()?
-        .encode_to_vec()
+        .encode_to_vec())
 }
 
 /// Build the OAM-LINKSTATE carrier as an OWNED message — the send-path form.
@@ -225,7 +224,7 @@ pub fn build_linkstate_oam_owned(list: &LinkstateListOwned) -> Result<OamOwned, 
         // sound — it is the reverse direction, narrowing a decoded id, that
         // needs `oam_id_from_wire` and is done below.
         id: wire_const::OAM_LINKSTATE_ID as u64,
-        extensions: Some(extensions),
+        extensions: Some(crate::held_list::held(extensions)?),
         body: OamOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len,
             // `owned_bytes` is the wz SSOT for the borrowed->owned bytes
@@ -594,29 +593,29 @@ mod tests {
         });
     }
 
-    /// The list walk refuses what the list codec refuses: an owned list one
-    /// entry past the bound is `TooManyElements` on both, and the bound is the
-    /// codec's own.
+    /// A list one entry past the bound is not an owned list at all, so neither
+    /// the list walk nor the list codec is offered one, and the bound that
+    /// refuses it is the codec's own: the field's type says it here, and
+    /// `LINK_STATES_CAP` agrees with it at exactly the bound.
     #[test]
     fn the_list_walk_refuses_a_list_past_the_bound_as_the_codec_does() {
         assert_eq!(LINK_STATES_CAP, 64);
         with_oracle_stack(|| {
-            let mut list = decode_list_owned(&minimal_list_wire(64));
-            let extra = list.link_states[0].clone();
-            list.link_states.push(extra);
-            list.num_link_states = 65;
-            assert_eq!(
-                list.try_as_borrowed().err(),
-                Some(CodecError::TooManyElements)
-            );
-            assert_eq!(
-                encode_linkstate_list(&list),
-                Err(CodecError::TooManyElements)
-            );
-            assert!(matches!(
-                build_linkstate_oam_owned(&list),
-                Err(CodecError::TooManyElements)
-            ));
+            let list = decode_list_owned(&minimal_list_wire(64));
+            let wire = encode_linkstate_list(&list).expect("a list at the bound is encodable");
+            assert_eq!(build_linkstate_oam_owned(&list).map(|_| ()), Ok(()));
+            assert_eq!(wire, minimal_list_wire(64));
+
+            let mut entries = list.link_states.into_inner();
+            entries.push(entries[0].clone());
+            let past_the_bound: Option<LinkstateListOwned> =
+                sce_forge_runtime::codec::Bounded::new(entries).map(|link_states| {
+                    LinkstateListOwned {
+                        num_link_states: 65,
+                        link_states,
+                    }
+                });
+            assert!(past_the_bound.is_none());
         });
     }
 

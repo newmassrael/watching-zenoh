@@ -28,26 +28,33 @@
 //! why it is a deliberate, client-transparent divergence beyond zenoh's
 //! (loop-bound-less) data plane.
 
+use sce_forge_runtime::codec::CodecError;
+
 use crate::wire::PushOwned;
 
 use crate::ext_nodeid::{self, EXT_ENC_Z64};
+use crate::held_list::edit_chain;
 
 /// Read the routing-context source `node_id` from a Push's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
 /// the shared [`ext_nodeid::read_source`].
 pub fn read_push_source(push: &PushOwned) -> u16 {
-    ext_nodeid::read_source(push.extensions.as_ref())
+    ext_nodeid::read_source(push.extensions.as_deref())
 }
 
 /// Set the routing-context source `node_id` on a Push's `ext_nodeid` extension
 /// (`node_id == 0` removes it — zenoh's omit-on-DEFAULT). The shared
 /// [`ext_nodeid::set_source`] owns the chain
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
-/// Push-level header `Z` flag to the resulting chain.
-pub fn set_push_source(push: &mut PushOwned, node_id: u16) {
-    let present = ext_nodeid::set_source(&mut push.extensions, node_id);
+/// Push-level header `Z` flag to the resulting chain. An `Err` is a chain at its bound with no
+/// room for the entry ([`crate::held_list::edit_chain`]): the Push cannot be sent.
+pub fn set_push_source(push: &mut PushOwned, node_id: u16) -> Result<(), CodecError> {
+    let present = edit_chain(&mut push.extensions, |chain| {
+        ext_nodeid::set_source(chain, node_id)
+    })?;
     ext_nodeid::sync_header_z(&mut push.header, present);
+    Ok(())
 }
 
 /// The wz-proprietary mesh-internal HOP-LIMIT extension id — `0x0a`, a FREE id
@@ -82,7 +89,7 @@ pub const HOPLIMIT_EXT_HEADER: u8 = HOPLIMIT_EXT_ID | EXT_ENC_Z64;
 /// the mesh through a hop-stamping peer), which a forwarder treats as a fresh
 /// budget. Delegates to the shared [`ext_nodeid::read_z64_ext`].
 pub fn read_push_hoplimit(push: &PushOwned) -> Option<u16> {
-    ext_nodeid::read_z64_ext(push.extensions.as_ref(), HOPLIMIT_EXT_HEADER).map(|v| v as u16)
+    ext_nodeid::read_z64_ext(push.extensions.as_deref(), HOPLIMIT_EXT_HEADER).map(|v| v as u16)
 }
 
 /// Set / replace the hop-limit (remaining forward budget) on a Push's hop-limit
@@ -91,11 +98,14 @@ pub fn read_push_hoplimit(push: &PushOwned) -> Option<u16> {
 /// `Z` normalisation); `Some(hop)` always inserts (a hop budget is always a
 /// meaningful value, unlike the `ext_nodeid`'s omit-on-zero). Co-exists with the
 /// `ext_nodeid` source on the same chain — the two ride distinct ids — and the
-/// resulting chain is id-ascending `[nodeid, hoplimit]` when both are present.
-pub fn set_push_hoplimit(push: &mut PushOwned, hop: u16) {
-    let present =
-        ext_nodeid::set_z64_ext(&mut push.extensions, HOPLIMIT_EXT_HEADER, Some(hop as u64));
+/// resulting chain is id-ascending `[nodeid, hoplimit]` when both are present. An `Err` is a chain
+/// at its bound ([`set_push_source`]): a Push the mesh could not count the hops of is not sent.
+pub fn set_push_hoplimit(push: &mut PushOwned, hop: u16) -> Result<(), CodecError> {
+    let present = edit_chain(&mut push.extensions, |chain| {
+        ext_nodeid::set_z64_ext(chain, HOPLIMIT_EXT_HEADER, Some(hop as u64))
+    })?;
     ext_nodeid::sync_header_z(&mut push.header, present);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -104,7 +114,6 @@ mod tests {
     use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};
     use crate::push_build::build_push_literal;
     use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant};
-    use alloc::vec;
     use wz_codecs::ext_zint::ExtZint;
 
     fn push() -> PushOwned {
@@ -130,14 +139,14 @@ mod tests {
     #[test]
     fn set_then_read_round_trips() {
         let mut p = push();
-        set_push_source(&mut p, 7);
+        set_push_source(&mut p, 7).unwrap();
         assert_eq!(read_push_source(&p), 7);
     }
 
     #[test]
     fn nodeid_header_is_id_mandatory_z64_terminal() {
         let mut p = push();
-        set_push_source(&mut p, 7);
+        set_push_source(&mut p, 7).unwrap();
         let exts = p.extensions.as_ref().expect("ext present after set");
         assert_eq!(exts.len(), 1, "only the nodeid ext");
         // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (sole / last entry).
@@ -149,8 +158,8 @@ mod tests {
     #[test]
     fn set_zero_removes_the_ext() {
         let mut p = push();
-        set_push_source(&mut p, 7);
-        set_push_source(&mut p, 0);
+        set_push_source(&mut p, 7).unwrap();
+        set_push_source(&mut p, 0).unwrap();
         assert_eq!(read_push_source(&p), 0);
         assert!(p.extensions.is_none(), "the sole ext is dropped to None");
         assert_eq!(p.header & MESSAGE_FLAG_Z, 0, "Push Z bit cleared");
@@ -159,8 +168,8 @@ mod tests {
     #[test]
     fn set_replaces_an_existing_nodeid() {
         let mut p = push();
-        set_push_source(&mut p, 7);
-        set_push_source(&mut p, 9);
+        set_push_source(&mut p, 7).unwrap();
+        set_push_source(&mut p, 9).unwrap();
         assert_eq!(read_push_source(&p), 9);
         let exts = p.extensions.as_ref().expect("ext present");
         assert_eq!(exts.len(), 1, "replaced, not duplicated");
@@ -170,10 +179,10 @@ mod tests {
     fn coexists_with_another_ext_and_fixes_chain_z_bits() {
         let mut p = push();
         // Seed a pre-existing (non-nodeid) extension.
-        p.extensions = Some(vec![other_ext()]);
+        p.extensions = Some(crate::held_list::one_entry(other_ext()));
         p.header |= MESSAGE_FLAG_Z;
 
-        set_push_source(&mut p, 7);
+        set_push_source(&mut p, 7).unwrap();
         let exts = p.extensions.as_ref().expect("chain present");
         assert_eq!(exts.len(), 2, "other ext kept, nodeid appended");
         // The non-last entry carries the continuation bit; nodeid terminates.
@@ -182,7 +191,7 @@ mod tests {
         assert_eq!(read_push_source(&p), 7);
 
         // Removing the nodeid leaves the other ext as a terminal entry.
-        set_push_source(&mut p, 0);
+        set_push_source(&mut p, 0).unwrap();
         let exts = p.extensions.as_ref().expect("other ext remains");
         assert_eq!(exts.len(), 1);
         assert_eq!(exts[0].header, 0x01 | EXT_ENC_Z64, "Z bit cleared (last)");
@@ -211,7 +220,7 @@ mod tests {
 
         let base_wire = build_push_literal("demo/c3c", b"v").expect("build").wire();
         let mut p = build_push_literal("demo/c3c", b"v").expect("build");
-        set_push_source(&mut p, 7);
+        set_push_source(&mut p, 7).unwrap();
         let wire = p.wire();
 
         // header(1) + literal wireexpr "demo/c3c" (mapping-id VLE + suffix_len VLE
@@ -245,7 +254,7 @@ mod tests {
     fn set_then_read_hoplimit_round_trips() {
         let mut p = push();
         assert_eq!(read_push_hoplimit(&p), None, "absent before any set");
-        set_push_hoplimit(&mut p, 5);
+        set_push_hoplimit(&mut p, 5).unwrap();
         assert_eq!(read_push_hoplimit(&p), Some(5));
         assert_eq!(
             p.header & MESSAGE_FLAG_Z,
@@ -257,7 +266,7 @@ mod tests {
     #[test]
     fn hoplimit_header_is_id_z64_nonmandatory_terminal() {
         let mut p = push();
-        set_push_hoplimit(&mut p, 4);
+        set_push_hoplimit(&mut p, 4).unwrap();
         let exts = p.extensions.as_ref().expect("ext present");
         assert_eq!(exts.len(), 1, "only the hoplimit ext");
         // 0x0a (id) | 0x20 (Z64), NO 0x10 (M — non-mandatory), Z clear (sole).
@@ -267,8 +276,8 @@ mod tests {
     #[test]
     fn hoplimit_replaces_not_duplicates() {
         let mut p = push();
-        set_push_hoplimit(&mut p, 4);
-        set_push_hoplimit(&mut p, 3);
+        set_push_hoplimit(&mut p, 4).unwrap();
+        set_push_hoplimit(&mut p, 3).unwrap();
         assert_eq!(read_push_hoplimit(&p), Some(3));
         assert_eq!(p.extensions.as_ref().unwrap().len(), 1, "replaced in place");
     }
@@ -277,8 +286,8 @@ mod tests {
     fn hoplimit_coexists_with_nodeid_in_canonical_order() {
         let mut p = push();
         // The forwarder stamps source THEN hop -> id-ascending [nodeid, hoplimit].
-        set_push_source(&mut p, 7);
-        set_push_hoplimit(&mut p, 4);
+        set_push_source(&mut p, 7).unwrap();
+        set_push_hoplimit(&mut p, 4).unwrap();
         let exts = p.extensions.as_ref().expect("chain present");
         assert_eq!(exts.len(), 2, "nodeid + hoplimit ride the same chain");
         // nodeid (id 0x3) is non-last -> Z continuation; hoplimit terminates.
@@ -306,8 +315,8 @@ mod tests {
 
         let mut p = build_push_literal("demo/hop", b"v").expect("build");
         // Both routing-context exts on one Push (the transit-forward shape).
-        set_push_source(&mut p, 7);
-        set_push_hoplimit(&mut p, 4);
+        set_push_source(&mut p, 7).unwrap();
+        set_push_hoplimit(&mut p, 4).unwrap();
         let encoded = p.wire();
 
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
@@ -334,7 +343,7 @@ mod tests {
 
         let base_wire = build_push_literal("demo/hop", b"v").expect("build").wire();
         let mut p = build_push_literal("demo/hop", b"v").expect("build");
-        set_push_hoplimit(&mut p, 4);
+        set_push_hoplimit(&mut p, 4).unwrap();
         let wire = p.wire();
 
         // header(1) + literal "demo/hop" (mapping-id VLE 1 + suffix_len VLE 1 +

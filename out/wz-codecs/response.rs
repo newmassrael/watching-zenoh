@@ -27,7 +27,7 @@ use super::ext_entry::ExtEntry;
 use super::reply::Reply;
 use super::err::Err;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
 use super::reply::ReplyView;
@@ -370,7 +370,7 @@ pub trait ResponseSource {
     /// The `keyexpr` field.
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
     /// The arm of the variant this value holds.
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource>;
 }
@@ -385,7 +385,7 @@ impl<T: ResponseSource + ?Sized> ResponseSource for &T {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         (**self).keyexpr()
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         (**self).extensions()
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
@@ -404,7 +404,8 @@ pub enum ResponsePartsBody<'a> {
 }
 
 /// A value of `Response` held in the types a caller already has: a source
-/// ([`ResponseSource`]) whose lists are slices and whose bodies are references.
+/// ([`ResponseSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ResponseParts<'a> {
@@ -415,7 +416,7 @@ pub struct ResponseParts<'a> {
     /// The `keyexpr` field.
     pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
     /// The `extensions` field.
-    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
     /// The arm of the variant this value holds.
     pub body: ResponsePartsBody<'a>,
 }
@@ -430,8 +431,8 @@ impl<'a> ResponseSource for ResponseParts<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.map(<[_]>::iter)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
         match &self.body {
@@ -452,8 +453,8 @@ impl<'a> ResponseSource for Response<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| _l.iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
         match &self.body {
@@ -474,7 +475,7 @@ impl<'a> ResponseSource for ResponseView<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
@@ -496,8 +497,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseSource for ResponseOwn
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
-        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
         match &self.body {
@@ -530,10 +531,7 @@ impl<'a> Response<'a> {
     /// ones `src` presents.
     #[doc(hidden)]
     pub fn write_source_in<S: ResponseSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &ResponseOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
-        if _k_extensions > 8 {
-            return Err(CodecError::TlvChainOverflow);
-        }
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
         let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(src.keyexpr()) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
         let _p_header_z_0: bool = src.extensions().is_some();
         let mut _c_header: u8 = (((src.header() & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
@@ -640,7 +638,7 @@ pub struct ResponseView<'a> {
     pub header: u8,
     pub request_id: u64,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<ListView<'a, ResponseExtensionsWalk, 0>>,
+    pub extensions: Option<Bounded<ListView<'a, ResponseExtensionsWalk, 0>, 8>>,
     pub body: ResponseViewVariant<'a>,
 }
 
@@ -709,7 +707,7 @@ impl<'a> ResponseView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, []));
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TlvChainOverflow)?);
         } else {
             _out.extensions = None;
         }
@@ -888,7 +886,7 @@ pub struct ResponseOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_for
     pub header: u8,
     pub request_id: u64,
     pub keyexpr: WireexprOwned<S>,
-    pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
     pub body: ResponseOwnedVariant<S>,
 }
 
@@ -1019,7 +1017,7 @@ impl<'a> Response<'a> {
             header: self.header,
             request_id: self.request_id,
             keyexpr: self.keyexpr.try_into_owned_in::<S>()?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
             body: self.body.try_into_owned_in::<S>()?,
         })
     }
@@ -1063,7 +1061,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseOwned<S> {
         _out.request_id = self.request_id;
         self.keyexpr.as_borrowed_into(&mut _out.keyexpr);
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.extensions = None,
         }
         self.body.try_as_borrowed_into(&mut _out.body)?;
@@ -1143,7 +1141,7 @@ impl<'a> Response<'a> {
             header: self.header,
             request_id: self.request_id,
             keyexpr: self.keyexpr.try_into_owned_in_origin::<S>(origin)?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
             body: self.body.try_into_owned_in_origin::<S>(origin)?,
         })
     }

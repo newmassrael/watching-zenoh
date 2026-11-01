@@ -26,7 +26,7 @@ use super::linkstate_link::LinkstateLink;
 use super::linkstate_weight::LinkstateWeight;
 use super::locator::Locator;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::linkstate_link::LinkstateLinkView;
 use super::linkstate_weight::LinkstateWeightView;
 use super::locator::LocatorView;
@@ -313,11 +313,11 @@ pub trait LinkstateSource {
     /// The `whatami` field.
     fn whatami(&self) -> Option<u8>;
     /// The `locators` field.
-    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone>;
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>>;
     /// The `links` field.
-    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone;
+    fn links(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64>;
     /// The `weights` field.
-    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone>;
+    fn weights(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>>;
 }
 
 impl<T: LinkstateSource + ?Sized> LinkstateSource for &T {
@@ -336,19 +336,20 @@ impl<T: LinkstateSource + ?Sized> LinkstateSource for &T {
     fn whatami(&self) -> Option<u8> {
         (**self).whatami()
     }
-    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
         (**self).locators()
     }
-    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+    fn links(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64> {
         (**self).links()
     }
-    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
+    fn weights(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
         (**self).weights()
     }
 }
 
 /// A value of `Linkstate` held in the types a caller already has: a source
-/// ([`LinkstateSource`]) whose lists are slices and whose bodies are references.
+/// ([`LinkstateSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct LinkstateParts<'a> {
@@ -363,11 +364,11 @@ pub struct LinkstateParts<'a> {
     /// The `whatami` field.
     pub whatami: Option<u8>,
     /// The `locators` field.
-    pub locators: Option<&'a [super::locator::LocatorParts<'a>]>,
+    pub locators: Option<::sce_forge_runtime::codec::Bounded<&'a [super::locator::LocatorParts<'a>], 64>>,
     /// The `links` field.
-    pub links: &'a [super::linkstate_link::LinkstateLinkParts],
+    pub links: ::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_link::LinkstateLinkParts], 64>,
     /// The `weights` field.
-    pub weights: Option<&'a [super::linkstate_weight::LinkstateWeightParts]>,
+    pub weights: Option<::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_weight::LinkstateWeightParts], 64>>,
 }
 
 impl<'a> LinkstateSource for LinkstateParts<'a> {
@@ -386,14 +387,14 @@ impl<'a> LinkstateSource for LinkstateParts<'a> {
     fn whatami(&self) -> Option<u8> {
         self.whatami
     }
-    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
-        self.locators.map(<[_]>::iter)
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+        self.locators.as_ref().map(|_l| _l.iter())
     }
-    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+    fn links(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64> {
         self.links.iter()
     }
-    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
-        self.weights.map(<[_]>::iter)
+    fn weights(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
+        self.weights.as_ref().map(|_l| _l.iter())
     }
 }
 
@@ -413,14 +414,14 @@ impl<'a> LinkstateSource for Linkstate<'a> {
     fn whatami(&self) -> Option<u8> {
         self.whatami
     }
-    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
-        self.locators.as_ref().map(|_l| _l.iter())
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+        self.locators.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
-    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
-        self.links.iter()
+    fn links(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64> {
+        ::sce_forge_runtime::codec::BoundedIter::from(&self.links)
     }
-    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
-        self.weights.as_ref().map(|_l| _l.iter())
+    fn weights(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
+        self.weights.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
 }
 
@@ -440,13 +441,13 @@ impl<'a> LinkstateSource for LinkstateView<'a> {
     fn whatami(&self) -> Option<u8> {
         self.whatami
     }
-    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
         self.locators.as_ref().map(|_l| _l.iter())
     }
-    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+    fn links(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64> {
         self.links.iter()
     }
-    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
+    fn weights(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
         self.weights.as_ref().map(|_l| _l.iter())
     }
 }
@@ -467,14 +468,14 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateSource for LinkstateO
     fn whatami(&self) -> Option<u8> {
         self.whatami
     }
-    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
-        self.locators.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+        self.locators.as_ref().map(|_l| _l.list_iter())
     }
-    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
-        ::sce_forge_runtime::codec::SceList::as_slice(&self.links).iter()
+    fn links(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64> {
+        self.links.list_iter()
     }
-    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
-        self.weights.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn weights(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
+        self.weights.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -499,18 +500,9 @@ impl<'a> Linkstate<'a> {
     /// ones `src` presents.
     #[doc(hidden)]
     pub fn write_source_in<S: LinkstateSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &LinkstateOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_locators: usize = src.locators().map_or(0, |_l| _l.count());
-        if _k_locators > 64 {
-            return Err(CodecError::TooManyElements);
-        }
-        let _k_links: usize = src.links().count();
-        if _k_links > 64 {
-            return Err(CodecError::TooManyElements);
-        }
-        let _k_weights: usize = src.weights().map_or(0, |_l| _l.count());
-        if _k_weights > 64 {
-            return Err(CodecError::TooManyElements);
-        }
+        let _k_locators: usize = src.locators().map_or(0, |_l| _l.len());
+        let _k_links: usize = src.links().len();
+        let _k_weights: usize = src.weights().map_or(0, |_l| _l.len());
         let _p_options_p_0: bool = src.zid().is_some();
         let _p_options_w_0: bool = src.whatami().is_some();
         let _p_options_l_0: bool = src.locators().is_some();
@@ -660,10 +652,10 @@ pub struct LinkstateView<'a> {
     pub zid: Option<&'a [u8]>,
     pub whatami: Option<u8>,
     pub num_locators: Option<u64>,
-    pub locators: Option<ListView<'a, LinkstateLocatorsWalk, 0>>,
+    pub locators: Option<Bounded<ListView<'a, LinkstateLocatorsWalk, 0>, 64>>,
     pub links_len: u64,
-    pub links: ListView<'a, LinkstateLinksWalk, 0>,
-    pub weights: Option<ListView<'a, LinkstateWeightsWalk, 0>>,
+    pub links: Bounded<ListView<'a, LinkstateLinksWalk, 0>, 64>,
+    pub weights: Option<Bounded<ListView<'a, LinkstateWeightsWalk, 0>, 64>>,
 }
 
 #[allow(dead_code)]
@@ -747,7 +739,7 @@ impl<'a> LinkstateView<'a> {
                 }
                 _count += 1;
             }
-            _out.locators = Some(ListView::new(_rest, _count, []));
+            _out.locators = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
             _out.locators = None;
         }
@@ -762,7 +754,7 @@ impl<'a> LinkstateView<'a> {
                 }
                 _count += 1;
             }
-            _out.links = ListView::new(_rest, _count, []);
+            _out.links = Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?;
         }
         if (options & 0x08u8) != 0 {
             let _n = links_len;
@@ -775,7 +767,7 @@ impl<'a> LinkstateView<'a> {
                 }
                 _count += 1;
             }
-            _out.weights = Some(ListView::new(_rest, _count, []));
+            _out.weights = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
             _out.weights = None;
         }
@@ -936,10 +928,10 @@ pub struct LinkstateOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_fo
     pub zid: Option<S::Bytes<16>>,
     pub whatami: Option<u8>,
     pub num_locators: Option<u64>,
-    pub locators: Option<S::List<LocatorOwned<S>, 64>>,
+    pub locators: Option<::sce_forge_runtime::codec::Bounded<S::List<LocatorOwned<S>, 64>, 64>>,
     pub links_len: u64,
-    pub links: S::List<LinkstateLink, 64>,
-    pub weights: Option<S::List<LinkstateWeight, 64>>,
+    pub links: ::sce_forge_runtime::codec::Bounded<S::List<LinkstateLink, 64>, 64>,
+    pub weights: Option<::sce_forge_runtime::codec::Bounded<S::List<LinkstateWeight, 64>, 64>>,
 }
 
 #[allow(dead_code)]
@@ -993,10 +985,10 @@ impl<'a> Linkstate<'a> {
             zid: self.zid.map(<S::Bytes<16> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
             whatami: self.whatami,
             num_locators: self.num_locators,
-            locators: self.locators.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            locators: self.locators.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
             links_len: self.links_len,
-            links: ::sce_forge_runtime::codec::try_collect_list(self.links, Ok)?,
-            weights: self.weights.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, Ok)).transpose()?,
+            links: ::sce_forge_runtime::codec::try_collect_bounded(self.links, Ok)?,
+            weights: self.weights.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, Ok)).transpose()?,
         })
     }
 
@@ -1043,13 +1035,13 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateOwned<S> {
         _out.whatami = self.whatami;
         _out.num_locators = self.num_locators;
         match &self.locators {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.locators.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.locators.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.locators = None,
         }
         _out.links_len = self.links_len;
-        ::sce_forge_runtime::codec::try_project_bounded_into(&mut _out.links, &self.links, |_e| Ok(_e.clone()))?;
+        ::sce_forge_runtime::codec::try_project_bounded_into(&mut _out.links, self.links.inner(), |_e| Ok(_e.clone()))?;
         match &self.weights {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.weights.insert(Default::default()), _l, |_e| Ok(_e.clone()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.weights.insert(Default::default()), _l.inner(), |_e| Ok(_e.clone()))?,
             None => _out.weights = None,
         }
         Ok(())
@@ -1119,10 +1111,10 @@ impl<'a> Linkstate<'a> {
             zid: self.zid.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<16>(origin, _v)).transpose()?,
             whatami: self.whatami,
             num_locators: self.num_locators,
-            locators: self.locators.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            locators: self.locators.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
             links_len: self.links_len,
-            links: ::sce_forge_runtime::codec::try_collect_list(self.links, Ok)?,
-            weights: self.weights.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, Ok)).transpose()?,
+            links: ::sce_forge_runtime::codec::try_collect_bounded(self.links, Ok)?,
+            weights: self.weights.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, Ok)).transpose()?,
         })
     }
 }

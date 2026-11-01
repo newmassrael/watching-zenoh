@@ -552,7 +552,7 @@ fn empty_link_state() -> wz_codecs::oam::OamOwned {
 
     wz_session_core::linkstate_oam::build_linkstate_oam_owned(&LinkstateListOwned {
         num_link_states: 0,
-        link_states: Vec::new(),
+        link_states: Default::default(),
     })
     .expect("build an empty link-state message")
 }
@@ -1244,7 +1244,8 @@ fn a_query_routed_from_a_face_is_held_behind_the_data_its_destination_holds() {
     wz_session_core::declare_ext_qos::set_request_qos(
         &mut request,
         QosLevel::DEFAULT.with_congestion(CongestionControl::Block),
-    );
+    )
+    .expect("within the bound");
     forward_frame(
         &rig.fwd,
         SOURCE,

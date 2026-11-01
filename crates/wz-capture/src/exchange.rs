@@ -1459,7 +1459,6 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture ResponseFinal is encodable")
     }
 
     /// `DeclKexpr`: bind `id` to `suffix` in the SENDER's space.

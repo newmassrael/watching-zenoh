@@ -660,6 +660,18 @@ pub(crate) fn client_query_route(
         })
 }
 
+/// `stamp`, told to the log when it failed. A forwarder's stamp fails on a chain at
+/// its bound with no room for the entry, and the edit has by then taken the chain
+/// out of the message, so the message goes no further on this path: it must not go
+/// on unstamped, and its encode refused it before the bound was a type. `what` names
+/// the message in the log.
+pub(crate) fn stamped(stamp: Result<(), CodecError>, what: &str) -> Result<(), CodecError> {
+    if let Err(err) = &stamp {
+        log::debug!("forward: DROP {what}, its extension chain has no room: {err:?}");
+    }
+    stamp
+}
+
 /// Compute the data-`Push` re-forward for ONE link-state mesh: given the tier's
 /// `net` + subscription `subs` and a Push already resolved against the inbound
 /// link's alias table (`keyexpr`), return the re-stamped carrier + the
@@ -675,7 +687,8 @@ pub(crate) fn client_query_route(
 /// unresolvable source, a keyexpr no remote peer subscribes to (the self-excluded
 /// [`LinkstatepeerInterest::interested_remote`] view — the self-bubble is the
 /// local sink, never a data forward target), an empty tree direction, an
-/// exhausted hop budget (`hop <= 1`), or a carrier the literal-normalize rejects.
+/// exhausted hop budget (`hop <= 1`), a chain with no room for the re-stamp
+/// ([`stamped`]), or a carrier the literal-normalize rejects.
 pub(crate) fn compute_push_forward(
     net: &LinkstateNetwork,
     subs: &LinkstatepeerInterest<()>,
@@ -711,8 +724,12 @@ pub(crate) fn compute_push_forward(
     // table, so an aliased id would be unresolvable there; wz keeps no outbound
     // alias table, so it always emits id == 0) — the same B1 normalize inline.
     let mut carrier = push.clone();
-    set_push_source(&mut carrier, out_node_id);
-    set_push_hoplimit(&mut carrier, hop - 1);
+    stamped(
+        set_push_source(&mut carrier, out_node_id)
+            .and_then(|()| set_push_hoplimit(&mut carrier, hop - 1)),
+        "a re-forwarded Push",
+    )
+    .ok()?;
     set_push_keyexpr_literal(&mut carrier, keyexpr).ok()?;
     Some((carrier, children))
 }
@@ -739,7 +756,8 @@ pub(crate) fn compute_push_forward(
 /// `Ok(None)`) on a keyexpr no remote peer subscribes to (the self-excluded
 /// [`LinkstatepeerInterest::interested_remote`] view — the self-bubble is the
 /// local sink, never a data forward target) or an empty tree direction; a `build`
-/// codec failure propagates as `Err`.
+/// codec failure propagates as `Err`, and so does a re-injected sample whose chain
+/// has no room for the stamps ([`stamped`]).
 ///
 /// R2901 (open-debt item 828) — unless `to_gateways`: then a keyexpr no remote
 /// peer subscribes to still yields the carrier, with an empty child set,
@@ -772,8 +790,11 @@ pub(crate) fn compute_self_publish_forward(
     // resolves the source to THIS node (its inbound neighbour) and floods along
     // self's tree. Fresh hop budget = node_count (the by-construction
     // transient-loop bound), the same stamp `compute_push_forward` decrements.
-    set_push_source(&mut carrier, 0);
-    set_push_hoplimit(&mut carrier, net.node_count() as u16);
+    stamped(
+        set_push_source(&mut carrier, 0)
+            .and_then(|()| set_push_hoplimit(&mut carrier, net.node_count() as u16)),
+        "a self-sourced Push",
+    )?;
     Ok(Some((carrier, children)))
 }
 
@@ -1035,7 +1056,14 @@ pub(crate) fn re_advertise_interest_into<V: Clone>(
             let Ok(mut declare) = build(keyexpr, value) else {
                 continue;
             };
-            set_declare_source(&mut declare, out_node_id);
+            if stamped(
+                set_declare_source(&mut declare, out_node_id),
+                "a re-advertised declaration",
+            )
+            .is_err()
+            {
+                continue;
+            }
             flood(delta_children, &declare);
         }
     }
@@ -1073,7 +1101,7 @@ pub(crate) fn build_declare_queryable_with_info(
     info: QueryableInfo,
 ) -> Result<DeclareOwned, CodecError> {
     let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
-    set_declare_queryable_info(&mut declare, info);
+    set_declare_queryable_info(&mut declare, info)?;
     Ok(declare)
 }
 

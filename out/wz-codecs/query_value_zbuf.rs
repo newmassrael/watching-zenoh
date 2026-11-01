@@ -25,7 +25,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use super::encoding::Encoding;
 use super::zbuf_slice::ZbufSlice;
 
-use sce_forge_runtime::codec::{ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::encoding::EncodingView;
 use super::zbuf_slice::ZbufSliceView;
 
@@ -181,7 +181,7 @@ pub trait QueryValueZbufSource {
     /// The `encoding` field.
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource>;
     /// The `slices` field.
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone>;
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>>;
 }
 
 impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
@@ -194,13 +194,14 @@ impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         (**self).encoding()
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
         (**self).slices()
     }
 }
 
 /// A value of `QueryValueZbuf` held in the types a caller already has: a source
-/// ([`QueryValueZbufSource`]) whose lists are slices and whose bodies are references.
+/// ([`QueryValueZbufSource`]) whose lists are slices within their bounds and whose
+/// bodies are references.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct QueryValueZbufParts<'a> {
@@ -211,7 +212,7 @@ pub struct QueryValueZbufParts<'a> {
     /// The `encoding` field.
     pub encoding: Option<&'a super::encoding::EncodingParts<'a>>,
     /// The `slices` field.
-    pub slices: Option<&'a [super::zbuf_slice::ZbufSliceParts<'a>]>,
+    pub slices: Option<::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4>>,
 }
 
 impl<'a> QueryValueZbufSource for QueryValueZbufParts<'a> {
@@ -224,8 +225,8 @@ impl<'a> QueryValueZbufSource for QueryValueZbufParts<'a> {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
-        self.slices.map(<[_]>::iter)
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
+        self.slices.as_ref().map(|_l| _l.iter())
     }
 }
 
@@ -239,8 +240,8 @@ impl<'a> QueryValueZbufSource for QueryValueZbuf<'a> {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding.as_ref()
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
-        self.slices.as_ref().map(|_l| _l.iter())
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
+        self.slices.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
     }
 }
 
@@ -254,7 +255,7 @@ impl<'a> QueryValueZbufSource for QueryValueZbufView<'a> {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding.as_ref()
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
         self.slices.as_ref().map(|_l| _l.iter())
     }
 }
@@ -269,8 +270,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryValueZbufSource for Query
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         self.encoding.as_ref()
     }
-    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
-        self.slices.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    fn slices(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>> {
+        self.slices.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -288,10 +289,7 @@ impl<'a> QueryValueZbuf<'a> {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: QueryValueZbufSource + ?Sized, K: SceSink>(src: &S, w: &mut K, after_shm: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        let _k_slices: usize = src.slices().map_or(0, |_l| _l.count());
-        if _k_slices > 4 {
-            return Err(CodecError::TooManyElements);
-        }
+        let _k_slices: usize = src.slices().map_or(0, |_l| _l.len());
         let _n_d_value_len_0: usize = match src.value() {
             Some(_v) => _v.len(),
             None => 0,
@@ -378,7 +376,7 @@ pub struct QueryValueZbufView<'a> {
     pub value: Option<&'a [u8]>,
     pub encoding: Option<EncodingView<'a>>,
     pub slice_count: Option<u32>,
-    pub slices: Option<ListView<'a, QueryValueZbufSlicesWalk, 0>>,
+    pub slices: Option<Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4>>,
 }
 
 #[allow(dead_code)]
@@ -451,7 +449,7 @@ impl<'a> QueryValueZbufView<'a> {
                 }
                 _count += 1;
             }
-            _out.slices = Some(ListView::new(_rest, _count, []));
+            _out.slices = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
             _out.slices = None;
         }
@@ -563,7 +561,7 @@ pub struct QueryValueZbufOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::s
     pub value: Option<S::Bytes<32>>,
     pub encoding: Option<EncodingOwned<S>>,
     pub slice_count: Option<u32>,
-    pub slices: Option<S::List<ZbufSliceOwned<S>, 4>>,
+    pub slices: Option<::sce_forge_runtime::codec::Bounded<S::List<ZbufSliceOwned<S>, 4>, 4>>,
 }
 
 #[allow(dead_code)]
@@ -585,7 +583,7 @@ impl<'a> QueryValueZbuf<'a> {
             value: self.value.map(<S::Bytes<32> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
             encoding: self.encoding.map(|_v| _v.try_into_owned_in::<S>()).transpose()?,
             slice_count: self.slice_count,
-            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
+            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
 
@@ -632,7 +630,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryValueZbufOwned<S> {
         }
         _out.slice_count = self.slice_count;
         match &self.slices {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.slices.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.slices.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
             None => _out.slices = None,
         }
         Ok(())
@@ -699,7 +697,7 @@ impl<'a> QueryValueZbuf<'a> {
             value: self.value.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<32>(origin, _v)).transpose()?,
             encoding: self.encoding.map(|_v| _v.try_into_owned_in_origin::<S>(origin)).transpose()?,
             slice_count: self.slice_count,
-            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }
 }

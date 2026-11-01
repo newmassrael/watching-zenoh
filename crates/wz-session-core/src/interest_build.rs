@@ -112,7 +112,7 @@ pub fn build_interest_liveliness_subscriber(
     // that body and must NOT carry it — the two builders differ in the C/F bits
     // and now in this, and folding it down would have made wz uniform where
     // upstream is not.
-    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
+    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE)?;
     Ok(interest)
 }
 
@@ -219,7 +219,7 @@ pub fn build_interest_propagated(
         aggregate,
         keyexpr,
     )?;
-    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
+    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE)?;
     Ok(interest)
 }
 
@@ -681,7 +681,11 @@ pub fn build_interest_final(interest_id: u64) -> InterestOwned {
 #[cfg(feature = "alloc")]
 pub fn build_interest_final_propagated(interest_id: u64) -> InterestOwned {
     let mut interest = build_interest_final(interest_id);
-    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
+    // An edit of an empty chain leaves one entry, which every bound holds.
+    let _ = crate::declare_ext_qos::set_interest_qos(
+        &mut interest,
+        crate::declare_ext_qos::QOS_DECLARE,
+    );
     interest
 }
 

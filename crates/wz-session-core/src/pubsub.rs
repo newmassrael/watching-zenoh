@@ -99,7 +99,11 @@ use alloc::string::String;
 // coupling rather than restating it in a longer cfg.
 
 use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
+// Not every build reads a held chain here: the arms that do are gated on the body codecs.
 use crate::caps;
+#[cfg(feature = "storage-profile")]
+#[allow(unused_imports)]
+use crate::held_list::HeldList;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 use crate::id_map::key_text_as;
 #[cfg(feature = "storage-profile")]
@@ -550,7 +554,7 @@ mod in_place;
 /// into scope.
 #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
 fn push_priority_band(push: &PushOwned) -> usize {
-    crate::put_payload::priority_band(push.extensions.as_deref().unwrap_or(&[]))
+    crate::put_payload::priority_band(push.extensions.entries().unwrap_or(&[]))
 }
 
 /// R311y530 — whether a session-local subscription `pattern` intersects an
@@ -1847,7 +1851,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 #[cfg(feature = "pubsub-put")]
                 PushOwnedVariant::CodecZenohMsgPut(put) => {
                     let body_exts: &[crate::wire::parts::ExtEntryOwned] =
-                        put.extensions.as_deref().unwrap_or(&[]);
+                        put.extensions.entries().unwrap_or(&[]);
                     #[cfg(feature = "pubsub-timestamp")]
                     let body_timestamp = put.timestamp.as_ref().map(TimestampHint::from_codec);
                     #[cfg(not(feature = "pubsub-timestamp"))]
@@ -1921,7 +1925,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 #[cfg(feature = "pubsub-delete")]
                 PushOwnedVariant::CodecZenohMsgDel(del) => {
                     let body_exts: &[crate::wire::parts::ExtEntryOwned] =
-                        del.extensions.as_deref().unwrap_or(&[]);
+                        del.extensions.entries().unwrap_or(&[]);
                     #[cfg(feature = "pubsub-timestamp")]
                     let body_timestamp = del.timestamp.as_ref().map(TimestampHint::from_codec);
                     #[cfg(not(feature = "pubsub-timestamp"))]
@@ -1960,7 +1964,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 _ => return,
             };
         let outer_exts: &[crate::wire::parts::ExtEntryOwned] =
-            push.extensions.as_deref().unwrap_or(&[]);
+            push.extensions.entries().unwrap_or(&[]);
         // R311em / R311y307 — the outer QoS extension is a single packed
         // byte (priority / congestion-control / express are bit views of
         // the same _z_qos_t._val), so the subscriber-side projection gates
@@ -2543,7 +2547,7 @@ pub fn sample_of_push(
         #[cfg(feature = "pubsub-put")]
         PushOwnedVariant::CodecZenohMsgPut(put) => {
             let exts: &[crate::wire::parts::ExtEntryOwned] =
-                put.extensions.as_deref().unwrap_or(&[]);
+                put.extensions.entries().unwrap_or(&[]);
             let payload = payload_of(put)?;
             #[cfg(feature = "pubsub-timestamp")]
             let timestamp = put.timestamp.as_ref().map(TimestampHint::from_codec);
@@ -2574,7 +2578,7 @@ pub fn sample_of_push(
         #[cfg(feature = "pubsub-delete")]
         PushOwnedVariant::CodecZenohMsgDel(del) => {
             let exts: &[crate::wire::parts::ExtEntryOwned] =
-                del.extensions.as_deref().unwrap_or(&[]);
+                del.extensions.entries().unwrap_or(&[]);
             #[cfg(feature = "pubsub-timestamp")]
             let timestamp = del.timestamp.as_ref().map(TimestampHint::from_codec);
             #[cfg(not(feature = "pubsub-timestamp"))]
@@ -2600,7 +2604,7 @@ pub fn sample_of_push(
         }
         _ => return None,
     };
-    let outer: &[crate::wire::parts::ExtEntryOwned] = push.extensions.as_deref().unwrap_or(&[]);
+    let outer: &[crate::wire::parts::ExtEntryOwned] = push.extensions.entries().unwrap_or(&[]);
     if let Some(timestamp) = timestamp {
         sample = sample.with_timestamp(timestamp);
     }
@@ -6140,9 +6144,9 @@ mod tests {
         let mut put = wz_codecs::msg_put::MsgPut::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
-        put.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        put.extensions = Some(crate::held_list::one_entry(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        ));
         let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
@@ -6291,9 +6295,9 @@ mod tests {
                     value: u64::from(raw),
                 },
             );
-            push.extensions = Some(vec![ext
-                .try_into_owned_in::<crate::wire::WireStorage>()
-                .unwrap()]);
+            push.extensions = Some(crate::held_list::one_entry(
+                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+            ));
             push.header |= 0x80;
         }
         push
@@ -6424,10 +6428,13 @@ mod tests {
         let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
             panic!("a Put");
         };
-        let slices = put.slices.as_mut().expect("the sliced layout");
-        for slice in SceList::as_slice(&second) {
-            slices.try_push(slice.clone()).expect("a second slice fits");
-        }
+        crate::held_list::edit_chain(&mut put.slices, |slices| {
+            let slices = slices.as_mut().expect("the sliced layout");
+            for slice in SceList::as_slice(second.inner()) {
+                slices.push(slice.clone());
+            }
+        })
+        .expect("a second slice fits");
         put.slice_count = Some(2);
         push
     }
@@ -6883,9 +6890,9 @@ mod tests {
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
-        push.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        push.extensions = Some(crate::held_list::one_entry(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        ));
         push
     }
 
@@ -6995,9 +7002,9 @@ mod tests {
         let mut put = wz_codecs::msg_put::MsgPut::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
-        put.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        put.extensions = Some(crate::held_list::one_entry(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        ));
         let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
@@ -7601,9 +7608,9 @@ mod metadata_decode_isolation_tests {
         let mut put = wz_codecs::msg_put::MsgPut::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
-        put.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        put.extensions = Some(crate::held_list::one_entry(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        ));
         let mut push = put_push_literal(keyexpr);
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
         push
