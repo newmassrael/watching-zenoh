@@ -73,6 +73,7 @@ pub mod observation;
 pub mod os;
 mod query;
 pub mod sync;
+pub mod tls_material;
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};
 pub use engine::SessionEngine;
 pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};

@@ -2700,70 +2700,20 @@ impl FaceLeg {
     }
 }
 
-/// The TLS material a C-ABI `z_open` carries, already RESOLVED to PEM bytes.
-///
-/// R311y534 — this replaces the two `Option<String>` listen-cert PATHS the quic
-/// acceptor used to take, and the reason is that the pico key set is wider than
-/// a pair of paths in two independent directions. Each certificate value has a
-/// PATH form and a `*_BASE64` inline form (`Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY`
-/// vs `..._BASE64_KEY`), and the upstream examples use the INLINE one by default
-/// — their PEM blobs are compiled into the program. And the dial side needs
-/// material the listen side never did: a root CA to verify the peer against, a
-/// name-verification policy, and an optional client cert for mTLS.
-///
-/// So the shim resolves "path or base64" ONCE, on the ABI side where the key
-/// numbers live, and hands PEM BYTES across. That keeps this crate free of
-/// key-encoding knowledge and makes the two forms indistinguishable downstream,
-/// which is what they are: `-C ca.pem` and the inline bundle are the same trust
-/// decision written two ways.
-///
-/// All fields default to `None`/`false`, which is the cert-free tcp/udp/ws path
-/// — [`Default`] is what a non-TLS `z_open` passes.
-#[derive(Default, Clone, Debug)]
-pub struct CapiTlsConfig {
-    /// The trust bundle a `tls/...` DIAL verifies the peer's server cert
-    /// against (pico `Z_CONFIG_TLS_ROOT_CA_CERTIFICATE{,_BASE64}_KEY`). `None`
-    /// leaves a `tls/...` dial without TLS material, which the runtime reports
-    /// as an unsupported dial rather than silently dialing in the clear.
-    pub root_ca_pem: Option<Vec<u8>>,
-    /// Whether the peer cert's SAN must match the dialed host (pico
-    /// `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY`). pico's own default is
-    /// `false`, and the stock examples rely on it: they dial a numeric
-    /// `tls/127.0.0.1:<port>` while their bundled cert names `localhost`.
-    pub verify_name_on_connect: bool,
-    /// The client cert a MUTUAL-TLS dial presents (pico
-    /// `Z_CONFIG_TLS_CONNECT_CERTIFICATE{,_BASE64}_KEY` + its private key),
-    /// gated by `Z_CONFIG_TLS_ENABLE_MTLS_KEY`. Both-or-neither.
-    pub connect_cert_pem: Option<Vec<u8>>,
-    pub connect_key_pem: Option<Vec<u8>>,
-    /// The cert chain + private key a `tls/...` or `quic/...` LISTEN presents
-    /// (pico `Z_CONFIG_TLS_LISTEN_{CERTIFICATE,PRIVATE_KEY}{,_BASE64}_KEY`).
-    /// zenoh feeds ONE tls block to both backends, so one pair serves both.
-    pub listen_cert_pem: Option<Vec<u8>>,
-    pub listen_key_pem: Option<Vec<u8>>,
-    /// Require and verify a CLIENT cert on the accept side (pico
-    /// `Z_CONFIG_TLS_ENABLE_MTLS_KEY` read by a listener). The bundle is
-    /// [`Self::root_ca_pem`], mirroring pico, which uses the one CA value for
-    /// both roles.
-    pub require_client_auth: bool,
-}
+/// The TLS material a C-ABI `z_open` carries, already RESOLVED to PEM bytes: the port's value,
+/// because the cooperative engine takes the same one. Re-exported here at the path this crate has
+/// always had.
+pub use wz_capi_port::tls_material::CapiTlsConfig;
 
-impl CapiTlsConfig {
-    /// The mTLS client-auth pair, `Some` only when BOTH halves are present.
-    ///
-    /// Separate from the fields because "mTLS enabled" and "the material for it
-    /// arrived" are two conditions, and a half-configured pair must not silently
-    /// degrade to one-way TLS.
-    #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
-    fn client_auth(&self) -> Option<wz_runtime_tokio::tls_config::ClientAuthPem<'_>> {
-        match (&self.connect_cert_pem, &self.connect_key_pem) {
-            (Some(cert), Some(key)) => Some(wz_runtime_tokio::tls_config::ClientAuthPem {
-                cert_chain_pem: cert,
-                private_key_pem: key,
-            }),
-            _ => None,
-        }
-    }
+/// The mTLS client-auth pair of `tls`, in the type the tokio runtime's dial takes: `Some` only
+/// when BOTH halves are present ([`CapiTlsConfig::client_auth_pair`]).
+#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+fn client_auth(tls: &CapiTlsConfig) -> Option<wz_runtime_tokio::tls_config::ClientAuthPem<'_>> {
+    tls.client_auth_pair()
+        .map(|(cert, key)| wz_runtime_tokio::tls_config::ClientAuthPem {
+            cert_chain_pem: cert,
+            private_key_pem: key,
+        })
 }
 
 /// The HOST of a `<scheme>/<host>:<port>` locator, for use as the TLS SNI /
@@ -2893,7 +2843,7 @@ fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfi
         cfg.with_tls(TlsDialConfig::from_pem(
             root_ca,
             server_name,
-            tls.client_auth(),
+            client_auth(tls),
             verification,
         )?)
     };
@@ -2914,7 +2864,7 @@ fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfi
         cfg.with_quic(QuicDialConfig::from_pem(
             root_ca,
             server_name,
-            tls.client_auth(),
+            client_auth(tls),
             verification,
         )?)
     };
