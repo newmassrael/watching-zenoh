@@ -18,8 +18,10 @@
 //
 // Time is cut into slots of one millisecond. In each slot the publisher puts the number of messages that
 // make RATE a second (the fraction is carried to the next slot) back to back, then spins until the next
-// slot. A slot that starts a millisecond or more late is counted in `late_slots`: the offered rate was
-// not offered, and the trial does not stand for it. The last line is
+// slot (with -w it sleeps until 50 microseconds before the slot: a run that reads the CPU of the process
+// then reads the library's, since the spin is charged to the process and is long when the library is
+// faster than the rate). A slot that starts a millisecond or more late is counted in `late_slots`: the
+// offered rate was not offered, and the trial does not stand for it. The last line is
 //
 //   paced_pub sent=<puts that returned 0> failed=<puts that returned an error> elapsed_s=<seconds from the
 //   first slot to the end of the last put> late_slots=<n>
@@ -58,12 +60,16 @@ int main(int argc, char **argv) {
     unsigned seconds = 3;
     int batching = 0;
     int drop = 0;
+    int sleep_wait = 0;
 
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
-    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:bd")) != -1) {
+    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:bdw")) != -1) {
         switch (opt) {
+            case 'w':
+                sleep_wait = 1;
+                break;
             case 'b':
                 batching = 1;
                 break;
@@ -89,7 +95,7 @@ int main(int argc, char **argv) {
                 seconds = (unsigned)strtoul(optarg, NULL, 10);
                 break;
             default:
-                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d]\n");
+                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w]\n");
                 return 2;
         }
     }
@@ -135,6 +141,12 @@ int main(int argc, char **argv) {
         if (target >= t0 + run_ns) break;
         uint64_t now;
         while ((now = now_ns()) < target) {
+            // With -w the wait sleeps until 50 microseconds before the slot and spins only for those,
+            // so the CPU the process is charged is the library's and not the pacer's.
+            if (sleep_wait && target - now > 100000ULL) {
+                struct timespec nap = {0, (long)(target - now - 50000ULL)};
+                nanosleep(&nap, NULL);
+            }
         }
         if (now - target >= slot_ns) late++;
         owed += per_slot;

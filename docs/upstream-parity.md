@@ -149,10 +149,22 @@ three, pc3, msg/s):
 The small sizes did not move (8 B and 64 B read as before within one search step), and 1 KiB and
 2048 B are ahead of pico from wz's side, so the 11 to 17 percent gap above is closed under this
 setting. What this does not say: the figure is the throughput of one host over loopback, with no
-latency reading; the wz side spends about 27 percent more CPU than pico for the same rate (the user
-time is about five times pico's) and two threads where pico has one; a lane now holds up to eight
-batches of heap while frames are queued; and pico to wz reads a tie with pico to pico
-(360 k at 1 KiB, 190 k at 2048 B), because pico's publisher is what bounds it.
+latency reading; wz runs two threads where pico runs one; a lane now holds up to eight batches of
+heap while frames are queued; and pico to wz reads a tie with pico to pico (360 k at 1 KiB, 190 k at
+2048 B), because pico's publisher is what bounds it.
+
+**CPU, corrected.** An earlier version of this section said wz spent about 27 percent more CPU than
+pico at the same rate and about five times its user time. Both came from a run where the publisher
+program (`paced_pub`) spins between slots: when the library is faster than the offered rate the spin
+is charged to the process, and the one wz reading was also taken with a lane of two. With the spin
+replaced by a sleep (`paced_pub -w`, 1 KiB at 290,000 a second, 4 s window, CPU of `/proc/<pid>/task`
+threads, two repetitions, lane at 8), the publisher side reads 340 and 348 ticks of 400 for pico's one
+thread and 231 and 236 for wz's two threads together (the sender 102 and 104, the writer 129 and
+132): wz spends about a third less CPU for the same rate, mostly in the kernel, because it writes
+many frames in one call. The split between user and kernel time is not stated, since tick
+accounting put the writer's user time at 40 in one repetition and 0 in the other. Pico's own run
+slipped 1,647 and 1,971 slots of 1 ms at that rate (it is at its limit there), wz's 9 and 0; one
+host, one size, pinned to CPUs 6,7,8,9.
 
 - **Host to host, the same build's text differs.** The same pico-client build read
   1,794,606 bytes on the development host, 1,827,441 on the bench host and 1,833,173 on
