@@ -1005,7 +1005,11 @@ Each lands whole with its surface lines, tests and faults in one round.
       order: the gateway partition on the nodes of the API (the router node and the peer node
       take `gateway/south`, with the region names of the remote's Init), the peer that holds a
       multicast group and dials what it scouts as a node, the client that holds a group, then
-      the spans.
+      the spans. The spans were met (rounds 4029 to 4032) and the peer that scouts is a node
+      when it keeps a south apart: scenario 2 passes whole, and 115 of 126 pass (measured
+      2026-11-01, a process per test). What is left is scenario 1 (ten tests, a client node that
+      listens, answers scouts and forwards between its router and the peers that find it: the
+      forwarder has no client role yet) and the intermittent tests of scenarios 6 and 7.
     - **Open:** `routing` (the two above), `regions` (above) and `open_time` (its tests are
       ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
