@@ -2534,7 +2534,8 @@ pub(crate) struct Tables {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalFaceEvent {
     /// A token is alive on `keyexpr`. `interest` is the id of the interest the face asked it
-    /// under ([`RouterForwarder::ask_local_tokens`]) when the router tells it as the answer to
+    /// under (`RouterForwarder::ask_local_tokens`, a method of the builds that keep tokens, so
+    /// not a link) when the router tells it as the answer to
     /// that interest's history, and `None` when the router pushes it of its own accord: a push
     /// is for every interest of the face that meets the key, an answer for the one that asked.
     TokenUp {
