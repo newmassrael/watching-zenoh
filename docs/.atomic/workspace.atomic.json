@@ -304892,6 +304892,34 @@
         "Open, in order: a logarithm and a gamma ratio that need no float maths (fixed-point, or a table of the logarithms of the integers with the Beta parameters chosen as fractions) so that the mixture can ship in a no_std crate; the prior as a posterior and not a maximum-likelihood point; a link that breaks more than the corpus holds; the null side of the steps measured, with a protocol that has a counter; kappa of the units from zenoh groups that fail them; the model number and the zenoh-analyzer session, because null flows read no today would read undecided. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
       ]
     },
+    "Round 4090": {
+      "decision_summary": "The link lease is gated on target_has_atomic = ptr as its alloc::sync::Arc is. The cross-compile lane (G.13) builds wz-session-core for thumbv6m-none-eabi, which has no alloc::sync, and failed on LinkLease after the link admission commit; abe9bc112b repaired the test gate, the heap allocation and two doc links but not this. A target without atomics holds at most the link its single task drives and has no second link to admit, so it has no lease; an Rc was refused because the session a lease sits in is Send. The loop-level witness of the admission, which routing-peer alone compiles, is run by C1y under routing-accept,routing-peer with a count guard of 1; no lane ran it.",
+      "changes_bullets": [
+        "wz-session-core: link_admission.rs (LinkLease and its Drop), session_actions.rs (link_lease field and init, install_link_admission, link_admitted, link_admitted_for_remote, link_confirmed, release_link_admission, refuse_link) and drive.rs (the admission block) gated on target_has_atomic = ptr. scripts/run-ci.sh C1y: guarded step for link_admission_mutual_dial_e2e, 1."
+      ],
+      "verification_bullets": [
+        "On the build host: thumbv6m-none-eabi and thumbv7em-none-eabihf builds of the session-reconnect set pass; wz-mcu-session-acceptor with fixed-memory passes; link_admission unit tests 3 passed; C1y passes with the new guard."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Read the next finished hosted run per job: the feature-gate NEG and isolated-crate lanes of run 41292703209 were not re-run here."
+      ],
+      "publishable_decision_summary": "The link lease is gated on target_has_atomic = ptr as its alloc::sync::Arc is. The cross-compile lane (G.13) builds wz-session-core for thumbv6m-none-eabi, which has no alloc::sync, and failed on LinkLease after the link admission commit; abe9bc112b repaired the test gate, the heap allocation and two doc links but not this. A target without atomics holds at most the link its single task drives and has no second link to admit, so it has no lease; an Rc was refused because the session a lease sits in is Send. The loop-level witness of the admission, which routing-peer alone compiles, is run by C1y under routing-accept,routing-peer with a count guard of 1; no lane ran it.",
+      "publishable_changes_bullets": [
+        "wz-session-core: link_admission.rs (LinkLease and its Drop), session_actions.rs (link_lease field and init, install_link_admission, link_admitted, link_admitted_for_remote, link_confirmed, release_link_admission, refuse_link) and drive.rs (the admission block) gated on target_has_atomic = ptr. scripts/run-ci.sh C1y: guarded step for link_admission_mutual_dial_e2e, 1."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: thumbv6m-none-eabi and thumbv7em-none-eabihf builds of the session-reconnect set pass; wz-mcu-session-acceptor with fixed-memory passes; link_admission unit tests 3 passed; C1y passes with the new guard."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the next finished hosted run per job: the feature-gate NEG and isolated-crate lanes of run 41292703209 were not re-run here."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
