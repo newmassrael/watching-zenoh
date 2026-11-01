@@ -304692,6 +304692,36 @@
         "Open, in order: a hierarchical null side (a rate per null protocol, its spread measured from the flows within each null capture), then the report again; the choice or the estimation of kappa, which needs zenoh groups that fail units (workloads and implementations this reader reads badly, section 6.4); only then whether the model number moves, with the zenoh-analyzer session, because null flows read no today would read undecided. The reader running maximum of a flow sum; the SN break rate as a mixture; the validation corpus; the owner confirmation of the acceptance levels."
       ]
     },
+    "Round 4084": {
+      "decision_summary": "The host table of the pico ABI gains the readings that followed round 4078: the round trip with the lane at 8 batches, the receive side of the 1 KiB cell, and one hypothesis that was measured and rejected.\n\nThe round trip of z_ping and z_pong, 8 B, 20,000 round trips, pico against the wz ABI in one session on the bench host: pico 20.0 microseconds in all three repetitions, wz 15.0 in all three. The deeper lane (round 4074) did not lengthen a round trip, and wz was not the slower of the pair. Both values are twice the earlier session's tie at 10 to 11 microseconds, which the host accounts for (another session held a lock on it); the order of the pair is the reading and not the figure.\n\nThe receive side: at 540,000 a second the wz subscriber's drive thread is 401 of 400 ticks (298 user, 103 kernel), one thread saturated at about 1.85 microseconds a message, where pico's subscriber takes the wz publisher to 920,000. Stack samples of that thread (150) are scattered over the dispatch, the payload marshal, the tokio poll and the receive buffer return, with no dominant function. Rejected: that the read-ahead (512 bytes, so a 1 KiB frame costs two receives) is the limit. With 8,192 bytes wz to wz at 1 KiB read 520 k and 540 k against 560 k, and the change was reverted; nothing of it is in the tree.",
+      "changes_bullets": [
+        "docs/upstream-parity.md: the round trip read again after the lane depth (pico 20.0 against wz 15.0 microseconds, three repetitions each), and the limits sentence of the host table now names the 8 B round trip as its one latency reading. No code changed in this round."
+      ],
+      "verification_bullets": [
+        "On pc3 through bx: scripts/pico-compare.sh rtt 3 (three repetitions of 20,000 round trips of the upstream z_ping and z_pong, built once against pico and once against the wz library, ping on CPUs 6,7 and pong on 8,9). Per-thread ticks of /proc for the subscriber at 540,000 a second, 150 stack samples of the subscriber under a debugger with a SIGUSR1 handshake, and the no-drop search at 1 KiB with the read-ahead at 8,192 bytes (two repetitions per pair; reverted, not committed). One host, one session; pc3 showed another session's lock in the bx log."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the wz subscriber stops at 560 k at 1 KiB, one thread saturated; where its 1.85 microseconds go is not read, and a user-mode profile is needed (perf_event_paranoid is 4 on the bench host and is the owner's to change). Not measured: round trip at sizes other than 8 B, the batched row, a host other than pc3, a zenoh or zenoh-c counterpart of the host table. The macOS mutual_dial red is open under the row of round 4077."
+      ],
+      "publishable_decision_summary": "The host table of the pico ABI gains the readings that followed round 4078: the round trip with the lane at 8 batches, the receive side of the 1 KiB cell, and one hypothesis that was measured and rejected.\n\nThe round trip of z_ping and z_pong, 8 B, 20,000 round trips, pico against the wz ABI in one session on the bench host: pico 20.0 microseconds in all three repetitions, wz 15.0 in all three. The deeper lane (round 4074) did not lengthen a round trip, and wz was not the slower of the pair. Both values are twice the earlier session's tie at 10 to 11 microseconds, which the host accounts for (another session held a lock on it); the order of the pair is the reading and not the figure.\n\nThe receive side: at 540,000 a second the wz subscriber's drive thread is 401 of 400 ticks (298 user, 103 kernel), one thread saturated at about 1.85 microseconds a message, where pico's subscriber takes the wz publisher to 920,000. Stack samples of that thread (150) are scattered over the dispatch, the payload marshal, the tokio poll and the receive buffer return, with no dominant function. Rejected: that the read-ahead (512 bytes, so a 1 KiB frame costs two receives) is the limit. With 8,192 bytes wz to wz at 1 KiB read 520 k and 540 k against 560 k, and the change was reverted; nothing of it is in the tree.",
+      "publishable_changes_bullets": [
+        "docs/upstream-parity.md: the round trip read again after the lane depth (pico 20.0 against wz 15.0 microseconds, three repetitions each), and the limits sentence of the host table now names the 8 B round trip as its one latency reading. No code changed in this round."
+      ],
+      "publishable_verification_bullets": [
+        "On pc3 through bx: scripts/pico-compare.sh rtt 3 (three repetitions of 20,000 round trips of the upstream z_ping and z_pong, built once against pico and once against the wz library, ping on CPUs 6,7 and pong on 8,9). Per-thread ticks of /proc for the subscriber at 540,000 a second, 150 stack samples of the subscriber under a debugger with a SIGUSR1 handshake, and the no-drop search at 1 KiB with the read-ahead at 8,192 bytes (two repetitions per pair; reverted, not committed). One host, one session; pc3 showed another session's lock in the bx log."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the wz subscriber stops at 560 k at 1 KiB, one thread saturated; where its 1.85 microseconds go is not read, and a user-mode profile is needed (perf_event_paranoid is 4 on the bench host and is the owner's to change). Not measured: round trip at sizes other than 8 B, the batched row, a host other than pc3, a zenoh or zenoh-c counterpart of the host table. The macOS mutual_dial red is open under the row of round 4077."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
