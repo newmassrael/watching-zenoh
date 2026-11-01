@@ -633,19 +633,35 @@ pub(crate) fn unit_reading_weight(reading: wz_session_core::passive::UnitReading
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
 
     /// `round(1000 * log2(x))`, the rule every weight is written by.
-    fn millibits(x: f64) -> i64 {
+    pub(crate) fn millibits(x: f64) -> i64 {
         (1000.0 * x.log2()).round() as i64
     }
 
-    /// `ln(n!)`, summed: every count here is a few hundred at most.
+    /// `ln(n!)`, summed in the order `ln 2 + ln 3 + ...` and kept: the corpus's
+    /// largest count is tens of thousands, and the bounds ask for the same sums
+    /// again and again.
     fn ln_factorial(n: u64) -> f64 {
-        (2..=n).map(|i| (i as f64).ln()).sum()
+        static SUMS: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
+        let sums = SUMS.get_or_init(|| {
+            let mut sums = Vec::with_capacity(70_000);
+            let mut running = 0.0f64;
+            sums.push(0.0);
+            for i in 1..70_000u64 {
+                running += (i as f64).ln();
+                sums.push(running);
+            }
+            sums
+        });
+        match usize::try_from(n).ok().and_then(|at| sums.get(at)) {
+            Some(sum) => *sum,
+            None => (2..=n).map(|i| (i as f64).ln()).sum(),
+        }
     }
 
     /// `P(X <= k)` for `X ~ Binomial(n, p)`, `0 < p < 1`.
@@ -662,10 +678,20 @@ mod tests {
 
     /// The one-sided 95% Clopper-Pearson upper bound on a share of `k` in `n`:
     /// the `p` at which seeing `k` or fewer has chance 5%.
-    fn upper_bound(k: u64, n: u64) -> f64 {
+    pub(crate) fn upper_bound(k: u64, n: u64) -> f64 {
         if k >= n {
             return 1.0;
         }
+        if k == 0 {
+            // The root of `(1 - p)^n = 0.05`; `bisect` finds the same number.
+            return 1.0 - 0.05f64.powf(1.0 / n as f64);
+        }
+        bisect(k, n)
+    }
+
+    /// The bound found by bisection on the binomial's distribution: the rule the
+    /// bound is, and the check of its closed form for none seen.
+    pub(crate) fn bisect(k: u64, n: u64) -> f64 {
         let (mut lo, mut hi) = (k as f64 / n as f64, 1.0f64);
         for _ in 0..200 {
             let mid = (lo + hi) / 2.0;
@@ -680,7 +706,7 @@ mod tests {
 
     /// Model 2's rule for one measured check whose zenoh outcome is index 0:
     /// the weights of every outcome, `yes` and `no`.
-    fn measured_weights(zenoh: &[u64], members: &[&[u64]]) -> Vec<Weight> {
+    pub(crate) fn measured_weights(zenoh: &[u64], members: &[&[u64]]) -> Vec<Weight> {
         let n1: u64 = zenoh.iter().sum();
         let k = zenoh.len();
         let mut p1: Vec<f64> = zenoh.iter().map(|&c| upper_bound(c, n1)).collect();
@@ -802,6 +828,7 @@ mod tests {
     fn the_upper_bound_of_none_seen_is_the_closed_form() {
         let n = 346;
         let closed = 1.0 - 0.05f64.powf(1.0 / n as f64);
+        assert!((bisect(0, n) - closed).abs() < 1e-12);
         assert!((upper_bound(0, n) - closed).abs() < 1e-12);
         assert_eq!(upper_bound(5, 5), 1.0);
     }

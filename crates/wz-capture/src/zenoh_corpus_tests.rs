@@ -29,18 +29,18 @@ use crate::session_table::ZenohVerdict;
 use crate::Dissection;
 
 /// The corpus directory, from the crate.
-fn corpus_dir() -> std::path::PathBuf {
+pub(crate) fn corpus_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../captures/corpus")
 }
 
 /// One file of the corpus, as the manifest describes it.
-struct Entry {
-    file: String,
-    hypothesis: String,
+pub(crate) struct Entry {
+    pub(crate) file: String,
+    pub(crate) hypothesis: String,
     packets: u64,
 }
 
-fn manifest() -> Vec<Entry> {
+pub(crate) fn manifest() -> Vec<Entry> {
     let text = std::fs::read_to_string(corpus_dir().join("corpus.json5"))
         .expect("captures/corpus/corpus.json5 reads");
     let doc = json5::parse(&text).unwrap_or_else(|e| panic!("the manifest is JSON5: {e:?}"));

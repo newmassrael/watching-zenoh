@@ -252,6 +252,8 @@ pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
 #[cfg(test)]
+mod zenoh_calibration_tests;
+#[cfg(test)]
 mod zenoh_corpus_tests;
 /// Whether a flow's bytes are zenoh, as a sequential test over the invariants a
 /// zenoh flow keeps: the checks, their weights and the tallies `session_table`

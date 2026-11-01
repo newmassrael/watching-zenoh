@@ -578,3 +578,57 @@ which makes the 0.x tags a test of the foreign version weight and not of the
 `yes` side,
 a path that loses more than 1.8%, and the null side only on the protocols the
 corpus holds.
+
+### 6.3 The calibration judged by group (2026-11-01)
+
+The corpus test reads every file with weights counted from every file. That is a
+fit, and a protocol that is in the null family sets the family's largest chance
+of an outcome, so its own flows are weighed against a bound it helped to make.
+Nor are the counts what they look like: the units of one session share a stack,
+a generator and a link, so 49505 units are not 49505 independent trials. What is
+independent is a capture, and better a group of them: a null protocol, a zenoh
+release line, a link condition.
+
+`crates/wz-capture/src/zenoh_calibration_tests.rs` (in the build that opens lz4)
+holds three things. A flow's two sums are linear in its outcome counts, and the
+first test shows the shipped weights applied to the counts give back every
+flow's own sums, and the second that the fit it uses counts the shipped weights
+from the whole corpus; so the rest reads the library and not a look-alike. The
+third leaves one group out at a time, counts the weights again from the others
+and reads the left-out flows with them (40 groups: 18 null protocols, 22 zenoh
+groups by release line, link and what the file exercises, named from the file's
+name until the manifest names them). It prints, and asserts nothing about the
+rates, because the owner has not said what the corpus must show.
+
+What it shows:
+
+- **No flow changes its word when its group is left out**, in 40 groups. The
+  extreme sum (the lowest `yes` sum of a zenoh group, the highest of a null one)
+  moves by 2.4 bits at most (the jitter group, 38597 to 36194) and mostly by
+  under 0.2. The closest a null flow comes to `yes` is a DNS flow at +1934, 18
+  bits short; the lowest `yes` of a zenoh group that reaches it is the jitter
+  group's, 16 bits over. The 20% loss group already holds two zenoh flows that
+  stay `undecided`.
+- **The failure chances stand on far fewer things than their bounds say.** All
+  zenoh failures are zero, and the one-sided 95% bound on each is 6.1e-5 on the
+  49505 units (the weight of a residual unit), 0.0212 on the 140 files and
+  0.1273 on the 22 groups; for framing lost, cookie, roles and version on their
+  own counts of 584 to 1222 it is 0.0024 to 0.0051 on the units and the same
+  0.0212 and 0.1273 on files and groups. The weights use the first.
+
+What it cannot show is what matters most. No group has a failure, so leaving
+one out cannot say what a failure in a group not yet captured would do, and the
+weights say it is a 14-bit event: two residual units weigh -25188 on the `no`
+sum, past the threshold, so a zenoh workload this reader reads badly, with a
+message kind it does not decode, reads `no` after two such units. The corpus
+holds one traffic generator and eleven release lines of the same code; queries
+and replies, liveliness, fragmented payloads, other priorities, authentication
+and another implementation are not in it. How often an unseen group fails a unit
+is the open number, and the group bound of 0.1273 is the honest statement of
+how little the corpus says about it.
+The next steps are in that direction, not toward more release tags (all of
+which read alike): a model in which a group has its own failure rate (a
+Beta-binomial over units, so a flow's evidence for zenoh saturates instead of
+growing by 967 for each unit), the SN break rate as a mixture and not a
+constant, workload groups in the corpus, and a held-out set the weights are
+never counted from.
