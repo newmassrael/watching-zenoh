@@ -304628,6 +304628,36 @@
         "Owed, from the regions file: scenario 1 (ten tests: a client node that listens, answers scouts, and forwards between its router and the peers that find it, which needs a client role of the forwarder), the intermittent tests of scenarios 6 and 7, and the gossip test that failed once in a run of the whole file. Owed from the roadmap: the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane. The leaf peers of a region are still the registry of faces, which does not forward."
       ]
     },
+    "Round 4082": {
+      "decision_summary": "The listener of the secure channel is witnessed on the target. A new image, deploy/zephyr-tls-loopback, is built and booted under QEMU by Layer Qz beside deploy/zephyr-app: one thread plays a listener (TlsListener over ZephyrTcpListener) and a dial (TlsDial over ZephyrTcpDial) on the board's loopback interface. A peer that is no secure channel is dropped and served no stream; a real peer is then taken, each end names the zid of the other end's key, and a message crosses the channel each way. A control that expects the wrong zid fails the image. The witness found a limit the admin node will inherit: a TLS server's first flight is five records, Zephyr's TCP holds each segment as a packet until it is acknowledged, and at the default of four TX packets the fifth send failed, so the server was dropped before its Finished. The image states 16 packets and 64 buffers. The admin node over Zephyr's sockets, which takes the listener, does not exist yet, and D12 step 4 and D14 still wait for it.",
+      "changes_bullets": [
+        "deploy/zephyr-tls-loopback (CMake, Kconfig, prj.conf, the mps2 board file, main.c, the Rust staticlib and its lock). scripts/run-ci.sh: Layer Qz builds and boots the image after zephyr-app and requires ZEPHYR-WZ-TLS PASS. .github/workflows/ci.yml: the zephyr-mcu job caches the image's cargo workspace. scripts/lib/no_allocator_link_gate.py: the image is classified pending, with its reason. .gitignore: its target directory. docs/session-lifecycle-intent.md: what the witness found."
+      ],
+      "verification_bullets": [
+        "Built with west for mps2/an385 and booted under QEMU on this machine: the console reaches ZEPHYR-WZ-TLS PASS. The control with the expected zid swapped prints the FAIL line and ZEPHYR-WZ-TLS FAIL rc=1. A first run failed in the dial with Refused; driving both ends of the handshake by hand showed the server's fifth send failing (Send(-1)), and the pool settings fixed it. Layer Qz run end to end with WZ_QZ_REQUIRE=1: both images build and pass, 29 s. no_allocator_link_gate population (21 images) and selftest, relicense_spdx --check, cargo fmt --check of the new workspace, and bash -n of run-ci.sh pass. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the fixed-memory admin node over Zephyr's sockets with a TLS acceptor (Kconfig axis, CMake undefined list for listen, accept and bind, TLS for the admin role, the TX packet and buffer pools stated), ZephyrTcpListener lacks SO_REUSEADDR which the POSIX listener sets, then D12 step 4 (the image binds Verbs over a list stated in its build) and D14. The first hosted run of Layer Qz with the second image is the evidence for its timing on a loaded runner (backstop 120 s, the local run took seconds)."
+      ],
+      "publishable_decision_summary": "The listener of the secure channel is witnessed on the target. A new image, deploy/zephyr-tls-loopback, is built and booted under QEMU by Layer Qz beside deploy/zephyr-app: one thread plays a listener (TlsListener over ZephyrTcpListener) and a dial (TlsDial over ZephyrTcpDial) on the board's loopback interface. A peer that is no secure channel is dropped and served no stream; a real peer is then taken, each end names the zid of the other end's key, and a message crosses the channel each way. A control that expects the wrong zid fails the image. The witness found a limit the admin node will inherit: a TLS server's first flight is five records, Zephyr's TCP holds each segment as a packet until it is acknowledged, and at the default of four TX packets the fifth send failed, so the server was dropped before its Finished. The image states 16 packets and 64 buffers. The admin node over Zephyr's sockets, which takes the listener, does not exist yet, and D12 step 4 and D14 still wait for it.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-tls-loopback (CMake, Kconfig, prj.conf, the mps2 board file, main.c, the Rust staticlib and its lock). scripts/run-ci.sh: Layer Qz builds and boots the image after zephyr-app and requires ZEPHYR-WZ-TLS PASS. .github/workflows/ci.yml: the zephyr-mcu job caches the image's cargo workspace. scripts/lib/no_allocator_link_gate.py: the image is classified pending, with its reason. .gitignore: its target directory. docs/session-lifecycle-intent.md: what the witness found."
+      ],
+      "publishable_verification_bullets": [
+        "Built with west for mps2/an385 and booted under QEMU on this machine: the console reaches ZEPHYR-WZ-TLS PASS. The control with the expected zid swapped prints the FAIL line and ZEPHYR-WZ-TLS FAIL rc=1. A first run failed in the dial with Refused; driving both ends of the handshake by hand showed the server's fifth send failing (Send(-1)), and the pool settings fixed it. Layer Qz run end to end with WZ_QZ_REQUIRE=1: both images build and pass, 29 s. no_allocator_link_gate population (21 images) and selftest, relicense_spdx --check, cargo fmt --check of the new workspace, and bash -n of run-ci.sh pass. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the fixed-memory admin node over Zephyr's sockets with a TLS acceptor (Kconfig axis, CMake undefined list for listen, accept and bind, TLS for the admin role, the TX packet and buffer pools stated), ZephyrTcpListener lacks SO_REUSEADDR which the POSIX listener sets, then D12 step 4 (the image binds Verbs over a list stated in its build) and D14. The first hosted run of Layer Qz with the second image is the evidence for its timing on a loaded runner (backstop 120 s, the local run took seconds)."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
