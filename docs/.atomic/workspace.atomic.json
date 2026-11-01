@@ -304538,6 +304538,36 @@
         "Not measured: CPU at sizes other than 1 KiB, CPU of the subscriber side, a second host, and latency. The CPU of pico at 290,000 a second is at its limit (slots slip), so a lower rate would compare the two at a point where neither is saturated. The next reading of the host table is the receive side: wz to wz stops at 560 k at 1 KiB because the wz subscriber is the next bottleneck."
       ]
     },
+    "Round 4079": {
+      "decision_summary": "The first piece of the secure channel the fixed admin node lacks is built: the port a node accepts connections on. Zephyr's sockets now have a listener (`ZephyrTcpListener`, a `StreamListen` over bind, listen and accept, taken without blocking through `poll`), whose accepted connection is the same stream a connect gives. The IP stack gained `tls_acceptor`, the secure twin of `acceptor`: over a listener whose accept completes the channel's handshake (`TlsListener`) it yields the stack's `tls/` link, which carries the zid the peer's key proved, so the session host runs it as it runs a `tls/` dial. Until now an accepted connection could only become a `tcp/` link. Nothing binds the listener yet: the admin node over Zephyr's sockets, and the witness of a handshake on the target, are the pieces that remain.",
+      "changes_bullets": [
+        "zephyr-sys: listen and accept declared. wz-runtime-zephyr: ZephyrTcpListener, ZephyrNetError::Listen and Accept, the accepted socket sharing a connect's setup. wz-runtime-coop: IpTlsAcceptor and IpStack::tls_acceptor, with a test that a secure listener's connection is the Tls variant and that a full node closes and counts the connection it cannot hold."
+      ],
+      "verification_bullets": [
+        "wz-runtime-coop ip_stack tests with session-slot: 9 passed, including the new one. clippy with -D warnings on wz-runtime-coop (session-slot, all targets) and on wz-runtime-zephyr for thumbv7m-none-eabi; cargo check of wz-runtime-zephyr for thumbv7m-none-eabi; cargo fmt check. The listener itself runs only on Zephyr and has not been run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: a witness of the listener on the target (a loopback handshake in a Zephyr image under QEMU, proving the zid of the peer's key); the admin node over Zephyr's sockets with a TLS acceptor (Kconfig, CMake undefined list for listen, accept and bind, the secure channel for the admin role); then D12 step 4 and D14. accept cannot tell a descriptor shortage from a peer that left (errno is out of reach), both are reported as Exhausted, and the last failure is kept on the listener."
+      ],
+      "publishable_decision_summary": "The first piece of the secure channel the fixed admin node lacks is built: the port a node accepts connections on. Zephyr's sockets now have a listener (`ZephyrTcpListener`, a `StreamListen` over bind, listen and accept, taken without blocking through `poll`), whose accepted connection is the same stream a connect gives. The IP stack gained `tls_acceptor`, the secure twin of `acceptor`: over a listener whose accept completes the channel's handshake (`TlsListener`) it yields the stack's `tls/` link, which carries the zid the peer's key proved, so the session host runs it as it runs a `tls/` dial. Until now an accepted connection could only become a `tcp/` link. Nothing binds the listener yet: the admin node over Zephyr's sockets, and the witness of a handshake on the target, are the pieces that remain.",
+      "publishable_changes_bullets": [
+        "zephyr-sys: listen and accept declared. wz-runtime-zephyr: ZephyrTcpListener, ZephyrNetError::Listen and Accept, the accepted socket sharing a connect's setup. wz-runtime-coop: IpTlsAcceptor and IpStack::tls_acceptor, with a test that a secure listener's connection is the Tls variant and that a full node closes and counts the connection it cannot hold."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-coop ip_stack tests with session-slot: 9 passed, including the new one. clippy with -D warnings on wz-runtime-coop (session-slot, all targets) and on wz-runtime-zephyr for thumbv7m-none-eabi; cargo check of wz-runtime-zephyr for thumbv7m-none-eabi; cargo fmt check. The listener itself runs only on Zephyr and has not been run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: a witness of the listener on the target (a loopback handshake in a Zephyr image under QEMU, proving the zid of the peer's key); the admin node over Zephyr's sockets with a TLS acceptor (Kconfig, CMake undefined list for listen, accept and bind, the secure channel for the admin role); then D12 step 4 and D14. accept cannot tell a descriptor shortage from a peer that left (errno is out of reach), both are reported as Exhausted, and the last failure is kept on the listener."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
