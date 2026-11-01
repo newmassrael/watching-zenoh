@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zephyr-tls-loopback/rust -- the wz Rust STATICLIB of the witness that a node on Zephyr's own
+# sockets accepts a secure channel (decision D12 of docs/session-lifecycle-intent.md, the step
+# before the image that binds the verbs): a listener, a dial and a handshake on the loopback
+# interface of one image, under QEMU. Linked into the Zephyr image by the parent CMakeLists.txt
+# as zephyr-app is: Zephyr is the kernel, cargo only emits the archive.
+#
+# Standalone workspace (the empty `[workspace]` table), so cargo does not pull it into
+# crates/Cargo.toml's member build.
+
+[workspace]
+
+[package]
+name = "wz-zephyr-tls-loopback"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+publish = false
+description = "wz Rust staticlib of the Zephyr secure-listener witness: a TLS 1.3 handshake between a listener and a dial on one image's loopback interface."
+
+[lib]
+name = "wz_zephyr_tls_loopback"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+# The critical-section implementation and the atomics fallback every wz Zephyr staticlib states
+# (deploy/zephyr-app/rust/Cargo.toml says why).
+critical-section = { version = "1", features = ["restore-state-u32"] }
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The stream port the witness is written against (`StreamSocket`, `StreamDial`, `StreamListen`).
+wz-runtime-coop = { path = "../../../crates/wz-runtime-coop", default-features = false, features = ["session-unicast", "alloc"] }
+# The monotonic tick the listener's handshake deadline reads.
+zephyr-sys = { path = "../../../crates/zephyr-sys" }
+# The secure channel, against the Mbed TLS the platform carries: the image's CMake compiles the
+# channel's C side (`csrc/wz_tls.c`) against Zephyr's own library, so `vendored` stays off.
+wz-tls-mbedtls = { path = "../../../crates/wz-tls-mbedtls", default-features = false, features = ["alloc"] }
+# The facade: the Zephyr profile's seams (`wz::runtime_zephyr`, the sockets and the allocator).
+wz = { path = "../../../crates/wz", default-features = false, features = ["runtime-coop", "platform-zephyr"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

@@ -25078,6 +25078,42 @@ layer_qz_zephyr_boot() {
     fi
     rm -f "$qlog"
     rm -rf "$(dirname "$build_dir")"
+
+    # The secure-listener witness (decision D12 of docs/session-lifecycle-intent.md): the same
+    # toolchain and the same board, a second image. A node on Zephyr's own sockets listens, drops
+    # a peer that is no secure channel, completes the handshake with one that is, and each end
+    # names the zid of the other end's key; a message then crosses the channel each way. Its
+    # sentinel is `ZEPHYR-WZ-TLS`, which the pattern above (`^ZEPHYR-WZ `, a space after) does not
+    # match, so neither image's verdict can end the other's wait. The handshake of two roles in
+    # software takes longer than the loopback round trip above, hence the longer backstop.
+    local tls_dir tls_elf tls_log tls_pid
+    tls_dir="$(mktemp -d)/zbuild"
+    tls_elf="$tls_dir/zephyr/zephyr.elf"
+    if ! _qz_west_build Qz deploy/zephyr-tls-loopback mps2/an385 "$tls_dir" qz-tls-loopback-west-build.log; then
+        rm -rf "$(dirname "$tls_dir")"
+        return 1
+    fi
+    tls_log="$(mktemp)"
+    timeout 120 qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic \
+        -net none -kernel "$tls_elf" >"$tls_log" 2>&1 &
+    tls_pid=$!
+    for _ in $(seq 1 1100); do
+        grep -qE '^ZEPHYR-WZ-TLS ' "$tls_log" 2>/dev/null && break
+        kill -0 "$tls_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill "$tls_pid" 2>/dev/null
+    wait "$tls_pid" 2>/dev/null
+    if grep -qE '^ZEPHYR-WZ-TLS PASS[[:space:]]*$' "$tls_log"; then
+        echo "  Qz run deploy/zephyr-tls-loopback via mps2/an385 (mps2-an385) PASS"
+    else
+        echo "  Qz run deploy/zephyr-tls-loopback FAIL (no 'ZEPHYR-WZ-TLS PASS' console sentinel)" >&2
+        echo "  ── Qz: captured qemu output ──" >&2
+        sed 's/^/    | /' "$tls_log" >&2
+        fail=1
+    fi
+    rm -f "$tls_log"
+    rm -rf "$(dirname "$tls_dir")"
     return "$fail"
 }
 

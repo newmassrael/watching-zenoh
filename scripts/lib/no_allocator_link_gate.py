@@ -709,6 +709,19 @@ IMAGES: dict[str, Image] = {
         "the Zephyr cooperative profile image allocates through the Zephyr heap",
         ci=False,
     ),
+    # The witness that a node on Zephyr's sockets accepts a secure channel. Not a node: it is a
+    # test of the listener, allocates through the Zephyr heap as zephyr-app does, and the
+    # fixed-memory admin node that takes the listener will be the gated image.
+    "zephyr-tls-loopback": Image(
+        "deploy/zephyr-tls-loopback/rust/Cargo.toml",
+        "staticlib",
+        "wz-zephyr-tls-loopback",
+        "pending",
+        (Build(V7M, env=ZEPHYR_BUILD_VALUES, label="qemu_mps2"),),
+        "the secure-listener witness is a test image on the Zephyr heap, not a node; the fixed-memory"
+        " admin node that takes the listener is the image this gate will hold",
+        ci=False,
+    ),
 }
 
 # ---------------------------------------------------------------------------

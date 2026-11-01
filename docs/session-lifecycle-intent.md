@@ -1284,6 +1284,26 @@ build), and D14 follows. A node that already holds a secure channel and an
 admin queryable has no image yet: the host slot node is a client with no admin
 queryable.
 
+The first two pieces of that channel are built and witnessed on the target.
+Zephyr's sockets have a listener (`ZephyrTcpListener`), and the IP stack turns
+what a secure listener completes into the stack's `tls/` link
+(`IpStack::tls_acceptor`), which carries the zid the peer's key proved. The
+witness is `deploy/zephyr-tls-loopback`, an image Layer Qz builds and boots
+beside `deploy/zephyr-app`: under QEMU one thread plays a listener
+(`TlsListener<ZephyrTcpListener>`) and a dial (`TlsDial<ZephyrTcpDial>`) over
+the board's loopback interface, because the channel's arena has no lock. It holds
+that a peer that is no secure channel is dropped and served no stream, that a real
+peer is then taken with each end naming the zid of the other end's key, and that
+a message crosses each way; a control that expects the wrong zid fails the
+image. The witness found a limit of the stack that the admin node inherits: a TLS
+server's first flight is five records, Zephyr's TCP keeps each segment as a
+packet until it is acknowledged, and at the default of four TX packets the fifth
+`send` failed, so the server was dropped before its Finished and the peer read an
+end of stream (the dial reported only that the handshake was refused). The image
+states 16 packets and 64 buffers; the admin node that takes the listener must
+state at least as much. What remains of the channel is the admin node over
+Zephyr's sockets, which does not exist yet.
+
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the
 link-state flood), and a profile has the sources its build holds: AP has all

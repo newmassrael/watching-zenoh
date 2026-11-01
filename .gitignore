@@ -74,6 +74,9 @@ deploy/zephyr-app/rust/target/
 # staticlib (the admin node). Same target/ policy; the Zephyr build dir lives
 # outside the repo.
 deploy/zephyr-admin-node/rust/target/
+# The secure-listener witness (Layer Qz's second image) is a standalone Zephyr-profile staticlib
+# as the two above are. Same target/ policy.
+deploy/zephyr-tls-loopback/rust/target/
 # R311y22 — xtask is the sixth standalone workspace (the codegen SSOT
 # that regenerates out/**; pulls sce-build/libxml2, kept out of the main
 # build). Same target/ policy. Its Cargo.lock IS committed (reproducible
