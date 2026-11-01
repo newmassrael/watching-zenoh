@@ -304722,6 +304722,36 @@
         "Open: the wz subscriber stops at 560 k at 1 KiB, one thread saturated; where its 1.85 microseconds go is not read, and a user-mode profile is needed (perf_event_paranoid is 4 on the bench host and is the owner's to change). Not measured: round trip at sizes other than 8 B, the batched row, a host other than pc3, a zenoh or zenoh-c counterpart of the host table. The macOS mutual_dial red is open under the row of round 4077."
       ]
     },
+    "Round 4085": {
+      "decision_summary": "The admin node of the slot profile is written once for every stack. What was lwIP's node (wz_session_lwip::slot_node::SlotAdminNode) decided three things that no stack owns: the connect manager over the endpoints the control names, the admin space declared on each established session, and the report of the sessions and endpoints held. They are now AdminCore in wz_session_mcu::slot_admin, and the lwIP node is that core around its datagram listener, its behaviour unchanged. The same module adds AcceptingAdminNode, the node whose stack hands it the links of the sessions a peer opened through the Accept port, which is how a stream stack takes them, a secure channel's listener included (IpStack::tls_acceptor). Nothing builds an AcceptingAdminNode yet: the image of the admin node over Zephyr's sockets does, and D12 step 4 and D14 wait for it.",
+      "changes_bullets": [
+        "wz-session-mcu: slot_admin (AdminCore, AcceptingAdminNode, NodeRefused), gated on session-slot, dial, adminspace-write and adminspace-fixed. wz-session-lwip: SlotAdminNode holds an AdminCore, loses the code that moved (report, declare_admin, report_inbound and the keys), and re-exports NodeRefused."
+      ],
+      "verification_bullets": [
+        "wz-session-lwip admin_node_slot tests (4) pass on the shared core; clippy with -D warnings on wz-session-mcu and wz-session-lwip, all targets; rustdoc of both; cargo fmt; the fixed-memory QEMU admin image (deploy/mcu-admin-node, fixed-memory, thumbv7m) builds. AcceptingAdminNode is compiled and has no test of its own yet: its accept pass is the one of SlotClientNode, and the first node built on it is the next step."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the fixed-memory admin node over Zephyr's sockets built on AcceptingAdminNode with the secure acceptor (the Kconfig axis, the CMake undefined list for listen, accept and bind, TLS for the admin role, the TX packet pools stated), SO_REUSEADDR on ZephyrTcpListener; then D12 step 4 and D14. The Qa and Qza lanes, which run the lwIP node against a stock zenohd, have not been run on this change."
+      ],
+      "publishable_decision_summary": "The admin node of the slot profile is written once for every stack. What was lwIP's node (wz_session_lwip::slot_node::SlotAdminNode) decided three things that no stack owns: the connect manager over the endpoints the control names, the admin space declared on each established session, and the report of the sessions and endpoints held. They are now AdminCore in wz_session_mcu::slot_admin, and the lwIP node is that core around its datagram listener, its behaviour unchanged. The same module adds AcceptingAdminNode, the node whose stack hands it the links of the sessions a peer opened through the Accept port, which is how a stream stack takes them, a secure channel's listener included (IpStack::tls_acceptor). Nothing builds an AcceptingAdminNode yet: the image of the admin node over Zephyr's sockets does, and D12 step 4 and D14 wait for it.",
+      "publishable_changes_bullets": [
+        "wz-session-mcu: slot_admin (AdminCore, AcceptingAdminNode, NodeRefused), gated on session-slot, dial, adminspace-write and adminspace-fixed. wz-session-lwip: SlotAdminNode holds an AdminCore, loses the code that moved (report, declare_admin, report_inbound and the keys), and re-exports NodeRefused."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-lwip admin_node_slot tests (4) pass on the shared core; clippy with -D warnings on wz-session-mcu and wz-session-lwip, all targets; rustdoc of both; cargo fmt; the fixed-memory QEMU admin image (deploy/mcu-admin-node, fixed-memory, thumbv7m) builds. AcceptingAdminNode is compiled and has no test of its own yet: its accept pass is the one of SlotClientNode, and the first node built on it is the next step."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the fixed-memory admin node over Zephyr's sockets built on AcceptingAdminNode with the secure acceptor (the Kconfig axis, the CMake undefined list for listen, accept and bind, TLS for the admin role, the TX packet pools stated), SO_REUSEADDR on ZephyrTcpListener; then D12 step 4 and D14. The Qa and Qza lanes, which run the lwIP node against a stock zenohd, have not been run on this change."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
