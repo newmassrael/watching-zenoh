@@ -419,22 +419,73 @@ where
         })
     }
 
-    /// A `tcp/` listener over the stack's stream dial. A `udp/` locator is not listened on yet
-    /// (a UDP port is one peer, and a face for each needs the datagrams told apart by their
-    /// source address), and a `tls/` one waits for the secure channel's listening half.
+    /// A `tcp/` listener over the stack's stream dial, or a `tls/` one over its secure channel's
+    /// (the channel's own listening half, which completes each handshake before the link sees the
+    /// connection). A `udp/` locator is not listened on yet (a UDP port is one peer, and a face
+    /// for each needs the datagrams told apart by their source address).
     fn open_listener(
         &self,
         at: Locator,
     ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
-        if at.proto != LinkProto::Tcp || !D::CARRIED {
-            return Err(LinkOpenError::Unsupported);
+        match at.proto {
+            LinkProto::Tcp if D::CARRIED => {
+                let listener = self.dial.listen(at.at.addr, at.at.port)?;
+                Ok(Box::new(IpListener::<U, D::Stream, L::Stream> {
+                    listener,
+                    shape: self.shape,
+                    stack: core::marker::PhantomData,
+                }))
+            }
+            LinkProto::Tls if L::CARRIED => {
+                let listener = self.tls.listen(at.at.addr, at.at.port)?;
+                Ok(Box::new(IpTlsListener::<U, D::Stream, L::Stream> {
+                    listener,
+                    shape: self.shape,
+                    stack: core::marker::PhantomData,
+                }))
+            }
+            _ => Err(LinkOpenError::Unsupported),
         }
-        let listener = self.dial.listen(at.at.addr, at.at.port)?;
-        Ok(Box::new(IpListener::<U, D::Stream, L::Stream> {
-            listener,
-            shape: self.shape,
-            stack: core::marker::PhantomData,
+    }
+}
+
+/// The accepting end of the `tls/` port a stack listens on: what [`IpListener`] is for `tcp/`,
+/// over the secure channel's streams. A connection it yields has completed its handshake, so the
+/// link above runs the session's own handshake over a stream whose peer the channel accepted.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+struct IpTlsListener<U, S, T: StreamSocket> {
+    listener: Box<dyn StreamListen<Stream = T>>,
+    shape: LinkShape,
+    stack: core::marker::PhantomData<fn() -> (U, S)>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<U, S, T> LinkListener<Rc<HeapIpDriver<U, S, T>>> for IpTlsListener<U, S, T>
+where
+    U: DatagramSocket + 'static,
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    fn local(&self) -> Locator {
+        let (addr, port) = self.listener.local();
+        Locator::tls(IpEndpoint { addr, port })
+    }
+
+    fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
+        let Some(channel) = self.listener.accept()? else {
+            return Ok(None);
+        };
+        let driver = Rc::new(IpDriver::Tls(self.shape.stream(
+            StreamDriver::with_buffers(channel, STREAM_RX_CAPACITY, self.shape.tx()),
+        )));
+        Ok(Some(OpenedLink {
+            sink: driver.clone(),
+            pump: driver,
         }))
+    }
+
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        self.listener.readiness()
     }
 }
 

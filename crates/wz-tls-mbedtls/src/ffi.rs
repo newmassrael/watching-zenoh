@@ -56,33 +56,56 @@ pub struct Io {
     pub recv: unsafe extern "C" fn(ctx: *mut c_void, buf: *mut u8, len: usize) -> c_int,
 }
 
-extern "C" {
-    pub fn wz_tls_start(arena: *mut u8, len: usize) -> c_int;
-    pub fn wz_tls_arena_peak(bytes: *mut usize, blocks: *mut usize) -> c_int;
-    pub fn wz_tls_arena_peak_reset();
+/// Every call into the C side is made through [`crate::lock::locked`]: the library keeps one
+/// arena and one PSA key store in process-wide state, so with `host-lock` no two calls overlap, on
+/// whatever thread. Each declaration below is both the foreign function (in `raw`) and the
+/// locked function the rest of the crate calls, so a call added here cannot skip the lock.
+macro_rules! locked_calls {
+    ($( fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?; )*) => {
+        mod raw {
+            use super::*;
+            extern "C" {
+                $( pub fn $name($($arg: $ty),*) $(-> $ret)?; )*
+            }
+        }
+        $(
+            /// # Safety
+            ///
+            /// The contract of the C function of this name (`csrc/wz_tls.h`).
+            pub unsafe fn $name($($arg: $ty),*) $(-> $ret)? {
+                crate::lock::locked(|| unsafe { raw::$name($($arg),*) })
+            }
+        )*
+    };
+}
 
-    pub fn wz_tls_identity_generate(out: *mut *mut Identity, subject: *const c_char) -> c_int;
-    pub fn wz_tls_identity_zid(id: *const Identity, zid: *mut u8);
-    pub fn wz_tls_identity_cert(id: *const Identity, der: *mut *const u8, len: *mut usize);
-    pub fn wz_tls_identity_from_pem(
+locked_calls! {
+    fn wz_tls_start(arena: *mut u8, len: usize) -> c_int;
+    fn wz_tls_arena_peak(bytes: *mut usize, blocks: *mut usize) -> c_int;
+    fn wz_tls_arena_peak_reset();
+
+    fn wz_tls_identity_generate(out: *mut *mut Identity, subject: *const c_char) -> c_int;
+    fn wz_tls_identity_zid(id: *const Identity, zid: *mut u8);
+    fn wz_tls_identity_cert(id: *const Identity, der: *mut *const u8, len: *mut usize);
+    fn wz_tls_identity_from_pem(
         out: *mut *mut Identity,
         chain: *const u8,
         chain_len: usize,
         key: *const u8,
         key_len: usize,
     ) -> c_int;
-    pub fn wz_tls_identity_free(id: *mut Identity);
+    fn wz_tls_identity_free(id: *mut Identity);
 
-    pub fn wz_tls_trust_from_pem(
+    fn wz_tls_trust_from_pem(
         out: *mut *mut Trust,
         roots: *const u8,
         len: usize,
         check_dates: c_int,
         now: i64,
     ) -> c_int;
-    pub fn wz_tls_trust_free(trust: *mut Trust);
+    fn wz_tls_trust_free(trust: *mut Trust);
 
-    pub fn wz_tls_session_open_chain(
+    fn wz_tls_session_open_chain(
         out: *mut *mut Session,
         role: c_int,
         own: *const Identity,
@@ -91,19 +114,19 @@ extern "C" {
         io: *const Io,
     ) -> c_int;
 
-    pub fn wz_tls_session_open(
+    fn wz_tls_session_open(
         out: *mut *mut Session,
         role: c_int,
         own: *const Identity,
         io: *const Io,
     ) -> c_int;
-    pub fn wz_tls_session_set_io_ctx(s: *mut Session, ctx: *mut c_void);
-    pub fn wz_tls_session_handshake(s: *mut Session) -> c_int;
-    pub fn wz_tls_session_peer_zid(s: *const Session, zid: *mut u8) -> c_int;
-    pub fn wz_tls_session_suite(s: *const Session) -> *const c_char;
-    pub fn wz_tls_session_write(s: *mut Session, buf: *const u8, len: usize) -> c_int;
-    pub fn wz_tls_session_read(s: *mut Session, buf: *mut u8, len: usize) -> c_int;
-    pub fn wz_tls_session_pending(s: *const Session) -> c_int;
-    pub fn wz_tls_session_close_notify(s: *mut Session);
-    pub fn wz_tls_session_free(s: *mut Session);
+    fn wz_tls_session_set_io_ctx(s: *mut Session, ctx: *mut c_void);
+    fn wz_tls_session_handshake(s: *mut Session) -> c_int;
+    fn wz_tls_session_peer_zid(s: *const Session, zid: *mut u8) -> c_int;
+    fn wz_tls_session_suite(s: *const Session) -> *const c_char;
+    fn wz_tls_session_write(s: *mut Session, buf: *const u8, len: usize) -> c_int;
+    fn wz_tls_session_read(s: *mut Session, buf: *mut u8, len: usize) -> c_int;
+    fn wz_tls_session_pending(s: *const Session) -> c_int;
+    fn wz_tls_session_close_notify(s: *mut Session);
+    fn wz_tls_session_free(s: *mut Session);
 }

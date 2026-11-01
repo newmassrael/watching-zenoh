@@ -30,10 +30,11 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "host-lock"))]
 extern crate std;
 
 mod ffi;
+mod lock;
 
 pub mod channel;
 pub mod stream;

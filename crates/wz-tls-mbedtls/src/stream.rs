@@ -11,8 +11,9 @@
 //! Who the peer is depends on the policy the dial or the listener was made with:
 //!
 //! - [`TlsDial::new`], pinned: each end proves the key its self-signed certificate carries and
-//!   the stream names the peer by the zid of that key (decision D1), which the session checks
-//!   against the zid the peer states ([`StreamSocket::peer_credential_zid`]).
+//!   the stream names the peer by the zid of that key (decision D1), which the session reports
+//!   as verified when it is the zid the peer states
+//!   ([`StreamSocket::peer_credential_zid`], read by `peer_identity_verified`).
 //! - [`TlsDial::chain`], chain: the peer's certificate chain verifies against roots
 //!   ([`ChainTrust`]), as a zenoh router's and a zenoh-pico `tls/` link's does. The peer's zid
 //!   is not derived from its key (a router's is its own), so the stream offers no credential zid
@@ -171,8 +172,9 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
     }
 
     fn peer_credential_zid(&self) -> Option<Zid> {
-        // A pinned stream's key names the peer, so the session holds the peer to it. A chain
-        // stream's peer is vouched for by an authority, and its zid is whatever it states.
+        // A pinned stream's key names the peer, so the session can report the peer's zid as
+        // verified against it. A chain stream's peer is vouched for by an authority, and its zid
+        // is whatever it states.
         self.peer_zid.filter(|_| self.pinned)
     }
 }

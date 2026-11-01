@@ -497,7 +497,8 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast|"
     # The fixed-memory profile's secure channel (decision D9): its tests run the channel, so they
     # link the Mbed TLS `vendored` builds from the pinned submodules, which is not a default.
-    "wz-tls-mbedtls|hook|vendored|"
+    # `host-lock` serialises the library's calls for the tests that run two engines on two threads.
+    "wz-tls-mbedtls|hook|host-lock,vendored|"
     "wz-runtime-core|hook|alloc|"
     "wz-session-core|hook|\
         access-extauth-usrpwd,\

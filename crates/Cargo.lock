@@ -4516,6 +4516,8 @@ dependencies = [
  "dunce",
  "rcgen",
  "rustls",
+ "wz-capi-coop",
+ "wz-capi-port",
  "wz-runtime-coop",
  "wz-runtime-posix",
  "wz-session-core",

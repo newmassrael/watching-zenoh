@@ -52,6 +52,10 @@ wz-runtime-posix = { path = "../wz-runtime-posix" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # The peer's self-signed certificate, as a zenoh router's operator makes one.
 rcgen = "0.13"
+# The cooperative engine, listening and dialling over the channel: two sessions of it meet over
+# `tls/` (`tests/engine_tls.rs`). It names no secure channel itself; the links it is given do.
+wz-capi-coop = { path = "../wz-capi-coop", features = ["listen"] }
+wz-capi-port = { path = "../wz-capi-port" }
 
 [features]
 # `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually
@@ -68,6 +72,11 @@ session-slot = ["wz-runtime-coop/session-slot"]
 # workspace-wide build that only checks the Rust needs neither the C toolchain nor the
 # submodules.
 vendored = []
+# A process-wide lock around every call into the C side, for a host whose threads reach the
+# library (a C program's read task beside its own thread, two engines of a test): Mbed TLS's arena
+# and PSA's key store are process-wide state with no lock of their own. An image that runs one
+# thread leaves it off and pays nothing (`src/lock.rs`).
+host-lock = []
 # The session lifecycle verbs on the cooperative runtime. Offered here, by the channel, because
 # they compile only beside one (decision D2): this crate always states `secure-channel`, so every
 # build that has the verbs through it has the channel too. The runtime offers no such feature.

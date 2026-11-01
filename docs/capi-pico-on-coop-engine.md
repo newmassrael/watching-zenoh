@@ -854,7 +854,7 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   tokio peer that races it (the two keep different rules, and a race can close both links until the
   next redial).
 
-- **L6. `tls/`, both roles. Designed; T1 and T2 built.** pico's `tls/` and zenohd's are TLS with a CA
+- **L6. `tls/`, both roles. Designed; T1 to T3 built.** pico's `tls/` and zenohd's are TLS with a CA
   chain, and the cooperative engine has no such link; a build with `tls/` selects the tokio
   engine (rustls) by its own feature. What stands in the way is not a missing composition, which
   the first reading of the tree suggests (`wz-tls-mbedtls` already is a `StreamSocket` and a
@@ -940,6 +940,25 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     threads; the two ends of the channel meeting on one thread is the engine's test (T3). The
     coop crate gained one blanket impl (`StreamListen for Box<L>`) so a provider can wrap the
     listener a dial hands back.
+  - T3, built (`wz-runtime-coop/src/ip_stack.rs`, `wz-tls-mbedtls/tests/engine_tls.rs`, 4
+    tests; 29 in the crate). The engine needed no change: it takes a `tls/` endpoint already
+    (`parse_endpoint`) and is generic over `SessionLinks`. What was missing was the stack:
+    `IpLinks::open_listener` answered a `tls/` locator as unsupported; it now opens the secure
+    channel's listener (`IpTlsListener`, the `tls/` twin of `IpListener`), and the slot profile's
+    acceptor is untouched because the engine is the heap profile's. Proved as `tcp/` was, with
+    the engine as both ends over loopback, each stepped by its read task: a session over a
+    chain-verified `tls/` link with a put each way; under mutual TLS a listener holds a face for
+    each vouched client and none for a stranger's; a client that does not trust the listener's
+    root never opens and does not wedge the port; and a pinned link carries a session whose zid
+    is its key's. Two decisions. (1) Two engines on two threads reach one library whose arena and
+    key store are process-wide state with no lock, so a `host-lock` feature puts one mutex around
+    every call into the C side (`ffi::locked_calls` makes each declaration both the foreign
+    function and its locked wrapper, so a call added cannot skip the lock); an image that runs one
+    thread leaves it off. It is never held across a wait between calls. This also makes a C
+    program's read task beside its own thread safe, which T4 meets. (2) The pinned zid binding
+    is not a refusal at the handshake: the session reports it (`peer_identity_verified`) for the
+    lifecycle verbs, and the engine's port does not expose it, so T3 asserts what the engine can
+    show, not a refusal that does not exist.
   - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: zenohd's
     rustls speaks it, but the real zenoh-pico's own Mbed TLS may offer 1.2 only, and then the
     channel needs 1.2 as well (read from the negotiated version of the two TLS programs in T4,
@@ -970,4 +989,4 @@ dial role's face stands by when its node is held.
 Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
 history is when two faces hold the same token key (L2 hands it every face's tokens, and each
 face's loss deletes its own); UDP faces by source address; `tls/` on the cooperative engine
-(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 and T2 are built).
+(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 to T3 are built).
