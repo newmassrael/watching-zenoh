@@ -64,6 +64,7 @@ on:
       - "crates/wz-analyze/**"
       - "crates/wz-packet-socket/**"
       - "crates/wz-host-net/**"
+      - "crates/wz-tls-pem/**"
       - "crates/wz-ext-pubsub/**"
       - "crates/wz-node-time/**"
       - "crates/wz-workload/**"

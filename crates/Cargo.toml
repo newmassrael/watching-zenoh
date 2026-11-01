@@ -99,6 +99,10 @@ members = [
     # built from it: the one reading both the tokio runtime and the cooperative host use, so the
     # policy under a multicast socket is written once.
     "wz-host-net",
+    # The two ways a TLS config key hands over PEM material (a file path, a base64 token), resolved
+    # into the PEM bytes both the tokio engine's rustls configs and the cooperative engine's Mbed
+    # TLS channel take, so the refusal of an empty file is written once.
+    "wz-tls-pem",
     # The rules of the advanced publisher and subscriber that no runtime owns: the `@adv` key
     # grammar, the `_time` selector and (as they move) the cache, sequencing and recovery rules,
     # which the tokio runtime and the cooperative engine both host.

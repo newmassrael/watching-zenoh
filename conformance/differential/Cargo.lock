@@ -3692,7 +3692,6 @@ version = "0.1.0"
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "futures-util",
  "getrandom 0.2.17",
@@ -3722,6 +3721,7 @@ dependencies = [
  "wz-routing-graph",
  "wz-runtime-core",
  "wz-session-core",
+ "wz-tls-pem",
  "x509-parser",
  "zeroize",
 ]
@@ -3743,6 +3743,13 @@ dependencies = [
  "wz-codecs",
  "wz-runtime-core",
  "zeroize",
+]
+
+[[package]]
+name = "wz-tls-pem"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
 ]
 
 [[package]]

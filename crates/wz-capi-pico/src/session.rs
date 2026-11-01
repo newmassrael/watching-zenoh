@@ -208,12 +208,12 @@ fn resolve_pem(
     base64_key: u8,
 ) -> Result<Option<Vec<u8>>, ZResult> {
     if let Some(path) = cfg.get(path_key) {
-        return wz_capi_core::runtime::tls_config::read_pem_file(path)
+        return wz_tls_pem::read_pem_file(path)
             .map(Some)
             .map_err(|_| crate::result::Z_ERR_INVALID);
     }
     if let Some(b64) = cfg.get(base64_key) {
-        return wz_capi_core::runtime::tls_config::decode_base64_pem(b64)
+        return wz_tls_pem::decode_base64_pem(b64)
             .map(Some)
             .map_err(|_| crate::result::Z_ERR_INVALID);
     }

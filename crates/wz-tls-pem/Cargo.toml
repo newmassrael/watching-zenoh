@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-tls-pem — the two ways a TLS config key hands over PEM material: a file path and a
+# base64-wrapped token, resolved into the PEM bytes every consumer below the config edge takes.
+#
+# Two engines read the same keys. The tokio engine (the AP engine, the zenoh-c ABI, the pico ABI's
+# default) builds rustls configs from PEM bytes; the cooperative engine builds the Mbed TLS
+# channel's identity and roots from the same bytes. The edge that holds the key spellings
+# (pico's `Z_CONFIG_TLS_*`, a locator tail's `*_file` and `*_base64`) resolves "path or base64"
+# ONCE; if each engine carried its own reader, the refusal of an empty file and the handling of a
+# trailing newline in a base64 token would be written twice and could part. So it lives here, with
+# nothing of any engine in it: `std` and the `base64` decoder.
+#
+# `rlib` only: a Rust-internal seam, not an artifact anyone links from C.
+
+[package]
+name = "wz-tls-pem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Resolve a TLS config key's PEM material (a file path or a base64 token) into PEM bytes, independent of any engine."
+publish = false
+
+[lib]
+name = "wz_tls_pem"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# The same crate and version as the tokio runtime's, so the graph gains nothing. Standard
+# (RFC 4648) alphabet, as zenoh-rust's `base64_decode` reads it.
+base64 = "0.22"
+
+[lints]
+workspace = true

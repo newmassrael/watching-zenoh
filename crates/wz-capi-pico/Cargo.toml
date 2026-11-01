@@ -308,7 +308,7 @@ transport-link-unixpipe = ["engine-tokio", "wz-capi-core/transport-link-unixpipe
 # With it, `z_open(listen="quic/..")` + those cert keys binds a mesh quic listener
 # (the --peer/--router/--router-hat demo twin, R311y405/y406); without it the
 # `quic/` scheme still parses but `bind_locator` returns `Unsupported` at bind.
-transport-link-quic = ["engine-tokio", "wz-capi-core/transport-link-quic"]
+transport-link-quic = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport-link-quic"]
 # R311y534 — the `tls/` link, dial AND accept. Unlike unixpipe this is
 # zenoh-pico-native on BOTH sides (its `z_pub_tls.c` / `z_sub_tls.c` each take
 # `-e tls/...` and `-l tls/...`), and it is what the §5.27 api-compat-pico
@@ -316,7 +316,7 @@ transport-link-quic = ["engine-tokio", "wz-capi-core/transport-link-quic"]
 # twelve `Z_CONFIG_TLS_*` keys into real dial/accept material; without it the
 # `tls/` scheme still parses but bind and dial return a feature-gated
 # `Unsupported`, so the keys are inert rather than misleading.
-transport-link-tls = ["engine-tokio", "wz-capi-core/transport-link-tls"]
+transport-link-tls = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport-link-tls"]
 # The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
 # it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under
 # `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds; without it the scheme still
@@ -514,6 +514,11 @@ wz-capi-core = { path = "../wz-capi-core", default-features = false, optional = 
 # engine selects the runtime's `host-lock`), so this library links no `critical-section`
 # implementation and exports nothing beside its C ABI.
 wz-capi-coop = { path = "../wz-capi-coop", optional = true }
+# The PEM bytes a `Z_CONFIG_TLS_*` key names, read from a file path or a base64 token. This ABI is
+# the edge that holds the key spellings, so it resolves "path or base64" once, here, and hands PEM
+# bytes to whichever engine the build selects; that reading is not an engine's, and `wz-tls-pem` is
+# the one both engines take it from.
+wz-tls-pem = { path = "../wz-tls-pem", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
 # The session core's own types (key expression canon and matching, QoS, locality, samples, the
 # sinks), named where they live and not through the tokio engine's re-exports of them: the ABI

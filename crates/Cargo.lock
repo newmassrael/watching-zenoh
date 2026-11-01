@@ -3907,6 +3907,7 @@ dependencies = [
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
+ "wz-tls-pem",
 ]
 
 [[package]]
@@ -4359,6 +4360,7 @@ dependencies = [
  "wz-session-wire-fixtures",
  "wz-statechart-bridge",
  "wz-switchboard-schema",
+ "wz-tls-pem",
  "wz-volume-abi",
  "x509-parser",
  "zeroize",
@@ -4521,6 +4523,13 @@ dependencies = [
  "wz-runtime-coop",
  "wz-runtime-posix",
  "wz-session-core",
+]
+
+[[package]]
+name = "wz-tls-pem"
+version = "0.1.0"
+dependencies = [
+ "base64",
 ]
 
 [[package]]

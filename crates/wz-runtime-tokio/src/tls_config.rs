@@ -67,7 +67,6 @@
 //! dependency.
 
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 
 use tokio_rustls::rustls::client::danger::{
@@ -119,46 +118,13 @@ where
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
-/// Read TLS PEM material (a cert chain, a private key, or a CA bundle) from a
-/// file into the bytes the decoders below consume — the file-path SOURCE for
+/// The two PEM SOURCES the decoders below consume: a file path
+/// ([`read_pem_file`]) and a base64 token ([`decode_base64_pem`]), for
 /// [`certs_from_pem`] / [`private_key_from_pem`] / [`server_trust_roots`] /
-/// [`client_auth_roots`]. This
-/// is the wz analogue of zenoh-rust reading the `*_FILE` config keys
-/// (`tokio::fs::read` in `zenoh-link-tls/src/utils.rs`) and of pico's file-path
-/// `TLS_CONFIG_*` keys.
-///
-/// Synchronous `std::fs::read` by design: a TLS config is built ONCE at startup,
-/// not on a hot path, so reading it synchronously keeps the otherwise-sync
-/// config builders free of async colouring (the rustls-idiomatic shape — rustls'
-/// own examples load cert files synchronously). Errors if the file is missing OR
-/// empty: an empty cert/key file is a misconfiguration that should fail fast
-/// rather than silently build a certless config.
-pub fn read_pem_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
-    let bytes = std::fs::read(path)?;
-    if bytes.is_empty() {
-        return Err(invalid_data("TLS PEM file is empty"));
-    }
-    Ok(bytes)
-}
-
-/// Decode base64-wrapped PEM into the raw PEM bytes the decoders consume — the
-/// base64 SOURCE for [`certs_from_pem`] / [`private_key_from_pem`] /
-/// [`server_trust_roots`] / [`client_auth_roots`]. Mirrors pico's `*_BASE64`
-/// TLS config keys (and
-/// zenoh-rust's `*_base64`): a multi-line PEM base64-wrapped into one token so it
-/// survives a transport that cannot carry raw newlines (an env var, a JSON
-/// field). The decoded bytes ARE PEM — feed them to a decoder like any other PEM
-/// source. Standard (RFC 4648) alphabet, matching zenoh-rust's `base64_decode`.
-///
-/// Surrounding whitespace is trimmed first (a base64 blob from a file or env var
-/// commonly carries a trailing newline, which the strict STANDARD engine would
-/// otherwise reject); internal non-alphabet bytes still error.
-pub fn decode_base64_pem(b64: &str) -> io::Result<Vec<u8>> {
-    use base64::{engine::general_purpose, Engine};
-    general_purpose::STANDARD
-        .decode(b64.trim())
-        .map_err(invalid_data)
-}
+/// [`client_auth_roots`]. They are not this crate's: the cooperative engine reads the same
+/// config keys, so the one implementation (the refusal of an empty file included) is
+/// `wz_tls_pem`'s, re-exported here at the paths this module has always had.
+pub use wz_tls_pem::{decode_base64_pem, read_pem_file};
 
 /// R2599 — the PEM bytes a locator tail's `PemSource` names, whichever of the
 /// three spellings wrote it.
