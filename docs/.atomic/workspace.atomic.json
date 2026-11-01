@@ -304120,6 +304120,40 @@
         "Of the red hosted run of round 4061 this round pays the dead-code cause only; the others were paid by peers' pushes before it (the Commanders link in 4062; router-interest-qos, the ask_local_tokens link, the coop budgets and the declared aliases on the heap by round 4065). Phase 5b of the router task-per-face work (a routed request and response probed and held) waits on its own branch and lands after this."
       ]
     },
+    "Round 4067": {
+      "decision_summary": "Phase 5b of the router's task-per-face work: a request and a response are probed and held as a Push is, so they no longer park a face's thread on a full link and no longer pass the data their destination holds. Their value and payload may be a buffer of shared memory whose handoff the sender opens before the send, so the probe runs inside the sender's transaction, committed when the message left and dropped, giving back what it took, when it did not. The router holds one that finds no room only when it routes it on behalf of a face it can gate, when its QoS does not drop it and when it carries no shared-memory descriptor, since the relay maps such a buffer for its destination in a way a later send cannot undo; those keep the waiting send.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: try_send_network_message_qos probes a Request and a Response through dispatch_request_at and dispatch_response_at at DispatchStage::Probe, inside the transaction open_shm_tx opens (session-extshm), and answers Unsent::NoRoom with the message whole when there is no room.",
+        "crates/wz-runtime-tokio/src/router_forward/egress.rs: held_lane holds a Request and a Response in the data lane (held_request, held_response): with a source face, without shared-memory descriptors (transport-shm), and unless the QoS drops it.",
+        "crates/wz-runtime-tokio/src/router_forward/egress_tests.rs: two tests, a request and a response probed on a full link come back whole, and a query routed from a face whose destination holds a Put is held behind it and leaves after it.",
+        "scripts/run-ci.sh: the nine C1AY router_forward guards move by 2. docs/router-task-per-face.md: section 5 states 5b. docs/reason-review-pins.md: the session_actions.rs row moves; the reason cites OutOfBand, which this round does not touch."
+      ],
+      "verification_bullets": [
+        "On the tree rebased onto round 4066: cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward passes, so does router_forward::egress with transport-shm, cargo test -p wz-session-core --lib passes, and the clippy of wz-runtime-tokio (routing-router-hat, all targets) and of wz-session-core (default, all-features, and the C1h reduced set) is clean under -D warnings. Each new test was shown to fail without its change: with the router's request arm returning no lane the routed-query test reads 1 held where it wants 2; with the session core's request arm removed, and separately its response arm, the probe test reads Ok(()) where it wants NoRoom. guarded_count_gate.py --range origin/main..HEAD named the nine C1AY router_forward guards 2 below what their commands printed, and they move to the printed numbers. Layer E7m: 13 passed. wz_router_hat_mesh (ignored legs): 8 passed. reason_review_pin_gate --check is OK with the row moved."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Still owed by the router task-per-face work: a droppable message keeps its one wait of wait_before_drop; a message carrying shared memory keeps the waiting send; the session core's own permit, which a synchronous publish and the C ABI need to stop parking, is not built; phase 6 (the conduit's lock made async for chains) and the table-sharing policy (snapshot, shard) are not started."
+      ],
+      "publishable_decision_summary": "Phase 5b of the router's task-per-face work: a request and a response are probed and held as a Push is, so they no longer park a face's thread on a full link and no longer pass the data their destination holds. Their value and payload may be a buffer of shared memory whose handoff the sender opens before the send, so the probe runs inside the sender's transaction, committed when the message left and dropped, giving back what it took, when it did not. The router holds one that finds no room only when it routes it on behalf of a face it can gate, when its QoS does not drop it and when it carries no shared-memory descriptor, since the relay maps such a buffer for its destination in a way a later send cannot undo; those keep the waiting send.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: try_send_network_message_qos probes a Request and a Response through dispatch_request_at and dispatch_response_at at DispatchStage::Probe, inside the transaction open_shm_tx opens (session-extshm), and answers Unsent::NoRoom with the message whole when there is no room.",
+        "crates/wz-runtime-tokio/src/router_forward/egress.rs: held_lane holds a Request and a Response in the data lane (held_request, held_response): with a source face, without shared-memory descriptors (transport-shm), and unless the QoS drops it.",
+        "crates/wz-runtime-tokio/src/router_forward/egress_tests.rs: two tests, a request and a response probed on a full link come back whole, and a query routed from a face whose destination holds a Put is held behind it and leaves after it.",
+        "scripts/run-ci.sh: the nine C1AY router_forward guards move by 2. docs/router-task-per-face.md: section 5 states 5b. docs/reason-review-pins.md: the session_actions.rs row moves; the reason cites OutOfBand, which this round does not touch."
+      ],
+      "publishable_verification_bullets": [
+        "On the tree rebased onto round 4066: cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward passes, so does router_forward::egress with transport-shm, cargo test -p wz-session-core --lib passes, and the clippy of wz-runtime-tokio (routing-router-hat, all targets) and of wz-session-core (default, all-features, and the C1h reduced set) is clean under -D warnings. Each new test was shown to fail without its change: with the router's request arm returning no lane the routed-query test reads 1 held where it wants 2; with the session core's request arm removed, and separately its response arm, the probe test reads Ok(()) where it wants NoRoom. guarded_count_gate.py --range origin/main..HEAD named the nine C1AY router_forward guards 2 below what their commands printed, and they move to the printed numbers. Layer E7m: 13 passed. wz_router_hat_mesh (ignored legs): 8 passed. reason_review_pin_gate --check is OK with the row moved."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still owed by the router task-per-face work: a droppable message keeps its one wait of wait_before_drop; a message carrying shared memory keeps the waiting send; the session core's own permit, which a synchronous publish and the C ABI need to stop parking, is not built; phase 6 (the conduit's lock made async for chains) and the table-sharing policy (snapshot, shard) are not started."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
