@@ -433,6 +433,165 @@ fn the_corpus_read_with_a_hierarchical_null_side_too() {
     }
 }
 
+/// The break rate of a zenoh flow's SN steps as a distribution over links: a flow
+/// has a rate of its own, drawn from a Beta distribution of this mean and
+/// concentration. Unlike the units' failure rate this one is measured: the corpus
+/// holds links that break no step, 8%, 10%, 37.5% and 75% of them.
+struct SnPrior {
+    mean: f64,
+    kappa: f64,
+}
+
+/// The prior the flows' `(followed, broke)` counts make likeliest, over a grid of
+/// means and of concentrations.
+fn fit_sn(flows: &[(u64, u64)]) -> SnPrior {
+    let mut counted: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    for &(f, b) in flows.iter().filter(|&&(f, b)| f + b > 0) {
+        *counted.entry((f, b)).or_default() += 1;
+    }
+    let mut best: Option<(f64, f64, f64)> = None;
+    for i in 0..40 {
+        let mean = 0.9 * 10f64.powf(-3.0 + 3.0 * i as f64 / 39.0);
+        for &kappa in &KAPPAS {
+            let ll: f64 = counted
+                .iter()
+                .map(|(&(f, b), &times)| times as f64 * ln_member(mean, Some(kappa), b, f + b))
+                .sum();
+            if best.is_none_or(|(top, _, _)| ll > top) {
+                best = Some((ll, mean, kappa));
+            }
+        }
+    }
+    let (_, mean, kappa) = best.expect("a zenoh flow stepped");
+    SnPrior { mean, kappa }
+}
+
+/// What a flow's SN steps weigh under the mixture, in millibits, on both sums: the
+/// probability of the steps under the prior against the null's, which is the
+/// shipped one (a step follows with chance at most 2^-8, as a varint).
+fn sn_mixture(p: &SnPrior, follows: u64, breaks: u64) -> i64 {
+    let n = follows + breaks;
+    if n == 0 {
+        return 0;
+    }
+    let p1 = ln_member(p.mean, Some(p.kappa), breaks, n) / core::f64::consts::LN_2;
+    let null = -8.0 * follows as f64 + breaks as f64 * (1.0 - 2f64.powi(-8)).log2();
+    millibits(p1 - null)
+}
+
+/// The same steps under the shipped weights.
+fn sn_shipped(follows: u64, breaks: u64) -> i64 {
+    follows as i64 * model::SN_FOLLOWS.yes + breaks as i64 * model::SN_BREAKS.yes
+}
+
+/// THE SN STEPS AS A MIXTURE, with the units of the report above or the shipped
+/// ones. Every zenoh flow is read with the prior fitted WITHOUT its own group, so
+/// that a link is not judged by a prior that has seen it. Printed; the words are
+/// not asserted.
+#[test]
+fn the_sn_steps_as_a_mixture_over_the_links_break_rate() {
+    let files = read_corpus();
+    let members = null_members(&files);
+    let groups = zenoh_groups(&files);
+    let steps_of = |skip: Option<&str>| -> Vec<(u64, u64)> {
+        files
+            .iter()
+            .filter(|f| f.zenoh && skip.is_none_or(|g| f.group != g))
+            .flat_map(|f| f.flows.iter().map(|fl| (fl.counts.sn[0], fl.counts.sn[1])))
+            .collect()
+    };
+    let all = fit_sn(&steps_of(None));
+    let no_jitter = fit_sn(&steps_of(Some("jitter")));
+    std::println!(
+        "SN break rate prior from every zenoh flow: mean {:.4}, kappa {}; without the jitter group: mean {:.4}, kappa {}",
+        all.mean, all.kappa, no_jitter.mean, no_jitter.kappa
+    );
+    for (f, b) in [
+        (100u64, 0u64),
+        (100, 6),
+        (50, 50),
+        (10, 10),
+        (0, 20),
+        (588, 1756),
+        (0, 29),
+    ] {
+        std::println!(
+            "  SN {f} followed, {b} broke: shipped {} | mixture {} (jitter left out of the fit: {})",
+            sn_shipped(f, b),
+            sn_mixture(&all, f, b),
+            sn_mixture(&no_jitter, f, b)
+        );
+    }
+    // One prior per zenoh group, fitted without it.
+    let zenoh_groups_named: alloc::collections::BTreeSet<&str> = files
+        .iter()
+        .filter(|f| f.zenoh)
+        .map(|f| f.group.as_str())
+        .collect();
+    let mut left_out: BTreeMap<&str, SnPrior> = BTreeMap::new();
+    for g in &zenoh_groups_named {
+        left_out.insert(g, fit_sn(&steps_of(Some(g))));
+    }
+    for kappa in [1.0, 16.0, 1.0e6] {
+        let h = Hierarchy::fit(kappa, &groups);
+        let mut cache: BTreeMap<(u64, u64), (i64, i64)> = BTreeMap::new();
+        for with_units in [false, true] {
+            let mut moved: BTreeMap<(String, &str, &str), u64> = BTreeMap::new();
+            let mut tally = [[0u64; 3]; 4];
+            for f in &files {
+                for flow in &f.flows {
+                    let u = flow.counts.units;
+                    let (k, n) = (u[1] + u[2], u.iter().sum::<u64>());
+                    let prior = if f.zenoh {
+                        &left_out[f.group.as_str()]
+                    } else {
+                        &all
+                    };
+                    let (fol, brk) = (flow.counts.sn[0], flow.counts.sn[1]);
+                    let (mut y, mut no) = (flow.yes, flow.no);
+                    let sn = sn_mixture(prior, fol, brk) - sn_shipped(fol, brk);
+                    y += sn;
+                    no += sn;
+                    if with_units {
+                        let (cy, cn) = *cache
+                            .entry((k, n))
+                            .or_insert_with(|| candidate_both(&h, &members, k, n));
+                        let (sy, sn_units) = shipped_unit_part(&u);
+                        y += cy - sy;
+                        no += cn - sn_units;
+                    }
+                    let (was, now) = (word(flow.yes, flow.no), word(y, no));
+                    let slot = |w: &str| match w {
+                        "yes" => 0,
+                        "no" => 1,
+                        _ => 2,
+                    };
+                    let side = if f.zenoh { 0 } else { 2 };
+                    tally[side][slot(was)] += 1;
+                    tally[side + 1][slot(now)] += 1;
+                    if was != now {
+                        *moved.entry((f.group.clone(), was, now)).or_default() += 1;
+                    }
+                    if f.zenoh && now != "yes" {
+                        std::println!(
+                            "  ZENOH FLOW READ {now} in {}: units {u:?}, SN {fol} followed {brk} broke; sums shipped {} / {}, now {y} / {no}",
+                            f.name, flow.yes, flow.no
+                        );
+                    }
+                }
+            }
+            std::println!(
+                "kappa {kappa}, {}: zenoh flows shipped {:?} now {:?} | null flows shipped {:?} now {:?}  (yes, no, undecided)",
+                if with_units { "SN mixture and units" } else { "SN mixture, shipped units" },
+                tally[0], tally[1], tally[2], tally[3]
+            );
+            for ((group, was, now), flows) in &moved {
+                std::println!("    {group}: {was} -> {now} in {flows} flow(s)");
+            }
+        }
+    }
+}
+
 /// The function the model stands on is right, and what it makes of a flow is a
 /// distribution: over the `k` failures of `n` units the probabilities add to one.
 #[test]

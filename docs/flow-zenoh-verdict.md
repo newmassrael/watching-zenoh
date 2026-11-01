@@ -805,7 +805,7 @@ property of the link, as the units' failure rate is of the group, and it belongs
 in the model the same way (a mixture over the rate, so that a flow with many
 breaks is a flow of a bad link and not a flow of many independent breaks). The
 two are one step, and neither ships alone: the candidate with the units alone
-turns a real zenoh flow into a false `no`.
+turns a real zenoh flow into a false `no` (section 6.6 takes the second half).
 
 What the measurements already say is where the shipped verdict stands. The 345
 null flows that read `no` rest on `kappa` being large: on the groups of zenoh
@@ -816,3 +816,66 @@ reason). And the `yes` of the jitter flow rests on the same independence
 assumption, in the other direction: two sums of millions that nearly cancel.
 Neither is a defect of a flow the corpus misreads today. Both are numbers that a
 link or a workload the corpus lacks would move.
+
+### 6.6 The SN steps as a mixture over the link's break rate (2026-11-02)
+
+The shipped weights price every SN step alone: +7.907 bits for a step that
+follows, -3.994 for one that breaks, which assumes the flow's link breaks one step
+in sixteen. The corpus has links that break none, 8%, 10%, 37.5% and, in one
+flow, 75% of them. That is a property of the link, and the steps of one flow share
+it. The candidate (`zenoh_hierarchy_tests.rs`, nothing shipped) gives each flow a
+break rate of its own, drawn from a Beta distribution whose mean and
+concentration are the ones that make the corpus's zenoh flows likeliest (a grid
+over both): mean 0.0044, concentration 2, which says most flows break nothing and
+the tail is heavy. A flow weighs the log of its steps' probability under that
+mixture against the null's, which is the shipped one (a step follows with chance
+at most 2^-8, as a varint). Unlike the units' failure rate this one is measured,
+since the corpus holds links that break steps.
+
+| steps | shipped | mixture |
+|---|---|---|
+| 100 followed, 0 broke | 790700 | 799946 |
+| 100 followed, 6 broke | 766736 | 759855 |
+| 50 followed, 50 broke | 195650 | 290498 |
+| 0 followed, 20 broke | -79880 | -15374 |
+| 0 followed, 29 broke | -115826 | -16369 |
+| 588 followed, 1756 broke | -2364148 | +2795271 |
+
+A break costs what the rate of its link says and not 4 bits: a flow of breaks
+alone is a flow of a bad link, which the shipped model prices as 29 independent
+rare events. A followed step still weighs about 8 bits, the null's chance of a
+varint equal to the last plus one, and that is what the 588 followed steps of the
+jitter flow are worth.
+
+Every zenoh flow was read with the prior fitted WITHOUT its own group (22
+fits), and the fit without the jitter group is the fit with it (the same grid
+point), so the jitter flow is judged by a prior that has not seen it.
+
+- **The false `no` of section 6.5 is gone.** With the SN mixture and the
+  candidate units, 619 zenoh flows read `yes`, 2 `undecided` (the two of the 20%
+  loss link, as shipped) and none `no`, at every `kappa` and with the null side
+  heterogeneous too. The jitter flow reads `yes` again.
+- **With the shipped units the SN mixture moves no word**, in zenoh flows or null
+  ones: the null flows that read `no` rest on their units.
+- **The null `no` is as in 6.5**: 345 shipped, 7 at `kappa` = 1, 54 at 16, 345 at
+  10^6. No null flow reads `yes` under any variant.
+
+What this does not settle:
+
+- The prior is a maximum-likelihood point estimate from about 640 flows, not a
+  posterior, and the 75% flow is the only one of its kind in the tail it shapes.
+  A link breaking 90% of its steps is a link the corpus has not seen.
+- The null side of the steps is still derived and not measured: a flow of a null
+  protocol with a counter in its frames would follow often. The corpus has none
+  that parse as frames.
+- Shipping it needs a logarithm and a gamma function in a crate that is `no_std`
+  with no third-party dependency and no float maths outside its tests. The weights
+  are computed from the counts when the evidence is asked for
+  (`sn_steps_weight` takes the counts), so the change is local, but it takes
+  either a fixed-point logarithm of its own or a decision to depend on one. With
+  the Beta parameters chosen as simple fractions the gamma ratio is a product of
+  fractions, and a table of logarithms of the integers up to the steps a flow
+  can hold would do.
+- Together with the units of section 6.5 it changes what a consumer sees: null
+  flows that read `no` read `undecided`. The zenoh words do not change. The
+  zenoh-analyzer session reads that.
