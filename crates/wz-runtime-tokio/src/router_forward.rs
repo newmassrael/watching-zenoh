@@ -7079,15 +7079,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// (true) `id` on `keyexpr`: current and future, for the subscribers or the queryables of
     /// the key.
     fn send_own_interest(&self, face: FaceId, id: u64, keyexpr: &str, queryables: bool) {
-        use wz_session_core::interest_build::{
-            build_interest_queryables, build_interest_subscribers,
-        };
-        let built = if queryables {
-            build_interest_queryables(id, true, true, 0, Some(keyexpr))
+        use wz_session_core::interest_build::{build_interest_propagated, InterestKinds};
+        // An interest the node sends on, stamped as upstream's hat stamps the ones it propagates.
+        let kinds = if queryables {
+            InterestKinds::QUERYABLES
         } else {
-            build_interest_subscribers(id, true, true, 0, Some(keyexpr))
+            InterestKinds::SUBSCRIBERS
         };
-        match built {
+        match build_interest_propagated(id, kinds, false, true, Some((0, Some(keyexpr)))) {
             Ok(interest) => self.send_one_to_face(face, NetworkMessage::Interest(interest)),
             Err(e) => log::warn!(
                 "router forward: own interest {id} on {keyexpr:?} could not be built: {e:?}"
@@ -9639,7 +9638,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 self.send_one_to_face(
                     face,
                     NetworkMessage::Interest(
-                        wz_session_core::interest_build::build_interest_final(id),
+                        wz_session_core::interest_build::build_interest_final_propagated(id),
                     ),
                 );
             }
