@@ -1263,6 +1263,27 @@ zid. The generator emits `COMMANDERS_OPEN`, `_CLOSE`, `_RESET` and `_STATUS`,
 each a list of sixteen-byte zids, only for a node that names one. No registered
 node names a commander, so no generated file changed.
 
+Step (4) is not buildable on the images that exist, and the reason is a missing
+capability and not a missing zid. A commander is a zid a link's key proved, and
+only the secure channel proves one (D1). The two admin images are over UDP: the
+Zephyr admin node on lwIP (`deploy/zephyr-admin-node`) and the QEMU node
+(`deploy/mcu-admin-node`) both accept datagrams from a router, and neither
+holds a TLS listener. The TLS of `deploy/zephyr-admin-node` is the client
+node's (`CONFIG_WZ_TLS` depends on the client role over Zephyr's sockets, and
+`fixed_tls.rs` is the client's), and the socket stack has no listener of the
+slot profile yet. A query that reaches such a node through a router is asked by
+no proven zid, so the node would judge every query `Unproven` and deny every
+verb, whatever list the build stated. An image that bound the verbs there would
+be bound and unusable, and D14's witness (an open by zid on the built image)
+could not pass. The order therefore has a step before (4): the admin node holds a
+secure channel on its accepting side, which is the slot profile's TLS listener on
+the lwIP stack; then (4) takes the lists from the build (the generated
+`COMMANDERS_*` of a node declaration, or a text the image's configuration
+states, read when the image is compiled so that a malformed list does not
+build), and D14 follows. A node that already holds a secure channel and an
+admin queryable has no image yet: the host slot node is a client with no admin
+queryable.
+
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the
 link-state flood), and a profile has the sources its build holds: AP has all
