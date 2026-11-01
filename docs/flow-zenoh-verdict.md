@@ -633,6 +633,22 @@ growing by 967 for each unit), the SN break rate as a mixture and not a
 constant, workload groups in the corpus, and a held-out set the weights are
 never counted from.
 
+The calibration is not written by hand any more. `zenoh_calibration_generated.rs`
+holds the counts of the corpus and the weights computed from them, and the test
+`the_generated_calibration_is_current` renders it from the corpus and fails with
+the first line that differs; `scripts/regen-calibration.sh` writes it. A capture
+added to the corpus is then a manifest entry, its line in a group, and that one
+command, where it was the counts, twelve weights and a dozen pinned numbers by
+hand. The same test holds this note's weight table and its counts to the
+calibration. What it does not move: the example sums that the session table, the
+C header and the C consumer pin (a test names each when it no longer matches),
+and the SN steps' weights, which are assumed and not counted. The command is not
+a `bx` action: an action's output must lie outside what the `regen-codegen` action
+reads, which is every file, and the two would be a cycle, so on a build machine
+the failing test prints the file and that text is the file. A control showed the
+test does its work: one count changed by one in the generated file fails it, the
+corpus's own count test and the weights' derivation test.
+
 ### 6.4 What the corpus must show: the acceptance criteria (2026-11-01)
 
 The thresholds are `alpha = beta = 2^-20`, about one in a million. A corpus

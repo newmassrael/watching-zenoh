@@ -36,7 +36,7 @@
 ))]
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use wz_session_core::passive::ReadingEvidence;
@@ -396,6 +396,288 @@ fn leaving_a_group_out_of_the_counts_moves_its_own_flows_by_this_much() {
     }
     let total: usize = files.iter().map(|f| f.flows.len()).sum();
     assert_eq!(flows_read, total, "every flow is read in exactly one group");
+}
+
+/// The calibration the corpus gives: the zenoh files' counts, each null file's,
+/// and the table of weights counted from them.
+struct Calibration {
+    zenoh: Counts,
+    /// Each null file, in the manifest's order, with its counts.
+    null: Vec<(String, Counts)>,
+    table: Table,
+    /// `log2(1 - e)` of the cookie echo, which the table holds added to the
+    /// bytes it counts.
+    cookie_fidelity: i64,
+    zenoh_files: usize,
+    zenoh_groups: usize,
+    null_groups: usize,
+}
+
+fn calibrate(files: &[File]) -> Calibration {
+    let mut zenoh = Counts::default();
+    let mut null = Vec::new();
+    for f in files {
+        if f.zenoh {
+            zenoh.and(&f.counts);
+        } else {
+            null.push((f.name.clone(), f.counts));
+        }
+    }
+    let members: Vec<&Counts> = null.iter().map(|(_, c)| c).collect();
+    let table = Table::fitted(&zenoh, &members);
+    let groups = |zenoh: bool| {
+        files
+            .iter()
+            .filter(|f| f.zenoh == zenoh)
+            .map(|f| f.group.as_str())
+            .collect::<alloc::collections::BTreeSet<_>>()
+            .len()
+    };
+    Calibration {
+        cookie_fidelity: table.cookie[0].yes
+            - model::COOKIE_ECHO_MAX_BYTES * model::COOKIE_ECHO_PER_BYTE,
+        table,
+        zenoh_files: files.iter().filter(|f| f.zenoh).count(),
+        zenoh_groups: groups(true),
+        null_groups: groups(false),
+        zenoh,
+        null,
+    }
+}
+
+/// `1234567` as Rust writes it in the model: `1_234_567`.
+fn lit(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('_');
+        }
+        out.push(c);
+    }
+    if n < 0 {
+        out.insert(0, '-');
+    }
+    out
+}
+
+fn weight_literal(w: Weight) -> String {
+    if w.yes == w.no {
+        alloc::format!("Weight::both({})", lit(w.yes))
+    } else {
+        alloc::format!("Weight::pair({}, {})", lit(w.yes), lit(w.no))
+    }
+}
+
+fn counts_literal(counts: &[u64]) -> String {
+    let each: Vec<String> = counts.iter().map(|&n| lit(n as i64)).collect();
+    alloc::format!("[{}]", each.join(", "))
+}
+
+/// The text of `zenoh_calibration_generated.rs` for this calibration. Laid out
+/// as rustfmt lays it out, so that formatting the file changes nothing.
+fn render(c: &Calibration) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::new();
+    let t = &c.table;
+    out.push_str(
+        "// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial\n\
+         // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael\n\n\
+         //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.\n\
+         //!\n\
+         //! The counts of the corpus and the weights computed from them\n\
+         //! (`docs/flow-zenoh-verdict.md` section 6.2), written by\n\
+         //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which\n\
+         //! fails when this file is not what the corpus gives. Regenerate with\n\
+         //! `scripts/regen-calibration.sh` and commit the result with the capture\n\
+         //! that moved it. The counts are those of a build that opens lz4.\n",
+    );
+    let _ = writeln!(
+        out,
+        "//!\n//! The corpus: {} zenoh files in {} groups, {} null files in {} groups.\n",
+        c.zenoh_files,
+        c.zenoh_groups,
+        c.null.len(),
+        c.null_groups
+    );
+    out.push_str(
+        "use crate::zenoh_evidence::model::measured::Member;\nuse crate::zenoh_evidence::Weight;\n\n",
+    );
+    let weights: [(&str, &str, Weight); 10] = [
+        ("COOKIE_ECHO_VIOLATED", "a cookie that differs", t.cookie[1]),
+        (
+            "INIT_ROLES_CONFIRMED",
+            "two Inits of opposite kinds",
+            t.roles[0],
+        ),
+        (
+            "INIT_ROLES_VIOLATED",
+            "two Inits of the same kind",
+            t.roles[1],
+        ),
+        (
+            "VERSION_HEADER",
+            "a version byte that is this reader's",
+            t.versions[0],
+        ),
+        (
+            "VERSION_FOREIGN",
+            "a version byte that names another version",
+            t.versions[1],
+        ),
+        ("UNIT_EXPLAINED", "a unit read whole", t.unit[0]),
+        ("UNIT_RESIDUAL", "a unit with bytes left over", t.unit[1]),
+        ("UNIT_UNDECODED", "a unit that did not decode", t.unit[2]),
+        (
+            "FRAMING_HELD",
+            "a stream direction that framed a unit",
+            t.framing[0],
+        ),
+        (
+            "FRAMING_LOST",
+            "a stream direction that lost its framing",
+            t.framing[1],
+        ),
+    ];
+    let _ = writeln!(
+        out,
+        "/// `log2(1 - e)` of the cookie echo, in millibits.\npub const COOKIE_ECHO_FIDELITY: i64 = {};\n",
+        lit(c.cookie_fidelity)
+    );
+    for (name, what, weight) in weights {
+        let _ = writeln!(
+            out,
+            "/// The weight of {what}.\npub const {name}: Weight = {};",
+            weight_literal(weight)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n/// The null protocols, in the manifest's order.\npub const NULL: [Member; {}] = [",
+        c.null.len()
+    );
+    for (file, counts) in &c.null {
+        let _ = writeln!(
+            out,
+            "    Member {{\n        file: \"{file}\",\n        units: {},\n        framing: {},\n    }},",
+            counts_literal(&counts.units),
+            counts_literal(&counts.framing)
+        );
+    }
+    out.push_str("];\n\n");
+    let _ = writeln!(
+        out,
+        "/// The zenoh files' framing units: read whole, residual, undecoded.\npub const ZENOH_UNITS: [u64; 3] = {};\n\n\
+         /// The zenoh files' stream directions captured from their start: framing held, lost.\npub const ZENOH_FRAMING: [u64; 2] = {};\n\n\
+         /// The zenoh files' cookie echoes: matched, differing.\npub const ZENOH_COOKIE: [u64; 2] = {};\n\n\
+         /// The zenoh files' Init pairs: of opposite kinds, of one kind.\npub const ZENOH_ROLES: [u64; 2] = {};\n\n\
+         /// The zenoh files' version headers: this reader's, another.\npub const ZENOH_VERSIONS: [u64; 2] = {};",
+        counts_literal(&c.zenoh.units),
+        counts_literal(&c.zenoh.framing),
+        counts_literal(&c.zenoh.cookie),
+        counts_literal(&c.zenoh.roles),
+        counts_literal(&c.zenoh.versions)
+    );
+    out
+}
+
+fn generated_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/zenoh_calibration_generated.rs")
+}
+
+/// `1234` as the design note's table writes it: signed, no separators.
+fn signed(n: i64) -> String {
+    if n > 0 {
+        alloc::format!("+{n}")
+    } else {
+        alloc::format!("{n}")
+    }
+}
+
+/// THE GENERATED FILE IS WHAT THE CORPUS GIVES. `zenoh_calibration_generated.rs`
+/// holds the counts and the weights, and nobody writes it: this test renders it
+/// from the corpus and fails with the first line that differs when the file is
+/// not that. With `WZ_BLESS_CALIBRATION` set it writes the file instead, which is
+/// what `scripts/regen-calibration.sh` does, so a capture added to the corpus
+/// moves the model by one command and not by twelve edits.
+///
+/// The design note's numbers are held to the same calibration: its weight table
+/// and the counts it states are not generated, and drifting from the file is
+/// what this fails on.
+#[test]
+fn the_generated_calibration_is_current() {
+    let files = read_corpus();
+    let calibration = calibrate(&files);
+    let want = render(&calibration);
+    let path = generated_path();
+    if std::env::var_os("WZ_BLESS_CALIBRATION").is_some() {
+        std::fs::write(&path, &want).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    let have = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    if have != want {
+        let at = have
+            .lines()
+            .zip(want.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| have.lines().count().min(want.lines().count()));
+        panic!(
+            "zenoh_calibration_generated.rs is not what the corpus gives (first difference at \
+             line {}):\n  file: {:?}\n  corpus: {:?}\nregenerate with scripts/regen-calibration.sh \
+             and commit it with the capture that moved it. On a machine that cannot build it, \
+             the file the corpus gives follows.\n=====\n{want}=====",
+            at + 1,
+            have.lines().nth(at),
+            want.lines().nth(at)
+        );
+    }
+
+    // The design note: its weight table and its counts are the generated ones.
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/flow-zenoh-verdict.md"),
+    )
+    .expect("docs/flow-zenoh-verdict.md reads");
+    let t = &calibration.table;
+    let rows = [
+        ("unit read whole", t.unit[0]),
+        ("unit residual", t.unit[1]),
+        ("unit undecoded", t.unit[2]),
+        ("stream framing held", t.framing[0]),
+        ("stream framing lost", t.framing[1]),
+        ("cookie matched (8 bytes)", t.cookie[0]),
+        ("cookie differing", t.cookie[1]),
+        ("Inits of opposite kinds", t.roles[0]),
+        ("Inits of one kind", t.roles[1]),
+        ("version of this reader", t.versions[0]),
+        ("another version", t.versions[1]),
+    ];
+    let mut stale = Vec::new();
+    for (name, w) in rows {
+        let row = alloc::format!("| {name} | {} | {} |", signed(w.yes), signed(w.no));
+        if !doc.contains(&row) {
+            stale.push(row);
+        }
+    }
+    let prose = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+    let z = &calibration.zenoh;
+    let counts = alloc::format!(
+        "and 0 undecoded in {} units; 0 framings lost in {} directions held from their start; \
+         0 differing cookies in {} echoes; 0 Init pairs of one kind in {}; 0 other versions in {} \
+         version headers",
+        z.units[0],
+        z.framing[0],
+        z.cookie[0],
+        z.roles[0],
+        z.versions[0]
+    );
+    if !prose.contains(&counts) {
+        stale.push(counts);
+    }
+    assert!(
+        stale.is_empty(),
+        "docs/flow-zenoh-verdict.md section 6.2 does not say what the corpus gives; it should \
+         hold:\n{}",
+        stale.join("\n")
+    );
 }
 
 /// The independent groups a claim needs: with no failure seen in `g` groups the

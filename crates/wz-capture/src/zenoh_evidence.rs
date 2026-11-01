@@ -245,6 +245,12 @@ impl Weight {
         }
     }
 
+    /// A weight whose two sums differ. A constructor and not a struct literal,
+    /// so that rustfmt lays a generated line out the same whatever its numbers.
+    pub const fn pair(yes: i64, no: i64) -> Self {
+        Self { yes, no }
+    }
+
     /// `n` observations of this weight.
     pub fn times(self, n: u64) -> Self {
         let n = i64::try_from(n).unwrap_or(i64::MAX);
@@ -271,6 +277,7 @@ impl Weight {
 /// again from `captures/corpus/`.
 pub mod model {
     use super::Weight;
+    use crate::zenoh_calibration_generated as generated;
 
     /// The model these weights are, written into the document so that a
     /// consumer can tell two calibrations apart.
@@ -295,20 +302,20 @@ pub mod model {
 
     /// `log2(1 - e)`, the zenoh side of a cookie match: a zenoh OpenSyn fails
     /// to echo its InitAck's cookie with chance `e`, the bound of 0 failures
-    /// in the corpus's 609 echoes ([`measured::ZENOH_COOKIE`]).
-    pub const COOKIE_ECHO_FIDELITY: i64 = -7;
+    /// in the corpus's echoes ([`measured::ZENOH_COOKIE`]). Generated.
+    pub const COOKIE_ECHO_FIDELITY: i64 = generated::COOKIE_ECHO_FIDELITY;
 
     /// `log2(e / 1)`: a cookie that differs. An arbitrary pair of byte strings
-    /// differs with chance close to one.
-    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-7_671);
+    /// differs with chance close to one. Generated.
+    pub const COOKIE_ECHO_VIOLATED: Weight = generated::COOKIE_ECHO_VIOLATED;
 
     /// `log2((1 - e) / (1/2))`: two Inits of opposite kinds, which two
     /// arbitrary Inits are with chance one half; `e` the bound of 0 pairs of
-    /// one kind in 611 ([`measured::ZENOH_ROLES`]).
-    pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(993);
+    /// one kind in the corpus's pairs ([`measured::ZENOH_ROLES`]). Generated.
+    pub const INIT_ROLES_CONFIRMED: Weight = generated::INIT_ROLES_CONFIRMED;
 
-    /// `log2(e / (1/2))`: two Inits of the same kind.
-    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-6_676);
+    /// `log2(e / (1/2))`: two Inits of the same kind. Generated.
+    pub const INIT_ROLES_VIOLATED: Weight = generated::INIT_ROLES_VIOLATED;
 
     /// `log2((1 - 2^-4) / 2^-8)`: a frame one step after the last. A varint
     /// equals a given value with chance at most `2^-8`, and a zenoh frame
@@ -322,54 +329,42 @@ pub mod model {
     /// `log2((1 - e) / 2^-8)`: the version byte of a message that names one
     /// is this reader's. A byte equals it by chance `2^-8`, and a zenoh flow
     /// of this version names another with chance `e`, the bound of 0 in the
-    /// corpus's 1222 version headers ([`measured::ZENOH_VERSIONS`]).
-    pub const VERSION_HEADER: Weight = Weight::both(7_996);
+    /// corpus's version headers ([`measured::ZENOH_VERSIONS`]). Generated.
+    pub const VERSION_HEADER: Weight = generated::VERSION_HEADER;
 
     /// `log2(e / (1 - 2^-8))`: it names another version. Model 1 weighed
     /// only the match, which bounds neither sum: an observation that can only
-    /// confirm raises the `yes` sum's expectation under the null.
-    pub const VERSION_FOREIGN: Weight = Weight::both(-8_668);
+    /// confirm raises the `yes` sum's expectation under the null. Generated.
+    pub const VERSION_FOREIGN: Weight = generated::VERSION_FOREIGN;
 
     /// A unit read whole. Zenoh: one less the two failures' bounds. `yes`:
-    /// mDNS's bound, 13 of 36 units; `no`: the members' average.
-    pub const UNIT_EXPLAINED: Weight = Weight {
-        yes: 967,
-        no: 3_546,
-    };
+    /// the largest share any null member shows of units read whole (mDNS's,
+    /// at the time of writing); `no`: the members' average. Generated.
+    pub const UNIT_EXPLAINED: Weight = generated::UNIT_EXPLAINED;
 
-    /// A unit with bytes left over. Zenoh: the bound of 0 in 49505 units;
-    /// `yes`: QUIC's 22 of 22; `no`: the members' average.
-    pub const UNIT_RESIDUAL: Weight = Weight {
-        yes: -14_012,
-        no: -12_594,
-    };
+    /// A unit with bytes left over. Zenoh: the bound of 0 in the corpus's
+    /// units; `yes`: the largest share any null member shows; `no`: the
+    /// members' average. Generated.
+    pub const UNIT_RESIDUAL: Weight = generated::UNIT_RESIDUAL;
 
-    /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
-    /// 26; `no`: the members' average.
-    pub const UNIT_UNDECODED: Weight = Weight {
-        yes: -14_012,
-        no: -13_124,
-    };
+    /// A unit that did not decode. Zenoh: as residual; `yes`: the largest
+    /// share any null member shows; `no`: the members' average. Generated.
+    pub const UNIT_UNDECODED: Weight = generated::UNIT_UNDECODED;
 
     /// A stream direction, captured from its start, that framed a unit before
-    /// it lost its framing. Zenoh: one less the bound of 0 lost in 584; `yes`:
-    /// the bound of 0 held in 34, SSH's; `no`: the smoothed shares of the six
-    /// members that lose it (MQTT, HTTP opening with another method, Redis,
-    /// PostgreSQL, SSH, SMTP), averaged.
-    pub const FRAMING_HELD: Weight = Weight {
-        yes: 2_838,
-        no: 6_453,
-    };
+    /// it lost its framing. Zenoh: one less the bound of 0 lost in the corpus's
+    /// directions; `yes`: the bound of the null member that holds it most often;
+    /// `no`: the smoothed shares of the members that lose it, averaged.
+    /// Generated.
+    pub const FRAMING_HELD: Weight = generated::FRAMING_HELD;
 
     /// A stream direction, captured from its start, that lost its framing
-    /// before it framed a unit: bytes that are not zenoh's framing.
-    pub const FRAMING_LOST: Weight = Weight {
-        yes: -7_611,
-        no: -7_594,
-    };
+    /// before it framed a unit: bytes that are not zenoh's framing. Generated.
+    pub const FRAMING_LOST: Weight = generated::FRAMING_LOST;
 
     /// The counts of `captures/corpus/` the measured weights are computed
-    /// from, as a build that opens lz4 reads them (2026-10-26).
+    /// from, as a build that opens lz4 reads them. Generated: the file is
+    /// `zenoh_calibration_generated.rs`, and a test holds it to the corpus.
     ///
     /// The rule (`docs/flow-zenoh-verdict.md` §6.2): for zenoh, each outcome a
     /// zenoh flow fails with takes the one-sided 95% Clopper-Pearson upper
@@ -390,130 +385,18 @@ pub mod model {
             pub framing: [u64; 2],
         }
 
-        /// The null protocols.
-        pub const NULL: [Member; 18] = [
-            Member {
-                file: "lan-dns.pcap",
-                units: [26, 32, 320],
-                framing: [0, 0],
-            },
-            Member {
-                file: "lan-mdns.pcap",
-                units: [13, 8, 15],
-                framing: [0, 0],
-            },
-            Member {
-                file: "lan-ssdp.pcap",
-                units: [0, 0, 26],
-                framing: [0, 0],
-            },
-            Member {
-                file: "stack-mqtt.pcap",
-                units: [6, 28, 7],
-                framing: [0, 84],
-            },
-            Member {
-                file: "stack-rtps.pcap",
-                units: [0, 2, 147],
-                framing: [0, 0],
-            },
-            Member {
-                file: "stack-coap.pcap",
-                units: [0, 24, 144],
-                framing: [0, 0],
-            },
-            Member {
-                file: "stack-someip.pcap",
-                units: [0, 28, 278],
-                framing: [0, 0],
-            },
-            Member {
-                file: "stack-quic.pcap",
-                units: [0, 22, 0],
-                framing: [0, 0],
-            },
-            Member {
-                file: "busylan-dhcp.pcap",
-                units: [16, 98, 133],
-                framing: [0, 0],
-            },
-            Member {
-                file: "busylan-ntp.pcap",
-                units: [5, 183, 0],
-                framing: [0, 0],
-            },
-            Member {
-                file: "busylan-wsd.pcap",
-                units: [5, 12, 155],
-                framing: [0, 0],
-            },
-            // No unit framed and no framing lost: a member that shows no
-            // observation of a check is not counted for it. A flow whose
-            // first bytes are `GET ` or `HTTP` is read as a WebSocket carrier
-            // and one that opens with a TLS ClientHello as an encrypted one,
-            // neither by the stream reader.
-            Member {
-                file: "stack-http.pcap",
-                units: [0, 0, 0],
-                framing: [0, 0],
-            },
-            Member {
-                file: "stack-tls.pcap",
-                units: [0, 0, 0],
-                framing: [0, 0],
-            },
-            // Connections that open with another method reach the stream
-            // reader, which takes `PO`, `PU` or `HE` for a length prefix: no
-            // unit is framed and every one of the 50 directions loses its
-            // framing.
-            Member {
-                file: "stack-http-post.pcap",
-                units: [0, 0, 0],
-                framing: [0, 50],
-            },
-            // Redis frames no unit and loses the framing of all 120 stream
-            // directions; PostgreSQL frames 531 units, every one with bytes
-            // left over, and loses 48 directions.
-            Member {
-                file: "stack-redis.pcap",
-                units: [0, 0, 0],
-                framing: [0, 120],
-            },
-            Member {
-                file: "stack-postgres.pcap",
-                units: [0, 531, 0],
-                framing: [0, 48],
-            },
-            // SSH: its binary packets frame as units after the banner, a third
-            // of them whole, and the framing is lost in all 34 directions.
-            // SMTP frames no unit and loses it in all 20.
-            Member {
-                file: "stack-ssh.pcap",
-                units: [33, 20, 40],
-                framing: [0, 34],
-            },
-            Member {
-                file: "stack-smtp.pcap",
-                units: [0, 0, 0],
-                framing: [0, 20],
-            },
-        ];
-
-        /// The zenoh files' framing units: read whole, residual, undecoded.
-        pub const ZENOH_UNITS: [u64; 3] = [49_505, 0, 0];
-
-        /// The zenoh files' stream directions captured from their start:
-        /// framing held, framing lost.
-        pub const ZENOH_FRAMING: [u64; 2] = [584, 0];
-
-        /// The zenoh files' cookie echoes: matched, differing.
-        pub const ZENOH_COOKIE: [u64; 2] = [609, 0];
-
-        /// The zenoh files' Init pairs: of opposite kinds, of one kind.
-        pub const ZENOH_ROLES: [u64; 2] = [611, 0];
-
-        /// The zenoh files' version headers: this reader's, another.
-        pub const ZENOH_VERSIONS: [u64; 2] = [1_222, 0];
+        // The null protocols (`NULL`, in the manifest's order) and the zenoh files'
+        // counts: framing units read whole, residual, undecoded (`ZENOH_UNITS`);
+        // stream directions captured from their start, framing held or lost
+        // (`ZENOH_FRAMING`); cookie echoes matched or differing (`ZENOH_COOKIE`);
+        // Init pairs of opposite kinds or of one (`ZENOH_ROLES`); version headers
+        // of this reader's version or another (`ZENOH_VERSIONS`). A null member
+        // that shows no observation of a check is not counted for it. What each
+        // null protocol does to the stream reader is in
+        // `docs/flow-zenoh-verdict.md` section 6.1.
+        pub use crate::zenoh_calibration_generated::{
+            NULL, ZENOH_COOKIE, ZENOH_FRAMING, ZENOH_ROLES, ZENOH_UNITS, ZENOH_VERSIONS,
+        };
     }
 }
 

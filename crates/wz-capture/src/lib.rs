@@ -251,6 +251,9 @@ pub mod session_table;
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
+/// The counts of `captures/corpus/` and the weights computed from them, written
+/// by a test and never by hand (`zenoh_calibration_tests`).
+pub(crate) mod zenoh_calibration_generated;
 #[cfg(test)]
 mod zenoh_calibration_tests;
 #[cfg(test)]
