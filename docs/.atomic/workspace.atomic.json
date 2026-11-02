@@ -306338,6 +306338,34 @@
         "The consumer is told fields 51 and the commit. Open: a reply inside a reassembled chain (above_transport.carried) names no request, as a final there does not; the census counts only completed exchanges the selector admits, so a consumer summing rows over a capture with unclosed exchanges reads more than the census, which the field note states. The flow zenoh test's carry of round 4125 stands."
       ]
     },
+    "Round 4133": {
+      "decision_summary": "The hosted run 41411911409, the first whose head held this session's fixes, was red in fifteen jobs of about nine causes; the validate, isolated-crate and non-default test jobs that had been red before it were green. The fixes: C1ay counts +3 in every arm (the router commits of the day) and C1ah node_clock 25, C1cb 34; wz-capi-core builds with no default features again (the refusal tests need peer, the dial config's tls needs scout, announced is read only with gossip); two docs-lane findings and five more of held_list.rs; the six coop text budgets, the multicast text baseline and the frt chain figure move to the hosted readings, each with its bisect: the unstable client image 1,055,458 at 8e37dda152, +1,260 at the link admission, +3,032 at the last SCE pin move of the day; the multicast image 71,948, +4 at the admission, +0 at the refused dial fix, 72,292 at the head. The frt chain (+292) and about 800 bytes of the multicast image are not attributed to a commit.",
+      "changes_bullets": [
+        "scripts/run-ci.sh (C1ay nine arms, C1ah node_clock, C1cb), scripts/lib/capability_cost_gate.py (six budgets and the dated note), scripts/check-footprint.sh (multicast text 72296 and 72436), scripts/lib/stack_frame_gate.py (frt peak 7956). wz-capi-core drive.rs (the refusal test gated on peer, tls on scout) and faces.rs (announced). wz-session-core held_list.rs (header links as code) and drive.rs (a private-fn link as code). docs/reason-review-pins.md: the drive.rs row of session-close-ingress, R4133."
+      ],
+      "verification_bullets": [
+        "On the build hosts: C1ay (all nine arms measured on the rebased tree, 297 302 324 305 308 355 297 299 310), C1ah, C1cb, Layer G passed; Layer Q reproduced the frt and multicast figures it was moved to; C1cs read the four budgets over by the unstable family; wz-capi-core clippy clean with no default features, with default features and with peer, 152 lib tests with router-node and scout, fmt clean; the reduced docs layer passed for wz-runtime-tokio (138 configurations) and for wz-session-core (124) after the link fixes; the reason pin gate, the gate self-tests and the citation form gate pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Open from the same run: the Qz Zephyr stack bound (rule engine-host pins 39 register calls where the image has 38, and Turn::run has a call site no rule of stack_call_contracts.json claims) and Layer M's wz_router_hat_advertises_group_sub_reaches_pico_zsub, which needs a multicast network and was not reproduced. The nine C1ay guards drift with every router commit; a guard read off the build is not done."
+      ],
+      "publishable_decision_summary": "The hosted run 41411911409, the first whose head held this session's fixes, was red in fifteen jobs of about nine causes; the validate, isolated-crate and non-default test jobs that had been red before it were green. The fixes: C1ay counts +3 in every arm (the router commits of the day) and C1ah node_clock 25, C1cb 34; wz-capi-core builds with no default features again (the refusal tests need peer, the dial config's tls needs scout, announced is read only with gossip); two docs-lane findings and five more of held_list.rs; the six coop text budgets, the multicast text baseline and the frt chain figure move to the hosted readings, each with its bisect: the unstable client image 1,055,458 at 8e37dda152, +1,260 at the link admission, +3,032 at the last SCE pin move of the day; the multicast image 71,948, +4 at the admission, +0 at the refused dial fix, 72,292 at the head. The frt chain (+292) and about 800 bytes of the multicast image are not attributed to a commit.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh (C1ay nine arms, C1ah node_clock, C1cb), scripts/lib/capability_cost_gate.py (six budgets and the dated note), scripts/check-footprint.sh (multicast text 72296 and 72436), scripts/lib/stack_frame_gate.py (frt peak 7956). wz-capi-core drive.rs (the refusal test gated on peer, tls on scout) and faces.rs (announced). wz-session-core held_list.rs (header links as code) and drive.rs (a private-fn link as code). docs/reason-review-pins.md: the drive.rs row of session-close-ingress, R4133."
+      ],
+      "publishable_verification_bullets": [
+        "On the build hosts: C1ay (all nine arms measured on the rebased tree, 297 302 324 305 308 355 297 299 310), C1ah, C1cb, Layer G passed; Layer Q reproduced the frt and multicast figures it was moved to; C1cs read the four budgets over by the unstable family; wz-capi-core clippy clean with no default features, with default features and with peer, 152 lib tests with router-node and scout, fmt clean; the reduced docs layer passed for wz-runtime-tokio (138 configurations) and for wz-session-core (124) after the link fixes; the reason pin gate, the gate self-tests and the citation form gate pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open from the same run: the Qz Zephyr stack bound (rule engine-host pins 39 register calls where the image has 38, and Turn::run has a call site no rule of stack_call_contracts.json claims) and Layer M's wz_router_hat_advertises_group_sub_reaches_pico_zsub, which needs a multicast network and was not reproduced. The nine C1ay guards drift with every router commit; a guard read off the build is not done."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
