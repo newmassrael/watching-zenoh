@@ -966,12 +966,12 @@ zenoh-analyzer session takes them with model 3. The shape agreed with it on
   sum so far, in millibits like the sums.
 - The side that crossed is not a key: the latched `zenoh` word is that side.
 - `log2_lr_millibits` and `log2_lr_no_millibits` stay the sums NOW, not at the
-  crossing. A latched `yes` can therefore stand beside a sum below the
-  threshold; the consumer's sentence that quotes the sum is its design rule's to
-  change, and the zenoh-analyzer design session is told.
+  crossing, so a latched `yes` can stand beside a sum below the threshold. That
+  is what the keys mean; how a consumer words it is the consumer's and moves
+  nothing here.
 - The keys move the `fields` and `session_table` documents one revision each
-  (47 and 6 today), numbered when model 3 ships. The order is: wz ships, the
-  design answers, the consumer moves its pin and its expectations in one change.
+  (47 and 6 today), numbered when model 3 ships, and the numbers are told to the
+  consumer then. Nothing in wz waits on the consumer's side of the change.
 
 **D5. The model is frozen by a ledger entry before a validation corpus is
 read**, and the validation corpus is evaluated once (section 6.4, two corpora).
