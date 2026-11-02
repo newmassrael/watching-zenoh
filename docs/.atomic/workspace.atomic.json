@@ -306100,6 +306100,36 @@
         "The analyzer's lab reads vocabulary_schema 3 and writes commanders from it. The condition a node of commanders alone breaks is the general one of a node with no endpoint and is not in the commander's table."
       ]
     },
+    "Round 4125": {
+      "decision_summary": "Model 4 of the flow zenoh test ships (doc 6.9). Model 3's no sum could not cross: every zenoh side was a rate measured on 22 groups, which lets a new group fail everything with chance 0.127, and no numerator lowers that; D6's remedy was incomplete. D9: model 4 precedes the freezing entry, so the validation corpus is read once, by the frozen model. D10: the no sum rejects zenoh of this wire (version 0x09), each datagram altered with chance at most epsilon. D11: the first derived check, wire_front: the first byte of a UDP or raweth datagram is a transport message id of the wire or a BatchHeader; epsilon 2^-24 where the checksum verified and 2^-10 where none did (Stone and Partridge 2000), none weighed where it failed. A foreign front's unit reading is not weighed again. Fields 50 and session_table 8.",
+      "changes_bullets": [
+        "wz-capture: zenoh_evidence.rs gains Check::WireFront (eps_basis derived), Integrity and the front's two terms, MODEL 4; LinkIngest weighs a datagram's front before its unit and does not weigh a foreign front's reading again; the generator counts fronts, writes the front's null bound and prior, and the corpus counts weighed unit readings; no_zenoh_file_shows_a_foreign_front puts the derivation to the corpus; doc_revision adds fields 50 and session_table 8 (check gains wire_front, eps_basis derived and measured); tallies, generated-protocol and fixture pins moved. wz-capi-dissect: the header's check list, model text and examples, the pinned documents and the C consumer (fields 50, session_table 8). docs/flow-zenoh-verdict.md: section 6.9."
+      ],
+      "verification_bullets": [
+        "On pc2, on the tree rebased onto round 4124: wz-capture with lz4 1640 pass, without 1628 pass; clippy clean for wz-capture in both builds and for wz-capi-dissect; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) linked the release cdylib and passed. The corpus: zenoh flows 619 yes 0 no 2 undecided as under model 3; null flows 0 yes 187 no 466 undecided (model 3: 0/0/653); 27067 zenoh datagram fronts, none foreign; leaving any group out moves no word. Static gate array and the citation form gate pass. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Replaces the carry of round 4117. Model 4 is shipped; the consumer is told fields 50, session_table 8 and the commit. Open, in order: more derived checks where the wire fixes a byte (a stream's length chain from a held start, an Init's version byte), each put to the corpus as wire_front was; the freezing entry (the rule, the epsilons, the region level, the priors, the group definition); the validation corpus of the workloads, implementations and links section 6.4 lists as absent, read once. A likelihood per null protocol names the protocol and is not part of the zenoh test."
+      ],
+      "publishable_decision_summary": "Model 4 of the flow zenoh test ships (doc 6.9). Model 3's no sum could not cross: every zenoh side was a rate measured on 22 groups, which lets a new group fail everything with chance 0.127, and no numerator lowers that; D6's remedy was incomplete. D9: model 4 precedes the freezing entry, so the validation corpus is read once, by the frozen model. D10: the no sum rejects zenoh of this wire (version 0x09), each datagram altered with chance at most epsilon. D11: the first derived check, wire_front: the first byte of a UDP or raweth datagram is a transport message id of the wire or a BatchHeader; epsilon 2^-24 where the checksum verified and 2^-10 where none did (Stone and Partridge 2000), none weighed where it failed. A foreign front's unit reading is not weighed again. Fields 50 and session_table 8.",
+      "publishable_changes_bullets": [
+        "wz-capture: zenoh_evidence.rs gains Check::WireFront (eps_basis derived), Integrity and the front's two terms, MODEL 4; LinkIngest weighs a datagram's front before its unit and does not weigh a foreign front's reading again; the generator counts fronts, writes the front's null bound and prior, and the corpus counts weighed unit readings; no_zenoh_file_shows_a_foreign_front puts the derivation to the corpus; doc_revision adds fields 50 and session_table 8 (check gains wire_front, eps_basis derived and measured); tallies, generated-protocol and fixture pins moved. wz-capi-dissect: the header's check list, model text and examples, the pinned documents and the C consumer (fields 50, session_table 8). docs/flow-zenoh-verdict.md: section 6.9."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2, on the tree rebased onto round 4124: wz-capture with lz4 1640 pass, without 1628 pass; clippy clean for wz-capture in both builds and for wz-capi-dissect; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) linked the release cdylib and passed. The corpus: zenoh flows 619 yes 0 no 2 undecided as under model 3; null flows 0 yes 187 no 466 undecided (model 3: 0/0/653); 27067 zenoh datagram fronts, none foreign; leaving any group out moves no word. Static gate array and the citation form gate pass. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Replaces the carry of round 4117. Model 4 is shipped; the consumer is told fields 50, session_table 8 and the commit. Open, in order: more derived checks where the wire fixes a byte (a stream's length chain from a held start, an Init's version byte), each put to the corpus as wire_front was; the freezing entry (the rule, the epsilons, the region level, the priors, the group definition); the validation corpus of the workloads, implementations and links section 6.4 lists as absent, read once. A likelihood per null protocol names the protocol and is not part of the zenoh test."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
