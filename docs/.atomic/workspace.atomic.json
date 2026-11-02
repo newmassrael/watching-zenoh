@@ -306756,6 +306756,34 @@
         "Open: the wz peer publisher a router dials is measured and not pinned; a test needs a lane that checks for zenohd and builds the differential crate (Layer E18 states no zenohd prerequisite). The drop counters of TlsListener are not reachable from the C ABI: the listener is boxed behind TlsDial::listen and a C program holds no listener handle, so an accessor would be a process-wide count behind a new wz_ext symbol, with the typed listener kept in the provider; not built. Not rebuilt: the Zephyr kit image, which needs the Zephyr workspace. The hosted runs of recent rounds are mostly cancelled while queued."
       ]
     },
+    "Round 4146": {
+      "decision_summary": "Four of the seven reds of hosted run 41481900203 are paid; the first run whose head held the fixes of round 4133 had fifteen red jobs before it and seven after. wz-capture builds with no default features again (C1bt and C1cf): unit_outcomes is read by tests whose readers that build lacks, so it is allowed to be unread there. wz-session-mcu's run_arena names connect_manager as code, since that module is a build of `dial` and the reduced docs configurations lack it. The zephyr loopback crate is formatted. The pico-peer text budget moves from 2,946,000 to 2,949,700, the hosted reading of 2,946,185 plus 3,500, as the coop cases moved the day before. The Qz stack bound was paid by another session in b9e65f2609 (the rule of Turn::run first), and Layer M's multicast pico test was not reproduced.",
+      "changes_bullets": [
+        "crates/wz-capture/src/zenoh_evidence.rs: allow(dead_code) on unit_outcomes with its reason. crates/wz-session-mcu/src/run_arena.rs: PeerStore and connect_manager named as code. deploy/zephyr-tls-loopback/rust/src/lib.rs: cargo fmt. scripts/lib/capability_cost_gate.py: pico-peer budget 2,949,700 with a dated note."
+      ],
+      "verification_bullets": [
+        "On the build host (hkl001): wz-capture clippy with no default features and all targets clean, its tests 1,042 passed, cargo fmt clean; the reduced docs measurement of wz-session-mcu, 24 configurations, no finding; the capability-cost gate self-test passes. Not run here: the capability-cost layer for pico-peer on a build host (the budget follows the hosted reading), and the Zephyr layers (no host but one has the venv)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The Zephyr venv exists on one machine only, so Layers Qz and Qzk cannot be run on a build host through bx; declaring it as a capability of the fleet and of bx.toml is open. The pins of stack_call_contracts.json are integers moved by hand at every SCE pin; a ledger the build writes and the gate compares is open. Layer M's wz_router_hat_advertises_group_sub_reaches_pico_zsub failed once on hosted and was not reproduced."
+      ],
+      "publishable_decision_summary": "Four of the seven reds of hosted run 41481900203 are paid; the first run whose head held the fixes of round 4133 had fifteen red jobs before it and seven after. wz-capture builds with no default features again (C1bt and C1cf): unit_outcomes is read by tests whose readers that build lacks, so it is allowed to be unread there. wz-session-mcu's run_arena names connect_manager as code, since that module is a build of `dial` and the reduced docs configurations lack it. The zephyr loopback crate is formatted. The pico-peer text budget moves from 2,946,000 to 2,949,700, the hosted reading of 2,946,185 plus 3,500, as the coop cases moved the day before. The Qz stack bound was paid by another session in b9e65f2609 (the rule of Turn::run first), and Layer M's multicast pico test was not reproduced.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/zenoh_evidence.rs: allow(dead_code) on unit_outcomes with its reason. crates/wz-session-mcu/src/run_arena.rs: PeerStore and connect_manager named as code. deploy/zephyr-tls-loopback/rust/src/lib.rs: cargo fmt. scripts/lib/capability_cost_gate.py: pico-peer budget 2,949,700 with a dated note."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host (hkl001): wz-capture clippy with no default features and all targets clean, its tests 1,042 passed, cargo fmt clean; the reduced docs measurement of wz-session-mcu, 24 configurations, no finding; the capability-cost gate self-test passes. Not run here: the capability-cost layer for pico-peer on a build host (the budget follows the hosted reading), and the Zephyr layers (no host but one has the venv)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The Zephyr venv exists on one machine only, so Layers Qz and Qzk cannot be run on a build host through bx; declaring it as a capability of the fleet and of bx.toml is open. The pins of stack_call_contracts.json are integers moved by hand at every SCE pin; a ledger the build writes and the gate compares is open. Layer M's wz_router_hat_advertises_group_sub_reaches_pico_zsub failed once on hosted and was not reproduced."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
