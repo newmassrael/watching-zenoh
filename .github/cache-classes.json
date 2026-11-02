@@ -295,13 +295,14 @@
       "prefixes": ["fuzz-corpus-"],
       "owners": ["fuzz.yml:fuzz"],
       "budget_mb": 60,
+      "measured_mb": 11.4,
       "churn": "run",
       "generation_suffix": "-[0-9]+$",
       "keep": 1,
       "protect": false,
       "evict_priority": 50,
       "allow_run_scoped": true,
-      "note": "The corpus each fuzz target of crates/wz-fuzz grew, one series per target (`fuzz-corpus-<target>`), saved by every nightly run so the next starts from the coverage this one reached. Run-scoped because a cache entry is immutable and the corpus changes every night; the pruner keeps the newest entry of each series. Not measured yet: the libFuzzer inputs are capped at 64 KiB and a target keeps hundreds to a few thousand, so the budget is an estimate to be measured after the first runs. Losing it costs the coverage of past nights and nothing else: the seeds are derived from the tree on every run. The fuzz targets' build is NOT cached: the budget has no room for another rust-cache class, and a cold build of the targets is about a minute on a build machine."
+      "note": "The corpus each fuzz target of crates/wz-fuzz grew, one series per target (`fuzz-corpus-<target>`), saved by every nightly run so the next starts from the coverage this one reached. Run-scoped because a cache entry is immutable and the corpus changes every night; the pruner keeps the newest entry of each series. Measured after the first run (41461623751, 2026-11-02, 1200 s a target): the seven entries sum to 11.4 MB, proto the largest at 3.8 MB and replay the smallest at 36 kB. A corpus grows night by night as libFuzzer keeps inputs that reach new coverage, and an input is capped at 64 KiB, so the budget keeps five times that as room to grow; remeasure when a night's sum passes 40 MB. Losing it costs the coverage of past nights and nothing else: the seeds are derived from the tree on every run. The fuzz targets' build is NOT cached: the budget has no room for another rust-cache class, and a cold build of the targets is about a minute on a build machine."
     }
   ]
 }
