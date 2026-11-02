@@ -148,7 +148,9 @@ DECLARATION_SCHEMA = 1
 #      `rate` (`min_gap_ns`, `max_gap_ns`), a key's `with` condition, a kind's `group_refused_keys`.
 #      Added beside it since (the number stays): the `replay` kind, the `samples` section, the values
 #      `decimal`, `text` and `hex`, and a `with` that lists its values (`in`).
-VOCABULARY_SCHEMA = 2
+#   3: the value `verbs` became `words` (`choices`, each with its line in `means`), and an endpoint
+#      role states the `conditions` the validator holds it to, each naming the text of its refusal.
+VOCABULARY_SCHEMA = 3
 
 # The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
 # bounds are numbers or the name of the target's field that holds the number, so the shape is stated
@@ -158,7 +160,8 @@ VOCABULARY_SCHEMA = 2
 #   value: `locator` (<scheme>/<a.b.c.d>:<port>), `zid` (lowercase hex), `key-expression` (a key or a
 #   pattern, held to MAX_KEYEXPR_BYTES), `key` (a literal key: no `*`, no `$`), `cell-key` (the key
 #   of a subscriber or a querier of the same node), `integer` (from `min` to `max`), `word` (one of
-#   `choices`), `rate` (a positive decimal of puts a second written as a string, whose gap is from
+#   `choices`), `words` (a comma-separated list of `choices`, at least one, each with its line in
+#   `means`; no word stands for all of them), `rate` (a positive decimal of puts a second written as a string, whose gap is from
 #   `min_gap_ns` to `max_gap_ns`).
 #   with: a key read only when another key of the word is stated (`{"key": K}`) or has a value
 #   (`{"key": K, "value": V}`, a word's default counting as stated); `required` is then "required
@@ -177,6 +180,10 @@ def _int(low: int, high: int | str, required: bool = True, default: int | None =
 
 def _word(choices: tuple[str, ...], default: str) -> dict:
     return {"value": "word", "required": False, "choices": list(choices), "default": default}
+
+
+def _words(means: dict[str, str]) -> dict:
+    return {"value": "words", "required": True, "choices": list(means), "means": dict(means)}
 
 
 def _rate(min_gap: int | str, max_gap: int | str) -> dict:
@@ -205,19 +212,57 @@ TIMINGS = ("declared", "capture")
 MUTATIONS = ("none", "flip_bit", "truncate", "extend", "scramble")
 
 
+# The lifecycle verbs a commander may be granted, in the order the generator emits the image's lists
+# of `Commanders` (`wz_session_core::lifecycle_wire::VERBS` names the same four), each with what the
+# grant lets the commander have the node do (decision D12 of docs/session-lifecycle-intent.md).
+COMMANDER_VERB_MEANS = {
+    "open": "the node opens a session to the peer a zid names",
+    "close": "the node closes a peer it holds, with its links, and drops it from its intent",
+    "reset": "the node resets a peer it holds at a generation and keeps it in its intent",
+    "status": "the node reports a peer's links, intent and machines; it changes nothing, but it "
+              "reveals which peers the node holds, so it is granted like the others",
+}
+COMMANDER_VERBS = tuple(COMMANDER_VERB_MEANS)
+
+# What a commander is held to beyond the shape of each key: each condition's `id`, what must `hold`,
+# and the `refusal`, the text every finding of `validate` against it carries. A condition that names
+# a key as `absent` refuses that key by its own refusal instead of the finding a key of another role
+# gets. `validate` reads the refusals from here and `vocabulary` prints the table, so a consumer is
+# told each condition in the words the validator refuses it with.
+COMMANDER_CONDITIONS = (
+    {"id": "secure_channel",
+     "holds": "the node declares a `tls` router (`dial`) or a `tls` peer: a commander is a zid a "
+              "link's key proved, and only a secure channel proves one",
+     "refusal": "a commander is a zid a link's key proved, and only a secure channel proves one "
+                "(decision D2 of docs/session-lifecycle-intent.md): declare a `tls` router or peer, "
+                "or no commander"},
+    {"id": "one_pair",
+     "holds": "a pair of a zid and a verb is declared once, across every commander of the node",
+     "refusal": "a pair of a zid and a verb is declared once"},
+    {"id": "no_locator", "absent": "locator",
+     "holds": "a commander states no locator: it is a zid the node takes orders from, not a place "
+              "it reaches or is reached at",
+     "refusal": "a commander has no locator: it is a zid the node takes orders from, not a place it "
+                "reaches"},
+)
+
+
+def condition_refusal(conditions: tuple[dict, ...], name: str) -> str:
+    """The refusal of the condition `name` of a role's table."""
+    return next(c["refusal"] for c in conditions if c["id"] == name)
+
+
 ENDPOINT_SHAPES = {
-    "dial": {"keys": {"locator": _key("locator")}},
+    "dial":{"keys": {"locator": _key("locator")}},
     "listen": {"keys": {"locator": _key("locator"), "accepts": _int(1, "max_accepts")}},
     "multicast": {"keys": {"locator": _key("locator"), "members": _int(1, "max_members"),
                            "ttl": _int(1, 255, required=False, default=1)}},
     "peer": {"keys": {"locator": _key("locator"), "zid": _key("zid")}},
     # Not an endpoint a node reaches or is reached at: the zid of a node it takes orders from, so it
     # has no locator.
-    "commander": {"keys": {"zid": _key("zid"), "verbs": _key("verbs")}},
+    "commander": {"keys": {"zid": _key("zid"), "verbs": _words(COMMANDER_VERB_MEANS)},
+                  "conditions": COMMANDER_CONDITIONS},
 }
-# The lifecycle verbs, in the order the node lists them (`wz_session_core::lifecycle_wire::VERBS`
-# names the same four) and the list of the image's `Commanders` each one fills.
-COMMANDER_VERBS = ("open", "close", "reset", "status")
 # `count` is how many of a kind one node holds: a target's field, or the budget (`limit`) a declaration
 # may raise.
 ENTITY_SHAPES = {
@@ -329,7 +374,7 @@ def holds(item: dict, keys: dict, condition: dict) -> bool:
 
 
 def value_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
-    """Each integer, word, rate, decimal, text or hex key of a word's shape that is missing (when
+    """Each integer, word, words, rate, decimal, text or hex key of a word's shape that is missing (when
     required) or outside its bounds, and each key stated where its `with` condition does not hold."""
     out = []
     for key, spec in keys.items():
@@ -344,7 +389,7 @@ def value_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
                     when = f"`{condition['key']}` is stated"
                 out.append(f"{who}: `{key}` is read only when {when}")
             continue
-        kinds = ("integer", "word", "rate", "decimal", "text", "hex")
+        kinds = ("integer", "word", "words", "rate", "decimal", "text", "hex")
         if spec["value"] not in kinds or (key not in item and not spec["required"]):
             continue
         value = item.get(key)
@@ -355,6 +400,11 @@ def value_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
         elif spec["value"] == "word":
             if value not in spec["choices"]:
                 out.append(f"{who}: {key} is {value!r}, not one of {', '.join(spec['choices'])}")
+        elif spec["value"] == "words":
+            named = [w.strip() for w in value.split(",")] if isinstance(value, str) else []
+            if not named or any(w not in spec["choices"] for w in named):
+                out.append(f"{who}: {key} is {value!r}, not a comma-separated list of "
+                           f"{', '.join(spec['choices'])}")
         elif spec["value"] == "decimal":
             _, why = decimal_parts(value)
             if why is not None:
@@ -581,7 +631,11 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                            f"{node['target']} target holds {target['endpoint_limits'][role]}")
         if role in ENDPOINT_SHAPES:
             keys = ENDPOINT_SHAPES[role]["keys"]
-            for extra in sorted((set(ep) & ENDPOINT_KEYS) - set(keys) - {"role"}):
+            absent = {c["absent"]: c["refusal"] for c in ENDPOINT_SHAPES[role].get("conditions", ())
+                      if "absent" in c}
+            for extra in sorted(set(absent) & set(ep)):
+                out.append(f"{who}: {absent[extra]}")
+            for extra in sorted((set(ep) & ENDPOINT_KEYS) - set(keys) - {"role"} - set(absent)):
                 out.append(f"{who}: only a {' or a '.join(f'`{r}`' for r in owners(ENDPOINT_SHAPES, extra))} "
                            f"endpoint has `{extra}`")
             out += value_problems(who, ep, keys, target)
@@ -600,12 +654,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                            "32 digits)")
             verbs = ep.get("verbs")
             named = [v.strip() for v in verbs.split(",")] if isinstance(verbs, str) else []
-            if not named or any(v not in COMMANDER_VERBS for v in named):
-                out.append(f"{who}: verbs is {verbs!r}, not a comma-separated list of "
-                           f"{', '.join(COMMANDER_VERBS)}")
             for verb in named:
                 if (zid, verb) in commanded:
-                    out.append(f"{who}: zid {zid} is already a commander of `{verb}`")
+                    out.append(f"{who}: zid {zid} is already a commander of `{verb}`: "
+                               f"{condition_refusal(COMMANDER_CONDITIONS, 'one_pair')}")
                 commanded.add((zid, verb))
             continue
         match = LOCATOR_RE.fullmatch(ep.get("locator", "")) if isinstance(ep.get("locator"), str) else None
@@ -633,9 +685,7 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         isinstance(ep.get("locator"), str) and ep["locator"].startswith("tls/")
         for ep in endpoints if isinstance(ep, dict) and ep.get("role") in ("dial", "peer")
     ):
-        out.append("a commander is a zid a link's key proved, and only a secure channel proves one "
-                   "(decision D2 of docs/session-lifecycle-intent.md): declare a `tls` router or peer, "
-                   "or no commander")
+        out.append(condition_refusal(COMMANDER_CONDITIONS, "secure_channel"))
     if "MAX_PEER_NODES" in data.get("limits", {}) and held.get("peer", 0) > values["MAX_PEER_NODES"]:
         out.append(f"limits: MAX_PEER_NODES is {values['MAX_PEER_NODES']}, the declaration holds "
                    f"{held['peer']} peers by their zid")
@@ -1266,7 +1316,8 @@ def view_of(name: str, data: dict, sha: str, generated: pathlib.Path, decl: dict
 def vocabulary(target_id: str, decl: dict) -> dict:
     """What a target builds, as data a consumer reads before it writes a declaration: the schema
     number, each endpoint role and entity kind with its keys and their bounds resolved to this
-    target's numbers (a word the target does not build carries the reason instead), the groups of
+    target's numbers (a word the target does not build carries the reason instead), the conditions
+    an endpoint role is held to beyond its keys, each with the text of its refusal, the groups of
     keys a word states exactly one of each (`one_of`, a list of lists), what a group carries (and
     the keys of a kind it carries that it does not), and the budgets and policies a declaration may state with the values a node gets when it
     states none. Made from the tables `validate` reads, so it cannot say a target builds what the
@@ -1290,6 +1341,8 @@ def vocabulary(target_id: str, decl: dict) -> dict:
                  "keys": resolved(shape["keys"])}
         if role == "listen":
             entry["refused_schemes"] = dict(target["listen_refused"])
+        if "conditions" in shape:
+            entry["conditions"] = [dict(c) for c in shape["conditions"]]
         endpoints[role] = entry
     limits, _ = limit_values(decl, {}, image_limits(target))
     entities = {}
@@ -1876,7 +1929,12 @@ document_bytes = 8
     expect("a commander of another verb is not a repeat",
            problems(secured + commander + commander.replace("open, status", "close")) == [])
     refuses("a commander with a locator", secured + commander + 'locator = "tls/10.0.0.9:7447"\n',
-            "only a `dial` or a `listen` or a `multicast` or a `peer` endpoint has `locator`")
+            "a commander has no locator")
+    expect("a commander's locator is refused once, by the commander's own condition",
+           not any("endpoint has `locator`" in p
+                   for p in problems(secured + commander + 'locator = "tls/10.0.0.9:7447"\n')))
+    refuses("a commander of every verb by a wildcard", secured + commander.replace("open, status", "*"),
+            "not a comma-separated list")
     refuses("more commanders than the target holds",
             secured + "".join(commander.replace('"1f"', f'"{n:x}"') for n in range(0x10, 0x19)),
             "more than 8 `commander`")
@@ -2013,9 +2071,12 @@ document_bytes = 8
     expect("the vocabulary states its own shape's number, this reader's schema and its target",
            vocab["vocabulary_schema"] == VOCABULARY_SCHEMA and vocab["schema"] == DECLARATION_SCHEMA
            and vocab["target"] == "slot")
-    # The number names the shape it states: a shape-2 field is what each new field of shape 2 is.
+    # The number names the shape it states: a shape-2 field is what each new field of shape 2 is, and
+    # a shape-3 field what shape 3 made of it.
     expect("the shape the vocabulary_schema names is the one printed",
-           VOCABULARY_SCHEMA == 2
+           VOCABULARY_SCHEMA == 3
+           and vocab["endpoints"]["commander"]["keys"]["verbs"]["value"] == "words"
+           and "conditions" in vocab["endpoints"]["commander"]
            and all(isinstance(group, list) for e in vocab["entities"].values() for group in e.get("one_of", []))
            and vocab["entities"]["publisher"]["keys"]["arrivals"]["value"] == "word"
            and vocab["entities"]["publisher"]["keys"]["rate_per_s"]["value"] == "rate"
@@ -2120,6 +2181,43 @@ document_bytes = 8
                    not any(f"{key} is" in p for p in at_max))
             expect(f"a {role} endpoint's {key} one past the bound is refused by name ({past})",
                    any(f"{key} is {spec['max'] + 1}" in p for p in past))
+    # A commander as the vocabulary states it is what the validator holds (decision D12): its verbs
+    # are the choices in the generator's order, each with its line, any of them alone is accepted and
+    # a word outside them is refused by name, and each condition is refused, in the condition's own
+    # words, by the declaration that breaks it and by nothing else.
+    command = vocab["endpoints"]["commander"]
+    verbs_spec = command["keys"]["verbs"]
+    expect("the vocabulary's commander verbs are the ones the generator emits, in its order",
+           command["built"] and verbs_spec["choices"] == list(COMMANDER_VERBS)
+           and list(verbs_spec["means"]) == verbs_spec["choices"]
+           and all(isinstance(line, str) and line for line in verbs_spec["means"].values()))
+    expect("the vocabulary says `status` is granted, since it reveals the peers a node holds",
+           "reveals which peers" in verbs_spec["means"]["status"])
+    tls_dial = dial.replace("tcp/", "tls/")
+    least_commander = {"role": "commander", "zid": "1f", "verbs": verbs_spec["choices"][0]}
+    for verb in verbs_spec["choices"]:
+        found = problems(head + tls_dial + toml_item("endpoint", {**least_commander, "verbs": verb}))
+        expect(f"a commander of `{verb}` alone, a choice the vocabulary states, is valid ({found})", found == [])
+    for odd in ("hold", "*", ""):
+        found = problems(head + tls_dial + toml_item("endpoint", {**least_commander, "verbs": odd}))
+        expect(f"a commander of {odd!r}, outside the vocabulary's choices, is refused by name ({found})",
+               any(f"verbs is {odd!r}, not a comma-separated list of {', '.join(verbs_spec['choices'])}" in p
+                   for p in found))
+    breaking = {
+        "secure_channel": head + dial + toml_item("endpoint", least_commander),
+        "one_pair": head + tls_dial + toml_item("endpoint", least_commander) + toml_item("endpoint", least_commander),
+        "no_locator": head + tls_dial + toml_item("endpoint", {**least_commander, "locator": "tls/10.0.0.9:7447"}),
+    }
+    expect("every condition the vocabulary states is broken once below, and none other",
+           sorted(c["id"] for c in command["conditions"]) == sorted(breaking))
+    for condition in command["conditions"]:
+        found = problems(breaking[condition["id"]])
+        expect(f"a commander that breaks `{condition['id']}` is refused in the vocabulary's words ({found})",
+               found and all(condition["refusal"] in p for p in found))
+        expect(f"`{condition['id']}` states what must hold", isinstance(condition["holds"], str) and condition["holds"])
+        expect(f"the refusal of `{condition['id']}` is no other condition's",
+               not any(other["refusal"] in p for other in command["conditions"] if other is not condition
+                       for p in found))
     expect("the vocabulary's listener schemes are the ones a listener is accepted over",
            vocab["endpoints"]["listen"]["schemes"] == ["tcp"]
            and any("listener is not built" in p for p in problems(

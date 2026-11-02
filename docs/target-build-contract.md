@@ -856,7 +856,10 @@ shape's number, `vocabulary_schema`, apart from the declaration's `schema`: it m
 the previous shape would misread the new one (a field that changes type or meaning, or goes; a field
 added beside the others does not), so a reader that refuses a number it does not know stops and names
 both. Shape 2 (Round 3729) made `one_of` a list of groups of keys and added the values `word` and
-`rate`, a key's `with` condition and a kind's `group_refused_keys`. The vocabulary and the
+`rate`, a key's `with` condition and a kind's `group_refused_keys`. Shape 3 turned the commander's
+value `verbs` into `words` (its `choices` in the generator's order, each with a line in `means`) and
+gave an endpoint role its `conditions`: each an `id`, what must `hold` and the `refusal`, the text the
+validator refuses a breach of it with, read from the same table. The vocabulary and the
 validator read one table of shapes (`ENDPOINT_SHAPES`, and `ENTITY_SHAPES` with the target's
 bounds), and the selftest holds them to each other: every integer of every word is accepted at the
 bound the vocabulary states and refused, by its name, one past it.
@@ -1091,7 +1094,10 @@ raises no budget, and a node of commanders alone has no endpoint. The authority 
 empty unless stated, and a zid listed for one verb commands no other; a wildcard commander does not
 exist and a pair of a zid and a verb is declared once. A commander is a zid a key proved, and only a
 secure channel proves one (decision D2), so a node that names one declares a `tls` router or peer,
-and the validator refuses it for a node that has none. The generator emits `COMMANDERS_OPEN`,
+and the validator refuses it for a node that has none. The vocabulary states the verbs a commander
+may be granted, each with what it lets the commander do (`status` among them, since it reveals which
+peers a node holds), and these conditions as `COMMANDER_CONDITIONS`, the table the validator takes
+its refusals from, so the selftest breaks each one and finds the condition's own refusal. The generator emits `COMMANDERS_OPEN`,
 `COMMANDERS_CLOSE`, `COMMANDERS_RESET` and `COMMANDERS_STATUS`, each a list of the sixteen bytes of a
 zid, only for a node that names a commander; the image gives them to
 `wz_session_mcu::connect_manager::Commanders`. A node that names none is commanded by nobody in
