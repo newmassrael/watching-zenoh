@@ -306366,6 +306366,46 @@
         "Open from the same run: the Qz Zephyr stack bound (rule engine-host pins 39 register calls where the image has 38, and Turn::run has a call site no rule of stack_call_contracts.json claims) and Layer M's wz_router_hat_advertises_group_sub_reaches_pico_zsub, which needs a multicast network and was not reproduced. The nine C1ay guards drift with every router commit; a guard read off the build is not done."
       ]
     },
+    "Round 4134": {
+      "decision_summary": "The host throughput comparison is extended from the pico family to the zenoh-c family: the same publisher and subscriber sources are built against the zenoh-c 1.10.2 release and against wz-capi-c (scripts/pico-compare.sh nodrop-c, with one compatibility header for the two C APIs), and the 64 B and 1 KiB cells are recorded. The 8 B cells with wz in them are not stated: a measured loss at the end of a run, not the rate, stops them.\n\nThe loss was found by changing one thing at a time. A wz publisher dropped before its session loses the last 500 to 1100 puts in 4 to 16 of 20 runs at 400 k/s; left to the session drop, or after a pause of 5 ms, it loses none. The undeclare of the publisher's key (Control) overtakes the queued puts (Data) on the writer lanes and the peer, which has unregistered the alias, drops them. The barrier in the lanes that is built and not landed (fence-wip) removes the loss in the same test, 0 of 20. This round does not land it: its owner is reading an unrelated race that it makes likelier. A flush of the open batch frame before the seal was tried first and changed nothing, and was not kept.",
+      "changes_bullets": [
+        "scripts/host-bench/bench_api.h (new): the one place where zenoh-pico's and zenoh-c's C APIs differ for the benches: the header, how a config value is stated, the Z_FEATURE macros, and a publisher that starts when a matching subscriber is visible (zenoh-c announces it after the connection, which the fixed sleep of the bench did not bound).",
+        "scripts/host-bench/paced_pub.c, count_sub.c: include bench_api.h; paced_pub.c gains -g MS (a pause after the last put) and -n (leave the publisher to the session close), both off in a measurement and described in its header.",
+        "scripts/pico-compare.sh: mode nodrop-c, which installs the zenoh-c release, builds wz-capi-c with the drop-in features, compiles the benches against each and runs the search.",
+        "docs/upstream-parity.md: two rows and two paragraphs for the zenoh-c family, the caveats, and the loss with its cause.",
+        "No library code changed in this round."
+      ],
+      "verification_bullets": [
+        "On pc3 through bx, idle host: pico-compare.sh nodrop-c 3 8,64,1024 at the default pinning (publisher on CPUs 6,7, subscriber on 10,11, trials of 3 s, resolution 5 percent), median of three. 64 B: PP 4.00 M, PW 4.00 M, WP 4.96 M, WW at least 5.12 M (the search stopped with nothing lost). 1 KiB: PP 2.24 M, PW 2.24 M, WP 3.12 M, WW 3.52 M (three readings of 3.52 M). P is zenoh-c, W is wz-capi-c. Two earlier runs are not used: the first lost the start of each run to the subscriber's announcement, and the second ran while other builds used the pinned CPUs and the trials' own check rejected most of it.",
+        "The loss: 20 runs per variant at 8 B and 400 k/s, wz to wz. With the publisher dropped first, 13, 16, 5 and 4 runs lost puts in four repetitions; with the publisher left to the session 0 of 20; with a pause of 5, 20, 100 and 1000 ms 0 of 20 each; with the barrier applied uncommitted 0 of 20. The kernel's abort counters were not what lost them."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Not stated: the 8 B cells with wz in them, until the barrier in the writer lanes lands; then they are read again (its owner was sent the evidence). Not measured: a pinning with more CPUs for the many-threaded zenoh-c, the batched and 2048 B rows of this family, a host other than pc3, and a zenoh (Rust) counterpart. Open: where the wz subscriber's time goes (needs a user-mode profile; perf_event_paranoid is 4 on the bench host)."
+      ],
+      "publishable_decision_summary": "The host throughput comparison is extended from the pico family to the zenoh-c family: the same publisher and subscriber sources are built against the zenoh-c 1.10.2 release and against wz-capi-c (scripts/pico-compare.sh nodrop-c, with one compatibility header for the two C APIs), and the 64 B and 1 KiB cells are recorded. The 8 B cells with wz in them are not stated: a measured loss at the end of a run, not the rate, stops them.\n\nThe loss was found by changing one thing at a time. A wz publisher dropped before its session loses the last 500 to 1100 puts in 4 to 16 of 20 runs at 400 k/s; left to the session drop, or after a pause of 5 ms, it loses none. The undeclare of the publisher's key (Control) overtakes the queued puts (Data) on the writer lanes and the peer, which has unregistered the alias, drops them. The barrier in the lanes that is built and not landed (fence-wip) removes the loss in the same test, 0 of 20. This round does not land it: its owner is reading an unrelated race that it makes likelier. A flush of the open batch frame before the seal was tried first and changed nothing, and was not kept.",
+      "publishable_changes_bullets": [
+        "scripts/host-bench/bench_api.h (new): the one place where zenoh-pico's and zenoh-c's C APIs differ for the benches: the header, how a config value is stated, the Z_FEATURE macros, and a publisher that starts when a matching subscriber is visible (zenoh-c announces it after the connection, which the fixed sleep of the bench did not bound).",
+        "scripts/host-bench/paced_pub.c, count_sub.c: include bench_api.h; paced_pub.c gains -g MS (a pause after the last put) and -n (leave the publisher to the session close), both off in a measurement and described in its header.",
+        "scripts/pico-compare.sh: mode nodrop-c, which installs the zenoh-c release, builds wz-capi-c with the drop-in features, compiles the benches against each and runs the search.",
+        "docs/upstream-parity.md: two rows and two paragraphs for the zenoh-c family, the caveats, and the loss with its cause.",
+        "No library code changed in this round."
+      ],
+      "publishable_verification_bullets": [
+        "On pc3 through bx, idle host: pico-compare.sh nodrop-c 3 8,64,1024 at the default pinning (publisher on CPUs 6,7, subscriber on 10,11, trials of 3 s, resolution 5 percent), median of three. 64 B: PP 4.00 M, PW 4.00 M, WP 4.96 M, WW at least 5.12 M (the search stopped with nothing lost). 1 KiB: PP 2.24 M, PW 2.24 M, WP 3.12 M, WW 3.52 M (three readings of 3.52 M). P is zenoh-c, W is wz-capi-c. Two earlier runs are not used: the first lost the start of each run to the subscriber's announcement, and the second ran while other builds used the pinned CPUs and the trials' own check rejected most of it.",
+        "The loss: 20 runs per variant at 8 B and 400 k/s, wz to wz. With the publisher dropped first, 13, 16, 5 and 4 runs lost puts in four repetitions; with the publisher left to the session 0 of 20; with a pause of 5, 20, 100 and 1000 ms 0 of 20 each; with the barrier applied uncommitted 0 of 20. The kernel's abort counters were not what lost them."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Not stated: the 8 B cells with wz in them, until the barrier in the writer lanes lands; then they are read again (its owner was sent the evidence). Not measured: a pinning with more CPUs for the many-threaded zenoh-c, the batched and 2048 B rows of this family, a host other than pc3, and a zenoh (Rust) counterpart. Open: where the wz subscriber's time goes (needs a user-mode profile; perf_event_paranoid is 4 on the bench host)."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
