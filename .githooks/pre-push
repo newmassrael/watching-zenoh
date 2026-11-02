@@ -962,6 +962,10 @@ round_fed_gates=(
     # deploy/wz-config.toml (the limits a node's budgets name) and every deploy/nodes/*.toml; the
     # selftest holds each refusal and ends by checking the registered declarations. A text read.
     "wz_node.py --selftest"
+    # R4131 -- the fuzz targets' seeds. Round-fed by captures/ and the reproducers pinned to its
+    # files (a capture moved or removed leaves a pinned input pointing at nothing): the selftest
+    # derives every target's seeds from the tree. A text read; the targets themselves are Layer Fz.
+    "fuzz_seeds.py --selftest"
     # The closed key set's generator (docs/closed-key-set.md, phase 1). Round-fed by
     # deploy/wz-config.toml (the key limit) and crates/wz-session-core/tests/key_set_data/: the
     # selftest holds each refusal and ends by checking the fixture's derived table and matcher corpus

@@ -25472,6 +25472,22 @@ layer_qzk_client_images_build() {
     return "$fail"
 }
 
+# ─── Layer Fz — the fuzz targets' seeds and reproducers, once each ──
+# The C ABI doors of wz-capi-dissect and wz-capi-replay take bytes a consumer
+# was handed from outside (capture files, live packets, schemas, E2E headers,
+# replay payloads), and a defect there is a crash of the consumer's process.
+# `crates/wz-fuzz` holds a coverage-guided target per family of doors; this lane
+# builds them (their own pinned nightly, AddressSanitizer) and runs every seed
+# `scripts/lib/fuzz_seeds.py` derives from `captures/` and the crate's examples,
+# and every reproducer under `crates/wz-fuzz/regressions/`, through its target
+# once. `scripts/fuzz.sh regress` counts what each target ran, so a target that
+# read no input fails rather than passing. The long runs that FIND inputs are
+# `.github/workflows/fuzz.yml`, nightly; this lane keeps what they found fixed.
+layer_fz_fuzz_regress() {
+    python3 scripts/lib/fuzz_seeds.py --selftest || return 1
+    bash scripts/fuzz.sh regress
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 # R3978 — the oracles this machine has already built, copied into this checkout
@@ -25653,6 +25669,7 @@ run_layer E16 layer_e16_fs_backend_shares_a_directory_with_upstream || overall=1
 run_layer E17 layer_e17_stats_registry_writes_upstreams_document || overall=1
 run_layer E18 layer_e18_zenoh_family_conformance || overall=1
 run_layer F layer_f_codec_footprint || overall=1
+run_layer Fz layer_fz_fuzz_regress || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
 run_layer Qa layer_qa_mcu_admin_node_vs_zenohd || overall=1

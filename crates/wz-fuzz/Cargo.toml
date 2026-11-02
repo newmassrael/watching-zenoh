@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Coverage-guided fuzz targets for the C ABI doors a consumer hands outside
+# bytes to: the capture, live, transport, text, schema and E2E doors of
+# `wz-capi-dissect` and the mutation and plan doors of `wz-capi-replay`.
+#
+# ## Why the doors and not the Rust beneath them
+#
+# A consumer reaches the parsers only through these `extern "C"` functions, and
+# a defect it can crash on may sit in the door itself: the null and length
+# checks, the string handed out and freed, the caller's buffer sized and
+# filled. A target calls each door exactly as a C caller does (the crates are
+# linked as rlibs, so no second binding layer stands between), and holds every
+# answer to the door's documented contract (`src/lib.rs`).
+#
+# ## Why a workspace of its own
+#
+# libFuzzer's instrumentation needs a nightly compiler (`rust-toolchain.toml`
+# here pins one) and the sanitizer flags `cargo fuzz` passes, neither of which
+# the product workspace (`crates/Cargo.toml`, pinned stable) may take. The
+# `[workspace]` table below makes this directory its own root, so no lane of
+# the product workspace builds it and its lock file pins only what it adds.
+#
+# `scripts/fuzz.sh` builds, seeds, replays and runs it; Layer Fz of
+# `scripts/run-ci.sh` replays the seeds and the committed reproducers on every
+# push, and `.github/workflows/fuzz.yml` fuzzes each target every night.
+[package]
+name = "wz-fuzz"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+serde_json = "1"
+wz-capi-dissect = { path = "../wz-capi-dissect" }
+wz-capi-replay = { path = "../wz-capi-replay" }
+
+[[bin]]
+name = "pcap"
+path = "fuzz_targets/pcap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "live"
+path = "fuzz_targets/live.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport"
+path = "fuzz_targets/transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto"
+path = "fuzz_targets/proto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "e2e"
+path = "fuzz_targets/e2e.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay"
+path = "fuzz_targets/replay.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,9 @@
+# The compiler of the fuzz targets, and of nothing else: libFuzzer's coverage
+# instrumentation and AddressSanitizer need `-Zsanitizer`, which only a nightly
+# takes. Pinned to a dated nightly for the reason the product workspace pins its
+# stable (`../../rust-toolchain.toml`): a floating channel would change the
+# compiler under a run without a commit saying so. Moving it is a commit of its
+# own. `scripts/fuzz.sh` installs it where it is missing.
+[toolchain]
+channel = "nightly-2026-06-07"
+profile = "minimal"

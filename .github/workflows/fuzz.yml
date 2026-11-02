@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Nightly coverage-guided fuzzing of the C ABI doors a consumer hands outside
+# bytes to (crates/wz-fuzz): each target for a fixed time, with
+# AddressSanitizer, starting from the corpus the previous night left.
+#
+# What a night FINDS is a crash written to crates/target/fuzz/artifacts/ and
+# uploaded as this run's artifact; the commit that fixes it copies the input to
+# crates/wz-fuzz/regressions/<target>/, where Layer Fz of the `ci` workflow
+# replays it on every push. A red run here is a debt item of its own, not a
+# red of the push it ran after.
+#
+# The corpus is cached per target and restored from the newest entry, so the
+# coverage each night reached is where the next one starts. A run started by
+# hand may give a shorter or longer time per target.
+
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds of fuzzing per target"
+        required: false
+        default: "1200"
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # The targets `scripts/fuzz.sh targets` prints; Layer C0 does not read
+        # this list, so a target added there is added here in the same commit.
+        target: [pcap, live, transport, text, proto, e2e, replay]
+    env:
+      WZ_FUZZ_SECONDS: ${{ github.event.inputs.seconds || '1200' }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # No cargo cache, for the reason ci.yml's fuzz-regress job gives: the
+      # cache budget has no room for one, and the targets build cold.
+      - name: Restore the corpus of ${{ matrix.target }}
+        uses: actions/cache/restore@v4
+        with:
+          path: crates/target/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz ${{ matrix.target }}
+        run: bash scripts/fuzz.sh run "${{ matrix.target }}" "$WZ_FUZZ_SECONDS" 2
+
+      - name: Save the corpus of ${{ matrix.target }}
+        # From the default branch only, where the schedule runs: an entry a
+        # branch run wrote could be read by no other ref.
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: crates/target/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload what crashed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: crates/target/fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

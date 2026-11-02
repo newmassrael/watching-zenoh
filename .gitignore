@@ -35,6 +35,14 @@ crates/target/
 # a `git add -A crates` before this line existed: build output, and a
 # machine-local absolute path, in a committed file.
 crates/target
+# The fuzz workspace (crates/wz-fuzz): scripts/fuzz.sh builds into
+# crates/target/fuzz, but `cargo fuzz` run by hand inside it writes its own
+# target, corpus and artifacts there. Its Cargo.lock is committed, for the
+# reason `oracles/Cargo.lock` is.
+crates/wz-fuzz/target/
+crates/wz-fuzz/corpus/
+crates/wz-fuzz/artifacts/
+crates/wz-fuzz/coverage/
 vendor/sce/target/
 # R311be — deploy/mcu-qemu-demo is a standalone workspace
 # (cross-compile to thumbv7m-none-eabi); its target/ is build

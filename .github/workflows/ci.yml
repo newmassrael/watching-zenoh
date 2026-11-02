@@ -2372,6 +2372,39 @@ jobs:
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
+  # The fuzz targets of the C ABI doors a consumer hands outside bytes to
+  # (crates/wz-fuzz), each run once over its seeds and its committed
+  # reproducers. A job of its own because the targets are built by their own
+  # pinned nightly with AddressSanitizer, into their own target directory:
+  # nothing another job compiles is reusable here, and nothing here is reusable
+  # there. The nightly runs that FIND inputs are .github/workflows/fuzz.yml.
+  fuzz-regress:
+    name: fuzz seeds and reproducers (Layer Fz)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # The doors reach vendor/sce through wz-session-core's path dependencies.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # No cargo cache: the cache budget (.github/cache-classes.json) has no
+      # room for another rust-cache class, and the targets build cold in about
+      # a minute on a build machine. scripts/fuzz.sh installs the pinned
+      # nightly itself.
+      - name: Layer Fz — every seed and reproducer through its fuzz target
+        run: bash scripts/run-ci.sh --layer Fz
+
+      - name: Budget margin — this job's own clock
+        # No floor yet: the job has not been timed on a hosted runner, and a
+        # floor guessed before the first run would fail a job for being fast.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90
+
   # ─────────────────────────────────────────────────────────────────
   # R3464 — the NON-DEFAULT TEST LEGS job, peeled off the `dissect` job above.
   #
