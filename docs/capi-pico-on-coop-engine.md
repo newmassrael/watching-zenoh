@@ -1099,12 +1099,18 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     channel's error of the latest that had one, which is how a program sees the arena or the
     key store run out. The counters are on the typed listener; the C ABI's listener is boxed
     behind `TlsDial::listen`, so a C program does not read them yet.
-  - The Zephyr kit image was not rebuilt here: it needs the Zephyr workspace (Layer Qzk builds it
-    on the hosted runner). The first cut of this step did not reach it; this one does: the image
+  - The Zephyr kit images. The first cut of this step did not reach them; this one does: an image
     compiles `csrc/wz_tls.c` and `src/stream.rs` itself. The C side gained code only under
     `rsa`, which the image never sets, so its object is what it was; the Rust side gained two
-    fields of a listener (a counter and the last error, about eight bytes of RAM). That has not
-    been built for the image.
+    fields of a listener (a counter and the last error, about eight bytes of RAM). Built with
+    `scripts/kit-lane.sh build` (what Layer Qzk runs), west on the development host, whose
+    `~/zephyrproject` and SDK are the only ones among the build hosts that were checked (pc2 and
+    pc3 have none): `zephyr-client-fixed-tls` built (text 256,552 B, padded image sha256
+    1ab77ee5...; it has no stack-gate row yet) and `zephyr-admin-fixed-tls` built and held by
+    both gates (stack chain 35,312 B against a 47,104 B stack; text 326,184 B against the
+    committed 326,088 B, within the 1,024 B the gate allows). The 96 B of text over the committed
+    row was not attributed to this step: no image was built from the commit before it. Nothing
+    was flashed or booted.
 
 ### What is decided and what is open
 
