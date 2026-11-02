@@ -2644,6 +2644,15 @@ pub struct RouterForwarder {
     /// This node's own zid, which every line the router logs names it by (`node=`), so that the
     /// lines of the several nodes of one process, or of one log collector, can be told apart.
     own_zid: Zid,
+    /// This node's links to each remote node from the moment a handshake names it, which the
+    /// loops that open this node's links ask while the link is still being established
+    /// ([`FaceForwarder::link_admission`]). One registry for every loop of the node, because only
+    /// the registry sees the link another loop has under way: two nodes that dial each other at
+    /// once then end with the one link that the lower zid dialled, and no declaration crosses
+    /// the other, so that a token is not retracted and declared again by the face that replaces
+    /// the first.
+    #[cfg(feature = "routing-accept")]
+    links: Arc<crate::link_registry::LinkRegistry>,
     /// The sessions this router holds, as far as closing the newest of them for capacity needs
     /// them (see [`shed`]). Behind a lock and not in [`faces`](Self#structfield.faces), so that
     /// the capacity control, a task of the control runtime, can shed while the loop is starved.
@@ -4416,6 +4425,8 @@ impl RouterForwarder {
             interception_source: std::sync::OnceLock::new(),
             credit: Arc::new(egress::Credit::default()),
             own_zid: self_zid,
+            #[cfg(feature = "routing-accept")]
+            links: Arc::new(crate::link_registry::LinkRegistry::new(self_zid.as_slice())),
             shed_registry: Arc::default(),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
             // enables autoconnect behaves byte-for-byte as before.
@@ -12617,6 +12628,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 state.tier
             );
         }
+        // The link's place in the node's admission is free the moment its face is: the node that
+        // comes back is not refused for the link that left, however long the loop keeps the
+        // session.
+        #[cfg(feature = "routing-accept")]
+        if let Some(state) = self.tables.faces.get(&id) {
+            state.actions.release_link_admission();
+        }
         self.shed_registry.remove(id);
         self.tables.mesh_ids.forget_face(id);
         // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
@@ -13330,6 +13348,14 @@ impl FaceForwarder for RouterForwarder {
             tables.north_net().self_zid().as_slice(),
             remote_zid,
         ))
+    }
+
+    /// The node's registry of links, asked by each link's handshake: a second link to a node this
+    /// router holds a link to, or prefers another to, is closed with `MaxLinks` before either
+    /// end has declared anything over it. [`Self::judge_second_link`] stays the rule for a link
+    /// that came up while no rival was known (a loop that aggregates links asks nothing here).
+    fn link_admission(&self) -> Option<Arc<dyn wz_session_core::link_admission::LinkAdmission>> {
+        Some(Arc::clone(&self.links) as Arc<dyn wz_session_core::link_admission::LinkAdmission>)
     }
 
     /// The held face is asked to close through the registry that holds the handle of every

@@ -3,22 +3,25 @@
 #![cfg(all(feature = "routing-router-hat", feature = "transport-link-tcp"))]
 
 //! Two nodes that each listen and each dial the other end with ONE link, the same one at both
-//! ends: the link the node with the lower zid dialled.
+//! ends, and neither of them ever brings up a face for the other.
 //!
-//! This is the LOOP-level witness of `crate::link_collision` and of the rule it reads
-//! (`wz_session_core::link_admission`). The machine and the rule are tested without sockets, over
-//! every order the two ends can complete their links in; what only a loop can show is that the
-//! loop does what the machine says: asks the held face to close, parks the link that replaces
-//! it, admits it after the face has gone, and leaves the node holding one face and the routing
-//! state of one.
+//! This is the LOOP-level witness of the router's admission of a second link
+//! (`RouterForwarder::link_admission`, the registry of `crate::link_registry`) and of the rule it
+//! reads (`wz_session_core::link_admission`). The machine and the rule are tested without
+//! sockets, over every order the two ends can complete their links in; what only a loop can show
+//! is that the link the node does not keep is closed in its handshake, before a declaration
+//! crossed it, and leaves the node holding one face and the routing state of one.
 //!
 //! The nodes are two `peer_loop`s on one task, joined, each with a router's forwarder (which keys
 //! its graph on the zid and so keeps one face per zid), each bound before either dials. Both
 //! start their dial in the same poll, so the two links cross: each end sees the link it dialled
-//! and the link the other dialled complete in whichever order the handshakes interleave in. With
-//! "the first up" the two ends decide that differently and each closes the link the other kept;
-//! the rounds alternate which node has the lower zid, so the rule's two arms (the held face is
-//! kept, the held face is replaced) are both run.
+//! and the link the other dialled in whichever order the handshakes interleave in. Which link is
+//! kept is the handshake's: a link that has been established keeps its place (as a BGP session
+//! does), and of two still in their handshake the one the lower zid dialled wins. Both ends read
+//! the same, so the one link is the same at both. The rounds alternate which node has the lower
+//! zid. The earlier form of this test asked for the lower zid's link in every round, which is
+//! what the loop's decision after the link is up gave: a face brought up, closed and brought up
+//! again, that the application of a node was told.
 //!
 //! What is read is what each loop reports: the faces it holds, by their `FaceUp` and `FaceDown`
 //! events, and whether it dialled each.
@@ -215,9 +218,9 @@ async fn round(a_zid: u8, b_zid: u8) -> (Held, Held) {
     (take(&a_held), take(&b_held))
 }
 
-/// Two nodes that dial each other keep one link, the one the lower zid dialled, at both ends.
+/// Two nodes that dial each other keep one link, the same at both ends, and bring up one face.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_routers_that_dial_each_other_keep_the_link_the_lower_zid_dialled() {
+async fn two_routers_that_dial_each_other_keep_one_link_and_bring_up_one_face() {
     for n in 0..ROUNDS {
         // The lower zid is the first node's in the even rounds and the second's in the odd ones.
         let (low, high) = (0x10 + n, 0xa0 + n);
@@ -243,12 +246,15 @@ async fn two_routers_that_dial_each_other_keep_the_link_the_lower_zid_dialled() 
              (a {:?}, b {:?})",
             a.log, b.log
         );
-        let a_is_lower = a_zid < b_zid;
+        // The link that is not kept is refused in its handshake, so it never becomes a face: a
+        // node that held one link and then closed it for the other would have told its
+        // application a node that left and came back.
         assert_eq!(
-            a_face.1, a_is_lower,
-            "round {n}: the link kept is the one the lower zid dialled (a lower: {a_is_lower}; \
-             a {:?}, b {:?})",
-            a.log, b.log
+            (a.events, b.events),
+            (1, 1),
+            "round {n}: each node brought up one face and took none down (a {:?}, b {:?})",
+            a.log,
+            b.log
         );
     }
 }
