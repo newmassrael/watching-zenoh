@@ -13,6 +13,10 @@
 #                                             scripts/host-bench's paced publisher and counting subscriber, which
 #                                             are built against each library from the same source: the control
 #                                             (pico on both sides) has a number where `thr` has none
+#   scripts/pico-compare.sh nodrop-c [reps] [sizes]
+#                                             the same search for the zenoh-c family: the benches built against the
+#                                             pinned zenoh-c release (variant P) and against wz-capi-c (variant W),
+#                                             which is provisioned and built under target/ by the mode itself
 #
 # Both sides of every pair are built from the SAME example source: once against the vendored zenoh-pico
 # library and once against `libwz_capi_pico`, in place of it. A number printed here is therefore the
@@ -49,7 +53,7 @@ wz_lib="$root/crates/target/release"
 out="$root/target/pico-compare"
 mkdir -p "$out/bin"
 
-if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
+if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ]; then
     bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
     (cd crates && cargo build --release -p wz-capi-pico) >"$out/build-wz.log" 2>&1 \
@@ -93,7 +97,45 @@ build_bench() {
         || { echo "pico-compare: NOT-MEASURED, $name against $variant did not build (see $out/build-${name}_$variant.log)"; exit 2; }
 }
 
+# build_zenoh_c_family: the zenoh-c counterpart of the pico family, for `nodrop-c`. Variant P is the zenoh-c
+# release (its headers and libzenohc.so at the pinned version, provisioned under this tree's target/), variant W
+# the wz library that stands in for it (wz-capi-c built for the features of that release's zenoh_configure.h,
+# the way Layer C1cc builds it). The benches are the same source (scripts/host-bench, BENCH_ZENOHC) built against
+# each, into $out/bin-c under the names the search program looks for.
+build_zenoh_c_family() {
+    local prefix="${WZ_ZENOH_C_PREFIX:-$root/target/zenoh-c-prefix}"
+    local ref="${WZ_ZENOH_C_REF:-$root/target/zenoh-c-ref}"
+    local wz_c_lib="$root/crates/target/release" args bench variant lib libname
+    mkdir -p "$out/bin-c"
+    WZ_ZENOH_C_PREFIX="$prefix" WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c.sh >"$out/build-zenoh-c.log" 2>&1 \
+        || { echo "pico-compare: NOT-MEASURED, the zenoh-c release did not install (see $out/build-zenoh-c.log)"; exit 2; }
+    bash scripts/provision-kconfiglib.sh >"$out/build-kconfiglib.log" 2>&1 \
+        || { echo "pico-compare: NOT-MEASURED, kconfiglib did not install (see $out/build-kconfiglib.log)"; exit 2; }
+    args="$(python3 -I scripts/lib/wz_config.py --drop-in-features c "$prefix/include/zenoh_configure.h")" \
+        || { echo "pico-compare: NOT-MEASURED, no drop-in features for $prefix/include/zenoh_configure.h"; exit 2; }
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build --release -p wz-capi-c $args) >"$out/build-wz-c.log" 2>&1 \
+        || { echo "pico-compare: NOT-MEASURED, wz-capi-c did not build (see $out/build-wz-c.log)"; exit 2; }
+    for bench in paced_pub count_sub; do
+        for variant in P W; do
+            if [ "$variant" = P ]; then
+                lib="$prefix/lib"
+                libname=zenohc
+            else
+                lib="$wz_c_lib"
+                libname=wz_capi_c
+            fi
+            cc -O2 -DBENCH_ZENOHC "$root/scripts/host-bench/$bench.c" -I"$prefix/include" -o "$out/bin-c/${bench}_$variant" \
+                -L"$lib" "-l$libname" "-Wl,-rpath,$lib" -lpthread 2>"$out/build-${bench}_c_$variant.log" \
+                || { echo "pico-compare: NOT-MEASURED, $bench against $variant (zenoh-c family) did not build (see $out/build-${bench}_c_$variant.log)"; exit 2; }
+        done
+    done
+}
+
 case "${1:-}" in
+    nodrop-c)
+        build_zenoh_c_family
+        ;;
     nodrop|profile|tids)
         for bench in paced_pub count_sub; do
             for variant in P W; do
@@ -264,6 +306,17 @@ tids() {
     done
 }
 
+# nodrop-c [reps] [sizes]: `nodrop` for the zenoh-c family, with the same benches, trial and search. In the pair
+# letters P is the zenoh-c release and W is the wz library standing in for it (wz-capi-c), not zenoh-pico.
+nodrop_c() {
+    local reps="${1:-3}" sizes="${2:-8,64,1024}"
+    local batch=()
+    [ "${PICO_CMP_BATCH:-0}" = 1 ] && batch=(--batch)
+    echo "zenoh-c family: P is the zenoh-c release, W is wz-capi-c"
+    python3 -I "$root/scripts/host-bench/nodrop.py" --bin-dir "$out/bin-c" --reps "$reps" --sizes "$sizes" \
+        --pub-cpus "$pub_cpus" --sub-cpus "$sub_cpus" --wz-env "$wz_env" "${batch[@]}"
+}
+
 mode="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$mode" in
@@ -271,9 +324,10 @@ case "$mode" in
     rtt) rtt "$@" ;;
     thr) thr "$@" ;;
     nodrop) nodrop "$@" ;;
+    nodrop-c) nodrop_c "$@" ;;
     profile) profile "$@" ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | profile [size] [rate]" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate]" >&2
         exit 2
         ;;
 esac

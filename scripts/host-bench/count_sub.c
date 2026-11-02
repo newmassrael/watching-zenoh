@@ -19,7 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "zenoh-pico.h"
+#include "bench_api.h"
 
 #if Z_FEATURE_SUBSCRIPTION == 1
 
@@ -46,10 +46,10 @@ int main(int argc, char **argv) {
                 keyexpr = optarg;
                 break;
             case 'l':
-                zp_config_insert(z_loan_mut(config), Z_CONFIG_LISTEN_KEY, optarg);
+                BENCH_CONFIG_INSERT(config, Z_CONFIG_LISTEN_KEY, optarg);
                 break;
             case 'm':
-                zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, optarg);
+                BENCH_CONFIG_INSERT(config, Z_CONFIG_MODE_KEY, optarg);
                 break;
             case 'd':
                 seconds = (unsigned)strtoul(optarg, NULL, 10);

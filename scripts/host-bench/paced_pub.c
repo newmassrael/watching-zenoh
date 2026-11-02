@@ -26,6 +26,10 @@
 //   paced_pub sent=<puts that returned 0> failed=<puts that returned an error> elapsed_s=<seconds from the
 //   first slot to the end of the last put> late_slots=<n>
 //
+// Two switches exist to tell where a loss at the end of a run comes from, and are off in a measurement:
+// -g MS waits that long after the last put before anything is closed, and -n leaves the publisher to the
+// session's close instead of dropping it first (a dropped publisher sends the undeclare of its key).
+//
 // The publisher is Z_CONGESTION_CONTROL_BLOCK: a full link slows it down (and shows as an elapsed time
 // past the trial and as late slots) and does not drop at the sender, so a message the subscriber never
 // counts was lost on the way. With -d it is Z_CONGESTION_CONTROL_DROP, as the upstream throughput example
@@ -38,7 +42,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "zenoh-pico.h"
+#include "bench_api.h"
 
 #if Z_FEATURE_PUBLICATION == 1
 
@@ -61,12 +65,20 @@ int main(int argc, char **argv) {
     int batching = 0;
     int drop = 0;
     int sleep_wait = 0;
+    unsigned grace_ms = 0;
+    int keep_publisher = 0;
 
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
-    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:bdw")) != -1) {
+    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:g:bdwn")) != -1) {
         switch (opt) {
+            case 'n':
+                keep_publisher = 1;
+                break;
+            case 'g':
+                grace_ms = (unsigned)strtoul(optarg, NULL, 10);
+                break;
             case 'w':
                 sleep_wait = 1;
                 break;
@@ -80,10 +92,10 @@ int main(int argc, char **argv) {
                 keyexpr = optarg;
                 break;
             case 'e':
-                zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, optarg);
+                BENCH_CONFIG_INSERT(config, Z_CONFIG_CONNECT_KEY, optarg);
                 break;
             case 'm':
-                zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, optarg);
+                BENCH_CONFIG_INSERT(config, Z_CONFIG_MODE_KEY, optarg);
                 break;
             case 's':
                 len = (size_t)strtoul(optarg, NULL, 10);
@@ -95,7 +107,7 @@ int main(int argc, char **argv) {
                 seconds = (unsigned)strtoul(optarg, NULL, 10);
                 break;
             default:
-                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w]\n");
+                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w] [-g MS] [-n]\n");
                 return 2;
         }
     }
@@ -121,6 +133,7 @@ int main(int argc, char **argv) {
         printf("paced_pub: unable to declare the publisher\n");
         return 1;
     }
+    BENCH_WAIT_MATCHING(z_loan(pub));
 
     uint8_t *value = (uint8_t *)z_malloc(len);
     memset(value, 1, len);
@@ -174,7 +187,8 @@ int main(int argc, char **argv) {
            (double)(end - t0) / 1e9, late);
     fflush(stdout);
 
-    z_drop(z_move(pub));
+    if (grace_ms > 0) usleep((useconds_t)grace_ms * 1000U);
+    if (!keep_publisher) z_drop(z_move(pub));
     z_drop(z_move(s));
     z_drop(z_move(payload));
     return 0;
