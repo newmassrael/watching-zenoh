@@ -20844,6 +20844,24 @@ layer_z_zenohd_interop() {
         pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group \
         pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd \
         || return 1
+    # A sample through a real router to a subscriber on wz, and the secure channel to that router
+    # in both roles (step T5 of L6, `docs/capi-pico-on-coop-engine.md`): a real pico `z_pub` puts
+    # through zenohd's `tcp/` listener and a wz subscriber hears it over plain `tcp/` (the control),
+    # over a `tls/` link it dials, and over a `tls/` link zenohd dials into it. The router names a
+    # subscriber's key by an id the subscriber declared, so these are the legs that read whether an
+    # engine resolves its own ids; the cooperative engine heard nothing through a router until it
+    # did. The tokio engine's run is the reference the cooperative engine's is read against.
+    local router_pubsub_legs=(
+        pico_zsub_source_on_wz_capi_hears_a_real_pico_put_through_zenohd
+        pico_zsubtls_source_on_wz_capi_dials_a_zenohd_tls_listener_and_hears_a_real_pico_put_through_zenohd
+        pico_zsubtls_source_on_wz_capi_serves_a_zenohd_that_dials_it_over_tls_and_hears_a_real_pico_put_through_zenohd
+    )
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_c_examples_on_wz_capi_dropin \
+        -- --ignored --quiet --test-threads=1 "${router_pubsub_legs[@]}" || return 1
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
+        cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin \
+        -- --ignored --quiet --test-threads=1 "${router_pubsub_legs[@]}" || return 1
     # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
     # witness the `@adv` plane has ever had. Every advanced-pubsub test before
     # this was wz<->wz, which cannot see a selector-dialect divergence: the same

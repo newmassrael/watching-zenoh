@@ -1150,7 +1150,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # 3 links. They were pushed WITHOUT the `wz-proves` lines and hosted Layer A4 redded for it (run
 # 41192748568, `corpus test declares nothing: 2`); measured by `audit-crossimpl-proof.sh`
 # (`measured 1084, declared 1081`).
-FOREIGN_ADJUDICATOR_LINKS = 1084
+# Step T5 of L6 -- 1084 -> 1087, RISING by three: the three legs of `pico_c_examples_on_wz_capi_dropin.rs`
+# that carry a sample through a real zenohd to a subscriber on wz, each adjudicating `api-compat-pico`
+# as `partial`: the plain-`tcp/` control and the leg where wz dials zenohd's `tls/` listener are
+# `wz->zenohd`, and the leg where zenohd dials wz's `tls/` acceptor is `zenohd->wz`: 3 tests x 1 atom
+# = 3. Measured by `audit-crossimpl-proof.sh` (`measured 1087, declared 1084`).
+FOREIGN_ADJUDICATOR_LINKS = 1087
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

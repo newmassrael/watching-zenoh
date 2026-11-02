@@ -100,10 +100,10 @@ use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_in,
     devices_holding_group, graceful_terminate, project_root, read_captured,
     run_query_until_answered, spawn_zenohd_multicast_scouting_on_any_interface,
-    wait_for_capture_alive, wait_for_exit, wait_for_substring, wait_for_tcp_accept_alive,
-    zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenoh_pico_include_dirs_single_threaded,
-    zenoh_pico_library_dir, zenohd_binary, ChildGuard, NetnsPair, PicoHeaderArm, PortReservation,
-    QueryAttempts,
+    spawn_zenohd_tcp_tls, spawn_zenohd_tls_dialer, wait_for_capture_alive, wait_for_exit,
+    wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
+    zenoh_pico_include_dirs_single_threaded, zenoh_pico_library_dir, zenohd_binary, ChildGuard,
+    NetnsPair, PicoHeaderArm, PortReservation, QueryAttempts,
 };
 
 /// How many one-shot queries the declaration-propagation window may eat.
@@ -4959,6 +4959,306 @@ fn pico_zsubtls_source_on_wz_capi_dials_real_pico_zpubtls_over_tls() {
     );
 
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+}
+
+/// The PEM that upstream's `z_pub_tls.c` carries as base64 string literals: the root, the end
+/// certificate that root signed and that certificate's key, written as files in `dir` for a
+/// router that must present or trust the same material the example program does. They are
+/// zenoh's own test certificates (a minica root, RSA-2048), so a zenohd with a `tls/` listener
+/// presents what the stock examples were written to trust, and a wz program built from the
+/// example trusts what zenohd was given.
+struct PicoExampleTlsFiles {
+    ca: String,
+    cert: String,
+    key: String,
+}
+
+fn pico_example_tls_files(dir: &std::path::Path) -> PicoExampleTlsFiles {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let path = project_root().join("vendor/zenoh-pico/examples/unix/c11/z_pub_tls.c");
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e} (is vendor/zenoh-pico checked out?)",
+            path.display()
+        )
+    });
+    let write = |literal: &str, file: &str| -> String {
+        let head = format!("static const char {literal}[] =");
+        let start = source
+            .find(&head)
+            .unwrap_or_else(|| panic!("{literal} in z_pub_tls.c"))
+            + head.len();
+        let end = source[start..].find(';').expect("the literal ends") + start;
+        let base64: String = source[start..end].split('"').skip(1).step_by(2).collect();
+        let pem = STANDARD
+            .decode(base64)
+            .unwrap_or_else(|e| panic!("{literal} is base64: {e}"));
+        let target = dir.join(file);
+        std::fs::write(&target, pem).expect("write the example's PEM");
+        target.to_string_lossy().into_owned()
+    };
+    PicoExampleTlsFiles {
+        ca: write("SERVER_CA_PEM", "example-ca.pem"),
+        cert: write("SERVER_CERT_PEM", "example-cert.pem"),
+        key: write("SERVER_KEY_PEM", "example-key.pem"),
+    }
+}
+
+/// LEG 37 (`wz->zenohd`) — upstream's `z_sub_tls.c`, running on wz, DIALS a real zenohd's `tls/`
+/// listener and hears what a real zenoh-pico `z_pub` put through that router.
+///
+/// The router is the TLS server here, which neither of the two legs above has: zenohd's rustls
+/// presents the example's RSA-2048 certificate, signed by the minica root the program carries,
+/// and wz has to verify that chain and finish the handshake. The publisher never speaks TLS (it
+/// is a plain `tcp/` client of the same router), so the sample can only have reached the wz
+/// subscriber across the TLS link the program dialed.
+///
+/// The name carries `zenohd` deliberately: Layer E's sweep skips that token because it provisions
+/// no router, so this leg is registered by exact name in Layer Z, which does.
+// wz-proves: api-compat-pico wz->zenohd partial
+#[test]
+#[ignore = "spawns a real zenohd, the real zenoh-pico z_pub CLI and a cc-compiled binary; \
+            run by run-ci Layer Z"]
+fn pico_zsubtls_source_on_wz_capi_dials_a_zenohd_tls_listener_and_hears_a_real_pico_put_through_zenohd(
+) {
+    wz_subscriber_hears_a_real_pico_put_through_zenohd("z_sub_tls", true);
+}
+
+/// The CONTROL of LEG 37: the same topology and the same programs but for the secure channel, over
+/// plain `tcp/`. When LEG 37 fails, this says whether the failure is the channel's or the
+/// library's way of being a client of a router; and it is a leg of its own worth having, because
+/// no other drop-in leg carries a sample through a router to a subscriber on wz.
+///
+/// The name carries `zenohd` deliberately, for the reason LEG 37 states.
+// wz-proves: api-compat-pico wz->zenohd partial
+#[test]
+#[ignore = "spawns a real zenohd, the real zenoh-pico z_pub CLI and a cc-compiled binary; \
+            run by run-ci Layer Z"]
+fn pico_zsub_source_on_wz_capi_hears_a_real_pico_put_through_zenohd() {
+    wz_subscriber_hears_a_real_pico_put_through_zenohd("z_sub", false);
+}
+
+/// The body of LEG 37 and its control: a router with a `tls/` and a `tcp/` listener, a real pico
+/// `z_pub` putting through its `tcp/` one, and upstream's `example` running on wz as a client of
+/// the router, over `tls/` or over `tcp/`, until it hears the sample.
+fn wz_subscriber_hears_a_real_pico_put_through_zenohd(example: &str, over_tls: bool) {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in and the PEM");
+    let dropin = dropin_binary(example, dir.path());
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    let pems = pico_example_tls_files(dir.path());
+
+    let (tcp_reservation, tls_port) = PortReservation::pick_pair();
+    let tcp_port = tcp_reservation.port();
+    let mut zenohd = spawn_zenohd_tcp_tls(tcp_port, tls_port, &pems.cert, &pems.key, || {
+        tempfile::tempfile().expect("tempfile for the readiness probe stderr")
+    });
+    drop(tcp_reservation);
+
+    let endpoint = if over_tls {
+        format!("tls/127.0.0.1:{tls_port}")
+    } else {
+        format!("tcp/127.0.0.1:{tcp_port}")
+    };
+    let payload = "TLS-THROUGH-ZENOHD-TO-WZ";
+
+    let mut sub_out = tempfile::tempfile().expect("z_sub_tls drop-in stdout capture");
+    let sub_writer = sub_out.try_clone().expect("dup z_sub_tls stdout handle");
+    let sub_err = sub_out.try_clone().expect("dup z_sub_tls stderr handle");
+    let subscriber = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args([
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+            "-k",
+            TLS_KEY_FILTER,
+            "-n",
+            "1",
+        ])
+        .stdout(Stdio::from(sub_writer))
+        .stderr(Stdio::from(sub_err))
+        .spawn()
+        .expect("spawn the compiled z_sub_tls drop-in");
+
+    // `-n 60`: the publisher puts on a one-second timer until the subscriber, which leaves on its
+    // first sample, has declared across the TLS link and the router has routed to it.
+    let mut pub_out = tempfile::tempfile().expect("z_pub stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup z_pub stdout handle");
+    let pub_err = pub_out.try_clone().expect("dup z_pub stderr handle");
+    let mut publisher = ChildGuard::wrap(
+        "real zenoh-pico z_pub (tcp to zenohd)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_pub)
+            .args([
+                "-e",
+                &format!("tcp/127.0.0.1:{tcp_port}"),
+                "-m",
+                "client",
+                "-k",
+                TLS_KEY,
+                "-v",
+                payload,
+                "-n",
+                "60",
+            ])
+            .stdout(Stdio::from(pub_writer))
+            .stderr(Stdio::from(pub_err))
+            .spawn()
+            .expect("spawn the real zenoh-pico z_pub"),
+    );
+
+    let status = bounded_exit("z_sub_tls.c on wz-capi-pico", subscriber, &mut sub_out);
+    let captured = read_captured(&mut sub_out);
+    let published = read_captured(&mut pub_out);
+    let _ = publisher.child_mut().kill();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    assert!(
+        status.success(),
+        "upstream z_sub_tls.c on wz's C-ABI exited {status:?} dialing zenohd's TLS listener — it \
+         returns -1 when z_open fails, which is what a rejected chain, a refused handshake or an \
+         unsupported `tls/` scheme looks like from inside.\n\
+         --- z_sub_tls.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_pub stdout+stderr ---\n{published}"
+    );
+    assert!(
+        captured.contains(payload),
+        "wz's z_sub_tls opened a TLS session with zenohd but never reported the sample a real \
+         pico z_pub put through that router.\nexpected substring: {payload}\n\
+         --- z_sub_tls.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_pub stdout+stderr ---\n{published}"
+    );
+    assert!(
+        captured.contains(TLS_KEY),
+        "the payload crossed zenohd's TLS link but not on the key the publisher used \
+         ({TLS_KEY}).\n--- z_sub_tls.c (on wz) stdout ---\n{captured}"
+    );
+}
+
+/// LEG 38 (`zenohd->wz`) — upstream's `z_sub_tls.c`, running on wz, ACCEPTS a real zenohd that
+/// dials its `tls/` listener, and hears what a real zenoh-pico `z_pub` put through that router's
+/// `tcp/` listener.
+///
+/// The half LEG 35 cannot reach: there the foreign dialer is a zenoh-pico client, whose Mbed TLS
+/// asks for TLS 1.3 by default; here the dialer is zenohd's rustls, a different TLS stack,
+/// trusting the example's minica root (by `root_ca_certificate`, with the name check off so the
+/// by-address dial verifies the chain only) and checking the RSA-2048 chain wz presents. The
+/// publisher never speaks TLS, so the sample can only have crossed the link zenohd dialed.
+///
+/// The accepting program is the SUBSCRIBER, as in `wz_tls_acceptor_zenohd_interop`, and not the
+/// publisher: a declared publisher that a router dials has no subscriber to publish to until the
+/// router has declared one to it, which is a different question from the channel's.
+///
+/// The name carries `zenohd` deliberately, for the reason LEG 37 states.
+// wz-proves: api-compat-pico zenohd->wz partial
+#[test]
+#[ignore = "spawns a real zenohd, the real zenoh-pico z_pub CLI and a cc-compiled binary; \
+            run by run-ci Layer Z"]
+fn pico_zsubtls_source_on_wz_capi_serves_a_zenohd_that_dials_it_over_tls_and_hears_a_real_pico_put_through_zenohd(
+) {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in and the PEM");
+    let dropin = dropin_binary("z_sub_tls", dir.path());
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    let pems = pico_example_tls_files(dir.path());
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tls/127.0.0.1:{port}");
+    let payload = "TLS-INTO-WZ-THROUGH-ZENOHD";
+
+    // The wz subscriber listens as a peer on `tls/`, and leaves on its first sample.
+    let mut sub_out = tempfile::tempfile().expect("z_sub_tls drop-in stdout capture");
+    let sub_writer = sub_out.try_clone().expect("dup z_sub_tls stdout handle");
+    let sub_err = sub_out.try_clone().expect("dup z_sub_tls stderr handle");
+    let mut subscriber = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args([
+            "-l",
+            &endpoint,
+            "-m",
+            "peer",
+            "-k",
+            TLS_KEY_FILTER,
+            "-n",
+            "1",
+        ])
+        .stdout(Stdio::from(sub_writer))
+        .stderr(Stdio::from(sub_err))
+        .spawn()
+        .expect("spawn the compiled z_sub_tls drop-in");
+    if let Err(why) = wait_for_tcp_accept_alive(&mut subscriber, port, LISTEN_TIMEOUT) {
+        let _ = subscriber.kill();
+        panic!(
+            "the z_sub_tls.c drop-in never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    // zenohd dials the listener (`-e`), trusting the example's root, and listens on an
+    // OS-assigned `tcp/` port for the plain publisher.
+    let (mut zenohd, tcp_port) = spawn_zenohd_tls_dialer(&endpoint, &pems.ca);
+
+    // `-n 60`: the publisher puts on a one-second timer until the wz subscriber has declared
+    // across the link zenohd dialed and the router has routed to it.
+    let mut pub_out = tempfile::tempfile().expect("z_pub stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup z_pub stdout handle");
+    let pub_err = pub_out.try_clone().expect("dup z_pub stderr handle");
+    let mut publisher = ChildGuard::wrap(
+        "real zenoh-pico z_pub (tcp to zenohd)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_pub)
+            .args([
+                "-e",
+                &format!("tcp/127.0.0.1:{tcp_port}"),
+                "-m",
+                "client",
+                "-k",
+                TLS_KEY,
+                "-v",
+                payload,
+                "-n",
+                "60",
+            ])
+            .stdout(Stdio::from(pub_writer))
+            .stderr(Stdio::from(pub_err))
+            .spawn()
+            .expect("spawn the real zenoh-pico z_pub"),
+    );
+
+    let status = bounded_exit("z_sub_tls.c on wz-capi-pico", subscriber, &mut sub_out);
+    let captured = read_captured(&mut sub_out);
+    let published = read_captured(&mut pub_out);
+    let _ = publisher.child_mut().kill();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    assert!(
+        status.success(),
+        "upstream z_sub_tls.c on wz's C-ABI exited {status:?} while accepting zenohd.\n\
+         --- z_sub_tls.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_pub stdout+stderr ---\n{published}"
+    );
+    assert!(
+        captured.contains(payload),
+        "wz's z_sub_tls accepted on tls/ but never reported the sample a real pico z_pub put \
+         through zenohd, which can only reach it across the link zenohd dialed.\n\
+         expected substring: {payload}\n\
+         --- z_sub_tls.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_pub stdout+stderr ---\n{published}"
+    );
+    assert!(
+        captured.contains(TLS_KEY),
+        "the payload arrived through zenohd but not on the key the publisher used \
+         ({TLS_KEY}).\n--- z_sub_tls.c (on wz) stdout ---\n{captured}"
+    );
 }
 
 /// LEG 32 (`pico->wz`) — upstream's `z_pong.c`, running on wz, echoes for the

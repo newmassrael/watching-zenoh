@@ -489,6 +489,9 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", fea
 # output in a clean directory per test run (no pollution of $OUT_DIR
 # or vendor/sce/target).
 tempfile = "3"
+# The TLS legs through a real zenohd (`tests/pico_c_examples_on_wz_capi_dropin.rs`) write the
+# certificates upstream's `z_pub_tls.c` carries as base64 literals to files for the router.
+base64 = "0.22"
 # R311y352 — added for a loopback address that is DETERMINISTICALLY
 # connection-refused (bound, never `listen()`ed). R2778 — that helper is now
 # the shared `wz_runtime_tokio_test_support::refusing_port`, which this crate
