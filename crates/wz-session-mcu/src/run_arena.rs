@@ -16,7 +16,8 @@ use core::mem::MaybeUninit;
 /// loop's function, about 550 bytes on the Zephyr client, and a local of that function is
 /// under every call the loop makes, so the worst chain of the whole node carries them. Built in
 /// this arena they are in `.bss`, as the peers' machines are, and the loop holds three references.
-/// The same reason made [`PeerStore`](crate::connect_manager::PeerStore) and the observer cell.
+/// The same reason made `PeerStore` (of `connect_manager`, a module of the builds that dial) and
+/// the observer cell.
 ///
 /// Like every table of the profile it is `Sync` by the profile's rule: the one cooperative loop
 /// reaches it.

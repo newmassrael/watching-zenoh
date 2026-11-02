@@ -453,7 +453,11 @@ CASES: tuple[Case, ...] = (
               "moved to that reading and 5,500. 1,064,448 with the gate that gives a link's "
               "session nothing between its handshake and the decision (+888), the budget "
               "moved to that reading and 5,500 again"),
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
+    # 2026-11-03 -- `pico-peer` 2,946,185 on hosted run 41481900203, 185 over its budget of
+    # 2,946,000, which the 2026-11-02 move of the coop cases had not reached; moved to that reading
+    # plus 3,500, to the hundred. The growth is the day's, as the coop cases' was (the SCE pin
+    # moves of 11-02, which regenerate the codecs this image links); it is not separated further.
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_949_700,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),

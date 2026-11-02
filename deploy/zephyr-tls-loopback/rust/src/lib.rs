@@ -341,7 +341,9 @@ fn restart_takes_the_port() -> bool {
     let peer = match ZephyrTcpSocket::connect(LOOPBACK, RESTART_PORT) {
         Ok(peer) => peer,
         Err(e) => {
-            log_line(format!("wz: FAIL - the restart port took no connection: {e:?}"));
+            log_line(format!(
+                "wz: FAIL - the restart port took no connection: {e:?}"
+            ));
             return false;
         }
     };
