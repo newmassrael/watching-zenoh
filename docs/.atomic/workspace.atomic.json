@@ -305486,6 +305486,36 @@
         "Replaces the carry of round 4101. Open, in order: model 3 in the reader (the region and priors generated, the units and SN steps by the rule in integers rounded toward the rejected side, the other checks per group, the latch with crossed_at_packet and the four extremes, model 3 in the existing model key, the pinned examples, fields and session_table one revision each, the numbers told to the consumer at shipping); then the freezing entry, the validation corpus, model 4."
       ]
     },
+    "Round 4107": {
+      "decision_summary": "The verbs of the admin node on Zephyr's sockets are witnessed through the query transport on the target. In deploy/zephyr-admin-loopback the fixed-memory client, which dials the admin node over tls/, now asks two GETs through its session: session/status/<peer> and session/close/<peer> under the node's zid. The status its key is listed for is answered with a status document, and the close it is not listed for is refused by name, so the zid the node decided by is the one the session's key proved and the plumbing of the requester (decision D12 step 1) carries it through a real session. The pair discriminates both ways: an unproven requester would be refused the status, and a node that took the requester for anyone would answer the close. A verb the build did not compile in is answered with nothing at all, not refused: the first build bound status alone and the close GET came back empty; the witness binds all four, as the product image does. What remains is D14's witness on the kit, with a real router's session reaching the verbs of the product image.",
+      "changes_bullets": [
+        "deploy/zephyr-admin-loopback: an asking layer for the client (AskLayer, whose sink keeps what each reply says), the keys of the two GETs, the app's wait for their answers, the lifecycle-close, lifecycle-reset and query-get features. docs/session-lifecycle-intent.md: the witness and what it shows."
+      ],
+      "verification_bullets": [
+        "Layer Qz run end to end with WZ_QZ_REQUIRE=1: four images build and pass, 100 s; the witness prints that the GET for status was answered with a status document and the GET for close was refused by name. A first run failed on the close GET (nothing came back) and showed that a verb the build does not bind is silent; the 123 static gates of the hook's array, cargo fmt. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: D14's witness on the kit with a real router's session reaching the verbs of the product image; SO_REUSEADDR on the Zephyr listener; the RAM rows for the larger loop arena of the fixed client and a hosted lane that builds it. A control that makes the query path alone fail was not run: the permit check by the witness shares the commander list with it, and the pair of GETs is what discriminates."
+      ],
+      "publishable_decision_summary": "The verbs of the admin node on Zephyr's sockets are witnessed through the query transport on the target. In deploy/zephyr-admin-loopback the fixed-memory client, which dials the admin node over tls/, now asks two GETs through its session: session/status/<peer> and session/close/<peer> under the node's zid. The status its key is listed for is answered with a status document, and the close it is not listed for is refused by name, so the zid the node decided by is the one the session's key proved and the plumbing of the requester (decision D12 step 1) carries it through a real session. The pair discriminates both ways: an unproven requester would be refused the status, and a node that took the requester for anyone would answer the close. A verb the build did not compile in is answered with nothing at all, not refused: the first build bound status alone and the close GET came back empty; the witness binds all four, as the product image does. What remains is D14's witness on the kit, with a real router's session reaching the verbs of the product image.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-admin-loopback: an asking layer for the client (AskLayer, whose sink keeps what each reply says), the keys of the two GETs, the app's wait for their answers, the lifecycle-close, lifecycle-reset and query-get features. docs/session-lifecycle-intent.md: the witness and what it shows."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Qz run end to end with WZ_QZ_REQUIRE=1: four images build and pass, 100 s; the witness prints that the GET for status was answered with a status document and the GET for close was refused by name. A first run failed on the close GET (nothing came back) and showed that a verb the build does not bind is silent; the 123 static gates of the hook's array, cargo fmt. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: D14's witness on the kit with a real router's session reaching the verbs of the product image; SO_REUSEADDR on the Zephyr listener; the RAM rows for the larger loop arena of the fixed client and a hosted lane that builds it. A control that makes the query path alone fail was not run: the permit check by the witness shares the commander list with it, and the pair of GETs is what discriminates."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
