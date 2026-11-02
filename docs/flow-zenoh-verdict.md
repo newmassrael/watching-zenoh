@@ -953,7 +953,25 @@ sum by half a millibit per term, and a flow has thousands of terms.
 Ville's inequality bounds the chance that the process EVER crosses, so the word
 of a flow is the first crossing and the moment of it, not the sum at the end;
 the reader also reports the model number. Both change the consumer, and the
-zenoh-analyzer session takes them with model 3.
+zenoh-analyzer session takes them with model 3. The shape agreed with it on
+2026-11-02:
+
+- The model number goes in the `model` key `zenoh_evidence` already has, as 3.
+  No second key says the same thing.
+- `zenoh_evidence` gains `crossed_at_packet`, the capture-global packet index (the
+  axis of a row's `packet`, which the consumer joins rows on; a time can repeat
+  and cannot) of the first crossing, `null` while no threshold has been crossed
+  and for nothing else; and `log2_lr_max_millibits`, `log2_lr_min_millibits`,
+  `log2_lr_no_max_millibits`, `log2_lr_no_min_millibits`, the extremes of each
+  sum so far, in millibits like the sums.
+- The side that crossed is not a key: the latched `zenoh` word is that side.
+- `log2_lr_millibits` and `log2_lr_no_millibits` stay the sums NOW, not at the
+  crossing. A latched `yes` can therefore stand beside a sum below the
+  threshold; the consumer's sentence that quotes the sum is its design rule's to
+  change, and the zenoh-analyzer design session is told.
+- The keys move the `fields` and `session_table` documents one revision each
+  (47 and 6 today), numbered when model 3 ships. The order is: wz ships, the
+  design answers, the consumer moves its pin and its expectations in one change.
 
 **D5. The model is frozen by a ledger entry before a validation corpus is
 read**, and the validation corpus is evaluated once (section 6.4, two corpora).
