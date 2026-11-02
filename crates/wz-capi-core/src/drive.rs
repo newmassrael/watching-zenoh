@@ -200,6 +200,7 @@ impl Dialer {
     /// dial that the walk repeats, or the re-dial of a lost link, still reads it as a dial that
     /// did not open, which is retried on its schedule and refused again while the other link
     /// stands.
+    #[cfg(feature = "peer")]
     async fn open_or_held(&self, endpoint: &str) -> Result<Option<OpenedSession>, OpenError> {
         match self.open_endpoint(endpoint).await {
             Ok(session) => Ok(Some(session)),
@@ -4945,8 +4946,10 @@ mod tests {
 
     /// An admission that refuses every link at the zid, as a node does that holds, or prefers,
     /// another link to the node on the other end.
+    #[cfg(feature = "peer")]
     struct RefusesEveryLink;
 
+    #[cfg(feature = "peer")]
     impl wz_session_core::link_admission::LinkAdmission for RefusesEveryLink {
         fn open(&self, _dialled: bool) -> u64 {
             1
@@ -4964,6 +4967,7 @@ mod tests {
     /// by another link, so the first walk of its connect endpoints reads it as that and not as a
     /// connect that failed (a restarted peer that dials a node whose old dialler dials it back at
     /// the same moment); the peer is told `MAX_LINKS` and no OpenSyn is sent.
+    #[cfg(feature = "peer")]
     #[test]
     fn a_link_the_node_refuses_is_not_a_connect_that_failed() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -5016,6 +5020,7 @@ mod tests {
                 .expect("entropy"),
                 offer: SessionOffer::universal(),
                 clock: TokioTime::new(),
+                #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
                 auth: None,
                 #[cfg(feature = "routing-namespace")]

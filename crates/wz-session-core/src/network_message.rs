@@ -1252,8 +1252,21 @@ pub(crate) enum WalkedRecord<'r> {
 /// (`judge_push_chains`, `judge_request_chains`, `judge_response_chains`), so an
 /// extension a participant must refuse ends the walk at the same record on both
 /// forms.
-// Read only by the lent-walk test, which needs a Push record to lend.
-#[cfg(all(feature = "codec-frame", feature = "codec-push", test))]
+// Read by the walk tests, each of which needs records to lend.
+#[cfg(all(
+    feature = "codec-frame",
+    test,
+    any(
+        feature = "codec-push",
+        all(feature = "codec-request", feature = "codec-response"),
+        all(
+            feature = "session-slot",
+            feature = "codec-declare",
+            feature = "declare-final",
+            feature = "codec-response-final"
+        )
+    )
+))]
 pub(crate) fn for_each_record(
     payload: &[u8],
     record: &mut RecordBuf,
@@ -1276,7 +1289,7 @@ pub(crate) fn for_each_record(
 // Read by the record walk and by the heap profile's frame; a build with neither reads nothing.
 #[allow(dead_code)]
 pub(crate) fn is_transport_mid(mid: u8) -> bool {
-    mid <= wire_const::T_MID_JOIN
+    mid <= wz_codecs::wire_const::T_MID_JOIN
 }
 
 /// [`for_each_record`] whose consumer may END the walk: an `Err` from `each`
