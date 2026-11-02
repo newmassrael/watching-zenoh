@@ -29,6 +29,7 @@ use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use wz_session_core::slot_observer::{OtherPeers, Requesters, SlotObserver};
+use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
 use wz_session_core::declare::matching::BoxedMatchingSink;
 use wz_session_core::declare::queryable::QuerierCriterion;
@@ -183,6 +184,18 @@ impl Registry {
     #[cfg(any(feature = "query", feature = "queryable"))]
     pub(super) fn face_mut(&mut self, id: FaceId) -> Option<&mut FaceTables> {
         self.faces.iter_mut().find(|face| face.id == id)
+    }
+
+    /// Hand the tables of face `id` the id space of the link now opened to it: the key expressions
+    /// this session declared to that link, which its peer may name in what it sends. A peer that
+    /// has been told an id prefers it to the literal (zenoh's routers do, for a subscriber they
+    /// route to), and an id the tables cannot resolve is a sample that is dropped. The space is
+    /// the link's, so each link the face is opened over installs its own, and the dial role's
+    /// face, which is opened again after a loss, replaces the lost link's.
+    pub(super) fn install_own_mapping_space(&mut self, id: FaceId, space: SharedOwnMappingSpace) {
+        if let Some(face) = self.faces.iter_mut().find(|face| face.id == id) {
+            face.peer.subscribers.set_own_mapping_space(space);
+        }
     }
 
     /// The application's part, the tables of face `id` and those of the others, apart so each can

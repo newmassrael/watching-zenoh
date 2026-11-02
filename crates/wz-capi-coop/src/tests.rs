@@ -79,6 +79,10 @@ enum Command {
     DeclareQueryable(u64, &'static str, bool),
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
+    /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
+    /// routes to once the subscriber has declared a key expression to it: the id is one the
+    /// session under test declared, and the key is what that declaration says.
+    PushReceiverAlias(u64, &'static [u8]),
     /// Close the session and stop, as a router that goes away does.
     Close,
     /// Ask a query of request id `.0` on the key.
@@ -378,6 +382,21 @@ fn run_router(
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
+            }
+            Ok(Command::PushReceiverAlias(id, value)) => {
+                // The aliased builder names the SENDER's space; this Push names the receiver's.
+                let mut push = wz_session_core::push_build::build_push_aliased(id, None, value)
+                    .expect("a Push naming an id");
+                push.keyexpr.body =
+                    wz_session_core::wire::parts::WireexprOwnedVariant::WireexprNonlocal(
+                        wz_session_core::wire::parts::WireexprNonlocalOwned {
+                            id,
+                            suffix_len: None,
+                            suffix: None,
+                        },
+                    );
+                let _ =
+                    actions.send_network_message(NetworkMessage::Push(Box::new(push)), true, false);
             }
             Ok(Command::Close) => {
                 actions.send_close_with_reason(CloseReason::Generic);
@@ -925,6 +944,65 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     assert!(
         took < Duration::from_millis(60),
         "a waiting read task wakes for the push, not at the end of its wait: {took:?}"
+    );
+    SessionDrive::close(&*engine);
+}
+
+/// A peer that was told an id names it. A zenoh router sends a subscriber the samples it routes
+/// to it by the key expression the subscriber declared to it (the receiver's id space, `M=0`),
+/// not by the literal, and a session that cannot resolve the id drops the sample: the engine
+/// heard nothing through a router for want of this, while a peer that names its own aliases (the
+/// sender's space) was heard all along. The id is one the session declared, and the key it
+/// resolves to is what that declaration says.
+///
+/// The CONTROL is the literal key, which the same subscriber hears: a drop is then the id's, and
+/// not the subscription's.
+#[test]
+fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+
+    let id = engine
+        .acquire_keyexpr("demo/named".to_owned())
+        .expect("a key expression the link takes");
+    let seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+    let record = seen.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine.declare_subscriber_on_wire(
+        "demo/named".to_owned(),
+        WireKey::aliased(id, None),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let record = record.clone();
+            Box::new(move |sample: &dyn SampleView| {
+                record
+                    .lock()
+                    .unwrap()
+                    .push((sample.keyexpr().to_string(), sample.payload().to_vec()));
+            })
+        }),
+    );
+    until(&engine, "the router to see the declarations", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+
+    router.send(Command::Push("demo/named", b"by the literal"));
+    until(&engine, "the literal push", || {
+        seen.lock().unwrap().len() == 1
+    });
+
+    router.send(Command::PushReceiverAlias(id, b"by the id"));
+    until(&engine, "the push naming the declared id", || {
+        seen.lock().unwrap().len() == 2
+    });
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("demo/named".to_owned(), b"by the literal".to_vec()),
+            ("demo/named".to_owned(), b"by the id".to_vec()),
+        ],
+        "the id resolves to the key the session declared for it"
     );
     SessionDrive::close(&*engine);
 }

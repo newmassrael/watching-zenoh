@@ -84,6 +84,7 @@ use wz_session_core::session_init_params::{
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
+use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 #[cfg(feature = "listen")]
 use wz_session_core::zid_hex::same_zid;
 use wz_session_core::WhatAmI;
@@ -308,6 +309,26 @@ struct Confined<T>(T);
 // `Sample`s and `bool`s, see `CoopEngine::samples`), so every handle of each `Rc` moves with the
 // `Core` when another thread takes the lock, and none is used by two threads at once.
 unsafe impl<T> Send for Confined<T> {}
+
+/// The id space of one link: the key expressions this session declared to it, read through the
+/// link's `actions` (which keep what they sent), lent to the tables of the face the link serves.
+/// A peer that was told an id names it instead of the literal when it sends something for the
+/// session (a router does for a subscriber it routes to), and the tables resolve it against this.
+struct LinkOwnSpace<C: ClockSource + 'static>(Rc<McuActions<C>>);
+
+impl<C: ClockSource + 'static> OwnMappingSpace for LinkOwnSpace<C> {
+    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+        OwnMappingSpace::resolve_own_mapping(&*self.0, id)
+    }
+}
+
+// SAFETY: as `Confined`. A `LinkOwnSpace` is stored only in the tables of a face, which `Core`
+// owns inside the lock of `CoopEngine`, and it is read only by the dispatch of that face's
+// frames, which runs under the same lock; no clone of its `Rc` leaves the lock. The marker
+// traits are what the shared handle of a host build names (`SharedOwnMappingSpace` is an `Arc` of
+// a `Send + Sync` object where the target has atomic pointers).
+unsafe impl<C: ClockSource + 'static> Send for LinkOwnSpace<C> {}
+unsafe impl<C: ClockSource + 'static> Sync for LinkOwnSpace<C> {}
 
 /// One thread's delivery for one engine, from `enter` to drop. The engine keeps the threads
 /// delivering for it ([`CoopEngine::delivering`]); a set held per engine and keyed by thread is
@@ -807,6 +828,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 return Err(OpenError::EntropyUnavailable);
             }
         }
+        // The id space of this link, for the tables of the face it serves: what the peer names by
+        // an id the session declared to it resolves against the link's own declarations. Each link
+        // has its own, so it is installed whenever one is made, a redialled face's included.
+        #[cfg(target_has_atomic = "ptr")]
+        let own_space: SharedOwnMappingSpace = Arc::new(LinkOwnSpace(actions.clone()));
+        #[cfg(not(target_has_atomic = "ptr"))]
+        let own_space: SharedOwnMappingSpace = Rc::new(LinkOwnSpace(actions.clone()));
+        self.registry
+            .borrow_mut()
+            .install_own_mapping_space(face, own_space);
         let readiness = pump.readiness().map(Arc::from);
         // The link gives the session nothing between its handshake and the face table's decision
         // (`admit`), so a link that is refused has put nothing in the tables.
