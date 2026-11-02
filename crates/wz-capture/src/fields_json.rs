@@ -1117,6 +1117,8 @@ pub struct Since {
 /// The flow object around the rows — `context`, `shown`, `omitted`,
 /// `disagreements` — is not a row and is not covered.
 pub const REVISABLE_ROW_CELLS: &[&str] = &[
+    "/above_transport/carried[]/answers/**",
+    "/above_transport/carried[]/closes/**",
     "/above_transport/carried[]/e2e/**",
     "/above_transport/carried[]/keyexpr",
     "/above_transport/carried[]/keyexpr_cause",
@@ -3036,7 +3038,13 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
     // matters most: the reader is being told these bytes could not be walked
     // here, and `above_transport` is the only thing on the row that can say
     // whether the session nonetheless read what they carried.
-    push_above_transport(carried, KeyexprAt::new(direction, spaces), judging, out);
+    push_above_transport(
+        carried,
+        KeyexprAt::new(direction, spaces),
+        judging,
+        closes,
+        out,
+    );
 }
 
 /// The records a walked row's `carried` array has an entry for, in order: the
@@ -3715,13 +3723,21 @@ impl CarriedState {
 /// chain holding two messages decodes each under its own key. The spans inside
 /// a decoded payload index the JOINED buffer, in the same space as the entry's
 /// `start` and `end` and for the same reason: they are not capture offsets.
-// `at` resolves the keys of a reassembled batch's records, and `declarations`
-// decodes their payloads; both exist only with `reassembly`.
+///
+/// And each carries the exchange pairing (`closes`, `answers`) as a row's own
+/// entries do (fields revision 52). The exchange plane folds a completed
+/// chain's records at the fragment that completed it, which is this row, in the
+/// order of this array; a fragment row carries no records of its own, so the
+/// record's place here is its place in the pairing.
+// `at` resolves the keys of a reassembled batch's records, `declarations`
+// decodes their payloads and `closes` pairs them; all exist only with
+// `reassembly`.
 #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
 fn push_above_transport(
     carried: Option<&wz_session_core::passive::Carried>,
     at: KeyexprAt<'_>,
     judging: E2eRow<'_>,
+    closes: Option<RowCloses<'_>>,
     out: &mut String,
 ) {
     let declarations = judging.declarations;
@@ -3775,11 +3791,19 @@ fn push_above_transport(
             });
             push_e2e(e2e.as_ref(), out);
             push_payload_block(record, declarations, at, out);
-            // On every entry, like the row's own: `null` here. The pairing is made
-            // over the frames a list holds, and a record inside a reassembled
-            // chain is not one of them, so this list names no request. Last, so
-            // the keys the entry always wrote keep the order they were written in.
-            out.push_str(",\"closes\":null,\"answers\":null");
+            // On every entry, like the row's own, and from the same pairing: the
+            // exchange plane folded this record at this row, at place `i`.
+            // Last, so the keys the entry always wrote keep their order.
+            out.push_str(",\"closes\":");
+            match closes.filter(|_| word == "ResponseFinal") {
+                Some(c) => out.push_str(&c.value(i)),
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"answers\":");
+            match closes.filter(|_| word == "Response") {
+                Some(c) => out.push_str(&c.answer_value(i)),
+                None => out.push_str("null"),
+            }
             out.push('}');
         }
         out.push(']');
@@ -5188,8 +5212,11 @@ impl RequestIndex {
 ///   key arrives, which turns `message` into a discriminant in the declared
 ///   `carries` axis and changes what every consumer was told about it.
 ///
-/// A final inside a REASSEMBLED chain (`above_transport.carried`) is not covered:
-/// its entries read `null`, so `null` there does not mean it is not a final.
+/// A final or a response inside a REASSEMBLED chain (`above_transport.carried`)
+/// is paired the same way since fields revision 52: the exchange plane folds the
+/// chain's records at the fragment that completed it, which is the row they are
+/// written on, and `request_record` of a request that arrived in a chain is its
+/// place in that row's `above_transport.carried`.
 #[cfg(feature = "network-codecs")]
 #[derive(Clone, Copy)]
 struct RowCloses<'a> {

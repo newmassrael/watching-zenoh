@@ -833,7 +833,7 @@ fn a_batch_is_judged_in_the_order_its_frames_were_batched() {
 }
 
 /// One `Fragment` message: reliable, `more` as asked, sequence number `sn`.
-fn fragment(sn: u8, more: bool, piece: &[u8]) -> Vec<u8> {
+pub(crate) fn fragment(sn: u8, more: bool, piece: &[u8]) -> Vec<u8> {
     let mut wire = alloc::vec![
         wz_session_core::wire_const::T_MID_FRAGMENT
             | wz_codecs::wire_const::FLAG_T_FRAGMENT_R

@@ -4014,8 +4014,10 @@ int main(void) {
      * side is `derived`. Words move; no key moves.
      * 51: a response's `answers` (the request it answered, and the round
      * trip on the first reply) and a final's `completion_ns`. Keys arrive;
-     * nothing retires. */
-    revisioned[2].revision = 51;
+     * nothing retires.
+     * 52: a reply or a final that arrived in fragments carries the same
+     * pairing. Values move under stationary keys. */
+    revisioned[2].revision = 52;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

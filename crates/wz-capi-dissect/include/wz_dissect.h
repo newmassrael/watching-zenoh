@@ -1300,7 +1300,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":51,"key":"kind","values":[...],
+ *     {"name":"fields","revision":52,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -3212,9 +3212,12 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * The orphan is the census's: the capture began mid-query, or the list was trimmed
  * past the request. It is the exchange plane's own pairing, so `closes` and the
  * census cannot disagree about which request a final closed, and it is the same
- * under every selector, including one that rejects the exchange. A final inside a
- * REASSEMBLED chain (`above_transport.carried`) reads `null`, so `null` there does
- * not mean it is not a final. In the whole-document door a held final's `closes`
+ * under every selector, including one that rejects the exchange. A final or a
+ * response inside a REASSEMBLED chain (`above_transport.carried`) is paired the
+ * same way since field-document revision 52 (it read `null` before): the chain's
+ * records belong to the fragment row that completed it, so a request that arrived
+ * in a chain is named by that row's `seq`, and `request_record` is its place in
+ * that row's `above_transport.carried`. In the whole-document door a held final's `closes`
  * can change between two documents only if its request stops being held (a front
  * trim), and the since door does NOT report that as `revised`: it keeps the
  * pairing across the trim and the row it wrote keeps naming the request (see AFTER
@@ -4947,7 +4950,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":51,"key":"state",
+ *     "value_families":[{"name":"fields","revision":52,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6174,6 +6177,8 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *                                              the request's ROW is gone)
  *     /carried[]/answers (its whole subtree)   a response whose request was
  *                                              trimmed: the same
+ *     /above_transport/carried[]/closes and    the same, for a final or a
+ *     /above_transport/carried[]/answers       response that arrived in fragments
  *
  * and /carried[]/e2e, whose counters this door keeps across a trim like the rest
  * (see WHAT A CALL COSTS): a slot's verdict depends on the frames of its slot

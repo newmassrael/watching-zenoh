@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use wz_session_core::json5::{self, Json5Value};
 
 use crate::datagram_tests::{frame_carrying, sender_space};
-use crate::e2e_row_tests::{Link, Wire, LINKS};
+use crate::e2e_row_tests::{fragment, Link, Wire, LINKS};
 use crate::exchange::tests::{request_put, request_query, response_final, response_reply};
 use crate::fields_json::{
     fields_json, fields_json_since_coordinated, fields_json_since_remembering,
@@ -767,5 +767,82 @@ fn a_continuing_walk_writes_the_round_trip_of_a_request_it_does_not_visit_again(
             Some(3),
             "{link:?}: {second}"
         );
+    }
+}
+
+/// The `above_transport.carried` entries of a row (a chain the row completed).
+fn reassembled(row: &Json5Value) -> Vec<&Json5Value> {
+    match get(row, "above_transport").and_then(|a| get(a, "carried")) {
+        Some(Json5Value::Array(entries)) => entries.iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A reply and a final that each arrived in two fragments carry the pairing on
+/// the entry of the chain each completed, as their unfragmented twins do on a
+/// row's own entries, and the rows still add up to the census.
+#[test]
+fn a_reply_and_a_final_that_arrived_in_fragments_name_their_request() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        wire.send(
+            true,
+            Some(ASKED_NS),
+            &frame_carrying(&request_query(7, sender_space(0, Some(KEY)))),
+        );
+        let reply = response_reply(7, sender_space(0, Some(KEY)), &[0x5A; 120]);
+        let (head, tail) = reply.split_at(reply.len() / 2);
+        wire.send(false, Some(ASKED_NS + 500_000), &fragment(0, true, head));
+        wire.send(false, Some(ASKED_NS + 575_000), &fragment(1, false, tail));
+        let fin = response_final(7);
+        let (head, tail) = fin.split_at(fin.len() / 2);
+        wire.send(false, Some(ASKED_NS + 800_000), &fragment(2, true, head));
+        wire.send(false, Some(ASKED_NS + 900_000), &fragment(3, false, tail));
+        let doc = since_all(&wire, 7);
+        let rows = rows(&doc);
+        assert_eq!(rows.len(), 7, "{link:?}: {doc}");
+        let request_seq = number(get(&rows[2], "seq")).expect("a numbered request row");
+        // Rows 4 and 6 completed the two chains; rows 3 and 5 began them.
+        for began in [&rows[3], &rows[5]] {
+            assert!(reassembled(began).is_empty(), "{link:?}: {doc}");
+        }
+        let reply_entries = reassembled(&rows[4]);
+        assert_eq!(reply_entries.len(), 1, "{link:?}: {doc}");
+        assert_eq!(word(get(reply_entries[0], "message")), Some("Response"));
+        assert_eq!(get(reply_entries[0], "closes"), Some(&Json5Value::Null));
+        let answers = get(reply_entries[0], "answers").expect("answers");
+        assert_eq!(
+            word(get(answers, "request_kind")),
+            Some("query"),
+            "{link:?}"
+        );
+        assert_eq!(
+            number(get(answers, "request_seq")),
+            Some(request_seq),
+            "{link:?}"
+        );
+        assert_eq!(boolean(get(answers, "first_reply")), Some(true), "{link:?}");
+        assert_eq!(
+            number(get(answers, "round_trip_ns")),
+            Some(575_000),
+            "{link:?}: the instant of the fragment that completed it: {doc}"
+        );
+        let final_entries = reassembled(&rows[6]);
+        assert_eq!(final_entries.len(), 1, "{link:?}: {doc}");
+        assert_eq!(get(final_entries[0], "answers"), Some(&Json5Value::Null));
+        let closes = get(final_entries[0], "closes").expect("closes");
+        assert_eq!(
+            number(get(closes, "request_seq")),
+            Some(request_seq),
+            "{link:?}"
+        );
+        assert_eq!(
+            number(get(closes, "completion_ns")),
+            Some(900_000),
+            "{link:?}: {doc}"
+        );
+        let (first, completion) = crate::exchange::exchanges(&wire.d).totals();
+        assert_eq!((first.count(), first.total_ns()), (1, 575_000), "{link:?}");
+        assert_eq!(completion.total_ns(), 900_000, "{link:?}");
     }
 }

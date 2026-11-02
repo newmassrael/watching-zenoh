@@ -2386,6 +2386,25 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R45_CARRIES,
     },
+    // Revision 52 moves VALUES under stationary keys and adds, retires and
+    // declares nothing. A `Response` or `ResponseFinal` that arrived in
+    // fragments (an entry of `above_transport.carried`) now carries the
+    // exchange pairing its unfragmented twin does: `answers` and `closes` read
+    // an object where they read `null`. The exchange plane folds a completed
+    // chain's records at the fragment that completed it, which is the row they
+    // are written on, so a request that arrived in a chain is named by that
+    // row's `seq` and its place in that row's `above_transport.carried`
+    // (`request_record`). Both subtrees there are revisable cells, as on a
+    // row's own entries.
+    DocumentShape {
+        document: FIELDS,
+        revision: 52,
+        keys: FIELDS_R51_KEYS,
+        retiring: &[],
+        families: FIELDS_R50_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R45_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -21793,7 +21812,7 @@ mod tests {
             // To 49 with model 3 of the zenoh test: the word latched at the
             // first crossing, `crossed_at_packet` and the sums' extremes. Keys
             // arrive and words move.
-            (FIELDS, 51),
+            (FIELDS, 52),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

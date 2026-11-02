@@ -17389,6 +17389,14 @@ mod tests {
     /// The reply and the final travel in ONE Frame, as `census_capture`'s do and as
     /// a responder batches them, so the final is a record among several in its row.
     fn exchange_packets() -> Vec<Vec<u8>> {
+        exchange_packets_answered(false)
+    }
+
+    /// [`exchange_packets`], with the reply and the final batched in one
+    /// message that arrives in two `Fragment`s when `fragmented`: their pairing
+    /// is then on the `above_transport.carried` entries of the fragment row
+    /// that completed the chain.
+    fn exchange_packets_answered(fragmented: bool) -> Vec<Vec<u8>> {
         let keepalive = [1u8, 0, 0x04];
         let query = framed_frame(
             0,
@@ -17431,7 +17439,28 @@ mod tests {
             }
             .encode_to_vec(),
         );
-        let answer = framed_frame(0, &answer_records);
+        let answers: Vec<Vec<u8>> = if fragmented {
+            let (head, tail) = answer_records.split_at(answer_records.len() / 2);
+            let fragment = |sn: u8, more: bool, piece: &[u8]| {
+                let mut wire = vec![
+                    wz_session_core::wire_const::T_MID_FRAGMENT
+                        | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                        | if more {
+                            wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                        } else {
+                            0
+                        },
+                    sn,
+                ];
+                wire.extend_from_slice(piece);
+                let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+                out.extend_from_slice(&wire);
+                out
+            };
+            vec![fragment(0, true, head), fragment(1, false, tail)]
+        } else {
+            vec![framed_frame(0, &answer_records)]
+        };
         let (init_a, init_b) = (framed_init(&[1, 2, 3, 4]), framed_init(&[5, 6, 7, 8]));
         let (mut a, mut b) = (1000u32, 2000u32);
         let mut p = Vec::new();
@@ -17441,8 +17470,10 @@ mod tests {
         b += init_b.len() as u32;
         p.push(tcp_packet(a, &query));
         a += query.len() as u32;
-        p.push(tcp_packet_reverse(b, &answer));
-        b += answer.len() as u32;
+        for answer in &answers {
+            p.push(tcp_packet_reverse(b, answer));
+            b += answer.len() as u32;
+        }
         for _ in 0..4 {
             p.push(tcp_packet(a, &keepalive));
             a += keepalive.len() as u32;
@@ -18495,6 +18526,29 @@ mod tests {
                     "/carried[]/closes/request_kind",
                     "/carried[]/closes/request_record",
                     "/carried[]/closes/request_seq",
+                ]),
+            ),
+            (
+                "a request trimmed ahead of a reply and a final that arrived in fragments",
+                pcap_prefix(
+                    &exchange_packets_answered(true),
+                    exchange_packets_answered(true).len(),
+                ),
+                wz_capture::DissectionLimits {
+                    frames_per_flow: Some(3),
+                    ..Default::default()
+                },
+                "",
+                cells(&[
+                    "/above_transport/carried[]/answers/first_reply",
+                    "/above_transport/carried[]/answers/request_kind",
+                    "/above_transport/carried[]/answers/request_record",
+                    "/above_transport/carried[]/answers/request_seq",
+                    "/above_transport/carried[]/answers/round_trip_ns",
+                    "/above_transport/carried[]/closes/completion_ns",
+                    "/above_transport/carried[]/closes/request_kind",
+                    "/above_transport/carried[]/closes/request_record",
+                    "/above_transport/carried[]/closes/request_seq",
                 ]),
             ),
             // A CONTROL since the list began to keep the chain fold of what it
