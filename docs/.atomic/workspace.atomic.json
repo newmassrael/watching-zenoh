@@ -306700,6 +306700,34 @@
         "Open: whether a wz-native listening peer that declares a publisher before a router dials it reaches a client behind the router. Measuring it needs a fixture no test has: a process that opens the zenoh-compatible session API with a listener and a publisher, a zenohd that dials it (spawn_zenohd_dialer_on_ephemeral_tcp takes the locator) and a client subscriber behind the router; the demo binary's single-session publisher is a raw frame driver and does not call Session::declare_publisher, so it cannot stand in. The drop counters of TlsListener are not reachable from the C ABI (the listener is boxed behind TlsDial::listen); exposing them is a new exported symbol and is left to a decision. Not rebuilt: the Zephyr kit image. The hosted runs of recent rounds are mostly cancelled while queued."
       ]
     },
+    "Round 4144": {
+      "decision_summary": "The first hosted run of Layer Qzk refused four of the six images it builds, on the stack-bound contract, and the contract is changed so that the refusal is not a function of the machine. The pins of the three engine rules (engine-host, engine-turn and engine-behaviour of deploy/stack_call_contracts.json) were read in three builds that split the same register calls among them three ways: the file a line table gives a call inside Turn::run is not the same on the lab host, on a workstation and on the hosted runner, and a rule that claims by file counts what the line table says. The rule for Turn::run, which claims by the function, now stands before the two that claim by file, so every register call inside the function is its own whatever file a build gives it. With that order all four client images read the same split on this workstation: 36 calls to engine-turn, 5 to engine-host and 11 to engine-behaviour (52 in all, as before: 38 + 1 + 13), and the pins say so. The pins of the engine rules were last moved for a split that one other build read; what a hosted run reads of the new order is read at the next round.",
+      "changes_bullets": [
+        "deploy/stack_call_contracts.json: the engine-turn rule before the file rules, its why, and the pins of engine-turn, engine-host and engine-behaviour."
+      ],
+      "verification_bullets": [
+        "The four client images were built through scripts/kit-lane.sh build on this workstation at the tip of origin/main and each passes stack_bound_gate.py --check with the new order and pins; the gate's selftest passes. The hosted run that refused them (run 41481900203, Layer Qzk) read engine-turn 3 and engine-behaviour 11 for the old order; the new order has not been run hosted."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: that a hosted run reads 36, 5 and 11 for the new order; the other reds of run 41481900203 (Layers C1bt, C1cs, C1bzr, C1cf and Layer 0), which are other sessions' and are read at the next round; the 19,104-byte spawn_pump frame of the admin image."
+      ],
+      "publishable_decision_summary": "The first hosted run of Layer Qzk refused four of the six images it builds, on the stack-bound contract, and the contract is changed so that the refusal is not a function of the machine. The pins of the three engine rules (engine-host, engine-turn and engine-behaviour of deploy/stack_call_contracts.json) were read in three builds that split the same register calls among them three ways: the file a line table gives a call inside Turn::run is not the same on the lab host, on a workstation and on the hosted runner, and a rule that claims by file counts what the line table says. The rule for Turn::run, which claims by the function, now stands before the two that claim by file, so every register call inside the function is its own whatever file a build gives it. With that order all four client images read the same split on this workstation: 36 calls to engine-turn, 5 to engine-host and 11 to engine-behaviour (52 in all, as before: 38 + 1 + 13), and the pins say so. The pins of the engine rules were last moved for a split that one other build read; what a hosted run reads of the new order is read at the next round.",
+      "publishable_changes_bullets": [
+        "deploy/stack_call_contracts.json: the engine-turn rule before the file rules, its why, and the pins of engine-turn, engine-host and engine-behaviour."
+      ],
+      "publishable_verification_bullets": [
+        "The four client images were built through scripts/kit-lane.sh build on this workstation at the tip of origin/main and each passes stack_bound_gate.py --check with the new order and pins; the gate's selftest passes. The hosted run that refused them (run 41481900203, Layer Qzk) read engine-turn 3 and engine-behaviour 11 for the old order; the new order has not been run hosted."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: that a hosted run reads 36, 5 and 11 for the new order; the other reds of run 41481900203 (Layers C1bt, C1cs, C1bzr, C1cf and Layer 0), which are other sessions' and are read at the next round; the 19,104-byte spawn_pump frame of the admin image."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
