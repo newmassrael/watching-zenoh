@@ -317,6 +317,13 @@ AWAITING_WALKER = {
     "header_c_or_f": "interest's generated union of the C and F header bits around "
     "its body; the walker surfaces those bits as flags and the body's fields by "
     "their own names",
+    "extensions_has_0x12": "msg_put's generated union of its extension chain and "
+    "the payload layout the shared-memory marker in that chain selects (SCE ADR "
+    "0065 section 6 R6); the walker emits the chain as extensions and then the "
+    "fields of the layout it read",
+    "options_h": "linkstate's generated union of the H option bit and the two "
+    "lists of one count it gates (SCE ADR 0065 section 6 R5); the walker surfaces "
+    "the bit among the options and the links and weights by their own names",
 }
 
 # NON-NAMES: identifiers a reason backticks that are deliberately NOT names on
@@ -666,11 +673,42 @@ def reason_citations(*tables: dict[str, str]) -> dict[str, list[str]]:
 OVERRIDES_STRUCT = re.compile(r"^pub struct \w+Overrides\b.*?^\}", re.M | re.S)
 
 
+GROUP_ENUM = re.compile(r"^pub enum \w+<[^>]*> \{\n(?P<body>.*?)^\}", re.M | re.S)
+GROUP_FIELD = re.compile(r"^        ([a-z_][a-z0-9_]*)\s*:", re.M)
+GROUP_ALIGNED = re.compile(
+    r"^        /// The `([a-z_][a-z0-9_]*)` and `([a-z_][a-z0-9_]*)` lists, of one count\.\n"
+    r"        ([a-z_][a-z0-9_]*)\s*:",
+    re.M,
+)
+
+
+def group_fields(text: str) -> set[str]:
+    """The fields held in the arms of one generated codec's groups.
+
+    A gate on a flag or on a chain's entries groups the fields it decides into one
+    enum, one arm per assignment (SCE ADR 0065 section 6, R4b and R6), so those
+    fields are a codec's fields that no `pub <field>:` line names. Two lists of
+    one count sit in an arm as one `Aligned` field named for both (R5); the two
+    lists are what a walker reads, so they are taken in its place.
+    """
+    out: set[str] = set()
+    for group in GROUP_ENUM.finditer(text):
+        body = group.group("body")
+        # A group's arms are each documented by the gate they stand for; a variant
+        # enum's arms (a body codec per tag, and the `Default` arm's `tag`) are not.
+        if "\n    /// While " not in "\n" + body:
+            continue
+        joined = {m.group(3): (m.group(1), m.group(2)) for m in GROUP_ALIGNED.finditer(body)}
+        for field in GROUP_FIELD.findall(body):
+            out.update(joined.get(field, (field,)))
+    return out
+
+
 def message_fields(text: str) -> set[str]:
-    """Every `pub <field>:` of the structs of one generated codec, Overrides aside."""
-    return set(
-        re.findall(r"^\s*pub ([a-z_][a-z0-9_]*)\s*:", OVERRIDES_STRUCT.sub("", text), re.M)
-    )
+    """Every field of one generated codec, Overrides aside: each `pub <field>:` of
+    its structs, and each field of an arm of its groups ([`group_fields`])."""
+    text = OVERRIDES_STRUCT.sub("", text)
+    return set(re.findall(r"^\s*pub ([a-z_][a-z0-9_]*)\s*:", text, re.M)) | group_fields(text)
 
 
 def codec_fields() -> dict[str, list[str]]:

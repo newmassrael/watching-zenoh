@@ -6056,12 +6056,14 @@ mod tests {
                 let mut c = SceCursor::new(b);
                 let m = wz_codecs::msg_put::MsgPut::decode(&mut c).expect("codec rejected fixture");
                 // Cross-check the codec's own view while it is in scope.
-                let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
-                    &m.extensions_has_0x12
+                let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    payload: decoded_payload,
+                    ..
+                } = &m.extensions_has_0x12
                 else {
                     panic!("an inline put carries a payload");
                 };
-                assert_eq!(payload.len(), 200);
+                assert_eq!(decoded_payload.len(), payload.len());
                 assert_eq!(m.payload_len, Some(200));
                 assert_eq!(m.timestamp.as_ref().unwrap().time, 0x0123_4567);
                 assert_eq!(m.timestamp.as_ref().unwrap().zid, &zid);
