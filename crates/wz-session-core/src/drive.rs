@@ -84,6 +84,36 @@ fn parse_frame_payload_out_of_line(
     let messages = parse_frame_payload_in(batch).map_err(InboundParseError::Codec)?;
     crate::network_message::refuse_unknown_mandatory_ext(messages)
 }
+
+/// A Frame's payload ends where its unit does only when nothing follows it. The sender of a
+/// batch puts a message of the other reliability behind a second Frame header, and a transport
+/// message behind the last record of a Frame (upstream's pipeline closes the open frame and
+/// goes on in the same batch), so what follows the last network
+/// record can be a transport message, and the record walk, which knows no length for it,
+/// absorbs the rest of the payload as one [`NetworkMessage::Unknown`] whose id is a transport
+/// id. That rest is the next unit of the batch, not a record of this frame: it is taken off
+/// the frame and parked, and the driver reads it before it reaches for the link, as it reads
+/// the rest of a batch that began with a handshake message.
+///
+/// A record with an id that is neither a network id nor a transport id stays an `Unknown`
+/// record of the frame, as it was: nothing says where it ends.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+fn park_the_batch_after_the_frame<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    messages: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+) {
+    use crate::network_message::NetworkMessage;
+    let ends_at_a_transport_message = matches!(
+        messages.last(),
+        Some(NetworkMessage::Unknown { mid, .. }) if *mid <= wz_codecs::wire_const::T_MID_JOIN
+    );
+    if !ends_at_a_transport_message {
+        return;
+    }
+    if let Some(NetworkMessage::Unknown { body, .. }) = messages.pop() {
+        actions.park_pending_unit(crate::link::RxBytes::from(body));
+    }
+}
 // transport-lowlatency — the lean rx branch reads the leading message id
 // (wire_const) and synthesizes an empty ext list (Vec); transport-compression's
 // rx un-wrap holds the decompressed batch in a Vec too.
@@ -1184,18 +1214,21 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     match parse_frame_payload_out_of_line(&payload) {
                         // `payload` is a range of the unit when the unit was
                         // lent, so the messages below are ranges of it too.
-                        Ok(messages) => DriverLoopOutcome::FramePayload {
-                            reliable,
-                            sn,
-                            messages: count_rx_network_messages(actions, messages),
-                            has_ext,
-                            extensions,
-                            // R311y221 — the true decoded band (already
-                            // in scope from the InboundFrame::Frame
-                            // destructure above; gates the RX conduit at
-                            // `admit_rx_frame_sn`). DEFAULT under non-QoS.
-                            priority,
-                        },
+                        Ok(mut messages) => {
+                            park_the_batch_after_the_frame(actions, &mut messages);
+                            DriverLoopOutcome::FramePayload {
+                                reliable,
+                                sn,
+                                messages: count_rx_network_messages(actions, messages),
+                                has_ext,
+                                extensions,
+                                // R311y221 — the true decoded band (already
+                                // in scope from the InboundFrame::Frame
+                                // destructure above; gates the RX conduit at
+                                // `admit_rx_frame_sn`). DEFAULT under non-QoS.
+                                priority,
+                            }
+                        }
                         Err(parse_err) => {
                             engine.process_event(E::FramingError);
                             DriverLoopOutcome::ParseError(parse_err)

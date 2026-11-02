@@ -334,16 +334,19 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
     drive_to_sent_init_syn(&mut engine);
 
     // T_MID_FRAME | R flag = 0x25, sn=1 VLE (0x01), tail payload
-    // = [0x00, 0xAA, 0xBB] — 0x00 is a synthetic network MID outside
-    // the {0x19..0x1F} authored set (INTEREST / RESPONSE_FINAL /
+    // = [0x18, 0xAA, 0xBB] — 0x18 is a synthetic MID outside the
+    // {0x19..0x1F} authored set (INTEREST / RESPONSE_FINAL /
     // RESPONSE / REQUEST / PUSH / DECLARE / OAM are the 7 wz-typed
-    // network MIDs as of R115's DECLARE inbound dispatch land). The
-    // R74 Unknown-MID dispatch path used 0x1E (DECLARE) historically
+    // network MIDs as of R115's DECLARE inbound dispatch land) and
+    // outside the transport MIDs {0x00..0x07}, which a frame does not
+    // absorb: it parks them as the next unit of the batch (see
+    // `a_frame_followed_by_a_transport_message_leaves_it_for_the_next_unit`).
+    // The R74 Unknown-MID dispatch path used 0x1E (DECLARE) historically
     // because that was the last un-typed MID; the R97 + R110 + R115
     // catalog completion forced a refactor to a synthetic out-of-range
     // value so the Unknown coverage stays meaningful.
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(vec![
-        0x25, 0x01, 0x00, 0xAA, 0xBB,
+        0x25, 0x01, 0x18, 0xAA, 0xBB,
     ]))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -359,8 +362,8 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
             assert_eq!(messages.len(), 1);
             match &messages[0] {
                 NetworkMessage::Unknown { mid, body } => {
-                    assert_eq!(*mid, 0x00);
-                    assert_eq!(body.as_slice(), &[0x00, 0xAA, 0xBB]);
+                    assert_eq!(*mid, 0x18);
+                    assert_eq!(body.as_slice(), &[0x18, 0xAA, 0xBB]);
                 }
                 NetworkMessage::Request(_)
                 | NetworkMessage::Push(_)
@@ -369,7 +372,7 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
                 | NetworkMessage::Interest(_)
                 | NetworkMessage::Response(_)
                 | NetworkMessage::Declare(_) => {
-                    panic!("synthetic MID 0x00 must NOT dispatch to any typed decoder")
+                    panic!("synthetic MID 0x18 must NOT dispatch to any typed decoder")
                 }
             }
         }
@@ -929,6 +932,108 @@ async fn a_batched_unit_delivers_every_message_it_carried() {
     assert!(
         matches!(third, DriverLoopOutcome::LinkLost(LostCause::PeerClosed)),
         "a drained unit must not keep answering; got {third:?}"
+    );
+}
+
+/// A batch that holds a Frame, then a Frame of the other reliability, then a Frame of the first
+/// again delivers all three, in order, and the unit is then exhausted.
+///
+/// # What was wrong
+///
+/// The sender of a batch puts a message of the other reliability behind a second Frame header
+/// (its pipeline closes the open frame and goes on in the same batch). A Frame was read as the
+/// tail of its unit, so its record walk met the second header where it expected a network
+/// message, absorbed everything from there on as one `Unknown` record, and the records of the
+/// second and third frames were lost: an upstream publisher's burst of twelve operations, one
+/// of them best-effort, reached a subscriber as seven.
+///
+/// The discriminator is the empty queue, as in `a_batched_unit_delivers_every_message_it_carried`:
+/// the second and third frames can come only from the parked remainder.
+#[cfg(feature = "codec-push")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
+    use wz_codecs::push::Push;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let push = || {
+        let push = Push {
+            header: 0x1D,
+            ..Push::default()
+        };
+        wz_codecs_test_support::with_empty_inline_put(push)
+            .encode_to_vec()
+            .expect("a fixture Push encodes")
+    };
+    // [Frame(reliable, sn 1) Push][Frame(best-effort, sn 0) Push][Frame(reliable, sn 2) Push]
+    let mut unit = vec![0x25, 0x01];
+    unit.extend(push());
+    unit.extend([0x05, 0x00]);
+    unit.extend(push());
+    unit.extend([0x25, 0x02]);
+    unit.extend(push());
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(unit))]);
+
+    let mut seen = Vec::new();
+    for turn in 0..3 {
+        match poll_and_dispatch_one(&mut driver, &actions, &mut engine).await {
+            DriverLoopOutcome::FramePayload {
+                reliable,
+                sn,
+                messages,
+                ..
+            } => {
+                assert_eq!(
+                    messages.len(),
+                    1,
+                    "turn {turn}: the one Push of its frame and nothing of the next; got {messages:?}"
+                );
+                assert!(matches!(messages[0], NetworkMessage::Push(_)));
+                seen.push((reliable, sn));
+            }
+            other => panic!("turn {turn}: expected a Frame, got {other:?}"),
+        }
+    }
+    assert_eq!(seen, vec![(true, 1), (false, 0), (true, 2)]);
+
+    let drained = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(drained, DriverLoopOutcome::LinkLost(LostCause::PeerClosed)),
+        "a drained unit must not keep answering; got {drained:?}"
+    );
+}
+
+/// A transport message behind the last record of a Frame is the next unit of the batch as well,
+/// where a frame used to take it for a record it could not read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_followed_by_a_transport_message_leaves_it_for_the_next_unit() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // [Frame(reliable, sn 1), no record][KeepAlive]
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(vec![0x25, 0x01, 0x04]))]);
+
+    match poll_and_dispatch_one(&mut driver, &actions, &mut engine).await {
+        DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        } => {
+            assert!(reliable);
+            assert_eq!(sn, 1);
+            assert!(
+                messages.is_empty(),
+                "the KeepAlive is not a record of the frame; got {messages:?}"
+            );
+        }
+        other => panic!("expected the Frame, got {other:?}"),
+    }
+    let second = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(second, DriverLoopOutcome::SideEffectOnly),
+        "the KeepAlive behind the frame, from the parked remainder; got {second:?}"
     );
 }
 
