@@ -1407,10 +1407,24 @@ third against the pinned router (`zenohd` 1.10.2; the first two ran against the
 lab's 1.10.0, and the kit lane's preflight now refuses a router that is not the
 pinned version), with no `wz: FAIL` line; the node's own console reported one session and a stack peak
 of 22,189 of 32,768 bytes. The requester the verbs decided by is the one the
-link's key proved, on silicon, through a real router. What this part does not
-do is the open by zid and the read of `sessions[]`, and the image has no stack
-gate row yet (the 32,768-byte stack is the build's default until a row sets
-it).
+link's key proved, on silicon, through a real router.
+
+Witnessed on the kit (2026-11-02, second part): the open by zid and the read of
+`sessions[]`. The image is built with a hint for a second peer
+(`CONFIG_WZ_PEER_NODE_ZID` and `_LOCATOR`, read when the image is compiled and
+declared to the node's directory at start as a permanent hint) and with the
+router's key listed for `open` as well as `status`. The run starts that peer, a
+second stock `zenohd` listening on the cable for `tls/` with the image's
+certificate as the root it pins, and checks in order: before the open the admin
+root of the image (`@/<zid>/peer`) lists the router's session and not the
+peer's, so a hint dials nobody; the router's `open/<peer>` is taken
+(`"verdict":"opening"`); and the admin root then lists both sessions, the second
+with the link from the image's own port to the peer's `tls/` port, so the image
+dialled the peer for its zid. The control of the first part stays (a router
+whose key is not listed is refused `status`). Held on the first run and on the
+repeat with the before-open check, against the pinned router. What D14 still
+lacks is the image's stack gate row (the 32,768-byte stack is the build's
+default until a row sets it), its text and resource rows, and a hosted build.
 
 **D15. An `open` for a peer the graphs do not hold enters the table.** An
 intent is declarative state: a configured BGP neighbour exists whether or not

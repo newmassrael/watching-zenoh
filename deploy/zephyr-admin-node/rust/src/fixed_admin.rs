@@ -243,6 +243,18 @@ static CLOSE_LIST: CommanderList<MAX_COMMANDERS> = commanders_of!("WZ_COMMANDERS
 static RESET_LIST: CommanderList<MAX_COMMANDERS> = commanders_of!("WZ_COMMANDERS_RESET");
 static STATUS_LIST: CommanderList<MAX_COMMANDERS> = commanders_of!("WZ_COMMANDERS_STATUS");
 
+/// The one peer the build knows where to find (`CONFIG_WZ_PEER_NODE_ZID` and `_LOCATOR`): declared to
+/// the node's directory at start as a permanent hint, so an `open` for that zid has a locator to dial
+/// for it. Empty when the build states none.
+static PEER_ZID: CommanderList<1> = CommanderList::parse(match option_env!("WZ_PEER_NODE_ZID") {
+    Some(text) => text,
+    None => "",
+});
+const PEER_LOCATOR: &str = match option_env!("WZ_PEER_NODE_LOCATOR") {
+    Some(text) => text,
+    None => "",
+};
+
 /// The node's in-band verbs: the store its connect manager holds the nodes in, judged by the lists
 /// above. A `static` of its own, because it holds references and so does not start as zero bytes,
 /// which is what keeps [`Storage`] in `.bss`. With `CONFIG_WZ_LIMIT_MAX_PEER_NODES` at its default
@@ -464,6 +476,17 @@ fn start() -> Result<Running, i32> {
         3
     })?;
     let node = STORAGE.run.put(|| node).ok_or(3)?;
+    if let Some(peer) = PEER_ZID.as_slice().first() {
+        let now_ms = Clock::default().now_us() / 1000;
+        if node
+            .core_mut()
+            .declare_node(*peer, PEER_LOCATOR, now_ms)
+            .is_err()
+        {
+            log(c"wz: FAIL - the peer the build names has no room in the node's directory");
+            return Err(3);
+        }
+    }
     // The line a lane (or a person at the console) waits for: who the node claims to be and where it
     // takes secure channels.
     log_args(format_args!(

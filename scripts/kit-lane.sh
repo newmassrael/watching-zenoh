@@ -174,6 +174,11 @@ COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
 # The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).
 TLS_PORT=7448
+# The address the kit's host takes on the cable (the one overlays/t2g_zeth.conf's plan and the client
+# overlays dial) and the port the second peer of an admin image's run listens on for `tls/`: the
+# locator the admin image is built to hint for that peer.
+PEER_HOST=192.168.100.1
+PEER_PORT=7449
 
 load_lab() {
     if [[ ! -r "$LAB_ENV" ]]; then
@@ -374,10 +379,24 @@ build() {
             bad "$key" "the router's identity could not be made ($out/router-id.log)"
             return 1
         fi
-        printf 'CONFIG_WZ_COMMANDERS_STATUS="%s"\n' "$ROUTER_ID" >"$out/commanders.conf"
-        echo "$ROUTER_ID" >"$out/router.zid"
+        local commander_id="$ROUTER_ID"
+        # The second peer the run starts: the image is built to hint where it is, so the commander's
+        # `open` for its zid has a locator to dial for it.
+        if ! make_router_identity "$out/peer"; then
+            bad "$key" "the peer's identity could not be made ($out/peer/router-id.log)"
+            return 1
+        fi
+        local peer_id="$ROUTER_ID"
+        {
+            printf 'CONFIG_WZ_COMMANDERS_STATUS="%s"\n' "$commander_id"
+            printf 'CONFIG_WZ_COMMANDERS_OPEN="%s"\n' "$commander_id"
+            printf 'CONFIG_WZ_PEER_NODE_ZID="%s"\n' "$peer_id"
+            printf 'CONFIG_WZ_PEER_NODE_LOCATOR="tls/%s:%s"\n' "$PEER_HOST" "$PEER_PORT"
+        } >"$out/commanders.conf"
+        echo "$commander_id" >"$out/router.zid"
+        echo "$peer_id" >"$out/peer.zid"
         confs="${confs:+$confs;}$out/commanders.conf"
-        ok "$key" "the router's key names zid $ROUTER_ID, built in as the commander of status and of no other verb"
+        ok "$key" "the router's key names zid $commander_id, built in as the commander of status and of open and of no other verb; the peer it opens is $peer_id at tls/$PEER_HOST:$PEER_PORT"
     fi
     local avail
     avail="$(LC_ALL=C free -m | awk '/^Mem:/ {print $7}')"
@@ -923,7 +942,8 @@ EOF
     setsid "$KIT_ZENOHD" --config "$OUT/router.json5" -l "tcp/127.0.0.1:17447" \
         --no-multicast-scouting --plugin-search-dir "$(dirname "$KIT_ZENOHD")" \
         --rest-http-port "127.0.0.1:$REST_PORT" >"$OUT/router.log" 2>&1 </dev/null &
-    PIDS+=("$!")
+    local router_pid=$!
+    PIDS+=("$router_pid")
     ok "$key" "a router claiming zid $router_id dials the image and pins its certificate ($OUT/router.json5)"
 
     # The verbs are asked through the router: under the node's zid, for a peer the lane names (the router).
@@ -946,10 +966,65 @@ EOF
     else
         bad "$key" "close was not refused by name: '${close_body:0:160}' ($OUT/close.json)"
     fi
+
+    # The open by zid. A second peer listens on the cable for `tls/`, pinning the image's certificate, and
+    # the image was built with a hint for it (its zid and this locator): the commander asks the image to
+    # open the peer, the image dials it FOR that zid, and the admin root of the image lists the session.
+    if [[ "$KIT_HOST_IP" != "$PEER_HOST" ]]; then
+        bad "$key" "the image hints its second peer at $PEER_HOST and this host takes $KIT_HOST_IP on the cable"
+        return 1
+    fi
+    local peer_id
+    peer_id="$(cat "$OUT/peer.zid")"
+    # Before the open the image holds the router's session and not the peer's: the hint alone dials nobody.
+    local root_before
+    root_before="$(curl -s -m 10 "http://127.0.0.1:$REST_PORT/@/$node_id/peer" 2>/dev/null || true)"
+    printf '%s\n' "$root_before" >"$OUT/root-before.json"
+    if ! grep -aqE "\"peer\"[^a-f0-9]+$router_id" <<<"$root_before"; then
+        bad "$key" "the admin root does not list the router's session before the open: '${root_before:0:160}' ($OUT/root-before.json)"
+    elif grep -aqE "\"peer\"[^a-f0-9]+$peer_id" <<<"$root_before"; then
+        bad "$key" "the image held the peer before it was asked to open it ($OUT/root-before.json)"
+    else
+        ok "$key" "before the open the admin root lists the router's session and not the peer's: a hint dials nobody ($OUT/root-before.json)"
+    fi
+    cat >"$OUT/peer/router.json5" <<EOF
+{ id: "$peer_id", mode: "router",
+  transport: { link: { tls: {
+    listen_certificate: "$OUT/peer/router.pem", listen_private_key: "$OUT/peer/router.key",
+    root_ca_certificate: "$OUT/device.pem", enable_mtls: true } } } }
+EOF
+    setsid "$KIT_ZENOHD" --config "$OUT/peer/router.json5" -l "tls/$PEER_HOST:$PEER_PORT" \
+        --no-multicast-scouting --plugin-search-dir "$(dirname "$KIT_ZENOHD")" \
+        >"$OUT/peer/router.log" 2>&1 </dev/null &
+    PIDS+=("$!")
+    sleep 3
+    local open_body
+    open_body="$(curl -s -m 10 "$base/open/$peer_id" 2>/dev/null || true)"
+    printf '%s\n' "$open_body" >"$OUT/open.json"
+    if [[ "$open_body" =~ verdict[^a-z]+opening ]]; then
+        ok "$key" "open was taken for the peer the image hints ($peer_id): the commander the image lists asked ($OUT/open.json)"
+    else
+        bad "$key" "open was not taken: '${open_body:0:160}' ($OUT/open.json, $OUT/peer/router.log)"
+    fi
+    local root_body="" held_router=0 held_peer=0
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        root_body="$(curl -s -m 10 "http://127.0.0.1:$REST_PORT/@/$node_id/peer" 2>/dev/null || true)"
+        grep -aqE "\"peer\"[^a-f0-9]+$router_id" <<<"$root_body" && held_router=1
+        grep -aqE "\"peer\"[^a-f0-9]+$peer_id" <<<"$root_body" && held_peer=1
+        [[ "$held_peer" -eq 1 && "$held_router" -eq 1 ]] && break
+        sleep 5
+    done
+    printf '%s\n' "$root_body" >"$OUT/root.json"
+    if [[ "$held_peer" -eq 1 && "$held_router" -eq 1 ]]; then
+        ok "$key" "the admin root of the image lists both sessions: the router that dialled it and the peer it opened by zid ($OUT/root.json)"
+    else
+        bad "$key" "the admin root does not list both sessions (router $held_router, peer $held_peer): '${root_body:0:200}' ($OUT/root.json)"
+    fi
+
     # The control: the same image, asked through a router whose key is NOT the listed commander. The verb
     # that was answered must now be refused, or the answer above was the verb's and not the requester's.
-    kill "${PIDS[-1]}" 2>/dev/null
-    wait "${PIDS[-1]}" 2>/dev/null
+    kill "$router_pid" 2>/dev/null
+    wait "$router_pid" 2>/dev/null
     sleep 3
     local other="$OUT/other"
     if ! make_router_identity "$other"; then

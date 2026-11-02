@@ -81,6 +81,26 @@ config WZ_COMMANDERS_STATUS
 	  As WZ_COMMANDERS_OPEN, for the verb that reads and changes nothing and still needs a
 	  permit, because it reveals which peers a node holds.
 
+config WZ_PEER_NODE_ZID
+	string "The zid of a peer the build knows where to find: one lowercase hex zid"
+	default ""
+	depends on WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS && !WZ_ROLE_CLIENT
+	help
+	  With WZ_PEER_NODE_LOCATOR, a hint the build declares for a peer the node may be asked to
+	  hold by its zid (the `open` verb): the directory keeps it as a declared source, permanent. A
+	  hint is where the zid may be and not a claim that it is: every dial of it is made for the
+	  zid, and a session another node answers closes at the handshake (decision D4 of
+	  docs/session-lifecycle-intent.md). Read when the image is compiled; empty: the node knows
+	  no peer, and an `open` for any zid is answered by name that it has no locator. Needs
+	  CONFIG_WZ_LIMIT_MAX_PEER_NODES above zero.
+
+config WZ_PEER_NODE_LOCATOR
+	string "Where that peer may be reached: a locator such as tls/192.168.100.1:7449"
+	default ""
+	depends on WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS && !WZ_ROLE_CLIENT
+	help
+	  The locator of the peer WZ_PEER_NODE_ZID names. The admin node dials `tls/` only.
+
 config WZ_BATCH_BYTES
 	int "Largest batch the node's sessions negotiate, in bytes"
 	default 1472
