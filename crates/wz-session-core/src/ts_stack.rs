@@ -214,6 +214,17 @@ pub fn record_interception<S: CodecStorage>(
     at: u8,
     timestamp: impl FnOnce() -> Option<Vec<u8>>,
 ) -> bool {
+    record_interception_stamped(extensions, at, || timestamp().map(|bytes| (bytes, false)))
+}
+
+/// [`record_interception`] for a clock that says whether its timestamp is the application's own:
+/// `timestamp` gives the bytes and whether the record is flagged as a custom one
+/// ([`point::IS_CUSTOM_TS`]), as a session opened with a timestamp callback records.
+pub fn record_interception_stamped<S: CodecStorage>(
+    extensions: &mut Option<Vec<ExtEntryOwned<S>>>,
+    at: u8,
+    timestamp: impl FnOnce() -> Option<(Vec<u8>, bool)>,
+) -> bool {
     let Some(mut stack) = extensions
         .as_ref()
         .and_then(|chain| read_ts_stack(chain.iter()))
@@ -223,10 +234,10 @@ pub fn record_interception<S: CodecStorage>(
     if !stack.is_instrumented(at) {
         return false;
     }
-    let Some(timestamp) = timestamp() else {
+    let Some((timestamp, is_custom)) = timestamp() else {
         return false;
     };
-    if !stack.record(at, timestamp, false) {
+    if !stack.record(at, timestamp, is_custom) {
         return false;
     }
     set_ts_stack(extensions, Some(&stack));
@@ -240,7 +251,17 @@ pub fn record_on_chain<S: CodecStorage, const MAX: usize>(
     at: u8,
     timestamp: impl FnOnce() -> Option<Vec<u8>>,
 ) -> bool {
-    crate::held_list::edit_chain(chain, |chain| record_interception(chain, at, timestamp))
+    record_on_chain_stamped(chain, at, || timestamp().map(|bytes| (bytes, false)))
+}
+
+/// [`record_on_chain`] for a clock that says whether its timestamp is the application's own
+/// ([`record_interception_stamped`]).
+pub fn record_on_chain_stamped<S: CodecStorage, const MAX: usize>(
+    chain: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX>>,
+    at: u8,
+    timestamp: impl FnOnce() -> Option<(Vec<u8>, bool)>,
+) -> bool {
+    crate::held_list::edit_chain(chain, |chain| record_interception_stamped(chain, at, timestamp))
         .unwrap_or(false)
 }
 
@@ -251,20 +272,30 @@ pub fn record_on_message(
     at: u8,
     timestamp: impl FnOnce() -> Option<Vec<u8>>,
 ) -> bool {
+    record_on_message_stamped(message, at, || timestamp().map(|bytes| (bytes, false)))
+}
+
+/// [`record_on_message`] for a clock that says whether its timestamp is the application's own
+/// ([`record_interception_stamped`]).
+pub fn record_on_message_stamped(
+    message: &mut crate::network_message::NetworkMessage,
+    at: u8,
+    timestamp: impl FnOnce() -> Option<(Vec<u8>, bool)>,
+) -> bool {
     // The type is named in each arm and not imported: a build with none of the three codecs has
     // no arm that names it, and an import would be unused there.
     match message {
         #[cfg(feature = "codec-push")]
         crate::network_message::NetworkMessage::Push(push) => {
-            record_on_chain(&mut push.extensions, at, timestamp)
+            record_on_chain_stamped(&mut push.extensions, at, timestamp)
         }
         #[cfg(feature = "codec-request")]
         crate::network_message::NetworkMessage::Request(request) => {
-            record_on_chain(&mut request.extensions, at, timestamp)
+            record_on_chain_stamped(&mut request.extensions, at, timestamp)
         }
         #[cfg(feature = "codec-response")]
         crate::network_message::NetworkMessage::Response(response) => {
-            record_on_chain(&mut response.extensions, at, timestamp)
+            record_on_chain_stamped(&mut response.extensions, at, timestamp)
         }
         _ => {
             let _ = (at, timestamp);
@@ -422,6 +453,26 @@ mod tests {
             chain.as_ref().unwrap().len(),
             1,
             "the stack is replaced, not added"
+        );
+    }
+
+    /// A route recorded with the application's own clock says so on the wire: the record carries
+    /// the custom flag, where one recorded with the clock of the node does not.
+    #[test]
+    fn a_route_recorded_with_the_applications_clock_is_flagged_custom() {
+        let mut chain = chain_of(point::SEND | point::ROUTE);
+        assert!(record_interception_stamped(
+            &mut chain,
+            point::ROUTE,
+            || Some((alloc::vec![9], true))
+        ));
+        let stack = read_ts_stack(chain.as_ref().unwrap().iter()).unwrap();
+        assert_eq!(
+            stack.stack[1],
+            Interception {
+                flags: point::ROUTE | point::IS_CUSTOM_TS,
+                timestamp: alloc::vec![9]
+            }
         );
     }
 

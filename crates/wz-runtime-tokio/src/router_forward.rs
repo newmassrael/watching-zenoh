@@ -2581,6 +2581,12 @@ pub enum MatchPlane {
 /// [`RouterForwarder::attach_local_face`]).
 pub type LocalFaceSink = Arc<dyn Fn(LocalFaceEvent) + Send + Sync>;
 
+/// What a session gives the node to record its routing on a timestamp stack with: the bytes of
+/// the timestamp and whether it is the application's own (a callback's), or `None` when it gives
+/// none ([`RouterForwarder::set_interception_source`]).
+#[cfg(feature = "pubsub-ts-stack")]
+pub type InterceptionSource = Arc<dyn Fn() -> Option<(Vec<u8>, bool)> + Send + Sync>;
+
 /// The key aliases the `Local` face has been told: none. The router names a key to the face as
 /// the literal it is, so a program that reads what it is told with the aliases of a session reads
 /// them against this table.
@@ -2977,6 +2983,12 @@ pub struct RouterForwarder {
     /// That makes the forward stamp FOREIGN-OBSERVABLE here: a pico subscriber
     /// prints `with timestamp:` for a Put that entered this router bare.
     node_hlc: crate::node_clock::NodeHlc,
+    /// What the node records its routing on a timestamp stack with, when its session has a clock
+    /// of its own to give ([`RouterForwarder::set_interception_source`]): upstream's runtime
+    /// records an interception with the one callback or clock the application opened the
+    /// session with. Unset, the clock of the node is used.
+    #[cfg(feature = "pubsub-ts-stack")]
+    interception_source: std::sync::OnceLock<InterceptionSource>,
     /// The namespace of the node's own session, which its face puts on what the session sends
     /// and takes off what it is told ([`RouterForwarder::with_local_namespace`]).
     #[cfg(feature = "routing-namespace")]
@@ -4108,6 +4120,15 @@ impl RouterForwarder {
         self.on_tables_mut().tables.north_is_client = true;
         self
     }
+
+    /// Record the routing of this node on a timestamp stack with `source`, the clock or the
+    /// callback its session was opened with, as upstream's runtime records an interception with
+    /// the one the application gave it. Set once, before the program does anything: a second call
+    /// keeps the first and says so with `false`.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn set_interception_source(&self, source: InterceptionSource) -> bool {
+        self.interception_source.set(source).is_ok()
+    }
 }
 
 impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
@@ -4260,6 +4281,8 @@ impl RouterForwarder {
                 node_mode,
                 timestamping,
             ),
+            #[cfg(feature = "pubsub-ts-stack")]
+            interception_source: std::sync::OnceLock::new(),
             credit: Arc::new(egress::Credit::default()),
             own_zid: self_zid,
             shed_registry: Arc::default(),
@@ -5672,11 +5695,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Request or a Response to (`net/routing/dispatcher/pubsub.rs` and `queries.rs`).
     #[cfg(feature = "pubsub-ts-stack")]
     fn record_route(&self, message: &mut NetworkMessage) {
-        wz_session_core::ts_stack::record_on_message(
+        wz_session_core::ts_stack::record_on_message_stamped(
             message,
             wz_session_core::ts_stack::point::ROUTE,
-            || self.node_hlc.interception_timestamp(),
+            || self.route_stamp(),
         );
+    }
+
+    /// The timestamp this node records its routing with and whether it is the application's own:
+    /// the session's when it gave one, and otherwise the clock of the node.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn route_stamp(&self) -> Option<(Vec<u8>, bool)> {
+        match self.interception_source.get() {
+            Some(source) => source(),
+            None => self
+                .node_hlc
+                .interception_timestamp()
+                .map(|bytes| (bytes, false)),
+        }
     }
 
     /// Send one built message to one held face, through the egress access control
@@ -7861,10 +7897,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             #[cfg(feature = "pubsub-ts-stack")]
             let push = {
                 let mut push = push;
-                wz_session_core::ts_stack::record_on_chain(
+                wz_session_core::ts_stack::record_on_chain_stamped(
                     &mut push.extensions,
                     wz_session_core::ts_stack::point::ROUTE,
-                    || self.node_hlc.interception_timestamp(),
+                    || self.route_stamp(),
                 );
                 push
             };
@@ -10082,10 +10118,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         .is_some()
         {
             let mut routed = push.clone();
-            wz_session_core::ts_stack::record_on_chain(
+            wz_session_core::ts_stack::record_on_chain_stamped(
                 &mut routed.extensions,
                 wz_session_core::ts_stack::point::ROUTE,
-                || self.node_hlc.interception_timestamp(),
+                || self.route_stamp(),
             );
             recorded = routed;
             &recorded
@@ -10648,22 +10684,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .collect()
         };
         // The session of the node is a face the query is handed to like any other: the routing
-        // is recorded on the stack of an instrumented query before the session reads it.
+        // is recorded on the stack of an instrumented query before the session reads it, unless
+        // the session asked it of itself, which upstream answers without a router between them.
         #[cfg(feature = "pubsub-ts-stack")]
         let recorded;
         #[cfg(feature = "pubsub-ts-stack")]
-        let request = if wz_session_core::ts_stack::read_ts_stack(
-            wz_session_core::held_list::HeldList::entries(&request.extensions)
-                .unwrap_or(&[])
-                .iter(),
-        )
-        .is_some()
+        let request = if inbound != LOCAL_FACE
+            && wz_session_core::ts_stack::read_ts_stack(
+                wz_session_core::held_list::HeldList::entries(&request.extensions)
+                    .unwrap_or(&[])
+                    .iter(),
+            )
+            .is_some()
         {
             let mut routed = request.clone();
-            wz_session_core::ts_stack::record_on_chain(
+            wz_session_core::ts_stack::record_on_chain_stamped(
                 &mut routed.extensions,
                 wz_session_core::ts_stack::point::ROUTE,
-                || self.node_hlc.interception_timestamp(),
+                || self.route_stamp(),
             );
             recorded = routed;
             &recorded
@@ -10731,7 +10769,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     if *namespaced {
                         self.fwd.put_under_namespace(&mut resp);
                     }
-                    self.send_to_face(inbound, reliable, || {
+                    self.send_hosted_reply(inbound, reliable, || {
                         NetworkMessage::Response(Box::new(resp.clone()))
                     });
                 }
@@ -10765,7 +10803,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 if record.namespaced {
                     self.fwd.put_under_namespace(&mut resp);
                 }
-                self.send_to_face(to.face, record.reliable, || {
+                self.send_hosted_reply(to.face, record.reliable, || {
                     NetworkMessage::Response(Box::new(resp.clone()))
                 });
             }
@@ -11848,6 +11886,47 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.send_to_face_about(target, reliable, None, build)
     }
 
+    /// Hand `msg` to the program's sink as what the node's own face is told, and whether there
+    /// was a sink. `routed` says the node routed the message on its way, so that the routing is
+    /// recorded on the stack of an instrumented one: a message another face sent, or a reply of
+    /// an instrumented query.
+    fn tell_local_face(&self, mut msg: NetworkMessage, routed: bool) -> bool {
+        let Some(sink) = &self.tables.local_face_sink else {
+            return false;
+        };
+        // What the session is told is relative to its namespace: a message about a key outside it
+        // is not the session's (upstream's ingress decorator of the face).
+        if !self.fwd.strip_namespace(&mut msg) {
+            return true;
+        }
+        #[cfg(feature = "pubsub-ts-stack")]
+        if routed {
+            self.record_route(&mut msg);
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        let _ = routed;
+        if let Some(event) = local_face_event(msg) {
+            sink(event);
+        }
+        true
+    }
+
+    /// A reply of a queryable of the node's own session to the face that asked. A query the
+    /// session asked of its own queryable is answered without a router between the two, as
+    /// upstream's session answers it, so that reply is not routed; any other face is sent the
+    /// reply as every message is.
+    fn send_hosted_reply(
+        &self,
+        target: FaceId,
+        reliable: bool,
+        mut build: impl FnMut() -> NetworkMessage,
+    ) -> bool {
+        if target == LOCAL_FACE {
+            return self.tell_local_face(build(), false);
+        }
+        self.send_to_face(target, reliable, build)
+    }
+
     /// [`send_to_face`](Self::send_to_face) for a message that names no key although it is about
     /// one (an undeclaration by id): `known` is the key, which the egress chain is asked about
     /// as upstream's is (see [`RouterFaceContext::known`]).
@@ -11860,23 +11939,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) -> bool {
         // The node's own face has no transport: what is sent to it goes to the program's sink.
         if target == LOCAL_FACE {
-            let Some(sink) = &self.tables.local_face_sink else {
-                return false;
-            };
-            let mut msg = build();
-            // What the session is told is relative to its namespace: a message about a key
-            // outside it is not the session's (upstream's ingress decorator of the face).
-            if !self.fwd.strip_namespace(&mut msg) {
-                return true;
-            }
-            // A face the message is handed to like any other: the routing is recorded on the
-            // stack of an instrumented one (a reply of an instrumented query).
-            #[cfg(feature = "pubsub-ts-stack")]
-            self.record_route(&mut msg);
-            if let Some(event) = local_face_event(msg) {
-                sink(event);
-            }
-            return true;
+            return self.tell_local_face(build(), true);
         }
         let faces = &self.tables.faces;
         let Some(state) = faces.get(&target) else {
@@ -29403,6 +29466,67 @@ mod tests {
             forward_one(&fwd, FaceId(1), stacked_push(ALL));
             let stack = stack_of_push(&sink_client.frame_bytes(0)).expect("a stack");
             assert_eq!(points(&stack), [point::SEND, point::ROUTE]);
+        }
+
+        /// A node whose session has a clock of its own records its routing with it, and says the
+        /// record is the application's, as upstream's runtime records with the one callback the
+        /// session was opened with; the first source given is kept.
+        #[test]
+        fn a_node_given_the_applications_clock_records_its_routing_with_it() {
+            let fwd = RouterForwarder::new(zid(0x01));
+            assert!(fwd.set_interception_source(Arc::new(|| Some((vec![0x42], true)))));
+            assert!(
+                !fwd.set_interception_source(Arc::new(|| Some((vec![0x43], true)))),
+                "a second source is refused"
+            );
+            let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+            let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+            fwd.register(FaceId(0), &client);
+            fwd.register(FaceId(1), &p);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+            fwd.tick();
+            forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+            sink_client.reset();
+            forward_one(&fwd, FaceId(1), stacked_push(ALL));
+            let stack = stack_of_push(&sink_client.frame_bytes(0)).expect("a stack");
+            assert_eq!(
+                stack.stack[1].flags,
+                point::ROUTE | point::IS_CUSTOM_TS,
+                "the route is flagged as the application's"
+            );
+            assert_eq!(stack.stack[1].timestamp, [0x42]);
+        }
+
+        /// The session of a node is a face a query is handed to like any other, so the node records
+        /// its routing on a query another face sent. A query the session asked of its own
+        /// queryable is answered without a router between them, as upstream's session does, and
+        /// so records none.
+        #[test]
+        fn a_query_is_routed_on_its_way_to_the_session_unless_the_session_asked_it() {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+            let handler_seen = Arc::clone(&seen);
+            fwd.host_queryable(
+                "demo/q",
+                false,
+                Box::new(move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                    let stack = view.ts_stack().expect("a stack");
+                    handler_seen.lock().unwrap().push(points(stack));
+                }),
+            );
+            let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+            fwd.register(FaceId(0), &client);
+            fwd.tick();
+            forward_one(&fwd, FaceId(0), stacked_request(1, ALL));
+            let NetworkMessage::Request(own) = stacked_request(2, ALL) else {
+                unreachable!()
+            };
+            fwd.local_get(&own);
+            assert_eq!(
+                *seen.lock().unwrap(),
+                [vec![point::SEND, point::ROUTE], vec![point::SEND],],
+                "routed from the other face, not from the session itself"
+            );
         }
 
         #[test]

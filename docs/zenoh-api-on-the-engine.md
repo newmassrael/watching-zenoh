@@ -542,6 +542,18 @@ Each lands whole with its surface lines, tests and faults in one round.
     a querier that asks for complete queryables needs a complete one that includes its key in
     both. The node now keeps the two rules, and the differential of the matching status of
     publishers and queriers is equal to upstream's.
+  - **Repaired after round 4109: the timestamp stack of a query, a reply and a message carried
+    the node's routing twice, and with the clock of the node where the session had its own.**
+    The node records its routing on the stack of each face it hands a message to, and the
+    session recorded its own routing as well, as the session of the other engine must; a
+    session over a node now leaves the routing to it. The node records with the callback the
+    session was opened with when it has one (`set_interception_source`), flagged as the
+    application's, as upstream's runtime does, and it records none on a query the session asked
+    of its own queryable or on the reply to it, which upstream answers without a router between
+    them. The differential of the timestamp stack of messages, queries and replies is equal to
+    upstream's. Open: the receive of a reply to a query the session asked of itself is
+    recorded on the thread of the node's face, after the next reply may have been sent, where
+    upstream records it as the reply arrives (`a_reply_a_query_holds_back_is_received_...`).
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

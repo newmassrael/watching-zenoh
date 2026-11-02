@@ -683,6 +683,33 @@ impl Engine {
         }
     }
 
+    /// Whether the engine records the routing of a message on its timestamp stack itself: a node
+    /// does, for each face it hands the message to, where the engine of a single session leaves
+    /// it to the session.
+    #[cfg(feature = "unstable")]
+    fn records_routing(&self) -> bool {
+        matches!(self, Engine::Router(_))
+    }
+
+    /// Hand a node the callback the session takes its timestamps with, so that the routing it
+    /// records on a stack carries the application's own clock, as upstream's runtime records
+    /// with the one the session was opened with. A session with no callback is recorded with the
+    /// clock of the node, which is the node's already.
+    #[cfg(feature = "unstable")]
+    fn install_interception_source(&self, timestamps: &Arc<TimestampSource>) {
+        let Engine::Router(router) = self else {
+            return;
+        };
+        if !timestamps.has_callback() {
+            return;
+        }
+        let source = Arc::clone(timestamps);
+        router
+            .node
+            .forwarder()
+            .set_interception_source(Arc::new(move || source.callback_stamp()));
+    }
+
     /// The clock of the node as a function: the next timestamp, or `None` for a node that holds
     /// none. The function lets go of the engine's session with the last of its holders.
     #[cfg(feature = "unstable")]
@@ -1422,6 +1449,16 @@ impl Engine {
     }
 
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn records_routing(&self) -> bool {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn install_interception_source(&self, _timestamps: &Arc<TimestampSource>) {
         match *self {}
     }
 
@@ -4540,6 +4577,8 @@ impl Session {
         let whatami = config.0.clone().expanded().mode();
         #[cfg(feature = "unstable")]
         let node_clock = engine.node_clock();
+        #[cfg(feature = "unstable")]
+        let engine_routes = engine.records_routing();
         let id = u32::try_from(engine.next_entity_id()).unwrap_or(u32::MAX);
         let queries_default_timeout = Duration::from_millis(
             config
@@ -4570,6 +4609,7 @@ impl Session {
                 whatami,
                 timestamp_callback,
                 node_clock,
+                engine_routes,
             )),
             #[cfg(all(
                 feature = "unstable",
@@ -4596,6 +4636,11 @@ impl Session {
             #[cfg(feature = "unstable")]
             link_listeners: std::sync::Mutex::new(vec![]),
         }));
+        #[cfg(feature = "unstable")]
+        session
+            .0
+            .engine
+            .install_interception_source(&session.0.timestamps);
         #[cfg(feature = "unstable")]
         crate::api::admin::init(session.downgrade());
         Ok(session)

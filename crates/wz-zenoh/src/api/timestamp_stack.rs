@@ -501,6 +501,10 @@ pub(crate) struct TimestampSource {
     node_clock: Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync>,
     /// The clock of a node that holds none, made when it is first asked.
     lazy_hlc: std::sync::OnceLock<uhlc::HLC>,
+    /// Whether the engine records the routing of a message itself, as a node does for each face
+    /// it hands the message to: the session then records none, since a message it records on
+    /// twice would carry the node twice.
+    engine_routes: bool,
 }
 
 #[cfg(feature = "unstable")]
@@ -510,6 +514,7 @@ impl TimestampSource {
         whatami: WhatAmI,
         callback: Option<GetTimestampCallback>,
         node_clock: Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync>,
+        engine_routes: bool,
     ) -> Self {
         Self {
             zid,
@@ -517,7 +522,25 @@ impl TimestampSource {
             callback,
             node_clock,
             lazy_hlc: std::sync::OnceLock::new(),
+            engine_routes,
         }
+    }
+
+    /// What the user's callback gives for a record the engine makes for the session: the bytes
+    /// and `true` for a custom record, or `None` for a session opened with no callback (the
+    /// engine then uses the clock of its node) and for a callback that gives nothing.
+    pub(crate) fn callback_stamp(&self) -> Option<(Vec<u8>, bool)> {
+        let callback = self.callback.as_ref()?;
+        let timestamp = callback(TimestampContext {
+            zid: self.zid,
+            whatami: self.whatami,
+        });
+        (!timestamp.is_empty()).then_some((timestamp, true))
+    }
+
+    /// Whether the user gave this session a callback to take timestamps with.
+    pub(crate) fn has_callback(&self) -> bool {
+        self.callback.is_some()
     }
 
     /// The stack a message starts with when `instrumentation` is asked for it, with what this node
@@ -544,6 +567,11 @@ impl TimestampSource {
         at: u8,
     ) {
         if stack.conf_flags & at == 0 {
+            return;
+        }
+        // The routing of a message is recorded by the engine that routes it, with the callback of
+        // the session when it has one (`Engine::install_interception_source`).
+        if self.engine_routes && at == interception_point::ROUTE {
             return;
         }
         let (timestamp, is_custom) = self.stamp();
