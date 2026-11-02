@@ -52,7 +52,11 @@ wz-session-mcu = { path = "../../../crates/wz-session-mcu", default-features = f
     "adminspace-write",
     "adminspace-fixed",
     "lifecycle-verbs",
+    "lifecycle-close",
+    "lifecycle-reset",
     "lifecycle-status",
+    # The client asks: the GETs of the verbs through its session (`query-get`).
+    "query-get",
 ] }
 wz-runtime-coop = { path = "../../../crates/wz-runtime-coop", default-features = false, features = ["session-slot"] }
 wz-runtime-zephyr = { path = "../../../crates/wz-runtime-zephyr", default-features = false, features = ["session-slot"] }

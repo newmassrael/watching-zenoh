@@ -1317,11 +1317,20 @@ the node observed on that live session is the zid of the client's key, and that
 the node's verdicts for that zid are an answer for `status` (the one verb the list
 names it for), a refusal for `close`, and a refusal of `status` for a zid nobody
 listed. A control that lists another zid as the commander fails the image at the
-status answer. What the witness does not exercise is the query transport: the
-permit is given the zid of the live session, not a GET that carries it, so the
-step (1) plumbing of the requester through a real session stays held by its host
-tests. Step (4) is therefore built and witnessed for the commander list on a node
-of the sockets profile.
+status answer. The verbs are also asked the way they are used: the client
+asks two GETs through its TLS session, `session/status/<peer>` and
+`session/close/<peer>` under the admin node's zid, and holds what comes back. The
+`status` its key is listed for is answered with a status document, and the `close`
+it is not listed for is refused by name (`{"verdict":"refused",...}`), so the zid
+the node decided by is the one the session's key proved and the step (1) plumbing
+of the requester carries it through a real session on the target. The pair
+discriminates both ways: a requester that arrived unproven would be refused the
+`status`, and a node that took the requester for anyone would answer the `close`.
+(A verb the build did not compile in is answered with nothing at all: the first
+build of the witness bound `status` alone, and the GET for `close` came back
+empty, not refused. It binds all four, as the product image does.) Step (4) is
+therefore built and witnessed for the commander list on a node of the sockets
+profile.
 
 The product image binds the same assembly. The `zephyr-admin-node` crate takes the
 sockets backend as the admin role of the fixed-memory profile (the feature
@@ -1340,9 +1349,10 @@ and Layer Qz boots it and runs a stock TLS 1.3 client against it
 (`scripts/lib/admin_tls_probe.py`, OpenSSL through Python, with nothing of wz's):
 the node completes the mutual handshake with a client it had never heard of, and
 the certificate it presented is the key whose zid its READY line names. A control
-that falsifies the announced zid fails the probe. What no witness yet has is a
-router's session reaching the verbs of this image: the query transport through a
-real session, and D14's witness on the kit with a real router, remain.
+that falsifies the announced zid fails the probe. The query transport through a
+real session is witnessed on the loopback image above, which is the same node with
+the same verbs; what no witness yet has is a session of a real router reaching the
+verbs of the product image, which is D14's witness on the kit.
 
 Building it found that the arena the fixed client builds its host, factory and
 node in had been outgrown without a lane saying so. It was 832 bytes (960 asking,

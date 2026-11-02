@@ -37,10 +37,14 @@ use wz_runtime_coop::session_drive::{LinkOpenError, SlotStack};
 use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 use wz_runtime_coop::{ClockSource, CoopLocalSet};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Commander, Verdict};
 use wz_session_core::lifecycle_wire::{RefusedReason, StatusVerdict};
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::DirectoryZid;
+use wz_session_core::reply_sink::{ReplyKind, ReplySink, ReplyView};
+use wz_session_core::sample::QosLevel;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -53,15 +57,15 @@ use wz_session_mcu::admin_fixed::{
     FixedNodeStatus, Verbs,
 };
 use wz_session_mcu::admin_host::{host_connect_writes_fixed, ConnectControl};
-use wz_session_mcu::app_layer::{NoReplies, SlotDispatch};
+use wz_session_mcu::app_layer::{GetRequest, NoReplies, SessionEvents, SlotDispatch};
 use wz_session_mcu::connect_manager::{Commanders, StaticEndpoints, StoreNode};
 use wz_session_mcu::slot_admin::AcceptingAdminNode;
-use wz_session_mcu::slot_client::Listening;
+use wz_session_mcu::slot_client::{DocumentSinks, Listening};
 use wz_session_mcu::slot_dial::SessionFactory;
 use wz_session_mcu::slot_host::SessionHost;
 use wz_session_mcu::slot_node::{
-    Answering, ClientNode, Declared, Entities, NoPlane, NodeApp, NodeHandle, NodeIdentity,
-    NodeLoop, NodePort, NodeStorage, SIGNING_KEY_BYTES,
+    ClientNode, Declared, Entities, NoPlane, NodeApp, NodeHandle, NodeIdentity, NodeLoop, NodePort,
+    NodeStorage, SessionLayer, SIGNING_KEY_BYTES,
 };
 use wz_tls_mbedtls::channel::{start_on_platform_arena, IdentitySlot};
 use wz_tls_mbedtls::stream::{AcceptBudget, HandshakeBudget, TlsDial, TlsListener};
@@ -341,12 +345,225 @@ impl NodePort for Port {
 static SERVER_IDENTITY: IdentitySlot = IdentitySlot::new();
 static CLIENT_IDENTITY: IdentitySlot = IdentitySlot::new();
 
+/// The queries the client asks the admin node over its session, in order, and what each was answered:
+/// the keys of the verbs, a `status` the session's key is listed for and a `close` it is not.
+const ASKS: usize = 2;
+/// The most of a reply's payload that is kept (a verdict document is well under it).
+const REPLY_BYTES: usize = 192;
+
+/// What one query came to.
+struct Answer {
+    /// The payload of its reply, and how many bytes of it are kept.
+    text: [Cell<u8>; REPLY_BYTES],
+    len: Cell<usize>,
+    /// The reply was an error reply, or the query timed out.
+    failed: Cell<bool>,
+}
+
+impl Answer {
+    const fn new() -> Self {
+        Self {
+            text: [const { Cell::new(0) }; REPLY_BYTES],
+            len: Cell::new(0),
+            failed: Cell::new(false),
+        }
+    }
+
+    /// Whether the kept payload contains `needle`.
+    fn holds(&self, needle: &str) -> bool {
+        let needle = needle.as_bytes();
+        let len = self.len.get();
+        len >= needle.len()
+            && (0..=len - needle.len()).any(|at| {
+                needle
+                    .iter()
+                    .enumerate()
+                    .all(|(i, byte)| self.text[at + i].get() == *byte)
+            })
+    }
+}
+
+/// The client's queries, all zero bytes.
+struct Asking {
+    /// How many have been asked, and how many have ended (their final or their timeout).
+    asked: Cell<usize>,
+    ended: Cell<usize>,
+    /// The session refused a query it was asked to send.
+    refused: Cell<bool>,
+    answers: [Answer; ASKS],
+}
+
+// SAFETY: the profile's rule: one cooperative loop on one thread reaches it.
+unsafe impl Sync for Asking {}
+
+static ASKING: Asking = Asking {
+    asked: Cell::new(0),
+    ended: Cell::new(0),
+    refused: Cell::new(false),
+    answers: [const { Answer::new() }; ASKS],
+};
+
+/// The keys of the queries, written once before the client starts.
+static ASK_KEYS: Once<[FixedText<96>; ASKS]> = Once::new();
+
+/// The sink of query `index`: what its reply says is kept, and its end is counted.
+#[derive(Clone, Copy)]
+struct AskSink {
+    index: usize,
+}
+
+impl ReplySink for AskSink {
+    fn on_reply(&mut self, reply: &dyn ReplyView) {
+        let answer = &ASKING.answers[self.index];
+        if reply.kind() == ReplyKind::Err {
+            answer.failed.set(true);
+            return;
+        }
+        let payload = reply.payload();
+        for (cell, byte) in answer.text.iter().zip(payload) {
+            cell.set(*byte);
+        }
+        answer.len.set(payload.len().min(REPLY_BYTES));
+    }
+
+    fn on_final(&mut self, _rid: u64) {
+        ASKING.ended.set(ASKING.ended.get() + 1);
+    }
+
+    fn on_timeout(&mut self, _rid: u64) {
+        ASKING.answers[self.index].failed.set(true);
+        ASKING.ended.set(ASKING.ended.get() + 1);
+    }
+}
+
+/// What the client's sessions report to: the node's dispatch, which asks the queries above one at a
+/// time, the next when the one before has ended.
+struct AskLayer;
+
+impl<C, D> SessionLayer<C, D> for AskLayer
+where
+    C: ClockSource + Default + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+{
+    type Events = AskEvents<C, D>;
+
+    fn events(
+        &mut self,
+        observer: &'static ObserverCell<DocumentSinks>,
+        handle: &wz_runtime_coop::session_runtime::SessionHandle<C, D>,
+    ) -> Self::Events {
+        AskEvents {
+            inner: SlotDispatch::new(
+                observer,
+                handle.clone(),
+                Requesters::<AskSink, NoReplies>::new(),
+            ),
+        }
+    }
+}
+
+struct AskEvents<C, D>
+where
+    C: ClockSource + Default + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+{
+    inner: SlotDispatch<C, AskSink, NoReplies, DocumentSinks, D>,
+}
+
+impl<C, D> AskEvents<C, D>
+where
+    C: ClockSource + Default + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+{
+    /// Whether a query waits for a turn that can send it.
+    fn ask_pending(&self) -> bool {
+        self.inner.is_established()
+            && ASKING.asked.get() < ASKS
+            && ASKING.ended.get() >= ASKING.asked.get()
+    }
+
+    /// Ask the next query, when the session can send it and the one before has ended.
+    fn ask_due(&mut self) {
+        if !self.ask_pending() {
+            return;
+        }
+        let index = ASKING.asked.get();
+        let Some(keys) = ASK_KEYS.get() else {
+            return;
+        };
+        let request = GetRequest {
+            keyexpr: keys[index].prefix(),
+            parameters: b"",
+            consolidation: None,
+            target: None,
+            timeout_ms: 20_000,
+            qos: QosLevel::DEFAULT,
+        };
+        match self.inner.get(&request, AskSink { index }) {
+            Ok(_) => ASKING.asked.set(index + 1),
+            Err(_) => ASKING.refused.set(true),
+        }
+    }
+}
+
+impl<C, D> SessionEvents for AskEvents<C, D>
+where
+    C: ClockSource + Default + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+{
+    fn on_event(&mut self, event: IterationEvent<'_>) {
+        self.inner.on_event(event);
+        self.ask_due();
+    }
+
+    /// Answers the record beside it and asks nothing: the request would be written on top of the
+    /// record. A query that is due is left to the next event.
+    fn on_record(&mut self, record: wz_session_core::driver_loop::InPlaceRecord<'_>) {
+        self.inner.on_record(record);
+        if self.ask_pending() {
+            self.inner.wake_now();
+        }
+    }
+}
+
 /// The application the client node runs each round: it steps the admin node, and holds the
 /// verdicts.
 struct Witness {
     client_zid: [u8; CREDENTIAL_ZID_BYTES],
-    /// The admin node's accepted session has been seen verified, and what was concluded.
+    /// The admin node's accepted session has been seen verified, and the permit decided for the zid
+    /// it observed; what remains is the answers to the queries asked through the session.
+    checked: bool,
+    /// Every verdict was held.
     concluded: bool,
+}
+
+impl Witness {
+    /// The answers to the queries the client asked the admin node through the TLS session: the
+    /// `status` its key is listed for was answered with a status document, and the `close` it is not
+    /// listed for was refused by name. The verdict reaches the client as a reply to a GET, so the
+    /// zid the node decided by is the one the session carried, not one the witness handed it.
+    fn finish(&mut self) -> ControlFlow<i32> {
+        if ASKING.refused.get() {
+            log(c"wz: FAIL - the client's session refused to send a query");
+            return ControlFlow::Break(1);
+        }
+        if ASKING.ended.get() < ASKS {
+            return ControlFlow::Continue(());
+        }
+        let (status, close) = (&ASKING.answers[0], &ASKING.answers[1]);
+        if status.failed.get() || !status.holds("\"verdict\":\"status\"") {
+            log(c"wz: FAIL - a GET for status through the session was not answered with a status");
+            return ControlFlow::Break(1);
+        }
+        log(c"wz: a GET for status through the TLS session was answered with a status document");
+        if close.failed.get() || !close.holds("\"verdict\":\"refused\"") {
+            log(c"wz: FAIL - a GET for close through the session was not refused by name");
+            return ControlFlow::Break(1);
+        }
+        log(c"wz: a GET for close through the same session was refused by name");
+        self.concluded = true;
+        ControlFlow::Break(0)
+    }
 }
 
 impl NodeApp for Witness {
@@ -358,6 +575,9 @@ impl NodeApp for Witness {
         }
         if self.concluded {
             return ControlFlow::Break(0);
+        }
+        if self.checked {
+            return self.finish();
         }
         let Some(parts) = SERVER_PARTS.get() else {
             return ControlFlow::Break(1);
@@ -426,7 +646,7 @@ impl NodeApp for Witness {
             return ControlFlow::Break(1);
         }
         log(c"wz: a zid nobody listed is refused status");
-        self.concluded = true;
+        self.checked = true;
         ControlFlow::Continue(())
     }
 }
@@ -609,6 +829,26 @@ pub extern "C" fn wz_app_main() -> i32 {
         log(why);
         return 3;
     }
+    // The queries the client asks the admin node once its session is up: the verbs, under the zid the
+    // node announces. `peer` is any zid (a node held by it, or none): the commander is what is judged.
+    {
+        use core::fmt::Write;
+        let mut server_hex: FixedText<33> = FixedText::new();
+        write_zenoh_hex(&server_id.zid(), &mut server_hex);
+        let mut status: FixedText<96> = FixedText::new();
+        let mut close: FixedText<96> = FixedText::new();
+        let peer = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+        let _ = write!(
+            status,
+            "@/{}/peer/session/status/{peer}",
+            server_hex.prefix()
+        );
+        let _ = write!(close, "@/{}/peer/session/close/{peer}", server_hex.prefix());
+        if ASK_KEYS.set([status, close]).is_err() {
+            log(c"wz: FAIL - the queries were written twice");
+            return 1;
+        }
+    }
 
     // The dialling node: the fixed-memory client over the same sockets, whose `tls/` dial steps the
     // admin node while it waits.
@@ -637,12 +877,13 @@ pub extern "C" fn wz_app_main() -> i32 {
         peers: &[],
         documents: &[],
         entities: Entities::NONE,
-        layer: Answering,
+        layer: AskLayer,
         idle_sleep_us: 5_000,
         report_every_ms: 0,
     };
     let app = Witness {
         client_zid: client_id.zid(),
+        checked: false,
         concluded: false,
     };
     let mut port = Port;
