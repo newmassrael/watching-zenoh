@@ -305850,6 +305850,36 @@
         "Owed, from the differential of the session: the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. A querier test of that file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
       ]
     },
+    "Round 4117": {
+      "decision_summary": "Model 3 of the flow zenoh test ships in the reader (doc 6.8). Each sum is an e-process against the hypothesis it rejects: its terms bound the rejected side's largest predictive chance (null members over every spread; a zenoh rate over its 95% region; the link's own SN rate) and mix the other side over a prior fixed in advance, in integers rounded toward the rejected side. The word latches at the first crossing. Two decisions taken while implementing: D7, a row of a pair is its own e-process over what its flows observe from the packet after each named the pair (membership is learned from data); D8, every bound in closed form on the safe side. eps_basis narrows to measured, a passenger by construction. Fields 49 and session_table 7.",
+      "changes_bullets": [
+        "wz-capture: zenoh_eprocess.rs (new: priors, the three bounds, directed rounding); zenoh_evidence.rs rewritten as an observation engine with the latch, crossed_at_packet and the four extremes; LinkIngest records every observation at its packet (SN steps and framing settled from the sessions, the Init roles at the first naming) and the Dissection keeps a row's evidence per pair; fields_json writes model 3, crossed_at_packet and the extremes; doc_revision adds fields 49 and session_table 7 (eps_basis family of one word); the generator writes model 3's parameters (regions on a grid of eight concentrations a decade, the SN prior refitted) and the leave-one-group-out report replays each flow. Fixtures: the handshake issues and echoes a cookie. wz-capi-dissect: the header's example and model text, the pinned documents and the C consumer (census 22, fields 49, session_table 7). docs/flow-zenoh-verdict.md: section 6.8."
+      ],
+      "verification_bullets": [
+        "On pc2, on the tree rebased onto round 4114: wz-capture with lz4 1638 pass, without 1627 pass; wz-capi-dissect 227 pass and its memory gate 4; clippy clean for wz-capture in both builds and for wz-capi-dissect. The C consumer (C1bo) linked the cdylib and read the tree. The corpus: zenoh flows 619 yes 0 no 2 undecided as under model 2, null flows 0 yes 0 no 653 undecided; leaving any group out moves no word. The generated regions bound every concentration of a fine grid. Static gate array and the citation form gate pass. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Replaces the carry of round 4106. Model 3 is shipped; the consumer is told fields 49, session_table 7 and the commit. Open, in order: the freezing entry (the rule, the region level, the priors, the group definition) before a validation corpus is read; the validation corpus of the workloads, implementations and links section 6.4 lists as absent, read once; model 4, a likelihood per null protocol in the no sum's numerator."
+      ],
+      "publishable_decision_summary": "Model 3 of the flow zenoh test ships in the reader (doc 6.8). Each sum is an e-process against the hypothesis it rejects: its terms bound the rejected side's largest predictive chance (null members over every spread; a zenoh rate over its 95% region; the link's own SN rate) and mix the other side over a prior fixed in advance, in integers rounded toward the rejected side. The word latches at the first crossing. Two decisions taken while implementing: D7, a row of a pair is its own e-process over what its flows observe from the packet after each named the pair (membership is learned from data); D8, every bound in closed form on the safe side. eps_basis narrows to measured, a passenger by construction. Fields 49 and session_table 7.",
+      "publishable_changes_bullets": [
+        "wz-capture: zenoh_eprocess.rs (new: priors, the three bounds, directed rounding); zenoh_evidence.rs rewritten as an observation engine with the latch, crossed_at_packet and the four extremes; LinkIngest records every observation at its packet (SN steps and framing settled from the sessions, the Init roles at the first naming) and the Dissection keeps a row's evidence per pair; fields_json writes model 3, crossed_at_packet and the extremes; doc_revision adds fields 49 and session_table 7 (eps_basis family of one word); the generator writes model 3's parameters (regions on a grid of eight concentrations a decade, the SN prior refitted) and the leave-one-group-out report replays each flow. Fixtures: the handshake issues and echoes a cookie. wz-capi-dissect: the header's example and model text, the pinned documents and the C consumer (census 22, fields 49, session_table 7). docs/flow-zenoh-verdict.md: section 6.8."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2, on the tree rebased onto round 4114: wz-capture with lz4 1638 pass, without 1627 pass; wz-capi-dissect 227 pass and its memory gate 4; clippy clean for wz-capture in both builds and for wz-capi-dissect. The C consumer (C1bo) linked the cdylib and read the tree. The corpus: zenoh flows 619 yes 0 no 2 undecided as under model 2, null flows 0 yes 0 no 653 undecided; leaving any group out moves no word. The generated regions bound every concentration of a fine grid. Static gate array and the citation form gate pass. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Replaces the carry of round 4106. Model 3 is shipped; the consumer is told fields 49, session_table 7 and the commit. Open, in order: the freezing entry (the rule, the region level, the priors, the group definition) before a validation corpus is read; the validation corpus of the workloads, implementations and links section 6.4 lists as absent, read once; model 4, a likelihood per null protocol in the no sum's numerator."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
