@@ -307078,6 +307078,36 @@
         "Owed: the hosted verdict of this round and the multicast end-to-end tests on the fence; the Control band of a lent-slot datagram raises the fence before the lend, which is the same order as the heap path."
       ]
     },
+    "Round 4156": {
+      "decision_summary": "Model 6 of the flow zenoh test ships (doc 6.11). D15: a WebSocket message is one batch (zenoh's ws link is not streamed), so its first payload byte, unmasked, is a wire_front observation where the capture holds the direction's SYN and the deframer never lost its framing since the upgrade; a message found by a scan was chosen for looking like a batch and is not weighed. Its integrity is that of the segments carrying the byte and its mask key. By D12 the ws scan now accepts the network ids a lowlatency link writes bare (98 of 256); a 0x00 batch header stays refused because zero runs confirmed chains in two reader tests. Depth 4 still refuses all noise and real zenoh streams. Fields 54, session table 10.",
+      "changes_bullets": [
+        "wz-capture: feed_websocket notes per message whether the deframer had never desynchronised, and weighs the front of such a message on a SYN-held direction through LinkIngest::observe_batch_front (renamed from observe_datagram_front, one rule for every delimited batch), the unit's reading following it as a datagram's; the ws scan's first-byte test is is_credible_lowlatency_header; MODEL 6; a ws flow test with and without SYNs. wz-codecs: the fifteen-id test also counts the scan's 98. wz-capture doc_revision: fields 54, session table 10. wz-capi-dissect: header text, examples and the C consumer at 54 and 10. docs/flow-zenoh-verdict.md: section 6.11."
+      ],
+      "verification_bullets": [
+        "On a build machine: wz-capture with lz4 1649 pass, without 1637 pass; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) passes; Layer C1bt passes; wz-codecs all pass; clippy clean for wz-capture in both builds and for wz-codecs. The new ws test reads one front of the wire (a masked network header) and one foreign front on a SYN-held flow, below -20 bits, and none without the SYNs. The ws chain discriminator with the wider test accepts noise 40, 35, 4 and 0 of 40 at depths 1 to 4 and no real zenoh stream at 4. The corpus words and fronts are unchanged (it holds no ws capture). Static gates 125 of 125, citation form gate passes. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Replaces the carry of round 4150. The flow zenoh test, in order: the freezing entry (D5, D9), now that the derived checks are in; then the validation corpus, read once (new captures of queries, liveliness, other implementations, a lowlatency link for D12 and a WebSocket link for D15). A compressed link's uncompressed batch (header 0x00) is not a point the ws scan resumes at; stated in doc 6.11. The consumer and the RTT session are told fields 54 and table 10."
+      ],
+      "publishable_decision_summary": "Model 6 of the flow zenoh test ships (doc 6.11). D15: a WebSocket message is one batch (zenoh's ws link is not streamed), so its first payload byte, unmasked, is a wire_front observation where the capture holds the direction's SYN and the deframer never lost its framing since the upgrade; a message found by a scan was chosen for looking like a batch and is not weighed. Its integrity is that of the segments carrying the byte and its mask key. By D12 the ws scan now accepts the network ids a lowlatency link writes bare (98 of 256); a 0x00 batch header stays refused because zero runs confirmed chains in two reader tests. Depth 4 still refuses all noise and real zenoh streams. Fields 54, session table 10.",
+      "publishable_changes_bullets": [
+        "wz-capture: feed_websocket notes per message whether the deframer had never desynchronised, and weighs the front of such a message on a SYN-held direction through LinkIngest::observe_batch_front (renamed from observe_datagram_front, one rule for every delimited batch), the unit's reading following it as a datagram's; the ws scan's first-byte test is is_credible_lowlatency_header; MODEL 6; a ws flow test with and without SYNs. wz-codecs: the fifteen-id test also counts the scan's 98. wz-capture doc_revision: fields 54, session table 10. wz-capi-dissect: header text, examples and the C consumer at 54 and 10. docs/flow-zenoh-verdict.md: section 6.11."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine: wz-capture with lz4 1649 pass, without 1637 pass; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) passes; Layer C1bt passes; wz-codecs all pass; clippy clean for wz-capture in both builds and for wz-codecs. The new ws test reads one front of the wire (a masked network header) and one foreign front on a SYN-held flow, below -20 bits, and none without the SYNs. The ws chain discriminator with the wider test accepts noise 40, 35, 4 and 0 of 40 at depths 1 to 4 and no real zenoh stream at 4. The corpus words and fronts are unchanged (it holds no ws capture). Static gates 125 of 125, citation form gate passes. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Replaces the carry of round 4150. The flow zenoh test, in order: the freezing entry (D5, D9), now that the derived checks are in; then the validation corpus, read once (new captures of queries, liveliness, other implementations, a lowlatency link for D12 and a WebSocket link for D15). A compressed link's uncompressed batch (header 0x00) is not a point the ws scan resumes at; stated in doc 6.11. The consumer and the RTT session are told fields 54 and table 10."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
