@@ -305456,6 +305456,36 @@
         "Not measured: the batched row at 2048 B and at the physical-core pinning, the round trip at sizes other than 8 B, a host other than pc3, and a zenoh or zenoh-c counterpart of the host table. Open: where the wz subscriber's 1.85 microseconds a message go (one drive thread saturated at 540,000 a second); a user-mode profile is needed and perf_event_paranoid is 4 on the bench host."
       ]
     },
+    "Round 4106": {
+      "decision_summary": "A correction of round 4101. Its carry and doc 6.7 D4 put the consumer's design answer in the order of the model 3 work, as a step wz waits for. That was wrong: wz decides what it emits and what each key means; how the consumer draws or words it is the consumer's own and is no input to wz. The order the consumer gave (wz ships, its design answers, it moves its pin and expectations in one change) is the consumer's internal order; the wz part of it is to ship and to tell the revision numbers. D4 now says so, and the model 3 work in the reader starts with no precondition outside wz. Nothing shipped; MODEL stays 2.",
+      "changes_bullets": [
+        "`docs/flow-zenoh-verdict.md` 6.7 D4: the consumer's wording of the sums is its own and moves nothing in wz; wz ships and tells the revision numbers, and nothing in wz waits on the consumer's side."
+      ],
+      "verification_bullets": [
+        "A document change only. Static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Replaces the carry of round 4101. Open, in order: model 3 in the reader (the region and priors generated, the units and SN steps by the rule in integers rounded toward the rejected side, the other checks per group, the latch with crossed_at_packet and the four extremes, model 3 in the existing model key, the pinned examples, fields and session_table one revision each, the numbers told to the consumer at shipping); then the freezing entry, the validation corpus, model 4."
+      ],
+      "publishable_decision_summary": "A correction of round 4101. Its carry and doc 6.7 D4 put the consumer's design answer in the order of the model 3 work, as a step wz waits for. That was wrong: wz decides what it emits and what each key means; how the consumer draws or words it is the consumer's own and is no input to wz. The order the consumer gave (wz ships, its design answers, it moves its pin and expectations in one change) is the consumer's internal order; the wz part of it is to ship and to tell the revision numbers. D4 now says so, and the model 3 work in the reader starts with no precondition outside wz. Nothing shipped; MODEL stays 2.",
+      "publishable_changes_bullets": [
+        "`docs/flow-zenoh-verdict.md` 6.7 D4: the consumer's wording of the sums is its own and moves nothing in wz; wz ships and tells the revision numbers, and nothing in wz waits on the consumer's side."
+      ],
+      "publishable_verification_bullets": [
+        "A document change only. Static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Replaces the carry of round 4101. Open, in order: model 3 in the reader (the region and priors generated, the units and SN steps by the rule in integers rounded toward the rejected side, the other checks per group, the latch with crossed_at_packet and the four extremes, model 3 in the existing model key, the pinned examples, fields and session_table one revision each, the numbers told to the consumer at shipping); then the freezing entry, the validation corpus, model 4."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
