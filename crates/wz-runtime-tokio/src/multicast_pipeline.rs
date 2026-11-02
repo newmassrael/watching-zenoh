@@ -435,6 +435,26 @@ struct StageQueue<'a> {
     feature = "codec-response-final",
     any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
+impl StageQueue<'_> {
+    /// A control-plane datagram is a barrier between the data queued before it and after it, as
+    /// on a unicast link (`BoxedLinkDriver::tx_fence`): the lanes serve their priorities in
+    /// strict order, so without this a declaration queued behind a put on the group would leave
+    /// first, and an undeclaration could reach the members before the puts that name what it
+    /// undeclares. What the other lanes hold now leaves before the control datagram does; a
+    /// group that runs no QoS has the one lane, which keeps its own order, and ignores it.
+    fn hold_control_behind_queued(&self, priority: Priority) {
+        if priority == Priority::Control {
+            self.lanes.fence();
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
 impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
     fn wait_for_room(
         &mut self,
@@ -451,6 +471,7 @@ impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
             sn,
             bytes,
         } = datagram;
+        self.hold_control_behind_queued(priority);
         // A closed queue is a finished link: the datagram is lost with it.
         if self.lanes.send(priority, bytes).is_ok() {
             self.queued.push_back(Some((reliable, sn)));
@@ -472,6 +493,7 @@ impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
         want: usize,
         fill: &mut dyn FnMut(&mut wz_session_core::tx_buf::SliceTxBuf<'_>) -> bool,
     ) -> bool {
+        self.hold_control_behind_queued(priority);
         let small = crate::session_tx_pool_ap_small::SLOT_SIZE;
         let tries = [want.min(small), want];
         let tries = if tries[0] == tries[1] {
@@ -1022,6 +1044,35 @@ mod tests {
         assert_eq!(
             blocked.join().expect("blocked pusher"),
             Ok(PushOutcome::Congested)
+        );
+    }
+
+    /// A control datagram queued behind data leaves behind it: the lanes serve their priorities
+    /// in strict order, so the Control lane would send the later datagram first, and a
+    /// declaration or an undeclaration would pass the data queued before it. The fence the push
+    /// raises holds the Control lane until that data is gone.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn a_control_datagram_leaves_behind_the_data_queued_before_it() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(true));
+        assert_eq!(
+            producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop)),
+            Ok(PushOutcome::Pushed)
+        );
+        assert_eq!(
+            producer.push(terminal(Priority::Control, CongestionControl::Drop)),
+            Ok(PushOutcome::Pushed)
+        );
+
+        let first = tap.lanes.try_recv_wire_tagged().expect("the data datagram");
+        let second = tap
+            .lanes
+            .try_recv_wire_tagged()
+            .expect("the control datagram");
+        assert_eq!(
+            (first.0, second.0),
+            (Priority::DEFAULT, Priority::Control),
+            "the control datagram was queued last and leaves last"
         );
     }
 
