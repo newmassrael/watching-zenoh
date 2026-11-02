@@ -306406,6 +306406,36 @@
         "Not stated: the 8 B cells with wz in them, until the barrier in the writer lanes lands; then they are read again (its owner was sent the evidence). Not measured: a pinning with more CPUs for the many-threaded zenoh-c, the batched and 2048 B rows of this family, a host other than pc3, and a zenoh (Rust) counterpart. Open: where the wz subscriber's time goes (needs a user-mode profile; perf_event_paranoid is 4 on the bench host)."
       ]
     },
+    "Round 4135": {
+      "decision_summary": "The replay fuzz target found that wz_replay_mutate ended its caller's process for an EXTEND by a count no memory holds: the door built the mutated payload on the heap to learn its length and only then compared it with the caller's buffer. The door now takes the length from Mutation::output_len and whether the payload changes from a new Mutation::changes, writes the payload straight into the caller's buffer once it holds it, and copies the input only when out overlaps it (a mutation in place, which the contract now names as allowed). Mutation::bytes is the one definition of the mutated bytes: apply_into writes it and changes compares it, so the door has no formula of its own. The three inputs the fuzzer wrote are seeds of every replay, as base64 in fuzz_seeds.py.",
+      "changes_bullets": [
+        "crates/wz-workload/src/mutation.rs: MutatedBytes and Mutation::bytes, Mutation::changes, apply_into built on bytes, two tests. crates/wz-capi-replay/src/lib.rs: wz_replay_mutate sizes, answers and writes without a heap payload, and its contract allows out to overlap payload; tests.rs: an extension no memory holds is refused, and a mutation in place writes what a separate buffer gets. crates/wz-fuzz/fuzz_targets/replay.rs: the same mutation in place must answer and write the same. scripts/lib/fuzz_seeds.py: LITERAL with the three reproducers; crates/wz-fuzz/regressions/README.md."
+      ],
+      "verification_bullets": [
+        "The sweep of every fuzz target for 180 s on a build machine after Round 4131: six targets found nothing, replay failed on three inputs (an allocation larger than ASan's maximum, and an out-of-memory). After the fix: wz-capi-replay 34 and wz-workload 17 tests pass, among them the four new ones; clippy of both is clean and wz-workload builds without alloc; fuzz.sh regress runs replay 8 and live 145 inputs with no failure; replay fuzzed for 180 s with four workers ran about 50 million inputs with no failure. The static gates of the hook's array pass. The hosted runs have not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Mutation::apply (the allocating form, which the replay tool and the driver use) still builds a payload of output_len: their counts come from declarations whose bounds the vocabulary states, not from a caller of the C ABI. The nightly fuzz.yml and the hosted fuzz-regress job are still to be measured from their first runs."
+      ],
+      "publishable_decision_summary": "The replay fuzz target found that wz_replay_mutate ended its caller's process for an EXTEND by a count no memory holds: the door built the mutated payload on the heap to learn its length and only then compared it with the caller's buffer. The door now takes the length from Mutation::output_len and whether the payload changes from a new Mutation::changes, writes the payload straight into the caller's buffer once it holds it, and copies the input only when out overlaps it (a mutation in place, which the contract now names as allowed). Mutation::bytes is the one definition of the mutated bytes: apply_into writes it and changes compares it, so the door has no formula of its own. The three inputs the fuzzer wrote are seeds of every replay, as base64 in fuzz_seeds.py.",
+      "publishable_changes_bullets": [
+        "crates/wz-workload/src/mutation.rs: MutatedBytes and Mutation::bytes, Mutation::changes, apply_into built on bytes, two tests. crates/wz-capi-replay/src/lib.rs: wz_replay_mutate sizes, answers and writes without a heap payload, and its contract allows out to overlap payload; tests.rs: an extension no memory holds is refused, and a mutation in place writes what a separate buffer gets. crates/wz-fuzz/fuzz_targets/replay.rs: the same mutation in place must answer and write the same. scripts/lib/fuzz_seeds.py: LITERAL with the three reproducers; crates/wz-fuzz/regressions/README.md."
+      ],
+      "publishable_verification_bullets": [
+        "The sweep of every fuzz target for 180 s on a build machine after Round 4131: six targets found nothing, replay failed on three inputs (an allocation larger than ASan's maximum, and an out-of-memory). After the fix: wz-capi-replay 34 and wz-workload 17 tests pass, among them the four new ones; clippy of both is clean and wz-workload builds without alloc; fuzz.sh regress runs replay 8 and live 145 inputs with no failure; replay fuzzed for 180 s with four workers ran about 50 million inputs with no failure. The static gates of the hook's array pass. The hosted runs have not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Mutation::apply (the allocating form, which the replay tool and the driver use) still builds a payload of output_len: their counts come from declarations whose bounds the vocabulary states, not from a caller of the C ABI. The nightly fuzz.yml and the hosted fuzz-regress job are still to be measured from their first runs."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
