@@ -3,7 +3,7 @@
 
 //! A list a message holds, kept within its bound as a type.
 //!
-//! The generated owned messages hold an extension chain or a list of slices as a [`Bounded`]
+//! The generated owned messages hold an extension chain or a list of slices as a `Bounded`
 //! (SCE ADR 0065 section 6, R2), so a list past its bound is not a value: the encode no longer
 //! refuses one, and a `Bounded` has no mutable access. What a chain's bound refused at the send
 //! is refused here, where the list is made or edited, and the three ways this crate holds a list

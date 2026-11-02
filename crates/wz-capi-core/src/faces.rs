@@ -2307,6 +2307,9 @@ impl SharedSession {
         };
         #[cfg(all(feature = "gossip", feature = "liveliness-get"))]
         Self::await_links_told(announced.told).await;
+        // Read only by the wait above, which a build with no gossip or no liveliness get lacks.
+        #[cfg(not(all(feature = "gossip", feature = "liveliness-get")))]
+        let _ = announced;
         self.face_up_replayed(id)
     }
 

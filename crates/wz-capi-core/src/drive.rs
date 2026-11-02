@@ -4969,6 +4969,7 @@ mod tests {
     /// The same answer for a link the OTHER end refused: the node it dialled holds, or prefers,
     /// another link to it and closes this one with `MAX_LINKS` where the OpenAck should come
     /// (the accepting side of the same two links that cross).
+    #[cfg(feature = "peer")]
     #[test]
     fn a_link_the_peer_refuses_with_max_links_is_not_a_connect_that_failed() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -5033,6 +5034,7 @@ mod tests {
                 .expect("entropy"),
                 offer: SessionOffer::universal(),
                 clock: TokioTime::new(),
+                #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
