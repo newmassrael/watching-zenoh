@@ -305944,6 +305944,38 @@
         "Owed: the upstream tests of Z8 over queries ran in no local lane for this change, so the hosted run of the lane is its check; the hosted CI runs the differential layer, but most CI runs are cancelled by a later push while queued, so a red of it can go unread. A querier test of the differential file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
       ]
     },
+    "Round 4120": {
+      "decision_summary": "The loop of the profile with no allocator is held on the case that round 4100 and 4103 repaired in the heap and in-place paths of the session core: a batch of two Frames in one datagram, whose second Frame header ended the walk of the first as an unknown message and lost everything after it. A test in wz-session-lwip sends such a datagram through a real pair of sessions on the host lwIP loopback and expects all five Puts at the subscriber, in order, with nothing reported but the data, on the copying loop (which parks what follows the first frame and reads it as the next unit, one iteration later), on the in-place loop, and on the in-place loop over the fixed bounded backing the MCU profile uses. It passes on all three, so no defect was found there; the case stays held. The guarded counts of the eight lanes of run-ci.sh that build that file are raised by one.",
+      "changes_bullets": [
+        "crates/wz-session-lwip/tests/rx_frame_allocations.rs: what_follows_a_second_frame_header_in_a_batch_is_dispatched.",
+        "scripts/run-ci.sh: the guarded counts of the eight C1m rx legs, 3 to 4, 4 to 5 (twice), 6 to 7 (four times), 5 to 6.",
+        "docs/zenoh-api-on-the-engine.md: the case is held on the profile with no allocator."
+      ],
+      "verification_bullets": [
+        "Locally: the new test passes on the copying loop (4 tests printed), the in-place loop (5), the in-place loop on the fixed backing (5), the fragment leg (7) and the query copying leg (6), which are the numbers now in run-ci.sh; the other legs add the same one test. Format passes. Not run: the hosted run, the two query in-place legs of the file."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the hosted CI has produced a verdict for almost none of the commits since 2026-11-01 (a later push replaces the queued run), so the E18 differential, the Z8 lane and the reduced-configuration layers have not read rounds 4113 to 4119; a change to ci.yml's concurrency is the owner's. Also owed: the write-lane overtaking of Data by Control (the owner), the routing three-node flake (not reproduced in 8 of 8 runs of the file), a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ],
+      "publishable_decision_summary": "The loop of the profile with no allocator is held on the case that round 4100 and 4103 repaired in the heap and in-place paths of the session core: a batch of two Frames in one datagram, whose second Frame header ended the walk of the first as an unknown message and lost everything after it. A test in wz-session-lwip sends such a datagram through a real pair of sessions on the host lwIP loopback and expects all five Puts at the subscriber, in order, with nothing reported but the data, on the copying loop (which parks what follows the first frame and reads it as the next unit, one iteration later), on the in-place loop, and on the in-place loop over the fixed bounded backing the MCU profile uses. It passes on all three, so no defect was found there; the case stays held. The guarded counts of the eight lanes of run-ci.sh that build that file are raised by one.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-lwip/tests/rx_frame_allocations.rs: what_follows_a_second_frame_header_in_a_batch_is_dispatched.",
+        "scripts/run-ci.sh: the guarded counts of the eight C1m rx legs, 3 to 4, 4 to 5 (twice), 6 to 7 (four times), 5 to 6.",
+        "docs/zenoh-api-on-the-engine.md: the case is held on the profile with no allocator."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the new test passes on the copying loop (4 tests printed), the in-place loop (5), the in-place loop on the fixed backing (5), the fragment leg (7) and the query copying leg (6), which are the numbers now in run-ci.sh; the other legs add the same one test. Format passes. Not run: the hosted run, the two query in-place legs of the file."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the hosted CI has produced a verdict for almost none of the commits since 2026-11-01 (a later push replaces the queued run), so the E18 differential, the Z8 lane and the reduced-configuration layers have not read rounds 4113 to 4119; a change to ci.yml's concurrency is the owner's. Also owed: the write-lane overtaking of Data by Control (the owner), the routing three-node flake (not reproduced in 8 of 8 runs of the file), a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
