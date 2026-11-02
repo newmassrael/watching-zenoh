@@ -5,7 +5,9 @@
 # The kit lane: a T2G kit image built, flashed, run on the board and held to the row the repository
 # commits for it (`deploy/resource_budget.json`, `scripts/lib/stack_frame_gate.py`), in one command whose
 # every step says its own verdict. It is a LAB lane: it needs the kit, its debugger and a router on the
-# host the kit is cabled to, so hosted CI cannot run it and it is not a `run_layer` of run-ci.sh.
+# host the kit is cabled to, so hosted CI cannot run it. Its `build` step needs none of those, and
+# Layer Qzk of run-ci.sh runs it for every image on the hosted runner: an arena outgrown, a stack
+# bound that moved or a text that grew is seen in the push that did it and not on the next kit day.
 #
 #   scripts/kit-lane.sh preflight [--deep]   the host is ready: workspace, tools, console, interface, router
 #   scripts/kit-lane.sh build <image>        west build, pad to the region, the stack gate on the ELF
@@ -14,6 +16,7 @@
 #   scripts/kit-lane.sh compare [--boots N] <image>...   answering images side by side, alternating boots
 #   scripts/kit-lane.sh build-responder      the host node that answers the asking image (needs cargo)
 #   scripts/kit-lane.sh list                 the images
+#   scripts/kit-lane.sh images               the gated client images (the ones Layer Qzk builds)
 #   scripts/kit-lane.sh --selftest           the table of images against the gates and the overlays
 #
 # Images are the keys of the stack gate: zephyr-client-heap (the fixed client with its storage on the
@@ -314,8 +317,9 @@ build() {
     mkdir -p "$out"
     local avail
     avail="$(LC_ALL=C free -m | awk '/^Mem:/ {print $7}')"
-    if ! [[ "${avail:-}" =~ ^[0-9]+$ && "$avail" -ge 8000 ]]; then
-        bad "$key" "less than 8 GB of memory is available, or the figure could not be read: a build here can take the host down"
+    local floor_mb="${KIT_LANE_MIN_AVAIL_MB:-8000}"
+    if ! [[ "${avail:-}" =~ ^[0-9]+$ && "$avail" -ge "$floor_mb" ]]; then
+        bad "$key" "less than $floor_mb MB of memory is available, or the figure could not be read: a build here can take the host down"
         return 1
     fi
     # shellcheck source=/dev/null  # created by scripts/provision-zephyr.sh
@@ -915,13 +919,13 @@ selftest() {
 import sys
 sys.path.insert(0, sys.argv[1] + "/scripts/lib")
 import stack_frame_gate as g
-print(" ".join(sorted(i.key for i in g.IMAGES if i.key.startswith("zephyr-client-fixed"))))
+print(" ".join(sorted(i.key for i in g.IMAGES if i.key.startswith("zephyr-client-"))))
 PY
 )"
     local mine
     mine="$(printf '%s\n' "${IMAGES[@]}" | sort | tr '\n' ' ' | sed 's/ $//')"
     if [[ "$mine" == "$population" ]]; then
-        ok selftest "the lane's images are the stack gate's zephyr-client-fixed images ($mine)"
+        ok selftest "the lane's images are the stack gate's zephyr-client images ($mine)"
     else
         bad selftest "the lane has [$mine] and the stack gate has [$population]"
     fi
@@ -1006,9 +1010,10 @@ case "$cmd" in
     compare) compare "$@" ;;
     build-responder) build_responder ;;
     list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
+    images) printf '%s\n' "${IMAGES[@]}" ;; # the gated client images, which `build` holds to their rows with no kit
     --selftest) selftest ;;
     *)
-        sed -n '9,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+        sed -n '12,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
         exit 64
         ;;
 esac

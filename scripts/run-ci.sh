@@ -25416,6 +25416,58 @@ layer_qzb_zephyr_board_matrix() {
     return "$fail"
 }
 
+# ─── Layer Qzk — the client images build under the gates they are held to ───
+#
+# Layer Qzb builds the one fixed-client row of the board table and holds it to the stack chain. The
+# client has four more images (the batching, the heap, the asking and the secure-channel variants), and
+# each is built with limits its overlay states, which the crates' own defaults do not: a stand-in build
+# of the defaults read as an outgrown arena what the board's build held, and an arena that did outgrow
+# its limits was seen only on a kit day. This lane builds every image of `scripts/kit-lane.sh images`
+# the way the kit lane builds it (the board's configuration, line tables on) and requires the verdicts
+# of that lane's build step: the arena assertion by the build itself, the stack chain, the stack bound
+# with the calls through a register followed, and the text. Nothing is flashed or booted.
+#
+# The kit lane's memory floor is for a workstation that can be taken down by a build; a hosted runner is
+# discarded, so the floor is the runner's (`WZ_QZK_MIN_AVAIL_MB`, 4000).
+layer_qzk_client_images_build() {
+    local rc image images lane_home fail=0 n=0 log_dir out log
+    _qz_toolchain thumbv7em-none-eabi && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
+    images="$(bash scripts/kit-lane.sh images)" \
+        || { echo "  Qzk FAIL — the kit lane could not list its images" >&2; return 1; }
+    [[ -n "$images" ]] \
+        || { echo "  Qzk FAIL — the kit lane lists no image; a lane with no population is not a pass" >&2; return 1; }
+    lane_home="$(mktemp -d)"
+    log_dir="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qzk"
+    mkdir -p "$log_dir"
+    for image in $images; do
+        n=$((n + 1))
+        if ZEPHYR_HOME="$(dirname "$_QZ_BASE")" KIT_LANE_HOME="$lane_home" \
+            KIT_LANE_MIN_AVAIL_MB="${WZ_QZK_MIN_AVAIL_MB:-4000}" \
+            bash scripts/kit-lane.sh build "$image" >"$log_dir/$image.verdicts" 2>&1; then
+            echo "  Qzk $image BUILT"
+        else
+            echo "  Qzk $image FAIL — the kit lane's build step refused it:" >&2
+            cat "$log_dir/$image.verdicts" >&2
+            for out in "$lane_home"/out/*-"$image"; do
+                [[ -d "$out" ]] || continue
+                mkdir -p "$log_dir/$image-out"
+                cp -R "$out/." "$log_dir/$image-out/"
+                tail -40 "$out/build.log" 2>/dev/null | sed 's/^/    build.log: /' >&2
+                for log in stack-bound stack-gate text-gate; do
+                    [[ -f "$out/$log.log" ]] && grep -v '^   +' "$out/$log.log" | head -12 | sed "s/^/    $log: /" >&2
+                done
+            done
+            fail=1
+        fi
+        rm -rf "$lane_home/build"
+    done
+    rm -rf "$lane_home"
+    (( n > 0 )) || fail=1
+    return "$fail"
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 # R3978 — the oracles this machine has already built, copied into this checkout
@@ -25603,6 +25655,7 @@ run_layer Qa layer_qa_mcu_admin_node_vs_zenohd || overall=1
 run_layer Qz layer_qz_zephyr_boot || overall=1
 run_layer Qza layer_qza_zephyr_admin_node_vs_zenohd || overall=1
 run_layer Qzb layer_qzb_zephyr_board_matrix || overall=1
+run_layer Qzk layer_qzk_client_images_build || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1
 # R311y841 — beside Z rather than beside E5: its oracle is the zenoh core

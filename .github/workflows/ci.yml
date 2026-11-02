@@ -4102,6 +4102,16 @@ jobs:
           . ~/zephyrproject/.venv/bin/activate
           bash scripts/run-ci.sh --layer Qzb
 
+      - name: Layer Qzk — the client images build under the gates they are held to
+        # The kit lane's build step for each client image: the board's own limits (an arena
+        # outgrown fails the build), the stack chain and bound, and the text. Nothing boots.
+        env:
+          WZ_QZ_REQUIRE: "1"
+        run: |
+          # shellcheck source=/dev/null  # provisioned by the venv step above
+          . ~/zephyrproject/.venv/bin/activate
+          bash scripts/run-ci.sh --layer Qzk
+
   # R3081 — the Zephyr ADMIN NODE under a stock zenohd (Layer
   # Qza). `zephyr-mcu` above has the Zephyr toolchain and no zenohd; `cross-mcu`
   # has QEMU and zenohd and no Zephyr; this job takes the Zephyr provisioning

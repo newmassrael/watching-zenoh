@@ -202,6 +202,41 @@ ZEPHYR_BUILD_VALUES: tuple[tuple[str, str], ...] = (
     ("WZ_LINK_WAIT_MS", "1000"),
 )
 
+# The limits the fixed client's overlays state (`overlays/t2g_client.conf` and
+# `overlays/t2g_client_fixed.conf`), which `west` hands cargo as `WZ_LIMIT_*` and the crates size
+# their tables by. The census builds the client with them, because a build with the crates' own
+# defaults is a larger node than any image of it: the run arena that holds the node's host, factory
+# and node (`fixed_client::RUN`) is asserted when the node's code is generated, and the defaults
+# made that assertion fail for the plain client (it was 832 bytes and the stand-in node needed
+# more than 2,432), where the board's own build, with these, fits the 832. A stand-in that is not
+# the image's numbers measures something else, and says so only by failing.
+FIXED_CLIENT_LIMITS: tuple[tuple[str, str], ...] = (
+    ("WZ_LIMIT_MAX_KEYEXPR_BYTES", "64"),
+    ("WZ_LIMIT_MAX_LOCATOR_LEN", "32"),
+    ("WZ_LIMIT_MAX_STATIC_CONNECT", "1"),
+    ("WZ_LIMIT_MAX_QUERYABLES", "2"),
+    ("WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS", "0"),
+    ("WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS", "0"),
+    ("WZ_LIMIT_MAX_REMOTE_DECLS", "0"),
+    ("WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES", "4"),
+    ("WZ_LIMIT_MAX_PENDING_REPLIES", "2"),
+    ("WZ_LIMIT_MAX_PENDING_FINALS", "2"),
+    ("WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES", "96"),
+    ("WZ_LIMIT_MAX_ADMIN_REPLY_BYTES", "96"),
+    ("WZ_LIMIT_MAX_TASKS", "2"),
+    ("WZ_LIMIT_MAX_TIMERS", "4"),
+)
+# The client that only answers asks no query and subscribes to nothing; the one that asks keeps two
+# pending rows (`overlays/t2g_client_get.conf`), and the one that subscribes keeps the crates' own.
+FIXED_CLIENT_ANSWERS: tuple[tuple[str, str], ...] = FIXED_CLIENT_LIMITS + (
+    ("WZ_LIMIT_MAX_SUBSCRIPTIONS", "0"),
+    ("WZ_LIMIT_MAX_PENDING_QUERIES", "0"),
+)
+FIXED_CLIENT_ASKS: tuple[tuple[str, str], ...] = FIXED_CLIENT_LIMITS + (
+    ("WZ_LIMIT_MAX_SUBSCRIPTIONS", "0"),
+    ("WZ_LIMIT_MAX_PENDING_QUERIES", "2"),
+)
+
 FREERTOS_CFG = ("WZ_FREERTOS_CONFIG", "@deploy/mcu-freertos-demo")
 
 IMAGES: dict[str, Image] = {
@@ -519,7 +554,9 @@ IMAGES: dict[str, Image] = {
                 V7EMHF,
                 None,
                 ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver"),
-                env=ZEPHYR_BUILD_VALUES + (("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),),
+                env=ZEPHYR_BUILD_VALUES
+                + FIXED_CLIENT_ANSWERS
+                + (("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),),
                 label="cyt4bf-sockets-client-fixed",
                 no_default_features=True,
             ),
@@ -530,7 +567,9 @@ IMAGES: dict[str, Image] = {
                 V7EMHF,
                 None,
                 ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver", "subscribe"),
-                env=ZEPHYR_BUILD_VALUES + (("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),),
+                env=ZEPHYR_BUILD_VALUES
+                + FIXED_CLIENT_LIMITS
+                + (("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),),
                 label="cyt4bf-sockets-client-fixed-subscribe",
                 no_default_features=True,
             ),
@@ -542,6 +581,7 @@ IMAGES: dict[str, Image] = {
                 None,
                 ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver", "batching"),
                 env=ZEPHYR_BUILD_VALUES
+                + FIXED_CLIENT_ANSWERS
                 + (
                     ("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),
                     ("WZ_IDLE_WAIT_MS", "1000"),
@@ -557,6 +597,7 @@ IMAGES: dict[str, Image] = {
                 None,
                 ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver", "batching", "get"),
                 env=ZEPHYR_BUILD_VALUES
+                + FIXED_CLIENT_ASKS
                 + (
                     ("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),
                     ("WZ_IDLE_WAIT_MS", "1000"),

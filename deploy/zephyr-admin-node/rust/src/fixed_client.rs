@@ -88,22 +88,22 @@ const TX: usize = BATCH_SIZE as usize;
 /// the kit, and the 248 bytes of what the connect manager's planner asked for in the call it runs
 /// (`ConnectManager::actions`, a field since it was a local of a frame on the stack of the thread
 /// that ticks it); the loop checks the number when it is compiled, and a build that grows past it
-/// stops. That was 832 (960 asking, 1792 over the channel) until the connect manager took the
-/// intent of a node nothing can dial yet (decision D15), its passive form (D10) and the lists of
-/// commanders (D12): they stopped the build of this image on the no-allocator gate's row
-/// (`zephyr-client-fixed`), which no hosted lane builds. MEASURED by building the plain client at
-/// each arena (the assertion is evaluated when the node's code is generated, so `cargo check` does
-/// not see it): 2,432 does not build and 2,560 does, so the node, the factory and the host need
-/// between the two, three times what they needed; the other two are moved by the same 1,728. A node
-/// that asks keeps its pending queries in the layer the factory holds, so it is
-/// given more. The client over the secure channel holds the channel in its stack, which the node
-/// and the host each carry; it is a verify image with no budget row, and is given room.
+/// stops. The numbers are the node's under the limits the image states (`overlays/t2g_client.conf`
+/// and `overlays/t2g_client_fixed.conf`: one endpoint to connect, no pending query, no
+/// subscription), which `west` hands cargo as `WZ_LIMIT_*`; a build with the crates' own larger
+/// defaults is a larger node, and needs more than 2,432 bytes where the image needs 832. The
+/// no-allocator gate's census builds this image with these limits for that reason
+/// (`FIXED_CLIENT_LIMITS` in `scripts/lib/no_allocator_link_gate.py`). The assertion is evaluated
+/// when the node's code is generated, so `cargo check` does not see it and `cargo build` does. A
+/// node that asks keeps its pending queries in the layer the factory holds, so it is given more.
+/// The client over the secure channel holds the channel in its stack, which the node and the host
+/// each carry; it is a verify image with no budget row, and is given room.
 #[cfg(not(any(feature = "get", feature = "tls")))]
-const RUN: usize = 2560;
+const RUN: usize = 832;
 #[cfg(all(feature = "get", not(feature = "tls")))]
-const RUN: usize = 2688;
+const RUN: usize = 960;
 #[cfg(feature = "tls")]
-const RUN: usize = 3584;
+const RUN: usize = 1792;
 /// The queryables the node declares: its status and its config.
 const DOCS: usize = 2;
 /// How long the node waits for the board to have an address: a DHCP lease on a slow link takes

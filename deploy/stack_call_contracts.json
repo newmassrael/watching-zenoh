@@ -78,7 +78,7 @@
     },
     {
       "id": "queryable",
-      "where": {"file": "query_sink.rs", "line": 903},
+      "where": {"file": "query_sink.rs", "line": 988},
       "callees": "slot_client::answer",
       "why": "the function a queryable was registered with"
     },
@@ -127,13 +127,13 @@
     },
     {
       "id": "entropy-make",
-      "where": {"file": "slot_node.rs", "line": 855},
+      "where": {"file": "slot_node.rs", "line": 768},
       "callees": "ZephyrEntropy|^trng_get_entropy$|fixed_client::run::\\{closure#1\\}",
       "why": "the function that makes the node's entropy source"
     },
     {
       "id": "entropy-draw",
-      "where": {"file": "session_actions.rs", "line": 6143},
+      "where": {"file": "session_actions.rs", "line": 6184},
       "callees": "EntropySource>::try_next_u64$",
       "why": "the draw of the session's initial value"
     },

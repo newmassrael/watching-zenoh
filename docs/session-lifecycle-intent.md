@@ -1354,15 +1354,24 @@ real session is witnessed on the loopback image above, which is the same node wi
 the same verbs; what no witness yet has is a session of a real router reaching the
 verbs of the product image, which is D14's witness on the kit.
 
-Building it found that the arena the fixed client builds its host, factory and
-node in had been outgrown without a lane saying so. It was 832 bytes (960 asking,
-1,792 over the channel), and the connect manager's intent for a node nothing can
-dial yet (D15), its passive form (D10) and its lists of commanders (D12) took the
-plain client to between 2,433 and 2,560 bytes: the assertion that holds the number
-is evaluated when the node's code is generated, so `cargo check` does not see it,
-and the no-allocator gate's row for that image, which no hosted lane builds, was
-the only place it showed. The numbers are 2,560, 2,688 and 3,584 now, each held by
-a real build of every variant the repository states.
+Building it showed the arena the fixed client builds its host, factory and node
+in (832 bytes, 960 asking, 1,792 over the channel) to be refused by the
+no-allocator gate's row for that image, and the first reading was that the
+connect manager's intent for a node nothing can dial yet (D15), its passive form
+(D10) and its lists of commanders (D12) had outgrown it. That reading was wrong,
+and the arenas were raised to 2,560, 2,688 and 3,584 on it (234aaf84f8) and put
+back in the round that wrote this paragraph. The arena is sized by the limits of the build
+(`CONFIG_WZ_LIMIT_*`, which the overlays state): the gate's stand-in build left
+them at the crates' defaults, which need more than 2,432 bytes, and the board's
+own build holds 832. Two facts stand from it. The assertion that holds the number
+is evaluated when the node's code is generated, so `cargo check` does not see it
+and only a build does; and the stand-in now builds with the overlays' limits
+(`FIXED_CLIENT_LIMITS` in `scripts/lib/no_allocator_link_gate.py`), so the row
+reads what the board holds. The mistake survived a push because no hosted lane
+built the variants: Layer Qzk now builds every client image the way the kit
+lane does, and it found the stack-bound contract's three line pins stale and the
+asking image's bound at 4,324 bytes, over three quarters of its stack, which is
+5,824 bytes now.
 
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the
