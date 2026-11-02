@@ -305730,6 +305730,62 @@
         "Owed, from the differential of the session: the timestamp stack of a query and a reply on the node (and the route point, which takes the session's custom clock), and the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
       ]
     },
+    "Round 4114": {
+      "decision_summary": "The SCE pin moves from ed2f5d7453 to 955774d15a through four guide sections (R2 lists held within bounds, R4a flags the value says, R4b gated fields grouped, R4c and R7 decode), and stops before ADR 0077 step 1: that step makes sce:max-size a wire bound, so wz's decode would refuse every Put over 256 B on every profile. Crossing it waits on SCE's section 7, which splits the protocol's bound from the deployment's capacity. A list past its bound is no longer a value, so what the encode refused is now refused where the list is made or edited: held_list is the one door, a chain edit past its bound leaves the message without a chain and the caller drops it, never sends it unstamped, since hop limit is a loop guard. An ingress QoS rewrite that finds a full chain now drops at ingress, where local delivery used to go on. The routing graph refuses a list past 64 when built, the outcome the encode gave. A Request dropped at egress closes its pending branch.",
+      "changes_bullets": [
+        "vendor/sce, out/**: the pin at 955774d15a and the regenerated codecs.",
+        "sources/codecs: sce:encode-may-fail dropped from the 14 documents that cannot fail to encode.",
+        "crates/wz-session-core/src/held_list.rs: new, HeldList::entries, held, one_entry, edit_chain, four tests.",
+        "crates/wz-session-core: the message setters return Result; push_build, put_payload, request_build, ext_view, interest_build, ts_stack (record_on_chain), passive (Join read through its s group).",
+        "crates/wz-routing-graph/src/lib.rs: make_link_state and every build_ return Result with TooManyElements; two tests at 64 and 65.",
+        "crates/wz-runtime-tokio: linkstate_forward stamped, router_forward let_go_unsent_branch and overwritten_ingress and overwritten_egress, interceptor apply_qos Result, gossip_plane built; two qos_overwrite tests.",
+        "crates/wz-session-core/src/lent_control.rs: an Interest asking for nothing is refused, with a test.",
+        "crates/wz-session-core/src/network_message.rs, crates/wz-capi-core/src/drive.rs: reduced builds that were red on main: is_transport_mid names wire_const by path, for_each_record is gated as its callers are, the capi open_or_held and its test need peer.",
+        "gated tests take the new encode signatures; scripts/run-ci.sh guarded counts; docs/reason-review-pins.md moved rows."
+      ],
+      "verification_bullets": [
+        "Locally on the tree before the last rebase: cargo test --workspace 9600 passed, 0 failed, 850 ignored; layers C1g, C1bnl and C1ax pass; C1h, C1m, C1cf, C1j, C1ai and C1al pass on the tree before that, which the reduced-build fixes were made on.",
+        "On the rebased tip: cargo check --workspace --all-targets, and --all-features --all-targets of wz-runtime-tokio and wz-session-core, are clean; wz-capi-coop's tests pass; the deferred static gates ran, and the five that were red now pass (dissect_name_census, binary_freshness_lint, self_report_lint, lane_feature_membership_gate, reason_review_pin_gate).",
+        "Reds repaired here that were on main: the reduced builds of wz-capi-core and of the crates that reach is_transport_mid, and two static gates from step T5 of L6. Lane Z runs each of the three router legs once per engine, a guard of 1 each, so 3 per engine in total as before; lane Z itself was not run locally.",
+        "The guarded-count gate measured 61 guards and nine moved to the printed numbers; those nine were not remeasured after the move. Ten guards are deferred to the hosted lanes that own them. The hosted run judges the footprint and text budget rows, which were not measured."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "Owed, the next pin move: ADR 0077 step 1 and step 2, R5, R6 and the rest once SCE's section 7 steps are on main; on-overflow leaves the documents, held_list moves to CapacityExceeded, the deploy input names each capacity, a lent value's lifetime is checked, a zid_len of 17 gets its test, ADR 0078 section 4 wants an autoroller.",
+        "Found here and not addressed: a mesh past 64 nodes has no full linkstate flood, since the list is refused and logged at debug only and no split exists; upstream was not checked.",
+        "deploy/text_budget.json and the footprint rows may move on the hosted run; they were not measured locally."
+      ],
+      "publishable_decision_summary": "The SCE pin moves from ed2f5d7453 to 955774d15a through four guide sections (R2 lists held within bounds, R4a flags the value says, R4b gated fields grouped, R4c and R7 decode), and stops before ADR 0077 step 1: that step makes sce:max-size a wire bound, so wz's decode would refuse every Put over 256 B on every profile. Crossing it waits on SCE's section 7, which splits the protocol's bound from the deployment's capacity. A list past its bound is no longer a value, so what the encode refused is now refused where the list is made or edited: held_list is the one door, a chain edit past its bound leaves the message without a chain and the caller drops it, never sends it unstamped, since hop limit is a loop guard. An ingress QoS rewrite that finds a full chain now drops at ingress, where local delivery used to go on. The routing graph refuses a list past 64 when built, the outcome the encode gave. A Request dropped at egress closes its pending branch.",
+      "publishable_changes_bullets": [
+        "vendor/sce, out/**: the pin at 955774d15a and the regenerated codecs.",
+        "sources/codecs: sce:encode-may-fail dropped from the 14 documents that cannot fail to encode.",
+        "crates/wz-session-core/src/held_list.rs: new, HeldList::entries, held, one_entry, edit_chain, four tests.",
+        "crates/wz-session-core: the message setters return Result; push_build, put_payload, request_build, ext_view, interest_build, ts_stack (record_on_chain), passive (Join read through its s group).",
+        "crates/wz-routing-graph/src/lib.rs: make_link_state and every build_ return Result with TooManyElements; two tests at 64 and 65.",
+        "crates/wz-runtime-tokio: linkstate_forward stamped, router_forward let_go_unsent_branch and overwritten_ingress and overwritten_egress, interceptor apply_qos Result, gossip_plane built; two qos_overwrite tests.",
+        "crates/wz-session-core/src/lent_control.rs: an Interest asking for nothing is refused, with a test.",
+        "crates/wz-session-core/src/network_message.rs, crates/wz-capi-core/src/drive.rs: reduced builds that were red on main: is_transport_mid names wire_const by path, for_each_record is gated as its callers are, the capi open_or_held and its test need peer.",
+        "gated tests take the new encode signatures; scripts/run-ci.sh guarded counts; docs/reason-review-pins.md moved rows."
+      ],
+      "publishable_verification_bullets": [
+        "Locally on the tree before the last rebase: cargo test --workspace 9600 passed, 0 failed, 850 ignored; layers C1g, C1bnl and C1ax pass; C1h, C1m, C1cf, C1j, C1ai and C1al pass on the tree before that, which the reduced-build fixes were made on.",
+        "On the rebased tip: cargo check --workspace --all-targets, and --all-features --all-targets of wz-runtime-tokio and wz-session-core, are clean; wz-capi-coop's tests pass; the deferred static gates ran, and the five that were red now pass (dissect_name_census, binary_freshness_lint, self_report_lint, lane_feature_membership_gate, reason_review_pin_gate).",
+        "Reds repaired here that were on main: the reduced builds of wz-capi-core and of the crates that reach is_transport_mid, and two static gates from step T5 of L6. Lane Z runs each of the three router legs once per engine, a guard of 1 each, so 3 per engine in total as before; lane Z itself was not run locally.",
+        "The guarded-count gate measured 61 guards and nine moved to the printed numbers; those nine were not remeasured after the move. Ten guards are deferred to the hosted lanes that own them. The hosted run judges the footprint and text budget rows, which were not measured."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, the next pin move: ADR 0077 step 1 and step 2, R5, R6 and the rest once SCE's section 7 steps are on main; on-overflow leaves the documents, held_list moves to CapacityExceeded, the deploy input names each capacity, a lent value's lifetime is checked, a zid_len of 17 gets its test, ADR 0078 section 4 wants an autoroller.",
+        "Found here and not addressed: a mesh past 64 nodes has no full linkstate flood, since the list is refused and logged at debug only and no split exists; upstream was not checked.",
+        "deploy/text_budget.json and the footprint rows may move on the hosted run; they were not measured locally."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
