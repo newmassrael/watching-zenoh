@@ -306984,6 +306984,42 @@
         "Open: the admin image's stack bound with the calls through a register followed (it has no bound row; 15 calls through a register on its chain are not followed); a hint for more than one peer and more than one commander key per verb on the kit; whether the other limits the admin overlay leaves at their defaults (subscriptions 16, remote declarations 16, queryables 16, pending declares 32) are part of what each session carries, and what the node needs of them."
       ]
     },
+    "Round 4153": {
+      "decision_summary": "The zenoh-c family rows of the host throughput comparison are read again on the tree that holds the writer-lane barrier (4142) and the close change (4148), and the loss paragraph is rewritten to state both causes of the loss at the end of a run. The 8 B cells with a wz publisher, held back in round 4134, are stated; they are at least 5.12 M msg/s (nothing was lost there and the next step of the search is past its cap), against 4.16 M to 4.80 M for zenoh-c. The claim in the earlier text that a close left to the session loses nothing is withdrawn: it was a reading of timing, and the close change shows it was wrong.",
+      "changes_bullets": [
+        "docs/upstream-parity.md: the 64 B / 1 KiB and 8 B rows of the zenoh-c family carry both runs; the paragraph of the family gives the medians of the second run, the 8 B cells, the run-to-run spread of zenoh-c and the wider pinning; the loss paragraph names the barrier and the close change and withdraws the earlier claim.",
+        "No library code changed in this round."
+      ],
+      "verification_bullets": [
+        "pc3 through bx, idle host (load 0.3 at the start of each run), pico-compare.sh nodrop-c 3 8,64 at the default pinning, trials of 3 s, resolution 5 percent, median of three; P is zenoh-c, W is wz-capi-c. 64 B: PP 4.32 M, PW 4.16 M, WP and WW at least 5.12 M. 8 B, a second run of the same cells because the first had the host taken by other work for PP and WW: PP 4.80 M (one of three readings valid, the others rejected by the trial's check of foreign CPU use), PW 4.48 M, WP and WW at least 5.12 M. The first run of this tree, 8 B PP and WW rejected for the same reason and its other cells equal to these.",
+        "Four CPUs a side (publisher 6,7,8,9, subscriber 10,11,3,4), 64 B: PP 4.00 M, PW 3.68 M, three readings each; its other cells rejected by the foreign-CPU check while other builds ran on the host, so they are not stated.",
+        "\"At least 5.12 M\": the search doubles from 20 k; nothing was lost at 5.12 M and the next step, 10.24 M, is past its cap of 8 M, so no higher rate was tried."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Not stated: 1 KiB with the close change (the 1 KiB cells are from before it; they were not stopped by the loss), 1 KiB at four CPUs a side (needs a quiet host and takes about an hour), the batched and 2048 B rows of this family, a host other than pc3, a zenoh (Rust) counterpart. The search's doubling ladder and cap hide how far above 5.12 M wz goes; a finer search above 5.12 M, to the pacer's own limit, would state it. Open: where the wz subscriber's time goes (needs a user-mode profile; perf_event_paranoid is 4 on the bench host)."
+      ],
+      "publishable_decision_summary": "The zenoh-c family rows of the host throughput comparison are read again on the tree that holds the writer-lane barrier (4142) and the close change (4148), and the loss paragraph is rewritten to state both causes of the loss at the end of a run. The 8 B cells with a wz publisher, held back in round 4134, are stated; they are at least 5.12 M msg/s (nothing was lost there and the next step of the search is past its cap), against 4.16 M to 4.80 M for zenoh-c. The claim in the earlier text that a close left to the session loses nothing is withdrawn: it was a reading of timing, and the close change shows it was wrong.",
+      "publishable_changes_bullets": [
+        "docs/upstream-parity.md: the 64 B / 1 KiB and 8 B rows of the zenoh-c family carry both runs; the paragraph of the family gives the medians of the second run, the 8 B cells, the run-to-run spread of zenoh-c and the wider pinning; the loss paragraph names the barrier and the close change and withdraws the earlier claim.",
+        "No library code changed in this round."
+      ],
+      "publishable_verification_bullets": [
+        "pc3 through bx, idle host (load 0.3 at the start of each run), pico-compare.sh nodrop-c 3 8,64 at the default pinning, trials of 3 s, resolution 5 percent, median of three; P is zenoh-c, W is wz-capi-c. 64 B: PP 4.32 M, PW 4.16 M, WP and WW at least 5.12 M. 8 B, a second run of the same cells because the first had the host taken by other work for PP and WW: PP 4.80 M (one of three readings valid, the others rejected by the trial's check of foreign CPU use), PW 4.48 M, WP and WW at least 5.12 M. The first run of this tree, 8 B PP and WW rejected for the same reason and its other cells equal to these.",
+        "Four CPUs a side (publisher 6,7,8,9, subscriber 10,11,3,4), 64 B: PP 4.00 M, PW 3.68 M, three readings each; its other cells rejected by the foreign-CPU check while other builds ran on the host, so they are not stated.",
+        "\"At least 5.12 M\": the search doubles from 20 k; nothing was lost at 5.12 M and the next step, 10.24 M, is past its cap of 8 M, so no higher rate was tried."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Not stated: 1 KiB with the close change (the 1 KiB cells are from before it; they were not stopped by the loss), 1 KiB at four CPUs a side (needs a quiet host and takes about an hour), the batched and 2048 B rows of this family, a host other than pc3, a zenoh (Rust) counterpart. The search's doubling ladder and cap hide how far above 5.12 M wz goes; a finer search above 5.12 M, to the pacer's own limit, would state it. Open: where the wz subscriber's time goes (needs a user-mode profile; perf_event_paranoid is 4 on the bench host)."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
