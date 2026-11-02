@@ -1030,11 +1030,12 @@ Each lands whole with its surface lines, tests and faults in one round.
       subscriber declared right after the open was told of tokens that were already alive;
       the open now waits for one connected and ingested node for each endpoint it dials, as
       upstream's start conditions count one connector for each. The `regions` file is in the
-      table and not in the lane (each failing test waits out a minute). The harness raises the
-      open files limit of its runs: a dozen sessions of one process pass a shell's 1,024.
-    - **Owed:** the files it asks for a `Runtime` of (the arm with `internal`), Windows, a margin
-      gate for the lane once it has measured runs, and the `regions` file in the lane, which
-      takes ten minutes for one run.
+      lane since it passes whole (126 tests, each in a process of its own, ten minutes on a
+      build host of thirty-two cores, so the harness allows it 1,800 seconds); whether the
+      hosted runner meets its multicast groups is read from its first run. The harness raises
+      the open files limit of its runs: a dozen sessions of one process pass a shell's 1,024.
+    - **Owed:** the files it asks for a `Runtime` of (the arm with `internal`), Windows, and a
+      margin gate for the lane once it has measured runs.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

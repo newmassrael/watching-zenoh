@@ -87,6 +87,18 @@ COMPILE_BOUND_S = 3600
 # A file of dozens of tests that each wait out a sleep runs for minutes: the liveliness file takes
 # about nine once the routers it opens work. A run that needs more says so (`Z8_RUN_BOUND_S`).
 RUN_BOUND_S = int(os.environ.get("Z8_RUN_BOUND_S", "1500"))
+#: Files that need more than that, in seconds for the whole file: `regions` runs 126 tests, each in
+#: a process of its own and each opening a dozen sessions, and takes ten minutes on a build host of
+#: thirty-two cores; a runner of a few cores is allowed three times that. `Z8_RUN_BOUND_S` still
+#: wins, so a person who asks for a bound gets it for every file.
+FILE_RUN_BOUND_S = {"regions": 1800}
+
+
+def run_bound(name: str) -> int:
+    """The seconds a file may run: the one asked for, else the file's own, else the default."""
+    if "Z8_RUN_BOUND_S" in os.environ:
+        return RUN_BOUND_S
+    return FILE_RUN_BOUND_S.get(name, RUN_BOUND_S)
 
 
 def workspace_dependencies(text: str) -> dict[str, str]:
@@ -451,9 +463,9 @@ def measure(names: list[str], out: pathlib.Path) -> int:
             rows.append(f"{name}\tno-compile\t{' | '.join(first_errors(clog))}")
             continue
         if name in ISOLATED_FILES:
-            rc = isolated_run(["cargo", "test", "--test", name, *flags], out, rlog, RUN_BOUND_S)
+            rc = isolated_run(["cargo", "test", "--test", name, *flags], out, rlog, run_bound(name))
         else:
-            rc = run(["cargo", "test", "--test", name, *flags, "--", "--test-threads=1"], out, rlog, RUN_BOUND_S)
+            rc = run(["cargo", "test", "--test", name, *flags, "--", "--test-threads=1"], out, rlog, run_bound(name))
         passed, failed, ignored = counts(rlog.read_text(encoding="utf-8", errors="replace"))
         ran = f"ran={passed + failed} passed={passed} ignored={ignored}"
         if rc is None:
