@@ -78,11 +78,16 @@ impl Owed {
     }
 }
 
-/// A delivery to a subscriber of the node's own session that the publish owes: the handler, and
-/// the sample it is to be handed.
-pub(super) struct OwedDelivery {
-    pub(super) handler: Arc<super::Hosted<super::HostedSubscriberHandler>>,
-    pub(super) sample: wz_session_core::sample::Sample,
+/// A call of the node's own session that a route owes: the program's callback, to be called once
+/// the tables are let go.
+pub(super) enum OwedDelivery {
+    /// A subscriber: the handler, and the sample it is to be handed.
+    Sample {
+        handler: Arc<super::Hosted<super::HostedSubscriberHandler>>,
+        sample: Box<wz_session_core::sample::Sample>,
+    },
+    /// A queryable: the query it is to be handed, and the branch of the query it answers.
+    Query(Box<super::QueryJob>),
 }
 
 thread_local! {
@@ -111,40 +116,55 @@ pub(super) fn owe_delivery(
     let sample = sample();
     DELIVERIES.with(|owed| {
         if let Some(owed) = owed.borrow_mut().as_mut() {
-            owed.push(OwedDelivery {
+            owed.push(OwedDelivery::Sample {
                 handler: Arc::clone(handler),
-                sample,
+                sample: Box::new(sample),
             });
         }
     });
     true
 }
 
-/// The span of one route, in which the deliveries to the subscribers of the node's own session are
-/// owed instead of made. Declare it BEFORE the guard of the tables the route takes, so that it
-/// ends after the guard is released: the deliveries are made then, by [`DeliveryScope::finish`] or,
-/// when the span ends any other way (a message the route skipped), by the drop.
-pub(super) struct DeliveryScope {
+/// [`owe_delivery`] for a query: the job is owed and `Ok`, or handed back when no span is open
+/// and the caller runs it itself.
+pub(super) fn owe_query(job: Box<super::QueryJob>) -> Result<(), Box<super::QueryJob>> {
+    DELIVERIES.with(|owed| match owed.borrow_mut().as_mut() {
+        Some(owed) => {
+            owed.push(OwedDelivery::Query(job));
+            Ok(())
+        }
+        None => Err(job),
+    })
+}
+
+/// The span of one route, in which the calls of the node's own session (its subscribers' and
+/// queryables' callbacks) are owed instead of made. Declare it BEFORE the guard of the tables the
+/// route takes, so that it ends after the guard is released: the calls are made then, by
+/// [`DeliveryScope::finish`] or, when the span ends any other way (a message the route skipped),
+/// by the drop.
+pub(super) struct DeliveryScope<'a> {
+    /// The forwarder the calls are made for, which takes the tables again to send what they answer.
+    fwd: &'a super::RouterForwarder,
     /// Whether this scope opened the span: a route begun from inside a callback joins the outer
     /// one, which makes what is owed.
     outermost: bool,
 }
 
-impl DeliveryScope {
+impl<'a> DeliveryScope<'a> {
     /// Open the span on this thread, or join the one that is open.
-    pub(super) fn enter() -> Self {
+    pub(super) fn enter(fwd: &'a super::RouterForwarder) -> Self {
         DELIVERIES.with(|owed| {
             let mut owed = owed.borrow_mut();
             let outermost = owed.is_none();
             if outermost {
                 *owed = Some(Vec::new());
             }
-            Self { outermost }
+            Self { fwd, outermost }
         })
     }
 
-    /// Close the span and make the deliveries it owes. The span is closed first, so that a
-    /// callback that publishes opens one of its own.
+    /// Close the span and make the calls it owes. The span is closed first, so that a callback
+    /// that publishes opens one of its own.
     pub(super) fn finish(mut self) {
         self.deliver();
     }
@@ -154,11 +174,11 @@ impl DeliveryScope {
             return;
         }
         let owed = DELIVERIES.with(|owed| owed.borrow_mut().take().unwrap_or_default());
-        super::RouterForwarder::deliver_owed(owed);
+        self.fwd.deliver_owed(owed);
     }
 }
 
-impl Drop for DeliveryScope {
+impl Drop for DeliveryScope<'_> {
     fn drop(&mut self) {
         if std::thread::panicking() {
             // A route that unwinds leaves no span open, and calls no callback while it does.

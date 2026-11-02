@@ -568,9 +568,12 @@ Each lands whole with its surface lines, tests and faults in one round.
     session are now called once the guard of the message or the publish that found them is
     let go (`DeliveryScope`, opened before the guard so that it ends after it), whichever way
     the message came: from the session's own put or from a link. The differential of the
-    subscriptions is equal to upstream's. The queryables of the session are called inside the
-    route of the query as they were, and a query callback that declares on the node is not held
-    by a test here.
+    subscriptions is equal to upstream's. The queryables of the session were called inside the
+    route of the query in the same way, and a query callback that declared on the node waited
+    as the subscribers' did (`a_callback_of_the_nodes_own_queryable_may_declare_while_its_session_asks`
+    was red); the route now takes the branch of the query's fan under the guard and owes the call
+    (`QueryJob`), which is made with no guard held and takes the tables for reading again to send
+    the replies and to end the branch.
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

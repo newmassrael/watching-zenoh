@@ -3054,6 +3054,21 @@ pub struct HeldRecord {
     holds: std::sync::atomic::AtomicUsize,
 }
 
+/// The call of a hosted queryable that a route owes ([`local_publish::DeliveryScope`]): the
+/// handler, the query it is to be handed (as it was routed to the node's own session), and the
+/// branch of the query's fan the call answers. The call is made, and what it answers sent, once
+/// the tables the route held are let go.
+struct QueryJob {
+    handler: Arc<Hosted<HostedQueryHandler>>,
+    request: RequestOwned,
+    /// The key of the query as the router names it.
+    keyexpr: String,
+    record: Arc<HeldRecord>,
+    /// The face that asked, which is sent the replies.
+    inbound: FaceId,
+    reliable: bool,
+}
+
 /// A query kept past the handler of a hosted queryable, answerable from any thread; the query's
 /// final is owed until every hold of it is dropped (`zenoh/src/api/queryable.rs` @
 /// `impl Drop for QueryInner {`). Dropping this releases one.
@@ -3736,7 +3751,6 @@ router_entry_points! { on_tables_mut:
 
 router_entry_points! { on_tables:
     fn face_snapshots(&self) -> Vec<FaceSnapshot>;
-    fn local_get(&self, request: &RequestOwned);
     fn matching(
         &self,
         plane: MatchPlane,
@@ -3847,7 +3861,7 @@ impl RouterForwarder {
     ) -> R {
         let scope = local_publish::Scope::enter();
         // Declared before the tables are taken, so that it ends after they are let go.
-        let deliveries = local_publish::DeliveryScope::enter();
+        let deliveries = local_publish::DeliveryScope::enter(self);
         let result = publish(self.on_tables());
         // The subscribers of the node's own session are handed what they were owed first: they
         // are the program's callbacks, which may use the session, and no send that waits for room
@@ -3859,29 +3873,115 @@ impl RouterForwarder {
         result
     }
 
-    /// Hand the subscribers of the node's own session the samples a route owed them, now that its
-    /// tables are released. A subscriber that is already running on this thread (a callback that
-    /// publishes into its own pattern) is handed its sample once it is out, as
-    /// [`deliver_to_hosted_subscribers`](OnTables::deliver_to_hosted_subscribers) does.
-    fn deliver_owed(deliveries: Vec<local_publish::OwedDelivery>) {
+    /// Call the subscribers and the queryables of the node's own session with what a route owed
+    /// them, now that its tables are released. A subscriber that is already running on this thread
+    /// (a callback that publishes into its own pattern) is handed its sample once it is out, as
+    /// [`deliver_to_hosted_subscribers`](OnTables::deliver_to_hosted_subscribers) does. A query
+    /// takes the tables for reading again, to send what its queryable answers.
+    fn deliver_owed(&self, deliveries: Vec<local_publish::OwedDelivery>) {
         if deliveries.is_empty() {
             return;
         }
         let inside = HostedDispatch::enter();
-        for local_publish::OwedDelivery { handler, sample } in deliveries {
-            if handler.is_retracted() {
-                continue;
-            }
-            if handler.call(|h| h(&sample as &dyn SampleView)).is_none() {
-                OnTables::<crate::sync::PlainReadGuard<'_, Tables>>::enqueue_self_echo(
-                    &handler, &sample,
-                );
+        for delivery in deliveries {
+            match delivery {
+                local_publish::OwedDelivery::Sample { handler, sample } => {
+                    if handler.is_retracted() {
+                        continue;
+                    }
+                    if handler.call(|h| h(&*sample as &dyn SampleView)).is_none() {
+                        OnTables::<crate::sync::PlainReadGuard<'_, Tables>>::enqueue_self_echo(
+                            &handler, &*sample,
+                        );
+                    }
+                }
+                local_publish::OwedDelivery::Query(job) => self.run_query_job(*job),
             }
         }
         if inside.is_outermost() {
             drop(inside);
             OnTables::<crate::sync::PlainReadGuard<'_, Tables>>::drain_self_echo();
         }
+    }
+
+    /// Call the hosted queryable of a query job with the query, send what it answers at once to
+    /// the face that asked, and let go of the call's hold of the branch. What the call keeps for
+    /// later ([`RouterForwarder::hold_current_query`]) keeps the branch open until it is dropped.
+    ///
+    /// The queryable is called with no tables held by this function: it is the program's
+    /// callback and may declare on the node. The tables are taken for reading after it returns, to
+    /// send its replies and to end the branch. When the route that owed the call had no span
+    /// open, the caller holds its own guard and the call is made inside it, as it always was.
+    fn run_query_job(&self, job: QueryJob) {
+        let QueryJob {
+            handler,
+            request,
+            keyexpr,
+            record,
+            inbound,
+            reliable,
+        } = job;
+        let Some(full) = wz_session_core::query::RequestQueryView::of_request(&request, &keyexpr)
+        else {
+            self.release_held(&record);
+            return;
+        };
+        let relative = if record.namespaced {
+            self.relative_key(&keyexpr)
+                .map(|relative| full.under(relative))
+        } else {
+            None
+        };
+        let view = if record.namespaced {
+            match &relative {
+                Some(relative) => relative,
+                None => {
+                    self.release_held(&record);
+                    return;
+                }
+            }
+        } else {
+            &full
+        };
+        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+        {
+            let mut responder = QueryResponder::new(
+                request.rid,
+                view.keyexpr().to_string(),
+                record.accept,
+                view.qos(),
+                &mut replies,
+            );
+            let previous = HOSTED_QUERY.with(|current| current.replace(Some(record.clone())));
+            // A handler that is already running on this thread (it asks a query its own
+            // pattern answers) is not called again: it would wait for itself.
+            let _ = handler.call(|h| h(view, &mut responder));
+            HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
+        }
+        {
+            let on = self.on_tables();
+            for reply in replies {
+                if let Ok(mut resp) = reply.into_response() {
+                    if record.namespaced {
+                        self.put_under_namespace(&mut resp);
+                    }
+                    on.send_hosted_reply(inbound, reliable, || {
+                        NetworkMessage::Response(Box::new(resp.clone()))
+                    });
+                }
+            }
+        }
+        // The handler has returned: its hold is let go, and the branch ends with the last.
+        self.release_held(&record);
+    }
+
+    /// The router's `local_get`: the query of the node's own session, with the calls of its
+    /// queryables made after the tables are released.
+    pub fn local_get(&self, request: &RequestOwned) {
+        // Declared before the tables are taken, so that it ends after they are let go.
+        let deliveries = local_publish::DeliveryScope::enter(self);
+        self.on_tables().local_get(request);
+        deliveries.finish();
     }
 
     /// The router's `publish`, with the sends it must wait for made after its tables are released.
@@ -10675,8 +10775,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// empty-route tail (self is excluded from the routing targets, so a GET
     /// matching only a self-hosted queryable — e.g. `@/<self-zid>/router/**` —
     /// arrives with `forwarded == 0`). Clones the matching handlers out of the
-    /// store and invokes each through [`Hosted::call`], under the tables' read
-    /// guard (see [`dispatch_local_subscribers`](Self::dispatch_local_subscribers)
+    /// store and invokes each through [`Hosted::call`] ([`run_query_job`](Self::run_query_job)),
+    /// once the tables' read guard of the route is let go when the route opened a span for the
+    /// calls ([`local_publish::DeliveryScope`]), and inside it when it did not (see
+    /// [`dispatch_local_subscribers`](Self::dispatch_local_subscribers)
     /// for what that allows a handler), accumulating replies via the SAME
     /// `QueryResponder` / `QueryReply::into_response` SSOT the wire queryable path
     /// uses, and emits them + the closing `ResponseFinal` (rid = the querier's) to
@@ -10785,33 +10887,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // The handler's own call.
                 holds: std::sync::atomic::AtomicUsize::new(1),
             });
-            let mut replies = wz_session_core::reply_stage::ReplyStage::new();
-            {
-                let mut responder = QueryResponder::new(
-                    request.rid,
-                    view.keyexpr().to_string(),
-                    accept,
-                    view.qos(),
-                    &mut replies,
-                );
-                let previous = HOSTED_QUERY.with(|current| current.replace(Some(record.clone())));
-                // A handler that is already running on this thread (it asks a query its own
-                // pattern answers) is not called again: it would wait for itself.
-                let _ = handler.call(|h| h(view, &mut responder));
-                HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
+            // The queryable is the program's callback, and a callback may use the session: declare
+            // on the node, publish, ask. The call is owed to the span of the route and made once
+            // the tables are let go, when there is one, and made here when there is none. The
+            // branch of the fan is taken above and ends with the call, so the final of the query
+            // is sent by the last branch to end, whichever way this goes.
+            let job = Box::new(QueryJob {
+                handler: Arc::clone(handler),
+                request: request.clone(),
+                keyexpr: keyexpr.to_owned(),
+                record,
+                inbound,
+                reliable,
+            });
+            if let Err(job) = local_publish::owe_query(job) {
+                self.fwd.run_query_job(*job);
             }
-            for reply in replies {
-                if let Ok(mut resp) = reply.into_response() {
-                    if *namespaced {
-                        self.fwd.put_under_namespace(&mut resp);
-                    }
-                    self.send_hosted_reply(inbound, reliable, || {
-                        NetworkMessage::Response(Box::new(resp.clone()))
-                    });
-                }
-            }
-            // The handler has returned: its hold is let go, and the branch ends with the last.
-            self.release_held(&record);
         }
         dispatched
     }
@@ -13103,7 +13194,7 @@ impl RouterForwarder {
                 // The subscribers of the node's own session are the program's callbacks, which may
                 // use the session and so write the tables: they are handed what this message
                 // brings once the guard below is let go. Declared before it, so it ends after it.
-                let _deliveries = local_publish::DeliveryScope::enter();
+                let _deliveries = local_publish::DeliveryScope::enter(self);
                 let on = self.on_tables_for_a_frame();
                 if !on.admits_ingress(id, message) {
                     continue;
@@ -22857,6 +22948,38 @@ mod tests {
             "the callback came back from declaring on the session that called it"
         );
         assert!(put.join().expect("the put").is_ok());
+    }
+
+    /// The same for a query: a queryable of the session is the program's callback, and a callback
+    /// may declare on the node that called it. A query the session asks of its own queryable is
+    /// routed with the tables held for reading, and the callback was called inside that route.
+    #[test]
+    fn a_callback_of_the_nodes_own_queryable_may_declare_while_its_session_asks() {
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+        use wz_session_core::sink::SampleView;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let done = std::sync::Mutex::new(done);
+        let inner = Arc::clone(&fwd);
+        fwd.host_queryable(
+            "demo/q",
+            false,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                inner.register_local_subscriber("demo/inner/**", Box::new(|_: &dyn SampleView| {}));
+                let _ = done.lock().unwrap().send(());
+            }),
+        );
+        let asking = Arc::clone(&fwd);
+        let asked = std::thread::spawn(move || {
+            let request = wz_session_core::request_build::build_request_query(1, 0, Some("demo/q"))
+                .expect("build request");
+            asking.local_get(&request);
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the callback came back from declaring on the node that asked it"
+        );
+        asked.join().expect("the query");
     }
 
     /// The same for what a face sends: the callback of a subscriber of the session is called once
