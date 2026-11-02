@@ -306012,6 +306012,34 @@
         "Owed, still: the hosted run of round 4088 and after, the capability cost of the nine pico coop builds, Layer E whole, the alias table that only allocates, a whole-process stop in about 1 of 30 runs, the re-dial with no upper bound, the aggregate reply retraction of peer-hat faces that waits for the last backer, the configured endpoint dial a guard refuses and retries on schedule, the router loop and the cooperative engine that still decide a second link after it is up."
       ]
     },
+    "Round 4122": {
+      "decision_summary": "The listener of Zephyr's sockets sets SO_REUSEADDR before it binds, as the POSIX listener does, so a node restarted on its port is not kept off it by the connection the earlier listener closed first. The witness is in deploy/zephyr-tls-loopback: a listener serves one connection, closes it first and goes, and a listener on the same port must bind at once. It discriminates: with the option applied the image prints that the restarted listener took the port and Layer Qz passes, with the option never applied the same image fails with a refused bind (Bind(-1)). Building the witness showed a second limit of the image that the product images will meet when they restart: Zephyr's TCP side of a context is a connection object from a pool of CONFIG_NET_MAX_CONN (4 on an IPv4-only build, not CONFIG_NET_MAX_CONTEXTS), a closed connection keeps its slot in TIME_WAIT, and a listen with no free object is refused (-1); the witness image states 16. The product admin image states CONFIG_NET_MAX_CONTEXTS only and keeps the default of 4 connections; whether a restart under load needs more is not measured and is not changed here.",
+      "changes_bullets": [
+        "crates/zephyr-sys: SOL_SOCKET and SO_REUSEADDR. crates/wz-runtime-zephyr: set_reuseaddr in ZephyrTcpListener::listen and the ReuseAddr error. deploy/zephyr-tls-loopback: the restart check (step 4) and CONFIG_NET_MAX_CONN=16."
+      ],
+      "verification_bullets": [
+        "Layer Qz run end to end with WZ_QZ_REQUIRE=1 passes on all four images. A control with the option never applied fails the same image: a listener restarted on its port could not bind it, Bind(-1). A first run of the check failed on its first listen (Listen(-1)) and showed the connection pool of 4; the image states 16. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Open: D14's witness on the kit with a real router's session reaching the verbs of the product image (no kit was attached to this host). The product admin image keeps the default of 4 TCP connections; whether a restart under load needs more is not measured."
+      ],
+      "publishable_decision_summary": "The listener of Zephyr's sockets sets SO_REUSEADDR before it binds, as the POSIX listener does, so a node restarted on its port is not kept off it by the connection the earlier listener closed first. The witness is in deploy/zephyr-tls-loopback: a listener serves one connection, closes it first and goes, and a listener on the same port must bind at once. It discriminates: with the option applied the image prints that the restarted listener took the port and Layer Qz passes, with the option never applied the same image fails with a refused bind (Bind(-1)). Building the witness showed a second limit of the image that the product images will meet when they restart: Zephyr's TCP side of a context is a connection object from a pool of CONFIG_NET_MAX_CONN (4 on an IPv4-only build, not CONFIG_NET_MAX_CONTEXTS), a closed connection keeps its slot in TIME_WAIT, and a listen with no free object is refused (-1); the witness image states 16. The product admin image states CONFIG_NET_MAX_CONTEXTS only and keeps the default of 4 connections; whether a restart under load needs more is not measured and is not changed here.",
+      "publishable_changes_bullets": [
+        "crates/zephyr-sys: SOL_SOCKET and SO_REUSEADDR. crates/wz-runtime-zephyr: set_reuseaddr in ZephyrTcpListener::listen and the ReuseAddr error. deploy/zephyr-tls-loopback: the restart check (step 4) and CONFIG_NET_MAX_CONN=16."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Qz run end to end with WZ_QZ_REQUIRE=1 passes on all four images. A control with the option never applied fails the same image: a listener restarted on its port could not bind it, Bind(-1). A first run of the check failed on its first listen (Listen(-1)) and showed the connection pool of 4; the image states 16. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: D14's witness on the kit with a real router's session reaching the verbs of the product image (no kit was attached to this host). The product admin image keeps the default of 4 TCP connections; whether a restart under load needs more is not measured."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
