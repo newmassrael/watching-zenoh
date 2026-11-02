@@ -27,9 +27,11 @@
 //!   factors it lacks, and Stirling's series finishes it, so the cost does not
 //!   grow with the number of steps a flow holds.
 //!
-//! Nothing here is wired into the model. `model::MODEL` stays 2 until the prior is
-//! chosen, generated and agreed with the consumer (§6.6); this is the arithmetic
-//! that decision rests on being possible.
+//! Model 3 reads the same mixture one step at a time
+//! ([`crate::zenoh_eprocess::Prior`]), which is what a latched word needs; this
+//! module computes it from the counts in one step, and the two are held to each
+//! other (`the_predictive_walk_is_the_mixture_of_the_counts`). Its logarithm is
+//! the one `zenoh_eprocess` stands on.
 
 /// The counts above which a flow's steps are counted as this many: `2^36`, about
 /// 7 * 10^10 steps, which no capture holds. It keeps the arguments of the logarithm
@@ -44,13 +46,13 @@ const HALF_LOG2_2PI_Q64: i128 = 24_455_735_256_403_655_384;
 
 /// `log2(255 / 256)` to 64 fractional bits: the null's weight of a step that breaks
 /// is the chance of a varint that is not the last plus one.
-const LOG2_BREAK_NULL_Q64: i128 = -104_160_705_160_689_130;
+pub(crate) const LOG2_BREAK_NULL_Q64: i128 = -104_160_705_160_689_130;
 
 /// One in Q64.
 const ONE_Q64: i128 = 1 << 64;
 
 /// The product of two 128-bit integers, as `(high, low)` halves of 256 bits.
-fn mul_wide(a: u128, b: u128) -> (u128, u128) {
+pub(crate) fn mul_wide(a: u128, b: u128) -> (u128, u128) {
     const LOW: u128 = (1 << 64) - 1;
     let (a0, a1) = (a & LOW, a >> 64);
     let (b0, b1) = (b & LOW, b >> 64);

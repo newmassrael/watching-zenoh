@@ -212,11 +212,12 @@ impl Tcp {
         self.messages += 1;
     }
 
-    /// The four messages of a handshake, one microsecond apart from `at_ns`.
+    /// The four messages of a handshake, one microsecond apart from `at_ns`,
+    /// the InitAck's cookie echoed by the OpenSyn as a zenoh peer does.
     fn handshake(&mut self, out: &mut Packets, at_ns: u64, dialer: &[u8], acceptor: &[u8]) {
         self.send(out, at_ns, true, &init(dialer, false));
-        self.send(out, at_ns + 1_000, false, &init(acceptor, true));
-        self.send(out, at_ns + 2_000, true, &open(false));
+        self.send(out, at_ns + 1_000, false, &init_ack_with_cookie(acceptor));
+        self.send(out, at_ns + 2_000, true, &open_syn_with_cookie());
         self.send(out, at_ns + 3_000, false, &open(true));
     }
 }
@@ -256,10 +257,29 @@ impl Udp {
 
     fn handshake(&mut self, out: &mut Packets, at_ns: u64, dialer: &[u8], acceptor: &[u8]) {
         self.send(out, at_ns, true, &init(dialer, false));
-        self.send(out, at_ns + 1_000, false, &init(acceptor, true));
-        self.send(out, at_ns + 2_000, true, &open(false));
+        self.send(out, at_ns + 1_000, false, &init_ack_with_cookie(acceptor));
+        self.send(out, at_ns + 2_000, true, &open_syn_with_cookie());
         self.send(out, at_ns + 3_000, false, &open(true));
     }
+}
+
+/// The cookie the fixtures' handshakes issue and echo: a zenoh InitAck always
+/// carries one, and its echo is what binds the two directions.
+const COOKIE: [u8; 8] = [0xC0, 0x0C, 0x1E, 0x5E, 0xED, 0x01, 0x02, 0x03];
+
+/// An InitAck naming `zid` and issuing [`COOKIE`].
+fn init_ack_with_cookie(zid: &[u8]) -> Vec<u8> {
+    let mut wire = init(zid, true);
+    *wire.last_mut().expect("the cookie length") = COOKIE.len() as u8;
+    wire.extend_from_slice(&COOKIE);
+    wire
+}
+
+/// An OpenSyn echoing [`COOKIE`].
+fn open_syn_with_cookie() -> Vec<u8> {
+    let mut wire = vec![0x02, 10, 0, COOKIE.len() as u8];
+    wire.extend_from_slice(&COOKIE);
+    wire
 }
 
 const T0: u64 = 1_700_000_000_000_000_000;
@@ -1864,34 +1884,56 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     let (packets, tcp) = tcp_session(true, 6);
     assert_eq!(
         (tcp.messages, tcp.wire_bytes),
-        (10, 48),
+        (10, 64),
         "the example's numbers"
     );
     let doc = session_table_json(&packets.dissect());
-    // Two version headers, the Init roles and ten units read whole; the
-    // keep-alives carry no SN, the fixture's cookie is empty, and its TCP opens
+    // The ROW (§6.8, D7): what came after the InitAck named the pair, the
+    // cookie echo of the OpenSyn (packet 2, where both cross `yes`) and eight
+    // units read whole. The keep-alives carry no SN, and the fixture's TCP opens
     // without a SYN, so its framing is not weighed.
-    let zenoh = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
-                 \"zenoh_evidence\":{\"log2_lr_millibits\":26655,\
-                 \"log2_lr_no_millibits\":52445,\
-                 \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,\
-                 \"checks\":[{\"check\":\"init_roles\",\"strength\":\"handshake\",\
-                 \"confirmed\":1,\"violated\":0,\"millibits\":993,\"no_millibits\":993,\
-                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
-                 {\"check\":\"version_header\",\"strength\":\"header\",\
-                 \"confirmed\":2,\"violated\":0,\"millibits\":15992,\"no_millibits\":15992,\
-                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
-                 {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                 \"confirmed\":10,\"violated\":0,\"millibits\":9670,\"no_millibits\":35460,\
-                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
+    let row = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
+               \"zenoh_evidence\":{\"log2_lr_millibits\":64964,\
+               \"log2_lr_no_millibits\":92373,\
+               \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":3,\
+               \"crossed_at_packet\":2,\
+               \"log2_lr_max_millibits\":64964,\"log2_lr_min_millibits\":0,\
+               \"log2_lr_no_max_millibits\":92373,\"log2_lr_no_min_millibits\":0,\
+               \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
+               \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
+               \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
+               {\"check\":\"unit_reading\",\"strength\":\"unit\",\
+               \"confirmed\":8,\"violated\":0,\"millibits\":966,\"no_millibits\":28372,\
+               \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
+    // The FLOW: the same, and the two Inits' version headers, their roles and
+    // their units.
+    let flow = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
+                \"zenoh_evidence\":{\"log2_lr_millibits\":81961,\
+                \"log2_lr_no_millibits\":116467,\
+                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":3,\
+                \"crossed_at_packet\":2,\
+                \"log2_lr_max_millibits\":81961,\"log2_lr_min_millibits\":0,\
+                \"log2_lr_no_max_millibits\":116467,\"log2_lr_no_min_millibits\":0,\
+                \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
+                \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
+                \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
+                {\"check\":\"init_roles\",\"strength\":\"handshake\",\
+                \"confirmed\":1,\"violated\":0,\"millibits\":998,\"no_millibits\":1001,\
+                \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
+                {\"check\":\"version_header\",\"strength\":\"header\",\
+                \"confirmed\":2,\"violated\":0,\"millibits\":15999,\"no_millibits\":16001,\
+                \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
+                {\"check\":\"unit_reading\",\"strength\":\"unit\",\
+                \"confirmed\":10,\"violated\":0,\"millibits\":966,\"no_millibits\":35464,\
+                \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":6}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":7}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
          \"last_seen_ts_ns\":\"1700000000000015000\",\
-         \"frames\":10,\"bytes\":48,{zenoh},\
-         \"unit_readings\":{{\"explained\":{{\"units\":10,\"bytes\":28}},\
+         \"frames\":10,\"bytes\":64,{row},\
+         \"unit_readings\":{{\"explained\":{{\"units\":10,\"bytes\":44}},\
          \"residual\":{{\"units\":0,\"bytes\":0}},\
          \"undecoded\":{{\"units\":0,\"bytes\":0}}}},\"unstated\":[],\
          \"flows\":[{{\"flow\":{{\"low\":"
@@ -1899,8 +1941,8 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     assert!(doc.starts_with(&want), "{doc}");
     assert!(
         doc.contains(&alloc::format!(
-            "\"link\":\"tcp\"}},\"encrypted\":\"clear\",\"bytes\":48,{zenoh},\
-             \"unit_readings\":{{\"explained\":{{\"units\":10,\"bytes\":28}},\
+            "\"link\":\"tcp\"}},\"encrypted\":\"clear\",\"bytes\":64,{flow},\
+             \"unit_readings\":{{\"explained\":{{\"units\":10,\"bytes\":44}},\
              \"residual\":{{\"units\":0,\"bytes\":0}},\
              \"undecoded\":{{\"units\":0,\"bytes\":0}}}}}}]}}],\
              \"excluded\":\
@@ -2062,12 +2104,12 @@ fn arbitrary_udp_bytes_prove_no_flow_zenoh_and_name_no_node() {
         "the bytes decode and stand as rows; the fact is what says what they are"
     );
     for row in &table.rows {
-        assert_eq!(word(row.evidence), ZenohVerdict::Undecided, "{row:?}");
+        assert_eq!(word(&row.evidence), ZenohVerdict::Undecided, "{row:?}");
         assert!(row.initiator.is_err() && row.acceptor.is_err(), "{row:?}");
     }
     for flow in d.datagram_flows() {
         assert_eq!(
-            word(flow.zenoh_evidence()),
+            word(&flow.zenoh_evidence()),
             ZenohVerdict::Undecided,
             "{:?}",
             flow.flow
@@ -2090,33 +2132,47 @@ fn arbitrary_udp_bytes_prove_no_flow_zenoh_and_name_no_node() {
 }
 
 /// A session whose handshake is in the capture is `yes`, in the row and in the
-/// flow, and the document says so with what it rests on: two version headers,
-/// the Init roles and six units read whole.
+/// flow, both at the OpenSyn whose cookie echoes the InitAck's (packet 2). The
+/// flow observed two version headers, the Init roles, the echo and six units
+/// read whole. The ROW is a test of its own over what came after the InitAck
+/// named the pair (§6.8, D7): the echo and four units, nothing of the Inits.
+/// The document writes the row's sums, its crossing and its extremes.
 #[test]
 fn a_session_with_its_handshake_is_zenoh() {
-    use crate::zenoh_evidence::{model, Check};
+    use crate::zenoh_evidence::Check;
     let (packets, _) = udp_session(true, 2);
     let d = packets.dissect();
     let table = session_table(&d);
     let row = only(&table);
-    assert_eq!(word(row.evidence), ZenohVerdict::Yes);
+    let flow = d.datagram_flows()[0].zenoh_evidence();
+    assert_eq!(word(&flow), ZenohVerdict::Yes);
+    assert_eq!(flow.crossing().map(|c| c.packet), Some(2));
+    assert_eq!(flow.tally(Check::VersionHeader).confirmed, 2);
+    assert_eq!(flow.tally(Check::InitRoles).confirmed, 1);
+    assert_eq!(flow.tally(Check::CookieEcho).confirmed, 1);
+    assert_eq!(flow.tally(Check::UnitReading).confirmed, 6);
     assert_eq!(row.versions.own_version, 2, "the InitSyn and the InitAck");
-    assert_eq!(row.evidence.tally(Check::VersionHeader).confirmed, 2);
-    assert_eq!(row.evidence.tally(Check::InitRoles).confirmed, 1);
-    assert_eq!(row.evidence.tally(Check::UnitReading).confirmed, 6);
-    let sum = model::VERSION_HEADER
-        .times(2)
-        .plus(model::INIT_ROLES_CONFIRMED)
-        .plus(model::UNIT_EXPLAINED.times(6));
-    assert_eq!(row.evidence.log2_lr_millibits(), sum.yes);
-    assert_eq!(row.evidence.log2_lr_no_millibits(), sum.no);
+    assert_eq!(word(&row.evidence), ZenohVerdict::Yes);
+    assert_eq!(row.evidence.crossing().map(|c| c.packet), Some(2));
+    assert_eq!(row.evidence.tally(Check::VersionHeader).confirmed, 0);
+    assert_eq!(row.evidence.tally(Check::InitRoles).confirmed, 0);
+    assert_eq!(row.evidence.tally(Check::CookieEcho).confirmed, 1);
+    assert_eq!(row.evidence.tally(Check::UnitReading).confirmed, 4);
+    let e = &row.evidence;
     let doc = session_table_json(&d);
     let head = alloc::format!(
         "\"zenoh\":\"yes\",\"announced_version\":\"own\",\"zenoh_evidence\":\
          {{\"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":20000,\
-         \"no_at_millibits\":-20000,\"model\":2,\"checks\":[{{\"check\":\"init_roles\"",
-        sum.yes,
-        sum.no
+         \"no_at_millibits\":-20000,\"model\":3,\"crossed_at_packet\":2,\
+         \"log2_lr_max_millibits\":{},\"log2_lr_min_millibits\":{},\
+         \"log2_lr_no_max_millibits\":{},\"log2_lr_no_min_millibits\":{},\
+         \"checks\":[{{\"check\":\"cookie_echo\"",
+        e.log2_lr_millibits(),
+        e.log2_lr_no_millibits(),
+        e.log2_lr_max_millibits(),
+        e.log2_lr_min_millibits(),
+        e.log2_lr_no_max_millibits(),
+        e.log2_lr_no_min_millibits(),
     );
     assert!(doc.contains(&head), "{head}\n{doc}");
 }
@@ -2127,7 +2183,7 @@ fn a_session_with_its_handshake_is_zenoh() {
 /// violation, and the flow is no longer `yes` on its Inits alone.
 #[test]
 fn an_echoed_cookie_decides_and_a_different_one_is_a_violation() {
-    use crate::zenoh_evidence::{model, Check};
+    use crate::zenoh_evidence::Check;
     let cookie = [0x5Au8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
     let init_ack = |cookie: &[u8]| {
         let mut wire = init(&ZID_B, true);
@@ -2146,24 +2202,21 @@ fn an_echoed_cookie_decides_and_a_different_one_is_a_violation() {
         let mut udp = Udp::new(true, 43210);
         udp.send(&mut out, T0, false, &init_ack(&cookie));
         udp.send(&mut out, T0 + 1_000, true, &open_syn(echoed));
-        only(&session_table(&out.dissect())).evidence
+        only(&session_table(&out.dissect())).evidence.clone()
     };
     let echoed = read(&cookie);
-    assert_eq!(
-        echoed.tally(Check::CookieEcho),
-        crate::zenoh_evidence::CheckTally {
-            confirmed: 1,
-            violated: 0,
-            millibits: 8 * model::COOKIE_ECHO_PER_BYTE + model::COOKIE_ECHO_FIDELITY,
-            no_millibits: 8 * model::COOKIE_ECHO_PER_BYTE + model::COOKIE_ECHO_FIDELITY,
-        }
-    );
-    assert_eq!(word(echoed), ZenohVerdict::Yes);
+    let tally = echoed.tally(Check::CookieEcho);
+    assert_eq!((tally.confirmed, tally.violated), (1, 0));
+    // Sixty-four bits less the zenoh side's chance of a match, which is close
+    // to one.
+    assert!((63_900..64_000).contains(&tally.millibits), "{tally:?}");
+    assert!((64_000..64_100).contains(&tally.no_millibits), "{tally:?}");
+    assert_eq!(word(&echoed), ZenohVerdict::Yes);
     let mut other = cookie;
     other[3] ^= 0xFF;
     let differs = read(&other);
     assert_eq!(differs.tally(Check::CookieEcho).violated, 1);
-    assert_eq!(word(differs), ZenohVerdict::Undecided);
+    assert_eq!(word(&differs), ZenohVerdict::Undecided);
 }
 
 /// A flow the capture joined after its handshake carries no Init. Three
@@ -2175,7 +2228,7 @@ fn a_flow_joined_after_its_handshake_starts_undecided() {
     let (packets, _) = midstream_tcp(3);
     let table = session_table(&packets.dissect());
     let row = only(&table);
-    assert_eq!(word(row.evidence), ZenohVerdict::Undecided);
+    assert_eq!(word(&row.evidence), ZenohVerdict::Undecided);
     assert_eq!(row.evidence.tally(Check::UnitReading).confirmed, 3);
     assert_eq!(AnnouncedVersion::of(row.versions), AnnouncedVersion::None);
 }
@@ -2200,17 +2253,13 @@ fn a_flow_joined_mid_session_is_zenoh_on_its_sn_steps() {
         );
     }
     let row = only(&session_table(&out.dissect())).clone();
-    assert_eq!(
-        row.evidence.tally(Check::SnFollows),
-        crate::zenoh_evidence::CheckTally {
-            confirmed: 4,
-            violated: 0,
-            millibits: 4 * crate::zenoh_evidence::model::SN_FOLLOWS.yes,
-            no_millibits: 4 * crate::zenoh_evidence::model::SN_FOLLOWS.no,
-        },
-        "{row:?}"
-    );
-    assert_eq!(word(row.evidence), ZenohVerdict::Yes, "{row:?}");
+    let steps = row.evidence.tally(Check::SnFollows);
+    assert_eq!((steps.confirmed, steps.violated), (4, 0), "{row:?}");
+    // About eight bits a step on either sum: a varint equals the next with
+    // chance `2^-8`, and a link that breaks no step is what the prior expects.
+    assert!((31_000..32_000).contains(&steps.millibits), "{steps:?}");
+    assert!((32_000..32_100).contains(&steps.no_millibits), "{steps:?}");
+    assert_eq!(word(&row.evidence), ZenohVerdict::Yes, "{row:?}");
     assert_eq!(AnnouncedVersion::of(row.versions), AnnouncedVersion::None);
 }
 
@@ -2236,7 +2285,7 @@ fn an_init_of_another_version_is_foreign_and_names_nobody() {
             .tally(crate::zenoh_evidence::Check::VersionHeader),
         crate::zenoh_evidence::CheckTally::default()
     );
-    assert_eq!(word(row.evidence), ZenohVerdict::Undecided);
+    assert_eq!(word(&row.evidence), ZenohVerdict::Undecided);
     assert_eq!(row.initiator, Err(Unstated::NotInCapture));
     assert!(crate::node::nodes(&d).nodes().is_empty());
 }
@@ -2256,7 +2305,7 @@ fn an_init_followed_by_bytes_no_message_explains_proves_nothing() {
         let d = out.dissect();
         let row = only(&session_table(&d)).clone();
         (
-            word(row.evidence),
+            word(&row.evidence),
             row.evidence.tally(Check::VersionHeader).confirmed,
             row.initiator.is_ok(),
             crate::node::nodes(&d).nodes().len(),
@@ -2315,8 +2364,8 @@ fn a_scout_of_another_version_names_no_node() {
     assert_eq!(census_of(&trailed), (0, AnnouncedVersion::None, 0));
 }
 
-fn word(evidence: crate::zenoh_evidence::ZenohEvidence) -> ZenohVerdict {
-    ZenohVerdict::of(&evidence)
+fn word(evidence: &crate::zenoh_evidence::ZenohEvidence) -> ZenohVerdict {
+    ZenohVerdict::of(evidence)
 }
 
 /// The word sets the documents declare are the enums'.
@@ -2343,6 +2392,10 @@ fn the_declared_zenoh_words_are_the_enums() {
         crate::doc_revision::ZENOH_BASIS_R46.to_vec(),
         Basis::names()
     );
+    assert_eq!(
+        crate::doc_revision::ZENOH_EPS_BASIS_R49.to_vec(),
+        Check::eps_basis_names()
+    );
 }
 
 // ── how a flow's framing units read ───────────────────────────────────────
@@ -2353,34 +2406,24 @@ fn tally(units: u64, bytes: u64) -> wz_session_core::passive::UnitTally {
 
 /// A flow joined after its handshake carries no Init. Every unit of it reads as
 /// a message that accounts for every byte: the fixture knows it put seven
-/// one-byte units in the stream. Seven keep-alives, and the framing where the
-/// capture holds the stream's start, are not enough for `yes`. The unit at
-/// which they would be is the model's: the framing's weight and one unit's,
-/// against the threshold.
+/// one-byte units in the stream. However many keep-alives follow, the flow stays
+/// `undecided`: a null protocol's flows can read whole all at once, so a run of
+/// whole units weighs what its first does (model 3), a bit or so.
 #[test]
 fn a_flow_joined_after_its_handshake_reads_as_explained_units() {
-    use crate::zenoh_evidence::model;
     let (packets, _) = midstream_tcp(7);
     let d = packets.dissect();
     let table = session_table(&d);
     let row = only(&table);
-    assert_eq!(word(row.evidence), ZenohVerdict::Undecided);
-    // What the stream's framing weighs, as the row says it: nothing when the
-    // fixture's TCP opens without a SYN, whose start the capture does not hold.
-    let held = row
-        .evidence
-        .tally(crate::zenoh_evidence::Check::StreamFraming)
-        .millibits;
-    let crossing = ((model::YES_AT - held) as u64).div_ceil(model::UNIT_EXPLAINED.yes as u64);
-    for (units, want) in [
-        (crossing - 1, ZenohVerdict::Undecided),
-        (crossing, ZenohVerdict::Yes),
-    ] {
+    assert_eq!(word(&row.evidence), ZenohVerdict::Undecided);
+    for units in [7u64, 200] {
         let (packets, _) = midstream_tcp(units);
-        assert_eq!(
-            word(only(&session_table(&packets.dissect())).evidence),
-            want,
-            "{units} units"
+        let evidence = only(&session_table(&packets.dissect())).evidence.clone();
+        assert_eq!(word(&evidence), ZenohVerdict::Undecided, "{units} units");
+        assert!(
+            evidence.log2_lr_millibits() < 2_000,
+            "{units} units: {}",
+            evidence.log2_lr_millibits()
         );
     }
     assert_eq!(row.readings.explained, tally(7, 7));
@@ -2579,8 +2622,9 @@ fn every_message_list_has_a_word() {
 }
 
 /// A FLOW'S WORD MOVES WHEN ITS HANDSHAKE ARRIVES, and the since door says so:
-/// the rows a cursor has passed read `undecided` until the two Inits are in the
-/// capture, and are revised with the word they read before.
+/// the rows a cursor has passed read `undecided` until the Inits and the
+/// OpenSyn that echoes the InitAck's cookie are in the capture, and are revised
+/// with the word they read before.
 #[test]
 fn the_arrival_of_an_init_revises_the_rows_a_cursor_passed() {
     let mut out = Packets::default();
@@ -2589,7 +2633,8 @@ fn the_arrival_of_an_init_revises_the_rows_a_cursor_passed() {
     udp.send(&mut out, T0 + 1_000, false, &keepalive());
     let before = out.dissect();
     udp.send(&mut out, T0 + 2_000, true, &init(&ZID_A, false));
-    udp.send(&mut out, T0 + 3_000, false, &init(&ZID_B, true));
+    udp.send(&mut out, T0 + 3_000, false, &init_ack_with_cookie(&ZID_B));
+    udp.send(&mut out, T0 + 4_000, true, &open_syn_with_cookie());
     let after = out.dissect();
 
     let filter = crate::filter::Filter::parse("zenoh == undecided").expect("compiles");
@@ -2687,7 +2732,7 @@ fn arbitrary_datagrams_mostly_do_not_read_as_explained() {
         let row = only(&table);
         assert_eq!(row.readings.units(), 1, "one datagram is one unit");
         assert_eq!(
-            word(row.evidence),
+            word(&row.evidence),
             ZenohVerdict::Undecided,
             "one datagram decides nothing: {wire:02x?}"
         );
@@ -3147,7 +3192,7 @@ fn read_structured_flow(
     let row = only(&table);
     let readings = row.readings;
     (
-        word(row.evidence),
+        word(&row.evidence),
         readings.explained.units,
         readings.residual.units,
         readings.undecoded.units,
@@ -3276,18 +3321,12 @@ fn structured_protocols() -> [(&'static str, StructuredBuilder, u16, u16); 6] {
 /// composite null's bound holding on its own population and not a measurement
 /// against protocols outside it.
 ///
-/// Flows of the 600 that read `no`, measured 2026-10-26 (every other flow is
-/// `undecided`; one or two datagrams never decide):
-///
-/// | n | mDNS | SSDP | DNS | NTP | CoAP | syslog |
-/// |---|---|---|---|---|---|---|
-/// | 3 | 349 | 600 | 521 | 582 | 452 | 600 |
-/// | 5 | 486 | 600 | 507 | 600 | 557 | 600 |
-/// | 10 | 600 | 600 | 599 | 600 | 600 | 600 |
-/// | 20, 50 | 600 | 600 | 600 | 600 | 600 | 600 |
-///
-/// The bound held below is the measurement at twenty and fifty, where every
-/// flow is `no`; the run prints the whole table.
+/// Under model 2 every flow of twenty datagrams or more read `no` (measured
+/// 2026-10-26). Under model 3 none does, at any length: a flow whose units fail
+/// is evidence against zenoh only as far as a new group of zenoh captures
+/// could fail them, a few bits, and `no` comes from recognising what the flow
+/// is (model 4, `docs/flow-zenoh-verdict.md` §6.7, D6). The run prints the
+/// table.
 #[test]
 fn the_sequential_test_says_yes_to_no_generated_flow_of_another_protocol() {
     for (name, build, sport, dport) in structured_protocols() {
@@ -3306,11 +3345,8 @@ fn the_sequential_test_says_yes_to_no_generated_flow_of_another_protocol() {
         }
         std::println!("{name} (n, yes, no) of 600: {rows:?}");
         assert_eq!(yes, 0, "{name} (n, yes, no): {rows:?}");
-        for (n, _, said_no) in &rows {
-            if *n >= 20 {
-                assert_eq!(*said_no, 600, "{name} at {n} (n, yes, no): {rows:?}");
-            }
-        }
+        let no: u64 = rows.iter().map(|(_, _, said_no)| said_no).sum();
+        assert_eq!(no, 0, "{name} (n, yes, no): {rows:?}");
     }
 }
 
@@ -3371,17 +3407,17 @@ fn arbitrary_bytes_on_a_stream_form_no_unit() {
 /// units as undecoded, because this reader refuses the compressed batch (with
 /// the `compression` feature it reads one of them, and one stays undecoded). A real
 /// zenoh session can read `undecoded`, which is why a unit is weighed and not
-/// counted as a verdict: the compressed session is `yes` either way. Without
-/// lz4 the two refused batches are not weighed at all, because a build that
-/// cannot open lz4 refuses every lz4 batch; with it, the damaged one weighs
-/// against the flow.
+/// counted as a verdict. Without lz4 the two refused batches are not weighed at
+/// all, because a build that cannot open lz4 refuses every lz4 batch; with it,
+/// the damaged one weighs against the flow. Under model 3 the compressed
+/// session is `undecided` either way: nothing in it binds its two directions.
 #[test]
 fn the_repositorys_captures_read_as_what_they_are() {
     let read = |bytes: &[u8]| {
         let d = Dissection::from_capture(bytes).expect("the capture reads");
         d.datagram_flows()
             .iter()
-            .map(|flow| (word(flow.zenoh_evidence()), flow.ingest.readings()))
+            .map(|flow| (word(&flow.zenoh_evidence()), flow.ingest.readings()))
             .collect::<Vec<_>>()
     };
     // A session joined after its handshake: two explained units and no Init,
@@ -3396,27 +3432,35 @@ fn the_repositorys_captures_read_as_what_they_are() {
     assert_eq!(joined.1.explained, tally(2, 144));
     assert_eq!(joined.1.units(), 2);
 
-    // The raweth capture is seven units with one version header and one SN
-    // step that follows: its JOIN names 0 as the next best-effort SN and its
-    // Fragment carries 0, and a link with no handshake starts a sender's SNs
-    // where its JOIN says. Read without the JOIN, that step was a break and the
-    // capture `undecided` under model 2, about ten and a half bits for `yes`; a
-    // unit read whole is weak evidence against a protocol that reads whole a
-    // third of the time, and the step that follows is what calls it.
+    // Two captures whose evidence is short of `yes` under model 3, where a run
+    // of whole units weighs what its first does (model 2 added them up and
+    // said `yes` to both). The publisher capture holds the Inits and no cookie
+    // echo and no SN step: two version headers, the Init roles and six units
+    // read whole, about eighteen bits. The raweth capture is seven units with
+    // one version header and one SN step that follows (its JOIN names 0 as the
+    // next best-effort SN and its Fragment carries 0, and a link with no
+    // handshake starts a sender's SNs where its JOIN says): about seventeen
+    // bits. `undecided` is what that evidence is worth.
     for (name, bytes, want) in [
         (
             "publisher",
             &include_bytes!("../../../captures/publisher-priority-encoding-timestamp.pcap")[..],
-            ZenohVerdict::Yes,
+            ZenohVerdict::Undecided,
         ),
         (
             "raweth",
             &include_bytes!("../../../captures/raweth-transport-messages.pcap")[..],
-            ZenohVerdict::Yes,
+            ZenohVerdict::Undecided,
         ),
     ] {
+        let d = Dissection::from_capture(bytes).expect("the capture reads");
+        let evidence: Vec<_> = d
+            .datagram_flows()
+            .iter()
+            .map(|f| f.zenoh_evidence())
+            .collect();
         for (verdict, readings) in read(bytes) {
-            assert_eq!(verdict, want, "{name}");
+            assert_eq!(verdict, want, "{name}: {evidence:?}");
             assert!(readings.units() > 0, "{name}");
             assert_eq!(readings.explained.units, readings.units(), "{name}");
         }
@@ -3437,16 +3481,11 @@ fn the_repositorys_captures_read_as_what_they_are() {
     let flow = compressed.first().expect("one flow");
     // Whether the batch is read depends on the reader's `compression` feature: off, the two
     // compressed units are refused and read `undecoded`, which the verdict does not weigh
-    // (`wz_session_core::passive::OPENS_LZ4_BATCHES`), so the handshake and the plain units
-    // carry the flow to `yes`; on, one of them reads and its bytes are the decompressed ones, and the
-    // one that is really broken is weighed as a unit that did not decode, a cost of about ten
-    // bits that leaves the flow at eleven and a half of the twenty `yes` asks: `undecided`.
-    let want = if cfg!(feature = "compression") {
-        ZenohVerdict::Undecided
-    } else {
-        ZenohVerdict::Yes
-    };
-    assert_eq!(flow.0, want);
+    // (`wz_session_core::passive::OPENS_LZ4_BATCHES`); on, one of them reads and its bytes are
+    // the decompressed ones, and the one that is really broken is weighed as a unit that did
+    // not decode. Either way the flow is `undecided` under model 3: its handshake holds no
+    // cookie echo and it steps no SN, and a run of plain units weighs what its first does.
+    assert_eq!(flow.0, ZenohVerdict::Undecided);
     if cfg!(feature = "compression") {
         assert_eq!(flow.1.explained, tally(5, 289));
         assert_eq!(flow.1.undecoded, tally(1, 37));

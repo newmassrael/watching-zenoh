@@ -4337,6 +4337,14 @@ fn tri_state(v: Option<bool>) -> &'static str {
 /// `no_millibits`, new, its part of the second. Why there are two:
 /// [`crate::zenoh_evidence`].
 ///
+/// Model 3 (`model` reads 3): `zenoh` is the word at the FIRST crossing of a
+/// threshold, where it latches, and `crossed_at_packet`, new, is the
+/// capture-global index of the packet that crossing was made at (the axis of a
+/// record's `packet`), `null` while no sum has crossed. `log2_lr_max_millibits`,
+/// `log2_lr_min_millibits`, `log2_lr_no_max_millibits` and
+/// `log2_lr_no_min_millibits`, new, are the extremes of each sum so far, the
+/// starting zero included; the two sums stay the sums now.
+///
 /// Beside the context and not inside it: the context is what the handshake
 /// negotiated, and this is what every message of the flow was evidence of, the
 /// scouting ones included, which no session folds. Counted at ingest, so a
@@ -4347,11 +4355,12 @@ pub(crate) fn push_zenoh(
     out: &mut String,
 ) {
     use crate::zenoh_evidence::{model, Check};
+    let crossed = evidence.crossing().map(|c| c.packet);
     let _ = write!(
         out,
         ",\"zenoh\":\"{}\",\"announced_version\":\"{}\",\"zenoh_evidence\":{{\
          \"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":{},\
-         \"no_at_millibits\":{},\"model\":{},\"checks\":[",
+         \"no_at_millibits\":{},\"model\":{},\"crossed_at_packet\":",
         crate::session_table::ZenohVerdict::of(evidence).name(),
         crate::session_table::AnnouncedVersion::of(versions).name(),
         evidence.log2_lr_millibits(),
@@ -4359,6 +4368,21 @@ pub(crate) fn push_zenoh(
         model::YES_AT,
         model::NO_AT,
         model::MODEL,
+    );
+    match crossed {
+        Some(packet) => {
+            let _ = write!(out, "{packet}");
+        }
+        None => out.push_str("null"),
+    }
+    let _ = write!(
+        out,
+        ",\"log2_lr_max_millibits\":{},\"log2_lr_min_millibits\":{},\
+         \"log2_lr_no_max_millibits\":{},\"log2_lr_no_min_millibits\":{},\"checks\":[",
+        evidence.log2_lr_max_millibits(),
+        evidence.log2_lr_min_millibits(),
+        evidence.log2_lr_no_max_millibits(),
+        evidence.log2_lr_no_min_millibits(),
     );
     let mut first = true;
     for check in Check::ALL {
@@ -7851,16 +7875,12 @@ mod tests {
         // strength and basis words are all written.
         {
             use crate::session_table::{AnnouncedVersion, ZenohVerdict};
-            use crate::zenoh_evidence::{model, Check, Weight, ZenohEvidence};
-            let mut every_check = ZenohEvidence::default();
-            for check in Check::ALL {
-                every_check.confirm(check, Weight::both(0));
-                every_check.violate(check, Weight::both(0));
-            }
+            use crate::zenoh_evidence::tests::{crossed_no, every_check_both_ways};
+            use crate::zenoh_evidence::{Observation, ZenohEvidence};
+            let every_check = every_check_both_ways();
             let mut yes = ZenohEvidence::default();
-            yes.confirm(Check::CookieEcho, Weight::both(model::YES_AT));
-            let mut no = ZenohEvidence::default();
-            no.violate(Check::UnitReading, Weight::both(model::NO_AT));
+            yes.observe(Observation::CookieEcho { matched: Some(8) }, 0);
+            let no = crossed_no();
             let mut zenoh_words = alloc::collections::BTreeSet::new();
             let mut version_words = alloc::collections::BTreeSet::new();
             let versions = [(0, 0), (1, 0), (0, 1), (1, 1)];
@@ -9984,12 +10004,12 @@ mod tests {
             (
                 rev::SESSION_TABLE,
                 "eps_basis",
-                crate::zenoh_evidence::Basis::names(),
+                crate::zenoh_evidence::Check::eps_basis_names(),
             ),
             (
                 rev::FIELDS,
                 "eps_basis",
-                crate::zenoh_evidence::Basis::names(),
+                crate::zenoh_evidence::Check::eps_basis_names(),
             ),
             // The verdict document's two families, each held to the
             // SAME walk the field document's is. Two declarations of one
@@ -10819,6 +10839,26 @@ mod tests {
                 // strength of having looked at one thing. That is the
                 // population-of-one pass this axis exists to refuse, and it is
                 // why `interest_pair_capture` was built.
+                //
+                // A family its revision declares with ONE word is the exception
+                // that is not a population's fault: no second word exists to
+                // contradict either verdict, the keys beside it are the same
+                // under every word it can take, and it is a passenger by
+                // construction (model 3's `eps_basis`).
+                if family.values.len() == 1 {
+                    match shape.carries.iter().find(|c| c.key == family.key) {
+                        Some(c) if matches!(c.shape, rev::CarriesShape::Passenger) => {
+                            passengers += 1;
+                            classified.push((name, family.key));
+                        }
+                        _ => failures.push(alloc::format!(
+                            "{name}.{} declares one word and is not declared a \
+                             PASSENGER, which a family of one word is by construction",
+                            family.key
+                        )),
+                    }
+                    continue;
+                }
                 if seen.len() < 2 {
                     failures.push(alloc::format!(
                         "{name}.{} is UNMEASURED by this population: {seen:?}. Fewer \

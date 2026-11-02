@@ -2644,17 +2644,20 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":6},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":7},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
         "\"frames\":3,\"bytes\":3,\"zenoh\":\"undecided\","
         "\"announced_version\":\"none\","
-        "\"zenoh_evidence\":{\"log2_lr_millibits\":2901,"
-        "\"log2_lr_no_millibits\":10638,"
-        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,"
+        "\"zenoh_evidence\":{\"log2_lr_millibits\":966,"
+        "\"log2_lr_no_millibits\":10640,"
+        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":3,"
+        "\"crossed_at_packet\":null,"
+        "\"log2_lr_max_millibits\":966,\"log2_lr_min_millibits\":0,"
+        "\"log2_lr_no_max_millibits\":10640,\"log2_lr_no_min_millibits\":0,"
         "\"checks\":[{\"check\":\"unit_reading\",\"strength\":\"unit\","
-        "\"confirmed\":3,\"violated\":0,\"millibits\":2901,\"no_millibits\":10638,"
+        "\"confirmed\":3,\"violated\":0,\"millibits\":966,\"no_millibits\":10640,"
         "\"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]},"
         "\"unit_readings\":{\"explained\":{\"units\":3,\"bytes\":3},"
         "\"residual\":{\"units\":0,\"bytes\":0},"
@@ -3779,8 +3782,11 @@ int main(void) {
      * sent from. Three keys (`ends`, `node`, `sender_end`) and one passenger family;
      * no value moves under an old key.
      * 21: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
-     * flow. A key arrives; nothing retires. */
-    revisioned[0].revision = 21;
+     * flow. A key arrives; nothing retires.
+     * 22: a `Join` on a link with a handshake is inadmissible there, and the
+     * node it names is counted under `evidence.inadmissible`. Values move under
+     * stationary keys. */
+    revisioned[0].revision = 22;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -3995,8 +4001,13 @@ int main(void) {
      * basis. Keys arrive and words move; nothing retires.
      * 47: `sn_mask` and `batch_size` gain `at_least`, the floor the bytes put
      * under a value nothing states, and `evidence` where they contradict the
-     * handshake. Keys arrive; nothing retires. */
-    revisioned[2].revision = 47;
+     * handshake. Keys arrive; nothing retires.
+     * 48: on a link with no handshake a sender's `Join` states the ring and
+     * the start its SNs are judged on. Values move under stationary keys.
+     * 49: model 3 of the zenoh test: the word latched at the first crossing,
+     * `crossed_at_packet` and the extremes of the two sums. Keys arrive and
+     * words move; nothing retires. */
+    revisioned[2].revision = 49;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4145,9 +4156,11 @@ int main(void) {
      * and keys arrive; nothing retires.
      * 6: model 2 of the zenoh test: two sums (`log2_lr_no_millibits`, each
      * check's `no_millibits`), the `stream_framing` check and the `measured`
-     * basis. `zenoh` keeps its words and its values move; nothing retires. */
+     * basis. `zenoh` keeps its words and its values move; nothing retires.
+     * 7: model 3, as the field document's 49, and a row of a pair is a test
+     * of its own over what its flows observed after each named the pair. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 6;
+    revisioned[12].revision = 7;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

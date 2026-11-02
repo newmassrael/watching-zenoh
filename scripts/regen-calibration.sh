@@ -3,9 +3,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # regen-calibration.sh -- regenerate crates/wz-capture/src/zenoh_calibration_generated.rs
-# from the corpus in captures/corpus/ (docs/flow-zenoh-verdict.md section 6.2).
+# from the corpus in captures/corpus/ (docs/flow-zenoh-verdict.md section 6.8).
 #
-# The file holds the counts of the corpus and the weights computed from them, and
+# The file holds the counts of the corpus and model 3's parameters computed from
+# them (the regions, the priors, the null bounds), and
 # nobody writes it by hand: after adding a capture to the corpus (a manifest entry
 # and its line in a group), run this and commit the result with the capture. The
 # test `the_generated_calibration_is_current` fails when the file is not what the

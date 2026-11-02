@@ -453,34 +453,35 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("link-tcp-midsession.pcap", (2, 0, 0), (2, 0, 0)),
     ("link-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
     ("link-pico-tcp.pcap", (2, 0, 0), (2, 0, 0)),
-    ("lan-dns.pcap", (0, 174, 13), (0, 174, 13)),
-    ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
-    ("lan-ssdp.pcap", (0, 2, 0), (0, 2, 0)),
+    // The null protocols. Under model 2, 345 of their 653 flows read `no`;
+    // under model 3 none does (`docs/flow-zenoh-verdict.md` §6.7, D6): a flow
+    // whose units fail is evidence against zenoh only as far as a new group of
+    // zenoh captures could fail them, a few bits, and `no` comes from
+    // recognising the protocol (model 4). No flow reads `yes` under either.
+    ("lan-dns.pcap", (0, 0, 187), (0, 0, 187)),
+    ("lan-mdns.pcap", (0, 0, 19), (0, 0, 19)),
+    ("lan-ssdp.pcap", (0, 0, 2), (0, 0, 2)),
     // The real implementations of three protocols that run beside zenoh, in
     // containers (2026-10-26). The forty MQTT connections that publish once and
     // leave lose their framing in both directions, from their SYN, and frame
-    // no unit: model 2 weighs that (`stream_framing`, about six bits a
-    // direction), and twenty-odd bytes a direction are rightly too few to say
-    // `no` at 2^-20.
-    ("stack-mqtt.pcap", (0, 4, 40), (0, 4, 40)),
-    ("stack-rtps.pcap", (0, 9, 3), (0, 9, 3)),
-    ("stack-coap.pcap", (0, 25, 0), (0, 25, 0)),
+    // no unit.
+    ("stack-mqtt.pcap", (0, 0, 44), (0, 0, 44)),
+    ("stack-rtps.pcap", (0, 0, 12), (0, 0, 12)),
+    ("stack-coap.pcap", (0, 0, 25), (0, 0, 25)),
     // Upstream vsomeip between two containers: service discovery, a method
     // over UDP and TCP, and a field's notifications.
-    ("stack-someip.pcap", (0, 5, 2), (0, 5, 2)),
+    ("stack-someip.pcap", (0, 0, 7), (0, 0, 7)),
     // HTTP/3 on aioquic, QUIC versions 1 and 2. Every one of the 23 QUIC
     // connections is `undecided`, as it should be: zenoh runs over QUIC too,
-    // and a protected flow carries nothing that tells the two apart. The two
-    // `no` are the host's own mDNS on the bridge.
-    ("stack-quic.pcap", (0, 2, 23), (0, 2, 23)),
+    // and a protected flow carries nothing that tells the two apart. The other
+    // two flows are the host's own mDNS on the bridge.
+    ("stack-quic.pcap", (0, 0, 25), (0, 0, 25)),
     // A busy network's own protocols (2026-10-27): DHCP between twelve
     // clients and a server, NTP between six clients and a server, LLMNR and
-    // WS-Discovery between a file server and four askers. No flow reads
-    // `yes`; NTP's 94 flows stay `undecided`, each a pair of 48-byte
-    // datagrams, which leaves too little to say `no` at 2^-20.
-    ("busylan-dhcp.pcap", (0, 21, 2), (0, 21, 2)),
-    ("busylan-ntp.pcap", (0, 89, 5), (0, 89, 5)),
-    ("busylan-wsd.pcap", (0, 8, 0), (0, 8, 0)),
+    // WS-Discovery between a file server and four askers.
+    ("busylan-dhcp.pcap", (0, 0, 23), (0, 0, 23)),
+    ("busylan-ntp.pcap", (0, 0, 94), (0, 0, 94)),
+    ("busylan-wsd.pcap", (0, 0, 8), (0, 0, 8)),
     // Structured TCP, the first stream protocols besides MQTT (2026-10-27):
     // HTTP/1.1, plain and over TLS 1.2 and 1.3, 34 connections each. The
     // reader frames no unit of them and loses no framing (neither is weighed),
@@ -491,11 +492,10 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("stack-http-post.pcap", (0, 0, 28), (0, 0, 28)),
     // Stream protocols of databases (2026-10-28): neither opens with GET,
     // HTTP or a TLS ClientHello, so the stream reader takes their first two
-    // bytes for a length prefix. No flow reads `yes`; PostgreSQL's three `no`
-    // flows carry enough residual units to say so.
+    // bytes for a length prefix. No flow reads `yes`.
     ("stack-redis.pcap", (0, 0, 60), (0, 0, 60)),
-    ("stack-postgres.pcap", (0, 3, 21), (0, 3, 21)),
-    ("stack-ssh.pcap", (0, 2, 15), (0, 2, 15)),
+    ("stack-postgres.pcap", (0, 0, 24), (0, 0, 24)),
+    ("stack-ssh.pcap", (0, 0, 17), (0, 0, 17)),
     ("stack-smtp.pcap", (0, 0, 10), (0, 0, 10)),
 ];
 

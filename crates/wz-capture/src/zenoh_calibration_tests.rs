@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! THE CALIBRATION, JUDGED BY GROUP: how far the measured weights of
-//! `zenoh_evidence::model` hold on captures that were left out of the counts
-//! they rest on (`docs/flow-zenoh-verdict.md` §6.3).
+//! THE CALIBRATION: model 3's parameters computed from `captures/corpus/`, the
+//! file they are written to, and how far they hold on captures that were left
+//! out of them (`docs/flow-zenoh-verdict.md` §6.3, §6.8).
 //!
-//! The corpus test (`zenoh_corpus_tests`) reads every file with weights that
-//! were counted from every file. That is a fit, not a validation: a protocol
+//! The corpus test (`zenoh_corpus_tests`) reads every file with parameters that
+//! were computed from every file. That is a fit, not a validation: a protocol
 //! that is in the null family sets the family's largest chance of an outcome,
 //! so its own flows are weighed against a bound it helped to make. This module
-//! leaves one GROUP out at a time, counts the weights again from the rest, and
-//! reads the left-out flows with them.
+//! leaves one GROUP out at a time, computes the parameters again from the rest,
+//! and reads the left-out flows with them, observation by observation as the
+//! reader made them ([`ZenohEvidence::replayed_with`]).
 //!
 //! The group is the unit that is independent of the others, which a flow is
 //! not: the units of one session share a stack, a traffic generator and a
@@ -20,15 +21,9 @@
 //! of `captures/corpus/corpus.json5` says which, and the manifest reader refuses
 //! a file in no group or in two.
 //!
-//! A flow's two sums are linear in its outcome counts ([`Counts`]), so a flow
-//! is read again from them with any table of weights ([`Table`]). That the
-//! shipped table, applied to the counts, gives back every flow's own sums is
-//! the first test here, and the reason the others can be trusted.
-//!
 //! The tests are of the build that opens lz4 (`--features compression`). A build
 //! that cannot counts the one batch it cannot open as a unit and does not weigh
-//! it, so its counts are not its sums, and a test that returned early there
-//! would pass over nothing: they are not compiled in it.
+//! it, so its counts are not the calibration's: they are not compiled in it.
 #![cfg(all(
     feature = "network-codecs",
     feature = "reassembly",
@@ -42,11 +37,15 @@ use alloc::vec::Vec;
 use wz_session_core::passive::ReadingEvidence;
 
 use crate::zenoh_corpus_tests::{corpus_dir, manifest};
-use crate::zenoh_evidence::tests as fit;
-use crate::zenoh_evidence::{cookie_echo_weight, model, Check, Weight, ZenohEvidence};
+use crate::zenoh_eprocess::{Prior, Region, ONE_Q32};
+use crate::zenoh_evidence::model::{self, Derived, Measured, Params};
+use crate::zenoh_evidence::{Check, ZenohEvidence};
+use crate::zenoh_hierarchy_tests::{
+    fit_sn, grid_kappas, kind_groups, mean_bound, upper_bound, GroupOutcomes, KINDS,
+};
 use crate::Dissection;
 
-/// The outcomes a flow's sums are made of.
+/// The outcomes of a flow, or of a file.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Counts {
     /// Framing units read whole, residual, undecoded.
@@ -77,24 +76,12 @@ impl Counts {
         add(&mut self.versions, &other.versions);
         add(&mut self.sn, &other.sn);
     }
-
-    /// Whether the counts hold an outcome the zenoh side calls a failure.
-    fn failures(&self) -> [u64; 5] {
-        [
-            self.units[1] + self.units[2],
-            self.framing[1],
-            self.cookie[1],
-            self.roles[1],
-            self.versions[1],
-        ]
-    }
 }
 
-/// One flow: its outcomes and the sums the library gave it.
+/// One flow: its outcomes and the evidence the library gave it.
 pub(crate) struct Flow {
     pub(crate) counts: Counts,
-    pub(crate) yes: i64,
-    pub(crate) no: i64,
+    pub(crate) evidence: ZenohEvidence,
 }
 
 /// One file of the corpus, read.
@@ -110,26 +97,17 @@ fn flows_of(d: &Dissection) -> Vec<Flow> {
     let mut out = Vec::new();
     let mut push = |r: ReadingEvidence, e: ZenohEvidence| {
         let t = |check| e.tally(check);
+        let pair = |check| [t(check).confirmed, t(check).violated];
         out.push(Flow {
             counts: Counts {
                 units: [r.explained.units, r.residual.units, r.undecoded.units],
-                framing: [
-                    t(Check::StreamFraming).confirmed,
-                    t(Check::StreamFraming).violated,
-                ],
-                cookie: [
-                    t(Check::CookieEcho).confirmed,
-                    t(Check::CookieEcho).violated,
-                ],
-                roles: [t(Check::InitRoles).confirmed, t(Check::InitRoles).violated],
-                versions: [
-                    t(Check::VersionHeader).confirmed,
-                    t(Check::VersionHeader).violated,
-                ],
-                sn: [t(Check::SnFollows).confirmed, t(Check::SnFollows).violated],
+                framing: pair(Check::StreamFraming),
+                cookie: pair(Check::CookieEcho),
+                roles: pair(Check::InitRoles),
+                versions: pair(Check::VersionHeader),
+                sn: pair(Check::SnFollows),
             },
-            yes: e.log2_lr_millibits(),
-            no: e.log2_lr_no_millibits(),
+            evidence: e,
         });
     };
     for f in d.flows() {
@@ -147,7 +125,9 @@ pub(crate) fn read_corpus() -> Vec<File> {
         .map(|entry| {
             let bytes = std::fs::read(corpus_dir().join(&entry.file))
                 .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
-            let d = Dissection::from_capture(&bytes)
+            // Every observation kept, so that a flow can be read again with
+            // other parameters.
+            let d = crate::zenoh_evidence::recording(|| Dissection::from_capture(&bytes))
                 .unwrap_or_else(|e| panic!("{}: the capture reads: {e:?}", entry.file));
             let flows = flows_of(&d);
             let mut counts = Counts::default();
@@ -166,278 +146,189 @@ pub(crate) fn read_corpus() -> Vec<File> {
         .collect()
 }
 
-/// Every weight a flow's sums are made of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Table {
-    unit: [Weight; 3],
-    framing: [Weight; 2],
-    /// A cookie of the longest length the model weighs, matched; and differing.
-    cookie: [Weight; 2],
-    roles: [Weight; 2],
-    versions: [Weight; 2],
-    sn: [Weight; 2],
+/// The denominator of the zenoh priors of the group-rate checks.
+const PRIOR_DEN: u64 = 1_000_000_000;
+
+/// The denominator of the SN prior.
+const SN_DEN: u64 = 10_000;
+
+/// `2^-40` bits in Q64, the margin a logarithm computed in floating point is
+/// moved by, far above its error.
+const FLOAT_MARGIN_Q64: i128 = 1 << 24;
+
+/// `log2 x` in Q64, rounded up past the margin.
+fn log2_up(x: f64) -> i128 {
+    (x.log2() * 18_446_744_073_709_551_616.0) as i128 + FLOAT_MARGIN_Q64
 }
 
-impl Table {
-    /// The table the library ships.
-    fn shipped() -> Table {
-        Table {
-            unit: [
-                model::UNIT_EXPLAINED,
-                model::UNIT_RESIDUAL,
-                model::UNIT_UNDECODED,
-            ],
-            framing: [model::FRAMING_HELD, model::FRAMING_LOST],
-            cookie: [
-                cookie_echo_weight(usize::try_from(model::COOKIE_ECHO_MAX_BYTES).unwrap_or(0)),
-                model::COOKIE_ECHO_VIOLATED,
-            ],
-            roles: [model::INIT_ROLES_CONFIRMED, model::INIT_ROLES_VIOLATED],
-            versions: [model::VERSION_HEADER, model::VERSION_FOREIGN],
-            sn: [model::SN_FOLLOWS, model::SN_BREAKS],
-        }
-    }
+/// `log2 x` in Q64, rounded down past the margin.
+fn log2_down(x: f64) -> i128 {
+    (x.log2() * 18_446_744_073_709_551_616.0) as i128 - FLOAT_MARGIN_Q64
+}
 
-    /// The table counted from `zenoh`'s outcomes and the null `members`', by the
-    /// rule `model_weights_are_their_stated_probabilities` states. The SN steps
-    /// stay the assumed ones.
-    fn fitted(zenoh: &Counts, members: &[&Counts]) -> Table {
-        let unit_members: Vec<&[u64]> = members.iter().map(|m| &m.units[..]).collect();
-        let framing_members: Vec<&[u64]> = members.iter().map(|m| &m.framing[..]).collect();
-        let units = fit::measured_weights(&zenoh.units, &unit_members);
-        let framing = fit::measured_weights(&zenoh.framing, &framing_members);
-        let eps = |[ok, failed]: [u64; 2]| fit::upper_bound(failed, ok + failed);
-        let (e_cookie, e_roles, e_version) =
-            (eps(zenoh.cookie), eps(zenoh.roles), eps(zenoh.versions));
-        let byte = 1.0 / 256.0;
-        Table {
-            unit: [units[0], units[1], units[2]],
-            framing: [framing[0], framing[1]],
-            cookie: [
-                Weight::both(
-                    model::COOKIE_ECHO_MAX_BYTES * model::COOKIE_ECHO_PER_BYTE
-                        + fit::millibits(1.0 - e_cookie),
-                ),
-                Weight::both(fit::millibits(e_cookie)),
-            ],
-            roles: [
-                Weight::both(fit::millibits((1.0 - e_roles) / 0.5)),
-                Weight::both(fit::millibits(e_roles / 0.5)),
-            ],
-            versions: [
-                Weight::both(fit::millibits((1.0 - e_version) / byte)),
-                Weight::both(fit::millibits(e_version / (1.0 - byte))),
-            ],
-            sn: Table::shipped().sn,
-        }
+/// A prior of weight one outcome centred on the Jeffreys estimate of the zenoh
+/// files' shares, `(c + 1/2) / (n + K/2)`: what the `yes` sum mixes a zenoh flow's
+/// own shares over.
+fn zenoh_prior<const K: usize>(counts: [u64; K]) -> Prior<K> {
+    let n: u64 = counts.iter().sum();
+    let mut num = [0u64; K];
+    for o in 1..K {
+        let share = (counts[o] as f64 + 0.5) / (n as f64 + K as f64 / 2.0);
+        num[o] = ((share * PRIOR_DEN as f64).round() as u64).max(1);
     }
-
-    /// A flow's `yes` and `no` sums under this table.
-    fn score(&self, c: &Counts) -> (i64, i64) {
-        let mut w = Weight::default();
-        let mut add = |counts: &[u64], weights: &[Weight]| {
-            for (n, weight) in counts.iter().zip(weights) {
-                w = w.plus(weight.times(*n));
-            }
-        };
-        add(&c.units, &self.unit);
-        add(&c.framing, &self.framing);
-        add(&c.cookie, &self.cookie);
-        add(&c.roles, &self.roles);
-        add(&c.versions, &self.versions);
-        add(&c.sn, &self.sn);
-        (w.yes, w.no)
+    num[0] = PRIOR_DEN - num[1..].iter().sum::<u64>();
+    Prior {
+        num,
+        den: PRIOR_DEN,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Word {
-    Yes,
-    No,
-    Undecided,
-}
-
-/// The word two sums come to: the rule of `ZenohVerdict::of`.
-fn word(yes: i64, no: i64) -> Word {
-    match (yes >= model::YES_AT, no <= model::NO_AT) {
-        (true, false) => Word::Yes,
-        (false, true) => Word::No,
-        _ => Word::Undecided,
-    }
-}
-
-/// Counts of the three words.
-#[derive(Debug, Default, Clone, Copy)]
-struct Tally {
-    yes: u64,
-    no: u64,
-    undecided: u64,
-}
-
-impl Tally {
-    fn add(&mut self, w: Word) {
-        match w {
-            Word::Yes => self.yes += 1,
-            Word::No => self.no += 1,
-            Word::Undecided => self.undecided += 1,
-        }
-    }
-}
-
-/// Every flow's own sums are the shipped table applied to its outcome counts.
-/// Without this nothing below says anything about the library.
-#[test]
-fn the_shipped_table_applied_to_a_flows_counts_gives_the_flows_own_sums() {
-    let table = Table::shipped();
-    let mut wrong = Vec::new();
-    let mut flows = 0usize;
-    for file in read_corpus() {
-        for (i, f) in file.flows.iter().enumerate() {
-            flows += 1;
-            let got = table.score(&f.counts);
-            if got != (f.yes, f.no) {
-                wrong.push(alloc::format!(
-                    "{} flow {i}: counts give {got:?}, the flow's own sums are {:?} ({:?})",
-                    file.name,
-                    (f.yes, f.no),
-                    f.counts
-                ));
-            }
-        }
-    }
-    assert!(flows > 0, "the corpus has flows");
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-/// The fit this module applies to a part of the corpus, applied to all of it,
-/// is the table the library ships: the same rule, not a look-alike.
-#[test]
-fn counting_the_weights_again_from_the_whole_corpus_gives_the_shipped_table() {
-    let files = read_corpus();
-    let mut zenoh = Counts::default();
-    for f in files.iter().filter(|f| f.zenoh) {
-        zenoh.and(&f.counts);
-    }
-    let members: Vec<&Counts> = files
+/// The null side of a measured check from the members that observed it: per
+/// outcome, the largest Clopper-Pearson bound (the `yes` sum's) and the average
+/// Jeffreys share (the `no` sum's), as logarithms.
+fn null_side<const K: usize>(members: &[[u64; K]]) -> ([i128; K], [i128; K]) {
+    let seen: Vec<&[u64; K]> = members
         .iter()
-        .filter(|f| !f.zenoh)
-        .map(|f| &f.counts)
+        .filter(|m| m.iter().sum::<u64>() > 0)
         .collect();
-    assert_eq!(Table::fitted(&zenoh, &members), Table::shipped());
-}
-
-/// THE MEASUREMENT: each group left out, the weights counted from the rest,
-/// the left-out flows read with them. Nothing is asserted about the rates yet:
-/// the owner has not stated what the corpus must show. The report is printed
-/// (`cargo test -p wz-capture --features dissect,reassembly leave_one_group_out
-/// -- --nocapture`), and the structure of it is held.
-#[test]
-fn leaving_a_group_out_of_the_counts_moves_its_own_flows_by_this_much() {
-    let files = read_corpus();
-    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, f) in files.iter().enumerate() {
-        groups.entry(f.group.clone()).or_default().push(i);
-    }
-    std::println!(
-        "group | files | flows | shipped yes/no/und | left out yes/no/und | extreme sum (shipped -> left out)"
-    );
-    let mut flows_read = 0usize;
-    for (group, idx) in &groups {
-        let zenoh_group = files[idx[0]].zenoh;
-        let mut train_zenoh = Counts::default();
-        for (i, f) in files.iter().enumerate() {
-            if f.zenoh && !idx.contains(&i) {
-                train_zenoh.and(&f.counts);
-            }
-        }
-        let members: Vec<&Counts> = files
+    let mut bound = [0i128; K];
+    let mut mean = [0i128; K];
+    for o in 0..K {
+        let top = seen
             .iter()
-            .enumerate()
-            .filter(|(i, f)| !f.zenoh && !idx.contains(i))
-            .map(|(_, f)| &f.counts)
-            .collect();
-        let left_out = Table::fitted(&train_zenoh, &members);
-        let (mut own, mut other) = (Tally::default(), Tally::default());
-        // The sum that matters for the group: the lowest `yes` of a zenoh group
-        // (a false `no` or `undecided` is how it fails), the highest of a null one.
-        let (mut extreme_shipped, mut extreme_left_out) = (None::<i64>, None::<i64>);
-        let mut nflows = 0usize;
-        for &i in idx {
-            for f in &files[i].flows {
-                nflows += 1;
-                own.add(word(f.yes, f.no));
-                let (y, n) = left_out.score(&f.counts);
-                other.add(word(y, n));
-                let pick = |cur: Option<i64>, v: i64| match cur {
-                    None => Some(v),
-                    Some(c) if zenoh_group => Some(c.min(v)),
-                    Some(c) => Some(c.max(v)),
-                };
-                extreme_shipped = pick(extreme_shipped, f.yes);
-                extreme_left_out = pick(extreme_left_out, y);
-            }
-        }
-        flows_read += nflows;
-        std::println!(
-            "{}{} | {} | {} | {}/{}/{} | {}/{}/{} | {:?} -> {:?}",
-            if zenoh_group { "zenoh " } else { "null " },
-            group,
-            idx.len(),
-            nflows,
-            own.yes,
-            own.no,
-            own.undecided,
-            other.yes,
-            other.no,
-            other.undecided,
-            extreme_shipped,
-            extreme_left_out
-        );
+            .map(|m| upper_bound(m[o], m.iter().sum()))
+            .fold(0.0f64, f64::max);
+        let average = seen
+            .iter()
+            .map(|m| (m[o] as f64 + 0.5) / (m.iter().sum::<u64>() as f64 + K as f64 / 2.0))
+            .sum::<f64>()
+            / seen.len() as f64;
+        bound[o] = log2_up(top);
+        mean[o] = log2_down(average);
     }
-    let total: usize = files.iter().map(|f| f.flows.len()).sum();
-    assert_eq!(flows_read, total, "every flow is read in exactly one group");
+    (bound, mean)
 }
 
-/// The calibration the corpus gives: the zenoh files' counts, each null file's,
-/// and the table of weights counted from them.
+/// The grid's concentrations in fixed point, rounded down.
+fn fixed_kappas() -> Vec<u64> {
+    grid_kappas()
+        .iter()
+        .map(|k| (k * ONE_Q32 as f64).floor() as u64)
+        .collect()
+}
+
+/// What the zenoh groups allow of one check's failure rate, rounded the way
+/// that raises the chance it bounds. A check no group observed allows anything.
+fn region_of(groups: &[GroupOutcomes], kappas: &'static [u64]) -> Region {
+    let one = ONE_Q32 as f64;
+    let grid = grid_kappas();
+    let up = |x: f64| ((x * (1.0 + 1e-9)) * one).ceil() as u64;
+    if groups.is_empty() {
+        let cells: Vec<u64> = grid[1..].iter().map(|k| up(*k)).collect();
+        return Region {
+            groups_bound: ONE_Q32,
+            kappas,
+            cells: Vec::leak(cells),
+            top: ONE_Q32,
+        };
+    }
+    let mut tops: Vec<f64> = grid.iter().map(|&k| mean_bound(k, groups)).collect();
+    // Held falling: each top at least every one after it.
+    for i in (0..tops.len() - 1).rev() {
+        tops[i] = tops[i].max(tops[i + 1]);
+    }
+    let groups_bound = 1.0 - 0.05f64.powf(1.0 / groups.len() as f64);
+    let cells: Vec<u64> = grid
+        .windows(2)
+        .zip(&tops)
+        .map(|(w, mu)| up(w[1] * mu))
+        .collect();
+    Region {
+        groups_bound: up(groups_bound),
+        kappas,
+        cells: Vec::leak(cells),
+        top: up(tops[tops.len() - 1]),
+    }
+}
+
+/// The calibration the corpus gives: the counts, and the parameters computed
+/// from them.
 struct Calibration {
     zenoh: Counts,
     /// Each null file, in the manifest's order, with its counts.
     null: Vec<(String, Counts)>,
-    table: Table,
-    /// `log2(1 - e)` of the cookie echo, which the table holds added to the
-    /// bytes it counts.
-    cookie_fidelity: i64,
+    params: Params,
+    /// The SN prior's mean and concentration, as the fit found them.
+    sn_fit: (f64, f64),
     zenoh_files: usize,
     zenoh_groups: usize,
     null_groups: usize,
 }
 
-fn calibrate(files: &[File]) -> Calibration {
+/// The parameters `files` give.
+fn calibrate<'a>(files: impl Iterator<Item = &'a File> + Clone) -> Calibration {
+    let kappas: &'static [u64] = Vec::leak(fixed_kappas());
     let mut zenoh = Counts::default();
     let mut null = Vec::new();
-    for f in files {
+    let mut steps = Vec::new();
+    for f in files.clone() {
         if f.zenoh {
             zenoh.and(&f.counts);
+            steps.extend(f.flows.iter().map(|fl| (fl.counts.sn[0], fl.counts.sn[1])));
         } else {
             null.push((f.name.clone(), f.counts));
         }
     }
-    let members: Vec<&Counts> = null.iter().map(|(_, c)| c).collect();
-    let table = Table::fitted(&zenoh, &members);
+    let region = |i: usize| region_of(&kind_groups(files.clone(), KINDS[i].1), kappas);
+    let units: Vec<[u64; 3]> = null.iter().map(|(_, c)| c.units).collect();
+    let framing: Vec<[u64; 2]> = null.iter().map(|(_, c)| c.framing).collect();
+    let (units_bound, units_mean) = null_side(&units);
+    let (framing_bound, framing_mean) = null_side(&framing);
+    let (mean, kappa) = fit_sn(&steps);
+    let a = ((kappa * mean * SN_DEN as f64).round() as u64).max(1);
+    let g = ((kappa * (1.0 - mean) * SN_DEN as f64).round() as u64).max(1);
+    let params = Params {
+        units: Measured {
+            zenoh: zenoh_prior(zenoh.units),
+            region: region(0),
+            log2_null_bound: units_bound,
+            log2_null_mean: units_mean,
+        },
+        framing: Measured {
+            zenoh: zenoh_prior(zenoh.framing),
+            region: region(1),
+            log2_null_bound: framing_bound,
+            log2_null_mean: framing_mean,
+        },
+        cookie: Derived {
+            zenoh: zenoh_prior(zenoh.cookie),
+            region: region(2),
+        },
+        roles: Derived {
+            zenoh: zenoh_prior(zenoh.roles),
+            region: region(3),
+        },
+        versions: Derived {
+            zenoh: zenoh_prior(zenoh.versions),
+            region: region(4),
+        },
+        sn: Prior {
+            num: [g, a],
+            den: SN_DEN,
+        },
+    };
     let groups = |zenoh: bool| {
         files
-            .iter()
+            .clone()
             .filter(|f| f.zenoh == zenoh)
             .map(|f| f.group.as_str())
             .collect::<alloc::collections::BTreeSet<_>>()
             .len()
     };
     Calibration {
-        cookie_fidelity: table.cookie[0].yes
-            - model::COOKIE_ECHO_MAX_BYTES * model::COOKIE_ECHO_PER_BYTE,
-        table,
-        zenoh_files: files.iter().filter(|f| f.zenoh).count(),
+        params,
+        sn_fit: (mean, kappa),
+        zenoh_files: files.clone().filter(|f| f.zenoh).count(),
         zenoh_groups: groups(true),
         null_groups: groups(false),
         zenoh,
@@ -446,7 +337,7 @@ fn calibrate(files: &[File]) -> Calibration {
 }
 
 /// `1234567` as Rust writes it in the model: `1_234_567`.
-fn lit(n: i64) -> String {
+fn lit(n: i128) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -461,16 +352,63 @@ fn lit(n: i64) -> String {
     out
 }
 
-fn weight_literal(w: Weight) -> String {
-    if w.yes == w.no {
-        alloc::format!("Weight::both({})", lit(w.yes))
-    } else {
-        alloc::format!("Weight::pair({}, {})", lit(w.yes), lit(w.no))
+/// An array literal as rustfmt lays it out at `indent` spaces, after `lead` on
+/// its first line and followed by `tail`: on that line when it is at most 60
+/// wide and the line fits in 100, one element a line otherwise.
+fn array_lit(items: &[i128], indent: usize, lead: &str, tail: &str) -> String {
+    let each: Vec<String> = items.iter().map(|&n| lit(n)).collect();
+    let inline = alloc::format!("[{}]", each.join(", "));
+    let pad = " ".repeat(indent);
+    if inline.len() <= 60 && indent + lead.len() + inline.len() + tail.len() <= 100 {
+        return alloc::format!("{pad}{lead}{inline}{tail}\n");
     }
+    let mut out = alloc::format!("{pad}{lead}[\n");
+    for e in each {
+        out.push_str(&alloc::format!("{pad}    {e},\n"));
+    }
+    out.push_str(&alloc::format!("{pad}]{tail}\n"));
+    out
+}
+
+fn prior_lit<const K: usize>(p: &Prior<K>, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let num: Vec<i128> = p.num.iter().map(|&n| i128::from(n)).collect();
+    alloc::format!(
+        "Prior {{\n{}{pad}    den: {},\n{pad}}}",
+        array_lit(&num, indent + 4, "num: ", ","),
+        lit(i128::from(p.den))
+    )
+}
+
+fn region_lit(r: &Region, cells: &str, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    alloc::format!(
+        "Region {{\n{pad}    groups_bound: {},\n{pad}    kappas: &KAPPAS,\n{pad}    cells: &{cells},\n{pad}    top: {},\n{pad}}}",
+        lit(i128::from(r.groups_bound)),
+        lit(i128::from(r.top))
+    )
+}
+
+fn measured_lit<const K: usize>(m: &Measured<K>, cells: &str) -> String {
+    alloc::format!(
+        "Measured {{\n        zenoh: {},\n        region: {},\n{}{}    }}",
+        prior_lit(&m.zenoh, 8),
+        region_lit(&m.region, cells, 8),
+        array_lit(&m.log2_null_bound, 8, "log2_null_bound: ", ","),
+        array_lit(&m.log2_null_mean, 8, "log2_null_mean: ", ","),
+    )
+}
+
+fn derived_lit(d: &Derived, cells: &str) -> String {
+    alloc::format!(
+        "Derived {{\n        zenoh: {},\n        region: {},\n    }}",
+        prior_lit(&d.zenoh, 8),
+        region_lit(&d.region, cells, 8),
+    )
 }
 
 fn counts_literal(counts: &[u64]) -> String {
-    let each: Vec<String> = counts.iter().map(|&n| lit(n as i64)).collect();
+    let each: Vec<String> = counts.iter().map(|&n| lit(i128::from(n))).collect();
     alloc::format!("[{}]", each.join(", "))
 }
 
@@ -479,14 +417,14 @@ fn counts_literal(counts: &[u64]) -> String {
 fn render(c: &Calibration) -> String {
     use core::fmt::Write as _;
     let mut out = String::new();
-    let t = &c.table;
+    let p = &c.params;
     out.push_str(
         "// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial\n\
          // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael\n\n\
          //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.\n\
          //!\n\
-         //! The counts of the corpus and the weights computed from them\n\
-         //! (`docs/flow-zenoh-verdict.md` section 6.2), written by\n\
+         //! The counts of the corpus and model 3's parameters computed from them\n\
+         //! (`docs/flow-zenoh-verdict.md` section 6.8), written by\n\
          //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which\n\
          //! fails when this file is not what the corpus gives. Regenerate with\n\
          //! `scripts/regen-calibration.sh` and commit the result with the capture\n\
@@ -501,56 +439,58 @@ fn render(c: &Calibration) -> String {
         c.null_groups
     );
     out.push_str(
-        "use crate::zenoh_evidence::model::measured::Member;\nuse crate::zenoh_evidence::Weight;\n\n",
+        "use crate::zenoh_eprocess::{Prior, Region};\n\
+         use crate::zenoh_evidence::model::measured::Member;\n\
+         use crate::zenoh_evidence::model::{Derived, Measured, Params};\n\n",
     );
-    let weights: [(&str, &str, Weight); 10] = [
-        ("COOKIE_ECHO_VIOLATED", "a cookie that differs", t.cookie[1]),
-        (
-            "INIT_ROLES_CONFIRMED",
-            "two Inits of opposite kinds",
-            t.roles[0],
-        ),
-        (
-            "INIT_ROLES_VIOLATED",
-            "two Inits of the same kind",
-            t.roles[1],
-        ),
-        (
-            "VERSION_HEADER",
-            "a version byte that is this reader's",
-            t.versions[0],
-        ),
-        (
-            "VERSION_FOREIGN",
-            "a version byte that names another version",
-            t.versions[1],
-        ),
-        ("UNIT_EXPLAINED", "a unit read whole", t.unit[0]),
-        ("UNIT_RESIDUAL", "a unit with bytes left over", t.unit[1]),
-        ("UNIT_UNDECODED", "a unit that did not decode", t.unit[2]),
-        (
-            "FRAMING_HELD",
-            "a stream direction that framed a unit",
-            t.framing[0],
-        ),
-        (
-            "FRAMING_LOST",
-            "a stream direction that lost its framing",
-            t.framing[1],
-        ),
-    ];
+    let kappas: Vec<i128> = p
+        .units
+        .region
+        .kappas
+        .iter()
+        .map(|&k| i128::from(k))
+        .collect();
     let _ = writeln!(
         out,
-        "/// `log2(1 - e)` of the cookie echo, in millibits.\npub const COOKIE_ECHO_FIDELITY: i64 = {};\n",
-        lit(c.cookie_fidelity)
+        "/// The concentrations of the regions' grid, `10^(-3 + i/8)`, in the fixed point\n\
+         /// of `zenoh_eprocess::Q32_BITS`, rounded down."
     );
-    for (name, what, weight) in weights {
+    out.push_str(&array_lit(
+        &kappas,
+        0,
+        &alloc::format!("pub const KAPPAS: [u64; {}] = ", kappas.len()),
+        ";",
+    ));
+    let regions: [(&str, &str, &Region); 5] = [
+        ("UNITS_CELLS", "the unit readings", &p.units.region),
+        ("FRAMING_CELLS", "the stream framing", &p.framing.region),
+        ("COOKIE_CELLS", "the cookie echo", &p.cookie.region),
+        ("ROLES_CELLS", "the Init roles", &p.roles.region),
+        ("VERSIONS_CELLS", "the version header", &p.versions.region),
+    ];
+    for (name, what, region) in regions {
+        let cells: Vec<i128> = region.cells.iter().map(|&k| i128::from(k)).collect();
         let _ = writeln!(
             out,
-            "/// The weight of {what}.\npub const {name}: Weight = {};",
-            weight_literal(weight)
+            "\n/// The cells of the region of the failure rate of {what}."
         );
+        out.push_str(&array_lit(
+            &cells,
+            0,
+            &alloc::format!("pub const {name}: [u64; {}] = ", cells.len()),
+            ";",
+        ));
     }
+    let _ = writeln!(
+        out,
+        "\n/// Model 3's parameters.\npub const PARAMS: Params = Params {{\n    units: {},\n    framing: {},\n    cookie: {},\n    roles: {},\n    versions: {},\n    sn: {},\n}};",
+        measured_lit(&p.units, "UNITS_CELLS"),
+        measured_lit(&p.framing, "FRAMING_CELLS"),
+        derived_lit(&p.cookie, "COOKIE_CELLS"),
+        derived_lit(&p.roles, "ROLES_CELLS"),
+        derived_lit(&p.versions, "VERSIONS_CELLS"),
+        prior_lit(&p.sn, 4),
+    );
     let _ = writeln!(
         out,
         "\n/// The null protocols, in the manifest's order.\npub const NULL: [Member; {}] = [",
@@ -585,29 +525,106 @@ fn generated_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/zenoh_calibration_generated.rs")
 }
 
-/// `1234` as the design note's table writes it: signed, no separators.
-fn signed(n: i64) -> String {
-    if n > 0 {
-        alloc::format!("+{n}")
-    } else {
-        alloc::format!("{n}")
+/// A probability as the design note's parameter table writes it.
+fn prob(log2_q64: i128) -> String {
+    alloc::format!(
+        "{:.4e}",
+        2f64.powf(log2_q64 as f64 / 18_446_744_073_709_551_616.0)
+    )
+}
+
+/// The rows of the design note's parameter table (§6.8) this calibration gives.
+fn doc_rows(c: &Calibration) -> Vec<String> {
+    let p = &c.params;
+    let q32 = |x: u64| alloc::format!("{:.4e}", x as f64 / ONE_Q32 as f64);
+    let share = |num: u64, den: u64| alloc::format!("{:.4e}", num as f64 / den as f64);
+    let mut rows = Vec::new();
+    let measured = [
+        (
+            "unit readings",
+            &p.units.log2_null_bound[..],
+            &p.units.log2_null_mean[..],
+        ),
+        (
+            "stream framing",
+            &p.framing.log2_null_bound[..],
+            &p.framing.log2_null_mean[..],
+        ),
+    ];
+    for (name, bound, mean) in measured {
+        let b: Vec<String> = bound.iter().map(|&x| prob(x)).collect();
+        let m: Vec<String> = mean.iter().map(|&x| prob(x)).collect();
+        rows.push(alloc::format!(
+            "| {name} | {} | {} |",
+            b.join(", "),
+            m.join(", ")
+        ));
     }
+    let regions = [
+        (
+            "unit readings",
+            &p.units.zenoh.num[1..],
+            p.units.zenoh.den,
+            &p.units.region,
+        ),
+        (
+            "stream framing",
+            &p.framing.zenoh.num[1..],
+            p.framing.zenoh.den,
+            &p.framing.region,
+        ),
+        (
+            "cookie echo",
+            &p.cookie.zenoh.num[1..],
+            p.cookie.zenoh.den,
+            &p.cookie.region,
+        ),
+        (
+            "Init roles",
+            &p.roles.zenoh.num[1..],
+            p.roles.zenoh.den,
+            &p.roles.region,
+        ),
+        (
+            "version header",
+            &p.versions.zenoh.num[1..],
+            p.versions.zenoh.den,
+            &p.versions.region,
+        ),
+    ];
+    for (name, failures, den, region) in regions {
+        let f: u64 = failures.iter().sum();
+        rows.push(alloc::format!(
+            "| {name} | {} | {} | {} |",
+            share(f, den),
+            q32(region.groups_bound),
+            q32(region.top)
+        ));
+    }
+    rows.push(alloc::format!(
+        "SN prior: Beta({}/{}, {}/{})",
+        p.sn.num[1],
+        p.sn.den,
+        p.sn.num[0],
+        p.sn.den
+    ));
+    rows
 }
 
 /// THE GENERATED FILE IS WHAT THE CORPUS GIVES. `zenoh_calibration_generated.rs`
-/// holds the counts and the weights, and nobody writes it: this test renders it
-/// from the corpus and fails with the first line that differs when the file is
-/// not that. With `WZ_BLESS_CALIBRATION` set it writes the file instead, which is
-/// what `scripts/regen-calibration.sh` does, so a capture added to the corpus
-/// moves the model by one command and not by twelve edits.
+/// holds the counts and the parameters, and nobody writes it: this test renders
+/// it from the corpus and fails with the first line that differs when the file
+/// is not that. With `WZ_BLESS_CALIBRATION` set it writes the file instead, which
+/// is what `scripts/regen-calibration.sh` does, so a capture added to the corpus
+/// moves the model by one command.
 ///
-/// The design note's numbers are held to the same calibration: its weight table
-/// and the counts it states are not generated, and drifting from the file is
-/// what this fails on.
+/// The design note's numbers are held to the same calibration: its parameter
+/// table and the counts it states are not generated, and drifting from the file
+/// is what this fails on.
 #[test]
 fn the_generated_calibration_is_current() {
     let files = read_corpus();
-    let calibration = calibrate(&files);
+    let calibration = calibrate(files.iter());
     let want = render(&calibration);
     let path = generated_path();
     if std::env::var_os("WZ_BLESS_CALIBRATION").is_some() {
@@ -630,33 +647,21 @@ fn the_generated_calibration_is_current() {
             want.lines().nth(at)
         );
     }
+    assert_eq!(calibration.params, model::PARAMS);
+    std::println!(
+        "SN prior fitted: mean {}, concentration {}",
+        calibration.sn_fit.0,
+        calibration.sn_fit.1
+    );
 
-    // The design note: its weight table and its counts are the generated ones.
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/flow-zenoh-verdict.md"),
     )
     .expect("docs/flow-zenoh-verdict.md reads");
-    let t = &calibration.table;
-    let rows = [
-        ("unit read whole", t.unit[0]),
-        ("unit residual", t.unit[1]),
-        ("unit undecoded", t.unit[2]),
-        ("stream framing held", t.framing[0]),
-        ("stream framing lost", t.framing[1]),
-        ("cookie matched (8 bytes)", t.cookie[0]),
-        ("cookie differing", t.cookie[1]),
-        ("Inits of opposite kinds", t.roles[0]),
-        ("Inits of one kind", t.roles[1]),
-        ("version of this reader", t.versions[0]),
-        ("another version", t.versions[1]),
-    ];
-    let mut stale = Vec::new();
-    for (name, w) in rows {
-        let row = alloc::format!("| {name} | {} | {} |", signed(w.yes), signed(w.no));
-        if !doc.contains(&row) {
-            stale.push(row);
-        }
-    }
+    let mut stale: Vec<String> = doc_rows(&calibration)
+        .into_iter()
+        .filter(|row| !doc.contains(row.as_str()))
+        .collect();
     let prose = doc.split_whitespace().collect::<Vec<_>>().join(" ");
     let z = &calibration.zenoh;
     let counts = alloc::format!(
@@ -674,10 +679,121 @@ fn the_generated_calibration_is_current() {
     }
     assert!(
         stale.is_empty(),
-        "docs/flow-zenoh-verdict.md section 6.2 does not say what the corpus gives; it should \
-         hold:\n{}",
+        "docs/flow-zenoh-verdict.md does not say what the corpus gives; it should hold:\n{}",
         stale.join("\n")
     );
+}
+
+/// Every flow read again from its observations, with the parameters the reader
+/// ships, is the evidence the reader gave it: the replay below reads the
+/// library, not a look-alike.
+#[test]
+fn every_flow_read_again_from_its_observations_is_its_own_evidence() {
+    let mut flows = 0usize;
+    for file in read_corpus() {
+        for (i, f) in file.flows.iter().enumerate() {
+            flows += 1;
+            assert_eq!(
+                crate::zenoh_evidence::recording(|| f.evidence.replayed_with(&model::PARAMS)),
+                f.evidence,
+                "{} flow {i}",
+                file.name
+            );
+        }
+    }
+    assert!(flows > 0, "the corpus has flows");
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Word {
+    Yes,
+    No,
+    Undecided,
+}
+
+/// The word a body of evidence latched, `undecided` while it has not crossed.
+fn word(e: &ZenohEvidence) -> Word {
+    match e.crossing() {
+        Some(c) if c.yes && !c.no => Word::Yes,
+        Some(c) if c.no && !c.yes => Word::No,
+        _ => Word::Undecided,
+    }
+}
+
+/// Counts of the three words.
+#[derive(Debug, Default, Clone, Copy)]
+struct Tally {
+    yes: u64,
+    no: u64,
+    undecided: u64,
+}
+
+impl Tally {
+    fn add(&mut self, w: Word) {
+        match w {
+            Word::Yes => self.yes += 1,
+            Word::No => self.no += 1,
+            Word::Undecided => self.undecided += 1,
+        }
+    }
+}
+
+/// THE MEASUREMENT: each group left out, the parameters computed from the rest,
+/// the left-out flows read with them. Printed (`-- --nocapture`); what it holds
+/// is that every flow is read in exactly one group, and that leaving a zenoh
+/// group out turns none of its flows to `no` (the error a false `no` would be).
+#[test]
+fn leaving_a_group_out_of_the_parameters_moves_its_own_flows_by_this_much() {
+    let files = read_corpus();
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, f) in files.iter().enumerate() {
+        groups.entry(f.group.clone()).or_default().push(i);
+    }
+    std::println!("group | files | flows | shipped yes/no/und | left out yes/no/und");
+    let mut flows_read = 0usize;
+    let mut false_no = Vec::new();
+    for (group, idx) in &groups {
+        let zenoh_group = files[idx[0]].zenoh;
+        let rest = files
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !idx.contains(i))
+            .map(|(_, f)| f);
+        let left_out = calibrate(rest).params;
+        let (mut own, mut other) = (Tally::default(), Tally::default());
+        let mut nflows = 0usize;
+        for &i in idx {
+            for f in &files[i].flows {
+                nflows += 1;
+                own.add(word(&f.evidence));
+                let again = word(&f.evidence.replayed_with(&left_out));
+                other.add(again);
+                if zenoh_group && again == Word::No {
+                    false_no.push(alloc::format!(
+                        "{}: a flow reads `no` left out",
+                        files[i].name
+                    ));
+                }
+            }
+        }
+        flows_read += nflows;
+        std::println!(
+            "{}{} | {} | {} | {}/{}/{} | {}/{}/{}",
+            if zenoh_group { "zenoh " } else { "null " },
+            group,
+            idx.len(),
+            nflows,
+            own.yes,
+            own.no,
+            own.undecided,
+            other.yes,
+            other.no,
+            other.undecided,
+        );
+    }
+    let total: usize = files.iter().map(|f| f.flows.len()).sum();
+    assert_eq!(flows_read, total, "every flow is read in exactly one group");
+    assert!(false_no.is_empty(), "{}", false_no.join("\n"));
 }
 
 /// The independent groups a claim needs: with no failure seen in `g` groups the
@@ -700,8 +816,8 @@ fn the_groups_a_claim_needs_are_the_zero_failure_bound_inverted() {
     for (target, needed) in [(0.10, 29u64), (0.05, 59), (0.01, 299)] {
         assert_eq!(groups_needed(target), needed, "target {target}");
         // The bound at `needed` is within the target, and at one fewer it is not.
-        assert!(fit::upper_bound(0, needed) <= target);
-        assert!(fit::upper_bound(0, needed - 1) > target);
+        assert!(upper_bound(0, needed) <= target);
+        assert!(upper_bound(0, needed - 1) > target);
     }
     let files = read_corpus();
     let groups = |zenoh: bool| {
@@ -731,54 +847,4 @@ fn the_groups_a_claim_needs_are_the_zero_failure_bound_inverted() {
             .len() as u64,
         zenoh + null
     );
-}
-
-/// What the zenoh failure chances are bounded by, with the count the bound
-/// stands on: units, files, groups. The units are not independent of each
-/// other, and the files of one group are not independent of each other.
-#[test]
-fn the_zenoh_failure_bound_stands_on_how_many_independent_things() {
-    let files = read_corpus();
-    let zenoh: Vec<&File> = files.iter().filter(|f| f.zenoh).collect();
-    let mut groups: BTreeMap<&str, [u64; 5]> = BTreeMap::new();
-    for f in &zenoh {
-        let slot = groups.entry(f.group.as_str()).or_default();
-        for (s, v) in slot.iter_mut().zip(f.counts.failures()) {
-            *s += v;
-        }
-    }
-    let mut all = Counts::default();
-    for f in &zenoh {
-        all.and(&f.counts);
-    }
-    let sizes = [
-        all.units.iter().sum::<u64>(),
-        all.framing.iter().sum::<u64>(),
-        all.cookie.iter().sum::<u64>(),
-        all.roles.iter().sum::<u64>(),
-        all.versions.iter().sum::<u64>(),
-    ];
-    let names = [
-        "unit with bytes left over or undecoded",
-        "stream direction that lost its framing",
-        "cookie that differs",
-        "Init pair of one kind",
-        "version header of another version",
-    ];
-    std::println!("failure | bound on units | on files | on groups (95% one-sided)");
-    for (i, name) in names.iter().enumerate() {
-        let file_failed = zenoh.iter().filter(|f| f.counts.failures()[i] > 0).count() as u64;
-        let group_failed = groups.values().filter(|g| g[i] > 0).count() as u64;
-        // A file or a group is a trial that fails if any of its units does.
-        let on_files = fit::upper_bound(file_failed, zenoh.len() as u64);
-        let on_groups = fit::upper_bound(group_failed, groups.len() as u64);
-        let on_units = fit::upper_bound(all.failures()[i], sizes[i]);
-        std::println!(
-            "{name} | {on_units:.6} ({} of {}) | {on_files:.4} ({file_failed} of {}) | {on_groups:.4} ({group_failed} of {})",
-            all.failures()[i],
-            sizes[i],
-            zenoh.len(),
-            groups.len()
-        );
-    }
 }

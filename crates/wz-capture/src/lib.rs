@@ -263,14 +263,17 @@ pub(crate) mod zenoh_calibration_generated;
 mod zenoh_calibration_tests;
 #[cfg(test)]
 mod zenoh_corpus_tests;
+/// The terms of model 3 in integers: priors, the bounds on the rejected
+/// hypothesis's largest chances, and the rounding toward the side a sum rejects.
+pub mod zenoh_eprocess;
 /// Whether a flow's bytes are zenoh, as a sequential test over the invariants a
 /// zenoh flow keeps: the checks, their weights and the tallies `session_table`
 /// keeps at ingest. Ungated for the reason the table is.
 pub mod zenoh_evidence;
 #[cfg(test)]
 mod zenoh_hierarchy_tests;
-/// The SN steps of a flow as a mixture over its link's break rate, in integers:
-/// staged for a later model, and wired into none yet.
+/// The SN steps of a flow as a mixture over its link's break rate, in integers,
+/// from the counts in one step, and the logarithm model 3's terms stand on.
 pub mod zenoh_mixture;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
@@ -4660,6 +4663,11 @@ mod message_list_census {
             // index fed in, so a caller resuming after a capture file knows
             // where the file stopped. Nothing decoded is held here.
             next_packet_index: _,
+            // The zenoh test's evidence per row and the flows to settle: sums
+            // and counts, not messages.
+            row_evidence: _,
+            touched: _,
+            next_row_link: _,
         } = &d;
 
         // AND THE THREE ARE THE ENUMERATION. Without this the pattern above
@@ -5974,6 +5982,27 @@ pub struct Dissection {
     /// time), and what the next caller needs is a coordinate nothing already
     /// read can collide with.
     next_packet_index: usize,
+    /// The zenoh test of each session row of a pair: what the flows naming the
+    /// pair observed from the packet after they named it
+    /// (`docs/flow-zenoh-verdict.md` §6.8, D7). A test of its own and not the
+    /// flows' sums added, because which flows a row holds is learned from the
+    /// bytes as they arrive.
+    row_evidence:
+        alloc::collections::BTreeMap<session_table::PairKey, zenoh_evidence::ZenohEvidence>,
+    /// The flows the packet just read touched, whose observations are settled
+    /// before the next packet is read ([`Self::settle_touched`]).
+    touched: Vec<Touched>,
+    /// The next number a flow's link is known by in a row's evidence.
+    next_row_link: u64,
+}
+
+/// A flow a packet touched, by kind and key: an index would not survive the
+/// eviction that ends a packet's reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Touched {
+    Stream(FlowKey),
+    Datagram(FlowKey),
+    Serial,
 }
 
 /// Hand-written for ONE field: `gap_patience` defaults to
@@ -6012,6 +6041,9 @@ impl Default for Dissection {
             chain_bytes_lost: 0,
             decryption_secrets: Vec::new(),
             next_packet_index: 0,
+            row_evidence: alloc::collections::BTreeMap::new(),
+            touched: Vec::new(),
+            next_row_link: 0,
         }
     }
 }
@@ -6792,19 +6824,22 @@ impl Dissection {
     pub(crate) fn list_zenoh_words(&self) -> Vec<Option<session_table::ZenohVerdict>> {
         let mut streams = self.flows.iter();
         let mut datagrams = self.datagram_flows.iter();
-        let mut datagram: Option<zenoh_evidence::ZenohEvidence> = None;
+        let word = |e: zenoh_evidence::ZenohEvidence| session_table::ZenohVerdict::of(&e);
+        let mut datagram: Option<session_table::ZenohVerdict> = None;
         self.message_lists_with_origin()
-            .map(|(_, origin, _)| {
-                let evidence = match origin {
-                    MessageListOrigin::Stream => streams.next().map(FlowDissection::zenoh_evidence),
-                    MessageListOrigin::Datagram => {
-                        datagram = datagrams.next().map(DatagramDissection::zenoh_evidence);
-                        datagram
-                    }
-                    MessageListOrigin::QuicStream(_) | MessageListOrigin::QuicDatagram => datagram,
-                    MessageListOrigin::Serial => Some(self.serial_zenoh_evidence()),
-                };
-                evidence.map(|e| session_table::ZenohVerdict::of(&e))
+            .map(|(_, origin, _)| match origin {
+                MessageListOrigin::Stream => {
+                    streams.next().map(FlowDissection::zenoh_evidence).map(word)
+                }
+                MessageListOrigin::Datagram => {
+                    datagram = datagrams
+                        .next()
+                        .map(DatagramDissection::zenoh_evidence)
+                        .map(word);
+                    datagram
+                }
+                MessageListOrigin::QuicStream(_) | MessageListOrigin::QuicDatagram => datagram,
+                MessageListOrigin::Serial => Some(word(self.serial_zenoh_evidence())),
             })
             .collect()
     }
@@ -7434,6 +7469,9 @@ impl Dissection {
                 summary.frames += flow.frames.len() - before;
             }
         }
+        // What the plaintext was evidence of is observed at each flow's last
+        // packet, and settled as a packet's is.
+        self.settle_every_flow();
         summary
     }
 
@@ -7524,6 +7562,10 @@ impl Dissection {
             feed.handshake_offers += 1;
             return feed;
         }
+        // Plaintext a caller recovered arrives outside a packet: what came
+        // before is settled, and this flow's observations are settled next.
+        self.settle_touched();
+        self.touch(Touched::Datagram(flow));
         let cap = self.limits.quic_streams_per_flow;
         let Some(dg) = self.datagram_flows.iter_mut().find(|f| f.flow == flow) else {
             feed.flow_absent += 1;
@@ -7734,10 +7776,15 @@ impl Dissection {
         sink: &mut impl PlaintextSink,
     ) -> quic::QuicStreamFeed {
         let mut feed = quic::QuicStreamFeed::default();
+        // Plaintext a caller recovered arrives outside a packet: what came
+        // before is settled, and this one is observed at its own packet.
+        self.settle_touched();
+        self.touch(Touched::Datagram(flow));
         let Some(dg) = self.datagram_flows.iter_mut().find(|f| f.flow == flow) else {
             feed.flow_absent += 1;
             return feed;
         };
+        dg.ingest.begin_packet(packet_index as u64);
         feed.bytes_fed += bytes.len();
         // HANDSHAKE PRESENT, read out of the reference implementation rather
         // than inferred from the word "datagram": zenoh's
@@ -7876,6 +7923,153 @@ impl Dissection {
     /// gaps that are open NOW, and a flow with none is untouched. Returns the
     /// number of gaps it forced.
     pub fn finish(&mut self) -> usize {
+        self.settle_touched();
+        let forced = self.finish_flows();
+        // What the exits read is observed at each flow's last packet, and
+        // settled like any packet's.
+        self.settle_every_flow();
+        forced
+    }
+
+    /// Every flow settled ([`Self::settle_flow`]): after work that reads a
+    /// flow outside a packet (the end of a capture, a decryption pass).
+    fn settle_every_flow(&mut self) {
+        self.settle_touched();
+        let mut every: Vec<Touched> = self.flows.iter().map(|f| Touched::Stream(f.flow)).collect();
+        every.extend(
+            self.datagram_flows
+                .iter()
+                .map(|f| Touched::Datagram(f.flow)),
+        );
+        every.push(Touched::Serial);
+        for t in every {
+            self.settle_flow(t);
+        }
+    }
+
+    /// The zenoh test's observations of the flows the last packet touched,
+    /// settled: the sessions' counts are observed, and the row of the pair a
+    /// flow names takes what it observed after it named it.
+    fn settle_touched(&mut self) {
+        for t in core::mem::take(&mut self.touched) {
+            self.settle_flow(t);
+        }
+    }
+
+    /// One flow's packet settled ([`Self::settle_touched`]).
+    fn settle_flow(&mut self, t: Touched) {
+        let forward = match t {
+            Touched::Stream(key) => {
+                let Some(at) = self.flows.iter().position(|f| f.flow == key) else {
+                    return;
+                };
+                let sessions = self.flows[at].session_observations();
+                let ingest = &mut self.flows[at].ingest;
+                Self::number_link(ingest, &mut self.next_row_link, sessions)
+            }
+            Touched::Datagram(key) => {
+                let Some(at) = self.datagram_flows.iter().position(|f| f.flow == key) else {
+                    return;
+                };
+                let sessions = self.datagram_flows[at].session_observations();
+                let ingest = &mut self.datagram_flows[at].ingest;
+                Self::number_link(ingest, &mut self.next_row_link, sessions)
+            }
+            Touched::Serial => {
+                let sessions = self.serial_session_observations();
+                Self::number_link(&mut self.serial_ingest, &mut self.next_row_link, sessions)
+            }
+        };
+        if let Some((forward, link)) = forward {
+            let row = self.row_evidence.entry(forward.pair.clone()).or_default();
+            Self::take_forward(row, &forward, link);
+        }
+    }
+
+    /// Settle one ingest, and the number its link has in a row's evidence when
+    /// it hands the row something.
+    fn number_link(
+        ingest: &mut session_table::LinkIngest,
+        next: &mut u64,
+        sessions: session_table::SessionObservations,
+    ) -> Option<(session_table::Forward, u64)> {
+        let forward = ingest.settle(sessions)?;
+        let link = ingest.row_link(|| {
+            *next += 1;
+            *next
+        });
+        Some((forward, link))
+    }
+
+    /// A row takes a flow's settled observations, its SN steps on the flow's
+    /// own link.
+    fn take_forward(
+        row: &mut zenoh_evidence::ZenohEvidence,
+        forward: &session_table::Forward,
+        link: u64,
+    ) {
+        for &observation in &forward.observations {
+            let observation = match observation {
+                zenoh_evidence::Observation::SnSteps {
+                    follows, breaks, ..
+                } => zenoh_evidence::Observation::SnSteps {
+                    link,
+                    follows,
+                    breaks,
+                },
+                other => other,
+            };
+            row.observe(observation, forward.packet);
+        }
+    }
+
+    /// The zenoh test of the row of `pair` now: what was settled, and what the
+    /// flows the last packet touched would hand it when settled.
+    pub(crate) fn row_evidence(
+        &self,
+        pair: &session_table::PairKey,
+    ) -> zenoh_evidence::ZenohEvidence {
+        let mut row = self.row_evidence.get(pair).cloned().unwrap_or_default();
+        let mut fresh = self.next_row_link;
+        for t in &self.touched {
+            let pending = match *t {
+                Touched::Stream(key) => self
+                    .flows
+                    .iter()
+                    .find(|f| f.flow == key)
+                    .map(|f| (&f.ingest, f.session_observations())),
+                Touched::Datagram(key) => self
+                    .datagram_flows
+                    .iter()
+                    .find(|f| f.flow == key)
+                    .map(|f| (&f.ingest, f.session_observations())),
+                Touched::Serial => Some((&self.serial_ingest, self.serial_session_observations())),
+            };
+            let Some((ingest, sessions)) = pending else {
+                continue;
+            };
+            let Some(forward) = ingest.pending(sessions).filter(|f| &f.pair == pair) else {
+                continue;
+            };
+            let link = ingest.row_link_given().unwrap_or_else(|| {
+                fresh += 1;
+                fresh
+            });
+            Self::take_forward(&mut row, &forward, link);
+        }
+        row
+    }
+
+    /// The packet being read touches the flow `t`: its observations are made at
+    /// that packet, and settled before the next.
+    fn touch(&mut self, t: Touched) {
+        if !self.touched.contains(&t) {
+            self.touched.push(t);
+        }
+    }
+
+    /// The exits of [`Self::finish`].
+    fn finish_flows(&mut self) -> usize {
         // R311y720 (§D M3) — FIRST, because the serial line's direction mapping
         // is final only now and everything below reads decoded messages.
         self.finish_serial();
@@ -8020,6 +8214,9 @@ impl Dissection {
         // returns early, and a coordinate the serial reader consumed is just as
         // spent as one the transport reader did.
         self.next_packet_index = self.next_packet_index.max(packet_index + 1);
+        // The zenoh test's observations of the packet before are settled before
+        // this one is read: a row takes them in the order they were made.
+        self.settle_touched();
         // BEFORE decapsulation, because a declared serial link type has no link
         // header for `decapsulate` to strip -- the bytes ARE the serial stream.
         // Declared and never sniffed: see `serial`'s module doc for why a
@@ -8068,6 +8265,8 @@ impl Dissection {
         ts_nanos: Option<u64>,
         bytes: &[u8],
     ) {
+        self.touch(Touched::Serial);
+        self.serial_ingest.begin_packet(packet_index as u64);
         let limit = self.limits.serial_frames_before_attribution;
         let line = self
             .serial
@@ -8263,6 +8462,8 @@ impl Dissection {
         // `reassembly`; its second is `PassiveFrame::observed_at_ms`, which
         // every build has. A build without `reassembly` sweeps nothing and
         // still stamps its frames.
+        self.touch(Touched::Stream(segment.flow));
+        self.flows[idx].ingest.begin_packet(packet_index as u64);
         self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
         // Item 252 — recorded for every segment, a pure ACK included: a
@@ -8549,6 +8750,10 @@ impl Dissection {
         } else {
             Direction::B
         };
+        self.touch(Touched::Stream(record.flow));
+        self.flows[idx]
+            .ingest
+            .begin_packet(record.packet_index as u64);
         self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
 
@@ -8659,6 +8864,10 @@ impl Dissection {
                 .observed_scout_from(d.source(), self.limits.max_scout_askers);
             self.drops.scout_askers += evicted;
         }
+        self.touch(Touched::Datagram(d.flow));
+        self.datagram_flows[idx]
+            .ingest
+            .begin_packet(d.packet_index as u64);
         self.advance_clock(idx, ts_nanos, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;

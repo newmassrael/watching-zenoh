@@ -66,7 +66,7 @@ use wz_session_core::passive::{
 use wz_session_core::scouting_message::ScoutingFrame;
 
 use crate::link::{FlowKey, LinkKind};
-use crate::zenoh_evidence::{model, Check, ZenohEvidence};
+use crate::zenoh_evidence::{Observation, ZenohEvidence};
 use crate::{Dissection, Framing};
 
 /// What the ingest path keeps about one flow that no retention bound may take
@@ -100,27 +100,58 @@ pub struct LinkIngest {
     /// How the flow's framing units read, counted at ingest for the same reason
     /// [`Self::versions`] is. See [`ReadingEvidence`].
     readings: ReadingEvidence,
-    /// The observations of the zenoh test this ingest path makes: the cookie
-    /// echoes, the version headers and the unit readings. The Init roles are
-    /// read off [`Self::named`] and the SN steps off the flow's sessions, both
-    /// when the evidence is asked for ([`Self::evidence`]).
+    /// The observations of the zenoh test, in the order they arrived: the cookie
+    /// echoes, the version headers, the unit readings and the Init roles as this
+    /// path reads them, and the SN steps and the framing judgements as the flow's
+    /// sessions count them ([`Self::settle`]).
     observed: ZenohEvidence,
     /// Per direction, the cookie of the latest InitAck that direction sent, for
     /// the OpenSyn of the other direction to be compared with. Only a flow that
     /// carried an InitAck holds one.
     init_ack_cookie: [Option<Vec<u8>>; 2],
+    /// The capture-global index of the packet being read, which every
+    /// observation is made at.
+    packet: u64,
+    /// What the flow's sessions had counted when they were last settled.
+    settled: SessionObservations,
+    /// The Init roles were observed: once, when both directions' Inits are
+    /// first held.
+    roles_observed: bool,
+    /// The observations made at [`Self::packet`] and not yet settled.
+    outbox: Vec<Observation>,
+    /// The pair the flow names now, in zid order, and the packet it began to.
+    named_pair: Option<(PairKey, u64)>,
+    /// The number the row's evidence knows this flow's link by.
+    row_link: Option<u64>,
+}
+
+/// Two zids, in order: the key of a session row.
+pub type PairKey = (Vec<u8>, Vec<u8>);
+
+/// What one flow's settled packet gives the row of the pair it names: the
+/// observations made at that packet, when the flow named the pair before it
+/// (`docs/flow-zenoh-verdict.md` §6.8, D7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Forward {
+    /// The row's key.
+    pub pair: PairKey,
+    /// The packet the observations were made at.
+    pub packet: u64,
+    /// The observations, in order.
+    pub observations: Vec<Observation>,
 }
 
 /// Whether a flow is zenoh, as the sequential test of [`crate::zenoh_evidence`]
-/// reads its evidence's two sums. The closed set:
+/// read its evidence's two sums at their FIRST crossing, where the word latches
+/// (model 3). The closed set:
 ///
-/// * `yes` -- the `yes` sum is at or above [`model::YES_AT`] and the `no` sum
-///   is above [`model::NO_AT`];
-/// * `no` -- the `no` sum is at or below [`model::NO_AT`] and the `yes` sum is
-///   below [`model::YES_AT`];
-/// * `undecided` -- otherwise: too little evidence either way, which is the
-///   word a lone header earns and the word a flow starts with, or both sums
-///   past their thresholds at once.
+/// * `yes` -- at the first crossing the `yes` sum was at or above
+///   [`crate::zenoh_evidence::model::YES_AT`] and the `no` sum above
+///   [`crate::zenoh_evidence::model::NO_AT`];
+/// * `no` -- at the first crossing the `no` sum was at or below the second and
+///   the `yes` sum below the first;
+/// * `undecided` -- otherwise: no sum has crossed, which is the word a lone
+///   header earns and the word a flow starts with, or both crossed at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZenohVerdict {
     /// The evidence crossed the threshold for zenoh.
@@ -134,11 +165,9 @@ pub enum ZenohVerdict {
 impl ZenohVerdict {
     /// The word `evidence` comes to.
     pub fn of(evidence: &ZenohEvidence) -> ZenohVerdict {
-        let yes = evidence.log2_lr_millibits() >= model::YES_AT;
-        let no = evidence.log2_lr_no_millibits() <= model::NO_AT;
-        match (yes, no) {
-            (true, false) => ZenohVerdict::Yes,
-            (false, true) => ZenohVerdict::No,
+        match evidence.crossing() {
+            Some(c) if c.yes && !c.no => ZenohVerdict::Yes,
+            Some(c) if c.no && !c.yes => ZenohVerdict::No,
             _ => ZenohVerdict::Undecided,
         }
     }
@@ -277,6 +306,92 @@ impl LinkIngest {
         self.last_ns = Some(self.last_ns.map_or(ns, |held| held.max(ns)));
     }
 
+    /// The packet at `packet` (capture-global) is about to be read: every
+    /// observation until the next is made at it. The previous packet's must
+    /// have been settled ([`Self::settle`]).
+    pub(crate) fn begin_packet(&mut self, packet: u64) {
+        self.packet = packet;
+    }
+
+    /// One observation, made at the packet being read.
+    fn record(&mut self, observation: Observation) {
+        self.observed.observe(observation, self.packet);
+        // Kept for the row only where there is one to hand it to.
+        if self.named_pair.is_some() {
+            self.outbox.push(observation);
+        }
+    }
+
+    /// What the flow's sessions counted since they were last settled, as
+    /// observations: the SN steps, and each stream direction whose framing was
+    /// judged. A count that fell (a session the flow no longer holds) gives
+    /// nothing.
+    fn session_observations_since(&self, now: SessionObservations) -> Vec<Observation> {
+        let was = self.settled;
+        let mut out = Vec::new();
+        let follows = now.steps.follows.saturating_sub(was.steps.follows);
+        let breaks = now.steps.breaks.saturating_sub(was.steps.breaks);
+        if follows > 0 || breaks > 0 {
+            out.push(Observation::SnSteps {
+                link: 0,
+                follows,
+                breaks,
+            });
+        }
+        for (held, n) in [
+            (true, now.framing_held.saturating_sub(was.framing_held)),
+            (false, now.framing_lost.saturating_sub(was.framing_lost)),
+        ] {
+            for _ in 0..n {
+                out.push(Observation::StreamFraming { held });
+            }
+        }
+        out
+    }
+
+    /// What settling the packet being read would give the row of the pair the
+    /// flow names, without settling it: `None` when the flow names no pair, or
+    /// began to name it at this very packet (whose observations chose the pair
+    /// and are not evidence about it).
+    pub(crate) fn pending(&self, sessions: SessionObservations) -> Option<Forward> {
+        let (pair, since) = self.named_pair.as_ref()?;
+        if *since >= self.packet {
+            return None;
+        }
+        let mut observations = self.outbox.clone();
+        observations.extend(self.session_observations_since(sessions));
+        Some(Forward {
+            pair: pair.clone(),
+            packet: self.packet,
+            observations,
+        })
+    }
+
+    /// The packet being read is done: what the flow's sessions counted in it
+    /// is observed, and what the row of its pair takes of it is handed back.
+    pub(crate) fn settle(&mut self, sessions: SessionObservations) -> Option<Forward> {
+        let forward = self.pending(sessions);
+        for observation in self.session_observations_since(sessions) {
+            self.observed.observe(observation, self.packet);
+        }
+        self.settled = sessions;
+        // Released, not cleared: a pass that read a whole flow at once (a
+        // decryption) must not leave its burst held.
+        self.outbox = Vec::new();
+        forward
+    }
+
+    /// The number the row's evidence knows this flow's link by, given by
+    /// `next` the first time it is asked for.
+    pub(crate) fn row_link(&mut self, next: impl FnOnce() -> u64) -> u64 {
+        *self.row_link.get_or_insert_with(next)
+    }
+
+    /// The number the row's evidence knows this flow's link by, if it has one.
+    pub(crate) fn row_link_given(&self) -> Option<u64> {
+        self.row_link
+    }
+
     /// A datagram of the flow arrived on a link with no handshake (a multicast
     /// group, or pico's raweth).
     pub(crate) fn observe_handshake_absent(&mut self) {
@@ -316,6 +431,7 @@ impl LinkIngest {
                 }
                 if !body.zid.is_empty() {
                     self.named[seat] = Some((body.zid.to_vec(), *is_ack));
+                    self.observe_naming();
                 }
             }
             Ok(InboundFrame::Open {
@@ -339,14 +455,31 @@ impl LinkIngest {
         if issued.is_empty() && echoed.is_empty() {
             return;
         }
-        if issued == echoed {
-            self.observed.confirm(
-                Check::CookieEcho,
-                crate::zenoh_evidence::cookie_echo_weight(issued.len()),
-            );
-        } else {
-            self.observed
-                .violate(Check::CookieEcho, model::COOKIE_ECHO_VIOLATED);
+        let matched = (issued == echoed).then_some(issued.len());
+        self.record(Observation::CookieEcho { matched });
+    }
+
+    /// An Init named a direction's node: the Init roles are observed the first
+    /// time both directions are named, and the pair the flow names is noted
+    /// with the packet it began to.
+    fn observe_naming(&mut self) {
+        if let (false, Some((_, a)), Some((_, b))) =
+            (self.roles_observed, &self.named[0], &self.named[1])
+        {
+            let opposite = a != b;
+            self.roles_observed = true;
+            self.record(Observation::InitRoles { opposite });
+        }
+        let pair = self.pair().map(|[a, b]| {
+            if a <= b {
+                (a.to_vec(), b.to_vec())
+            } else {
+                (b.to_vec(), a.to_vec())
+            }
+        });
+        let named = self.named_pair.as_ref().map(|(p, _)| p);
+        if pair.as_ref() != named {
+            self.named_pair = pair.map(|p| (p, self.packet));
         }
     }
 
@@ -355,23 +488,13 @@ impl LinkIngest {
     /// violates it. Both are weighed, because an observation that could only
     /// confirm would raise the `yes` sum's expectation under the null.
     fn observe_version(&mut self, version: u8) {
-        if version == wz_codecs::wire_const::PROTOCOL_VERSION {
-            self.observed
-                .confirm(Check::VersionHeader, model::VERSION_HEADER);
-        } else {
-            self.observed
-                .violate(Check::VersionHeader, model::VERSION_FOREIGN);
-        }
+        let own = version == wz_codecs::wire_const::PROTOCOL_VERSION;
+        self.record(Observation::VersionHeader { own });
     }
 
     /// One framing unit's reading, as evidence of the test.
     fn observe_reading(&mut self, reading: UnitReading) {
-        let weight = crate::zenoh_evidence::unit_reading_weight(reading);
-        if reading == UnitReading::Explained {
-            self.observed.confirm(Check::UnitReading, weight);
-        } else {
-            self.observed.violate(Check::UnitReading, weight);
-        }
+        self.record(Observation::UnitReading(reading));
     }
 
     /// One framing unit the session produced: every message of it, and the unit
@@ -426,34 +549,15 @@ impl LinkIngest {
         self.versions
     }
 
-    /// The flow's evidence for the zenoh test: what ingest observed, the Init
-    /// roles, and what the flow's sessions observed ([`SessionObservations`]:
-    /// the SN steps and how each stream direction's framing was first judged).
+    /// The flow's evidence for the zenoh test now: what was observed, and what
+    /// the flow's sessions (`sessions`, as they stand) counted in the packet not
+    /// yet settled ([`SessionObservations`]: the SN steps and how each stream
+    /// direction's framing was first judged).
     pub fn evidence(&self, sessions: SessionObservations) -> ZenohEvidence {
-        let mut evidence = self.observed;
-        match self.roles() {
-            Roles::Settled {
-                initiator: Some(_),
-                acceptor: Some(_),
-            } => evidence.confirm(Check::InitRoles, model::INIT_ROLES_CONFIRMED),
-            Roles::Contradicted => evidence.violate(Check::InitRoles, model::INIT_ROLES_VIOLATED),
-            Roles::Settled { .. } => {}
+        let mut evidence = self.observed.clone();
+        for observation in self.session_observations_since(sessions) {
+            evidence.observe(observation, self.packet);
         }
-        let steps = sessions.steps;
-        evidence.add(
-            Check::SnFollows,
-            steps.follows,
-            steps.breaks,
-            crate::zenoh_evidence::sn_steps_weight(steps),
-        );
-        evidence.add(
-            Check::StreamFraming,
-            sessions.framing_held,
-            sessions.framing_lost,
-            model::FRAMING_HELD
-                .times(sessions.framing_held)
-                .plus(model::FRAMING_LOST.times(sessions.framing_lost)),
-        );
         evidence
     }
 
@@ -872,8 +976,10 @@ pub struct SessionRow {
     pub bytes: u64,
     /// What the flows' version-bearing messages said, together.
     pub versions: VersionEvidence,
-    /// The flows' evidence for the zenoh test, together: the observations of
-    /// one session's links add, as the observations of one link do.
+    /// The row's evidence for the zenoh test. A row of a pair is a test of its
+    /// own over what its flows observed from the packet after each named the
+    /// pair (`docs/flow-zenoh-verdict.md` §6.8, D7); a row of one flow that
+    /// names no pair is that flow's evidence.
     pub evidence: ZenohEvidence,
     /// How the flows' framing units read, together.
     pub readings: ReadingEvidence,
@@ -946,8 +1052,9 @@ fn agreed<T: PartialEq + Clone>(items: impl Iterator<Item = Stated<T>>) -> State
 }
 
 impl SessionRow {
-    /// Fold the flows of one session into its row.
-    fn of(links: Vec<Link>) -> Self {
+    /// Fold the flows of one session into its row, whose evidence is
+    /// `evidence`.
+    fn of(links: Vec<Link>, evidence: ZenohEvidence) -> Self {
         let initiator = agreed(links.iter().map(|l| l.initiator.clone()));
         let acceptor = agreed(links.iter().map(|l| l.acceptor.clone()));
         let link = agreed(links.iter().map(|l| Ok(l.kind)));
@@ -970,9 +1077,6 @@ impl SessionRow {
         let versions = links
             .iter()
             .fold(VersionEvidence::default(), |sum, l| sum.and(l.versions));
-        let evidence = links
-            .iter()
-            .fold(ZenohEvidence::default(), |sum, l| sum.and(l.evidence));
         let readings = links
             .iter()
             .fold(ReadingEvidence::default(), |sum, l| sum.and(l.readings));
@@ -1226,22 +1330,32 @@ pub fn session_table(d: &Dissection) -> SessionTable {
     let (links, excluded) = links_of(d);
     // The session a pair stands under: the pair is UNORDERED, because the two
     // links of one session need not have been dialled by the same end.
-    let mut by_pair: BTreeMap<(Vec<u8>, Vec<u8>), usize> = BTreeMap::new();
-    let mut groups: Vec<Vec<Link>> = Vec::new();
+    let mut by_pair: BTreeMap<PairKey, usize> = BTreeMap::new();
+    let mut groups: Vec<(Option<PairKey>, Vec<Link>)> = Vec::new();
     for link in links {
         match link.pair.clone() {
             Some(key) => match by_pair.get(&key) {
-                Some(&at) => groups[at].push(link),
+                Some(&at) => groups[at].1.push(link),
                 None => {
-                    by_pair.insert(key, groups.len());
-                    groups.push(alloc::vec![link]);
+                    by_pair.insert(key.clone(), groups.len());
+                    groups.push((Some(key), alloc::vec![link]));
                 }
             },
-            None => groups.push(alloc::vec![link]),
+            None => groups.push((None, alloc::vec![link])),
         }
     }
-    SessionTable {
-        rows: groups.into_iter().map(SessionRow::of).collect(),
-        excluded,
-    }
+    let rows = groups
+        .into_iter()
+        .map(|(pair, links)| {
+            let evidence = match &pair {
+                Some(key) => d.row_evidence(key),
+                None => links
+                    .first()
+                    .map(|l| l.evidence.clone())
+                    .unwrap_or_default(),
+            };
+            SessionRow::of(links, evidence)
+        })
+        .collect();
+    SessionTable { rows, excluded }
 }
