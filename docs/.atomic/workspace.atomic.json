@@ -305912,6 +305912,38 @@
         "Owed: the callbacks of the session's queryables are called inside the route of a query, with the tables held for reading, so one that declares on the node may wait as the subscribers' did; a test that holds it. The hosted CI runs the differential layer, but most CI runs are cancelled by a later push while they are queued, so a red of it can go unread. A querier test of that file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
       ]
     },
+    "Round 4119": {
+      "decision_summary": "The callbacks of the session's queryables are called after the routing tables are let go, as the subscribers' were in round 4118. A queryable of the node's own session is the program's callback and may declare on the node; a query the session asked of its own queryable was routed with the tables held for reading and the callback called inside that route, so a callback that declared waited for the read its own thread held (a unit test for it was red). The route now takes the query's branch of the fan under the guard, as it did, and owes the call as a job to the span it opened before the guard: the job calls the handler with no guard held, then takes the tables for reading to send the replies and end the branch, so the final of the query is sent by the last branch to end, whichever way it goes. A route with no span open calls inside its guard as it always did. The same span covers a query a face sent and the session's own get. Nothing else of the differential of the session moves: 25 of 25.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: QueryJob; dispatch_router_local_queryables takes the branch and owes the job; RouterForwarder::run_query_job calls the handler with no guard and takes one to send and end the branch; RouterForwarder::local_get opens the span; deliver_owed is a method that makes samples and jobs; a test.",
+        "crates/wz-runtime-tokio/src/router_forward/local_publish.rs: the span carries the forwarder and owes samples or query jobs, both boxed.",
+        "docs/zenoh-api-on-the-engine.md: the repair."
+      ],
+      "verification_bullets": [
+        "Locally: the new test of a queryable callback that declares while its session asks was red and passes; the 1158 tests of wz-runtime-tokio with the router, token, clock and stack features pass; the whole differential of the session passes, 25 of 25, on the tree before the boxing and the same code after (the boxing is a size change clippy asked for); clippy with warnings denied and the format check pass for wz-runtime-tokio with those features. Not run: the hosted run, the upstream tests of Z8 over queries, the pico and zenohd layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the upstream tests of Z8 over queries ran in no local lane for this change, so the hosted run of the lane is its check; the hosted CI runs the differential layer, but most CI runs are cancelled by a later push while queued, so a red of it can go unread. A querier test of the differential file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ],
+      "publishable_decision_summary": "The callbacks of the session's queryables are called after the routing tables are let go, as the subscribers' were in round 4118. A queryable of the node's own session is the program's callback and may declare on the node; a query the session asked of its own queryable was routed with the tables held for reading and the callback called inside that route, so a callback that declared waited for the read its own thread held (a unit test for it was red). The route now takes the query's branch of the fan under the guard, as it did, and owes the call as a job to the span it opened before the guard: the job calls the handler with no guard held, then takes the tables for reading to send the replies and end the branch, so the final of the query is sent by the last branch to end, whichever way it goes. A route with no span open calls inside its guard as it always did. The same span covers a query a face sent and the session's own get. Nothing else of the differential of the session moves: 25 of 25.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: QueryJob; dispatch_router_local_queryables takes the branch and owes the job; RouterForwarder::run_query_job calls the handler with no guard and takes one to send and end the branch; RouterForwarder::local_get opens the span; deliver_owed is a method that makes samples and jobs; a test.",
+        "crates/wz-runtime-tokio/src/router_forward/local_publish.rs: the span carries the forwarder and owes samples or query jobs, both boxed.",
+        "docs/zenoh-api-on-the-engine.md: the repair."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the new test of a queryable callback that declares while its session asks was red and passes; the 1158 tests of wz-runtime-tokio with the router, token, clock and stack features pass; the whole differential of the session passes, 25 of 25, on the tree before the boxing and the same code after (the boxing is a size change clippy asked for); clippy with warnings denied and the format check pass for wz-runtime-tokio with those features. Not run: the hosted run, the upstream tests of Z8 over queries, the pico and zenohd layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the upstream tests of Z8 over queries ran in no local lane for this change, so the hosted run of the lane is its check; the hosted CI runs the differential layer, but most CI runs are cancelled by a later push while queued, so a red of it can go unread. A querier test of the differential file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
