@@ -306566,6 +306566,34 @@
         "Open: whether a wz-native listening peer that declares a publisher before a router dials it reaches a client behind the router; Session::declare_publisher in wz-runtime-tokio emits the matching Interest at declare time, and the cache that replays it after a reconnect is not known to replay it to a link accepted later. The drop counters of TlsListener are not reachable from the C ABI (the listener is boxed behind TlsDial::listen), so a C program still sees a full arena or key store only as a peer that was closed. Not read: how pico itself settles a certificate's dates. Not rebuilt: the Zephyr kit image; it compiles csrc/wz_tls.c and src/stream.rs, whose C change is under rsa (never set there) and whose Rust change is two fields in a listener. The hosted runs of rounds 4110 to 4135 are mostly cancelled while queued, so the Layer Z lines of T5 have no hosted verdict yet."
       ]
     },
+    "Round 4140": {
+      "decision_summary": "The first hosted run of the nightly fuzz workflow (41461623751, dispatched by hand, 1200 s a target) is read: all seven targets ran their twenty minutes with no failure, each job took 22 to 23 minutes (the cold build and set-up about three), inside its 45-minute limit. The seven corpus entries it saved sum to 11.4 MB, which the fuzz-corpus cache class now records as its measured size against its 60 MB budget. The per-push fuzz-regress job is still unmeasured: the two CI runs that carried Rounds 4131 and 4135 were cancelled before any job was created, replaced by later pushes while queued.",
+      "changes_bullets": [
+        ".github/cache-classes.json: the fuzz-corpus class gains measured_mb 11.4 and its note the run it was measured on, what each target kept and when to remeasure."
+      ],
+      "verification_bullets": [
+        "gh api actions/runs/41461623751: completed, success; the seven jobs success, each started to completed 22 to 23 minutes. gh cache list: seven fuzz-corpus entries on main of that run, 36 kB to 3.8 MB, 11.4 MB in all. workflow_cache_budget_gate.py passes. CI runs 41460802919 and 41463772051 read cancelled with no job."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The fuzz-regress job of ci.yml has not run on a hosted runner yet; the first CI run that completes is where its time is read and the floor of its budget margin set."
+      ],
+      "publishable_decision_summary": "The first hosted run of the nightly fuzz workflow (41461623751, dispatched by hand, 1200 s a target) is read: all seven targets ran their twenty minutes with no failure, each job took 22 to 23 minutes (the cold build and set-up about three), inside its 45-minute limit. The seven corpus entries it saved sum to 11.4 MB, which the fuzz-corpus cache class now records as its measured size against its 60 MB budget. The per-push fuzz-regress job is still unmeasured: the two CI runs that carried Rounds 4131 and 4135 were cancelled before any job was created, replaced by later pushes while queued.",
+      "publishable_changes_bullets": [
+        ".github/cache-classes.json: the fuzz-corpus class gains measured_mb 11.4 and its note the run it was measured on, what each target kept and when to remeasure."
+      ],
+      "publishable_verification_bullets": [
+        "gh api actions/runs/41461623751: completed, success; the seven jobs success, each started to completed 22 to 23 minutes. gh cache list: seven fuzz-corpus entries on main of that run, 36 kB to 3.8 MB, 11.4 MB in all. workflow_cache_budget_gate.py passes. CI runs 41460802919 and 41463772051 read cancelled with no job."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fuzz-regress job of ci.yml has not run on a hosted runner yet; the first CI run that completes is where its time is read and the floor of its budget margin set."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
