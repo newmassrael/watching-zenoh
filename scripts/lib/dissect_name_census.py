@@ -66,8 +66,10 @@ CODECS = ROOT / "out" / "wz-codecs"
 # PROTOCOL: names that come from the zenoh wire spec rather than from a wz codec
 # struct. Flag letters are the spec's own single-character flag names, and the
 # discriminators are its message / body variant names. Neither is a field of any
-# generated struct, and neither is ours to choose.
-PROTOCOL_FLAGS = {"a", "c", "e", "i", "l", "m", "n", "p", "r", "s", "t", "z", "mid"}
+# generated struct, and neither is ours to choose. `s` is the spec's letter too,
+# but the codecs now name the group that flag gates after it (init_body, join:
+# `s: Option<..>`), so it is a codec field and the codec owns the name.
+PROTOCOL_FLAGS = {"a", "c", "e", "i", "l", "m", "n", "p", "r", "t", "z", "mid"}
 PROTOCOL_VARIANTS = {
     "decl_final",
     "decl_kexpr",
@@ -309,6 +311,12 @@ AWAITING_WALKER = {
     "dissector's MID space by design",
     "header_flags": "ext_envelope's codec-internal split of the header byte; the "
     "walker surfaces those bits individually instead",
+    "after_shm": "query_value_zbuf's generated union of its two layouts, chosen by "
+    "whether the shm marker came before it and not by a byte of this codec; the "
+    "walker emits the fields of the layout it read",
+    "header_c_or_f": "interest's generated union of the C and F header bits around "
+    "its body; the walker surfaces those bits as flags and the body's fields by "
+    "their own names",
 }
 
 # NON-NAMES: identifiers a reason backticks that are deliberately NOT names on

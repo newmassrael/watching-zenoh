@@ -232,7 +232,10 @@ CARRIED_SUBJECT = 214
 # reaches `wz-ap-demo` only through `spawn_zenohd*`, whose readiness probe execs
 # it; the sessions under test are in the test process, so the demo is the probe
 # and not the subject, which is what this bucket derives, not a claim written here.
-PROBE_ROUTE = 25
+# 25 -> 27 (step T5 of L6): two legs of `pico_c_examples_on_wz_capi_dropin.rs` reach
+# `wz-ap-demo` only through `spawn_zenohd*`; the subject is a subscriber on wz and
+# zenohd is the router it hears through, so the demo is the probe here as well.
+PROBE_ROUTE = 27
 REFUSAL_ONLY = 8
 
 # THE LIVE POLICY SPLIT, budgeted so it cannot go back to being invisible.

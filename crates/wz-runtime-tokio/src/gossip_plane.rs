@@ -431,13 +431,13 @@ impl GossipCore {
     }
 
     /// The list the graph built, or nothing for one past the bound, which the graph refuses when
-    /// it builds it. A list that was not built is not sent: this is a node that cannot be told
-    /// rather than a node that is lied to.
+    /// it builds it. A refused list is not sent: this is a node that cannot be told rather than a
+    /// node that is lied to.
     fn built<T>(list: Result<T, CodecError>) -> Option<T> {
         match list {
             Ok(list) => Some(list),
             Err(err) => {
-                log::debug!("gossip: a topology list was not built: {err:?}");
+                log::debug!("gossip: the graph refused a topology list: {err:?}");
                 None
             }
         }
