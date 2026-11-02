@@ -306278,6 +306278,36 @@
         "Open: the admin image's stack gate, text and resource rows (its stack is the build's default 32,768 bytes, peak 22,189 in the first part's runs); a hosted build of it in Layer Qzk; a hint for more than one peer and more than one commander key per verb on the kit; the GET medians of the asking and secure-channel clients against 1.10.2."
       ]
     },
+    "Round 4131": {
+      "decision_summary": "The C ABI doors a consumer hands outside bytes to are fuzzed, as the analyzer asked: its process runs them, so a defect in them is its crash, and its own fuzzer does not instrument wz. crates/wz-fuzz is a workspace of its own on a pinned nightly with AddressSanitizer, with a libFuzzer target per family of doors (pcap, live, transport, text, proto, e2e, replay); each calls the extern C functions as a C caller does and holds every answer to the contract the doors document. Seeds come from captures/ and the crate's examples. Layer Fz replays them on every push and fuzz.yml fuzzes each target every night. The first replay found a defect: Dissection::follow_lent lent a container before refusing it as shrunk, and the next read of a flow panicked across the ABI. It now lends a container only once it is admitted.",
+      "changes_bullets": [
+        "crates/wz-capture/src/lib.rs: follow_bytes takes the container to lend and lends it after the shrink check; redecode_gate.rs: a_container_refused_as_shrunk_is_not_lent. crates/wz-capi-dissect/src/lib.rs: wz_dissect_live_follow_lent states that a refused container is not lent. crates/wz-fuzz: the seven targets, their contract checks (src/lib.rs), the lock and the nightly pin. scripts/fuzz.sh (build, regress, run, sweep), scripts/lib/fuzz_seeds.py (seeds and the pinned reproducer), Layer Fz of scripts/run-ci.sh and the fuzz-regress job of ci.yml, .github/workflows/fuzz.yml, the fuzz-corpus cache class, fuzz_seeds.py --selftest in the pre-push gate array, .gitignore."
+      ],
+      "verification_bullets": [
+        "scripts/fuzz.sh regress on a build machine before the fix: six targets pass, live fails on its seed of zenoh-v1-10-0-tcp-full.pcap opened through follow_lent with the panic of passive_messages.rs. After the fix every target passes, counted per target: pcap 432, live 864, transport 512, text 18, proto 5, e2e 4, replay 5 inputs (the seeds then rotate to 144 and 145 for pcap and live). The new wz-capture test passes and fails on the old order of lending, with the same panic. wz-capture lib tests 1280 pass; clippy of wz-capture and of the fuzz crate is clean; fuzz_seeds.py --selftest, shellcheck, actionlint, Layer L and the static gates of the hook's array pass. The hosted runs have not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The fuzz-regress job and the nightly fuzz.yml have not run on a hosted runner: their time, the floor of the job's budget margin and the size of the fuzz-corpus cache class are to be measured from the first runs. Inputs a nightly run finds are fixed as their own rounds, each with its reproducer pinned in fuzz_seeds.py or copied to crates/wz-fuzz/regressions/. The fuzz targets' build is not cached: the cache budget has no room for another rust-cache class."
+      ],
+      "publishable_decision_summary": "The C ABI doors a consumer hands outside bytes to are fuzzed, as the analyzer asked: its process runs them, so a defect in them is its crash, and its own fuzzer does not instrument wz. crates/wz-fuzz is a workspace of its own on a pinned nightly with AddressSanitizer, with a libFuzzer target per family of doors (pcap, live, transport, text, proto, e2e, replay); each calls the extern C functions as a C caller does and holds every answer to the contract the doors document. Seeds come from captures/ and the crate's examples. Layer Fz replays them on every push and fuzz.yml fuzzes each target every night. The first replay found a defect: Dissection::follow_lent lent a container before refusing it as shrunk, and the next read of a flow panicked across the ABI. It now lends a container only once it is admitted.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/lib.rs: follow_bytes takes the container to lend and lends it after the shrink check; redecode_gate.rs: a_container_refused_as_shrunk_is_not_lent. crates/wz-capi-dissect/src/lib.rs: wz_dissect_live_follow_lent states that a refused container is not lent. crates/wz-fuzz: the seven targets, their contract checks (src/lib.rs), the lock and the nightly pin. scripts/fuzz.sh (build, regress, run, sweep), scripts/lib/fuzz_seeds.py (seeds and the pinned reproducer), Layer Fz of scripts/run-ci.sh and the fuzz-regress job of ci.yml, .github/workflows/fuzz.yml, the fuzz-corpus cache class, fuzz_seeds.py --selftest in the pre-push gate array, .gitignore."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/fuzz.sh regress on a build machine before the fix: six targets pass, live fails on its seed of zenoh-v1-10-0-tcp-full.pcap opened through follow_lent with the panic of passive_messages.rs. After the fix every target passes, counted per target: pcap 432, live 864, transport 512, text 18, proto 5, e2e 4, replay 5 inputs (the seeds then rotate to 144 and 145 for pcap and live). The new wz-capture test passes and fails on the old order of lending, with the same panic. wz-capture lib tests 1280 pass; clippy of wz-capture and of the fuzz crate is clean; fuzz_seeds.py --selftest, shellcheck, actionlint, Layer L and the static gates of the hook's array pass. The hosted runs have not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fuzz-regress job and the nightly fuzz.yml have not run on a hosted runner: their time, the floor of the job's budget margin and the size of the fuzz-corpus cache class are to be measured from the first runs. Inputs a nightly run finds are fixed as their own rounds, each with its reproducer pinned in fuzz_seeds.py or copied to crates/wz-fuzz/regressions/. The fuzz targets' build is not cached: the cache budget has no room for another rust-cache class."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
