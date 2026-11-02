@@ -305880,6 +305880,38 @@
         "Replaces the carry of round 4106. Model 3 is shipped; the consumer is told fields 49, session_table 7 and the commit. Open, in order: the freezing entry (the rule, the region level, the priors, the group definition) before a validation corpus is read; the validation corpus of the workloads, implementations and links section 6.4 lists as absent, read once; model 4, a likelihood per null protocol in the no sum's numerator."
       ]
     },
+    "Round 4118": {
+      "decision_summary": "The last defect of the differential of the session (E18) found with round 4109 is repaired: the burst of an upstream publisher did not finish, and the whole file now passes, 25 of 25. The scenario has a subscriber callback that uses the session that calls it. A subscriber of the node's own session was called inside the route that found it, with the routing tables held for reading, and the read of a thread is recursive, so it does not let a writer in; the declaration the callback made was a writer, and it waited for the read its own thread held, with every later declaration on the node queued behind it. The callbacks of the node's own subscribers are now called once the guard of the message or the publish that found them is let go, whether it came from the session's put or from a link: a span opened before the guard owes the deliveries and makes them after it. The callbacks of the session's queryables are still called inside the route of a query.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/local_publish.rs: DeliveryScope and owe_delivery; the scope of a publish no longer carries deliveries.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: publishing opens a DeliveryScope before the guard, forward_frame opens one for the messages that read the tables, deliver_to_hosted_subscribers owes its deliveries inside a scope, deliver_owed makes them; two tests, one for a put of the session and one for a message of a face.",
+        "docs/zenoh-api-on-the-engine.md: the repair and what it leaves."
+      ],
+      "verification_bullets": [
+        "Locally: the burst test fails to finish on the tree before and finishes in 2 s after, with the transcripts equal to upstream's; the whole file of the differential of the session passes, 25 of 25 with none skipped; the 362 tests of the forwarder with the router, token, clock and stack features pass, the two new ones among them; clippy with warnings denied and the format check pass for wz-runtime-tokio with those features. Not run: the hosted run, the pico and zenohd interop layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the callbacks of the session's queryables are called inside the route of a query, with the tables held for reading, so one that declares on the node may wait as the subscribers' did; a test that holds it. The hosted CI runs the differential layer, but most CI runs are cancelled by a later push while they are queued, so a red of it can go unread. A querier test of that file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ],
+      "publishable_decision_summary": "The last defect of the differential of the session (E18) found with round 4109 is repaired: the burst of an upstream publisher did not finish, and the whole file now passes, 25 of 25. The scenario has a subscriber callback that uses the session that calls it. A subscriber of the node's own session was called inside the route that found it, with the routing tables held for reading, and the read of a thread is recursive, so it does not let a writer in; the declaration the callback made was a writer, and it waited for the read its own thread held, with every later declaration on the node queued behind it. The callbacks of the node's own subscribers are now called once the guard of the message or the publish that found them is let go, whether it came from the session's put or from a link: a span opened before the guard owes the deliveries and makes them after it. The callbacks of the session's queryables are still called inside the route of a query.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/local_publish.rs: DeliveryScope and owe_delivery; the scope of a publish no longer carries deliveries.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: publishing opens a DeliveryScope before the guard, forward_frame opens one for the messages that read the tables, deliver_to_hosted_subscribers owes its deliveries inside a scope, deliver_owed makes them; two tests, one for a put of the session and one for a message of a face.",
+        "docs/zenoh-api-on-the-engine.md: the repair and what it leaves."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the burst test fails to finish on the tree before and finishes in 2 s after, with the transcripts equal to upstream's; the whole file of the differential of the session passes, 25 of 25 with none skipped; the 362 tests of the forwarder with the router, token, clock and stack features pass, the two new ones among them; clippy with warnings denied and the format check pass for wz-runtime-tokio with those features. Not run: the hosted run, the pico and zenohd interop layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the callbacks of the session's queryables are called inside the route of a query, with the tables held for reading, so one that declares on the node may wait as the subscribers' did; a test that holds it. The hosted CI runs the differential layer, but most CI runs are cancelled by a later push while they are queued, so a red of it can go unread. A querier test of that file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
