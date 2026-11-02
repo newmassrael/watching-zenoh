@@ -58,10 +58,16 @@ fn main() {
     // RSA is the host's (feature `rsa`): the configuration headers and the C side read this one
     // macro, so the library and the channel are built to the same answer.
     let rsa = env::var_os("CARGO_FEATURE_RSA").is_some();
+    // So is the room for sessions (feature `host-lock`): a host program holds more of them than
+    // an image, and the library's own count of keys it holds at once is sized to that.
+    let host = env::var_os("CARGO_FEATURE_HOST_LOCK").is_some();
 
     let mut cmake_config = cmake::Config::new(&mbedtls);
     if rsa {
         cmake_config.cflag("-DWZ_TLS_RSA=1");
+    }
+    if host {
+        cmake_config.cflag("-DWZ_TLS_HOST=1");
     }
     let dst = cmake_config
         .define("TF_PSA_CRYPTO_DIR", &crypto)
@@ -96,6 +102,9 @@ fn main() {
         );
     if rsa {
         channel.define("WZ_TLS_RSA", Some("1"));
+    }
+    if host {
+        channel.define("WZ_TLS_HOST", Some("1"));
     }
     channel.compile("wz_tls");
 

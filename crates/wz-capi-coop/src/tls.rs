@@ -35,7 +35,16 @@ use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial, TlsStream};
 /// The bytes the library's allocations come from on a host. The memory is zeroed and so reserved
 /// and not touched until the library uses it; a session's use is measured by
 /// [`channel::arena_peak`]. The size is a host program's room for sessions, not an image's
-/// budget, and is not yet measured against a count of sessions.
+/// budget.
+///
+/// Measured against a count of sessions (a listener holding sessions from an OpenSSL client, with
+/// an RSA-2048 certificate): a held session takes about 20 KB of the arena, and the arena took
+/// 198 of them (4,040,772 B at the last) before it refused the next handshake. What bounds a
+/// program first is the library's store of keys, four to a session, which the host build sizes to
+/// this arena (`WZ_TLS_HOST` in `wz-tls-mbedtls`'s `wz_tls_crypto_config.h`); at the library's
+/// default of 32 the same listener held 7. A handshake the arena or the store has no room for is
+/// dropped and the peer sees a close, so a program that expects more than about 190 sessions at
+/// once is the reason to raise this.
 pub const HOST_ARENA: usize = 4 << 20;
 
 /// Why a [`HostTls`] could not be made.

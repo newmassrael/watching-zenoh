@@ -47,6 +47,18 @@
 #define PSA_WANT_ALG_RSA_OAEP                   1
 #endif
 
+/* The keys PSA Crypto holds at once, for the host (`host-lock` feature of the crate, which defines
+ * WZ_TLS_HOST). An established TLS 1.3 session holds four of them (measured: with the library's
+ * default of 32, a listener held 7 sessions and a handshake that needed a slot beyond them was
+ * dropped without a word; with 256 it held 63, so four each, and one handshake in flight takes
+ * four more), and the room the host gives sessions (`HOST_ARENA` in `wz-capi-coop`, 4 MiB at about
+ * 20 KB for a held session with an RSA-2048 certificate, so about 200) is what should bound a
+ * program, not this count. The slots are static storage of the library, small beside an arena. The
+ * kit image sizes the store by Kconfig and does not define this. */
+#if defined(WZ_TLS_HOST)
+#define MBEDTLS_PSA_KEY_SLOT_COUNT 1024
+#endif
+
 /* PSA Crypto itself, with its random generator: a CTR_DRBG seeded from the platform's entropy
  * (the operating system's on a host, as the kit's is its TRNG). */
 #define MBEDTLS_PSA_CRYPTO_C

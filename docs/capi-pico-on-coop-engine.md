@@ -1028,16 +1028,44 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     (a router stand-in pushes a sample naming an id the engine declared; the literal-key push to
     the same subscriber is the control), which times out waiting for the sample when the space
     resolves nothing, and the three legs, which passed after it and failed before. Not covered:
-    the publisher direction through a router over `tls/` (the legs here carry a sample TO wz),
-    and a router the engine is a peer of rather than a client.
-  - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: it does
-    against upstream's examples as built here (Mbed TLS 3.6.4 with 1.2 and 1.3 both on; the legs
-    pass against a channel that speaks 1.3 only, so they negotiated it), and zenohd's rustls
-    speaks it. A pico built on an Mbed TLS with no 1.3 (2.28, or a board's) would need 1.2, and
-    none was measured. The clock: the provider states the host's wall time at each dial, and how
-    pico itself settles a certificate's dates was not read. The arena a chain needs, RSA included,
-    beyond a two-link chain is not measured against a count of sessions (the host's is 4 MiB,
-    reserved and untouched until used), nor is the cost of the RSA handshake in it.
+    a router the engine is a peer of rather than a client, and the publisher direction through a
+    router over `tls/` (the legs here carry a sample TO wz); that direction was measured after T5
+    and is not the channel's, see the next bullet.
+  - The publisher that a router dials, measured. A program that listens as a peer and declares a
+    publisher, a real zenohd that dials it (`-e`), and a real pico `z_sub` client behind zenohd:
+    zenoh's own `z_pub` (Rust, a peer) delivers in 2.5 s, and the router's log shows why: the peer
+    sends `Interest(CurrentFuture, keyexprs+subscribers)` for its publisher's key as soon as the
+    link is up (`declare_publisher_inner` sends it, and the peer hat repeats it to a new face,
+    `repropagate_interests`), and the router answers by propagating the client's subscriber to it. The pico `z_pub`
+    and the drop-in `z_pub` on wz do not deliver, and the router's log shows neither the Interest
+    nor a Push from them. That is pico's rule and the drop-in keeps it: a pico peer asks only
+    while it holds a router as a peer at the time it declares (`_z_add_interest`; the drop-in's
+    `interest_form` in `write_filter.rs`), and the publisher here declares before the router has
+    dialed. So the arrangement is not a defect of wz's channel or of the drop-in's parity, it is
+    the upstream pico's limit; no test pins it, because a test of "nothing is delivered" would hold
+    wz to pico where wz may do better.
+  - Whether TLS 1.3 alone suffices, measured. A client that offers 1.2 only (OpenSSL 3.0
+    `s_client -tls1_2`) is refused with the `protocol_version` alert (70) and the listener sees
+    nothing to accept. Against upstream's examples as built here (Mbed TLS 3.6.4 with 1.2 and 1.3
+    both on) the legs negotiate 1.3, and zenohd's rustls speaks it. A pico built on an Mbed TLS
+    with no 1.3 (2.28, or a board's) is such a client and cannot open a `tls/` link to wz; wz has
+    no 1.2 in its fixed-memory configuration (`wz_tls_mbedtls_config.h`), and none is planned.
+  - The arena against a count of sessions, measured on a host (a listener holding sessions from
+    OpenSSL clients, an RSA-2048 certificate): about 20 KB of arena for a held server session,
+    198 sessions in the 4 MiB (4,040,772 B at the last), and the next handshake dropped. That
+    count was not reachable before this measurement: an established session holds four of the
+    keys PSA Crypto keeps in a store of 32 by default, so a listener held 7 sessions and dropped
+    the eighth handshake with 4 MiB unused. The host build now sizes the store to the arena
+    (`WZ_TLS_HOST`, set by `host-lock`; the kit image sizes it by Kconfig and is untouched), and
+    `tests/tls_sessions.rs` holds 24 connections with both ends in one process (it holds 2 of 24
+    without the setting).
+  - The clock, read: the examples' certificates are valid from March 2023 to March 2123, so no
+    leg here depends on a date. How pico itself settles a certificate's dates was not read, and
+    stays open; the provider states the host's wall time at each dial and a lapsed certificate is
+    refused (`tests/tls_provider.rs`).
+  - The Zephyr kit image was not rebuilt here: it needs the Zephyr workspace (Layer Qzk builds it
+    on the hosted runner). Nothing of this step reaches it: `WZ_TLS_HOST` comes from `build.rs`
+    under `host-lock`, and the image compiles the channel's C side itself.
 
 ### What is decided and what is open
 
