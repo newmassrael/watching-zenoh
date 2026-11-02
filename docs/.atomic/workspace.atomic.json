@@ -306248,6 +306248,36 @@
         "Owed: a fence on the writer lanes that keeps a Control frame behind the frames queued before it is built and tested (branch fence-wip) but not landed: with it the upstream liveliness regression_1 test fails about 4 times in 100 on the build host (0 in 105 without), every failure after the two nodes resolve crossing dials and replace a face; that race is the link admission work. Also owed: the hosted verdicts of rounds 4113 to this one."
       ]
     },
+    "Round 4130": {
+      "decision_summary": "The second part of decision D14's witness is built and held on the T2G kit: the admin node opens a peer by its zid and the admin root lists the session. The admin image gains a hint the build declares for one peer (CONFIG_WZ_PEER_NODE_ZID and CONFIG_WZ_PEER_NODE_LOCATOR, read when the image is compiled, declared to the node's directory at start as a permanent hint through AdminCore::declare_node), and the kit lane builds it with the router's key listed for open as well as status and a second key, the peer's, whose zid the hint names. The run starts that peer as a second stock zenohd listening for tls/ on the cable with the node's certificate as the root it pins, and holds, in order: before the open the admin root lists the router's session and not the peer's, so a hint dials nobody; the router's open for the peer is taken (the verdict word opening); the admin root then lists both sessions, the second over the link from the node's own port to the peer's tls/ port, so the node dialled the peer for the zid its hint names; and the earlier control, a router whose key is not listed, is still refused status. The run held on its first try and again with the before-open check, against the pinned zenohd 1.10.2. What remains of D14 is the image's rows (stack gate, text, resource) and a hosted build of it.",
+      "changes_bullets": [
+        "deploy/zephyr-admin-node: Kconfig (the peer hint), CMakeLists.txt (its environment), rust/src/fixed_admin.rs (the hint declared at start). scripts/kit-lane.sh: the peer's identity and the open and sessions steps of the admin run. docs/session-lifecycle-intent.md: D14's second part."
+      ],
+      "verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: two runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls, the second with the before-open check; every step held, including the admin root listing the peer only after the open and naming the node's own link to the peer's tls/ port, and no wz: FAIL line. The image builds locally and on the lab host; kit-lane.sh --selftest passes. The hosted run has not been read; no hosted lane builds this image."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the admin image's stack gate, text and resource rows (its stack is the build's default 32,768 bytes, peak 22,189 in the first part's runs); a hosted build of it in Layer Qzk; a hint for more than one peer and more than one commander key per verb on the kit; the GET medians of the asking and secure-channel clients against 1.10.2."
+      ],
+      "publishable_decision_summary": "The second part of decision D14's witness is built and held on the T2G kit: the admin node opens a peer by its zid and the admin root lists the session. The admin image gains a hint the build declares for one peer (CONFIG_WZ_PEER_NODE_ZID and CONFIG_WZ_PEER_NODE_LOCATOR, read when the image is compiled, declared to the node's directory at start as a permanent hint through AdminCore::declare_node), and the kit lane builds it with the router's key listed for open as well as status and a second key, the peer's, whose zid the hint names. The run starts that peer as a second stock zenohd listening for tls/ on the cable with the node's certificate as the root it pins, and holds, in order: before the open the admin root lists the router's session and not the peer's, so a hint dials nobody; the router's open for the peer is taken (the verdict word opening); the admin root then lists both sessions, the second over the link from the node's own port to the peer's tls/ port, so the node dialled the peer for the zid its hint names; and the earlier control, a router whose key is not listed, is still refused status. The run held on its first try and again with the before-open check, against the pinned zenohd 1.10.2. What remains of D14 is the image's rows (stack gate, text, resource) and a hosted build of it.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-admin-node: Kconfig (the peer hint), CMakeLists.txt (its environment), rust/src/fixed_admin.rs (the hint declared at start). scripts/kit-lane.sh: the peer's identity and the open and sessions steps of the admin run. docs/session-lifecycle-intent.md: D14's second part."
+      ],
+      "publishable_verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: two runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls, the second with the before-open check; every step held, including the admin root listing the peer only after the open and naming the node's own link to the peer's tls/ port, and no wz: FAIL line. The image builds locally and on the lab host; kit-lane.sh --selftest passes. The hosted run has not been read; no hosted lane builds this image."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the admin image's stack gate, text and resource rows (its stack is the build's default 32,768 bytes, peak 22,189 in the first part's runs); a hosted build of it in Layer Qzk; a hint for more than one peer and more than one commander key per verb on the kit; the GET medians of the asking and secure-channel clients against 1.10.2."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
