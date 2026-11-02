@@ -306640,6 +306640,38 @@
         "Owed, still: the alias table that only allocates, a whole-process stop in about 1 of 30 runs, the aggregate reply retraction of peer-hat faces that waits for the last backer, the configured endpoint dial a guard refuses and retries on schedule."
       ]
     },
+    "Round 4142": {
+      "decision_summary": "A control message (a declaration, an undeclaration) is a barrier between the data sent before it and after it, but the link's writer serves its priority lanes in strict order, so a Control frame left ahead of data queued earlier and an undeclaration could reach the peer before the puts that name what it undeclares. Every queued frame now carries an enqueue number, the session raises a fence on the link after the barrier flush, and the Control lane waits while a lane holds an entry numbered below the fence. A session with no QoS keeps one lane and is not held. The reconnect seam forwards the fence to the live link. The race it exposed in the upstream liveliness test (a face replaced after crossing dials) was repaired by link admission in the handshake, and the test passes 200 of 200 with the fence.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: enqueue numbers, OutboundTx::fence, control_held_by_fence in take_next and take_next_packed, six tests.",
+        "crates/wz-session-core/src/link.rs, session_actions.rs, reconnect.rs: BoxedLinkDriver::tx_fence (default none), raised after the Control barrier flush, forwarded by both swap seams.",
+        "crates/wz-runtime-tokio stream, ws, serial, udp and quic drivers delegate tx_fence; the recording fixture counts fences; session_glue test a_declaration_raises_the_links_fence_after_the_data_before_it_and_before_itself."
+      ],
+      "verification_bullets": [
+        "On the build host: the upstream liveliness regression_1 test passes 200 of 200 with the fence (9 of 211 failed before the link admission repair); the wz-runtime-tokio lib tests pass with default features (641) and with all features (2239); clippy of wz-session-core with all features and all targets is clean. Earlier on the same change: whole Z8 files regions 126/126, liveliness 46/46, routing 8/8, session 5/5, the differential 25/25; disabling the fence or its call fails four tests. Not run: the hosted run, the multicast lane."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the multicast writer lane is not under the fence (it is not a unicast link driver), so a declaration there can still overtake earlier data. Also owed: the hosted verdicts of rounds 4113 to this one."
+      ],
+      "publishable_decision_summary": "A control message (a declaration, an undeclaration) is a barrier between the data sent before it and after it, but the link's writer serves its priority lanes in strict order, so a Control frame left ahead of data queued earlier and an undeclaration could reach the peer before the puts that name what it undeclares. Every queued frame now carries an enqueue number, the session raises a fence on the link after the barrier flush, and the Control lane waits while a lane holds an entry numbered below the fence. A session with no QoS keeps one lane and is not held. The reconnect seam forwards the fence to the live link. The race it exposed in the upstream liveliness test (a face replaced after crossing dials) was repaired by link admission in the handshake, and the test passes 200 of 200 with the fence.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: enqueue numbers, OutboundTx::fence, control_held_by_fence in take_next and take_next_packed, six tests.",
+        "crates/wz-session-core/src/link.rs, session_actions.rs, reconnect.rs: BoxedLinkDriver::tx_fence (default none), raised after the Control barrier flush, forwarded by both swap seams.",
+        "crates/wz-runtime-tokio stream, ws, serial, udp and quic drivers delegate tx_fence; the recording fixture counts fences; session_glue test a_declaration_raises_the_links_fence_after_the_data_before_it_and_before_itself."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: the upstream liveliness regression_1 test passes 200 of 200 with the fence (9 of 211 failed before the link admission repair); the wz-runtime-tokio lib tests pass with default features (641) and with all features (2239); clippy of wz-session-core with all features and all targets is clean. Earlier on the same change: whole Z8 files regions 126/126, liveliness 46/46, routing 8/8, session 5/5, the differential 25/25; disabling the fence or its call fails four tests. Not run: the hosted run, the multicast lane."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the multicast writer lane is not under the fence (it is not a unicast link driver), so a declaration there can still overtake earlier data. Also owed: the hosted verdicts of rounds 4113 to this one."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
