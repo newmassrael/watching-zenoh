@@ -304986,6 +304986,40 @@
         "Open: the mutual_dial failure (twice macOS, once Linux), owned by the pico session, whose diagnostic found the listen port free after the failed open. The C1cn guard reported 2 of 4 guarded legs unreached because the layer stopped at the unclaimed test; the next hosted run says whether the other two ran. The admin node witness (deploy/zephyr-admin-loopback) lands with this push; the product image, SO_REUSEADDR on the Zephyr listener and the query transport through a real session remain."
       ]
     },
+    "Round 4093": {
+      "decision_summary": "The SN mixture computed in integers, wired into nothing. The weights are integers in a no_std crate with no third-party dependency and no float maths outside tests, so the mixture of round 4089 needed its arithmetic first. zenoh_mixture.rs: log2 of an integer to 64 fractional bits by squaring a 128-bit mantissa, exact for the powers of two and within 1e-12 bits of the floating-point logarithm elsewhere; a gamma ratio by shifting the argument up to 16 and Stirling, so the cost does not grow with the steps a flow holds; the Beta parameters as fractions of one denominator, so a rising factorial is a product of integers over it. Held to a floating-point sum over three priors and 64 step counts (within the rounding), to the rising factorial up to 1e5 factors (3e-9 bits) and to eleven values computed apart from it, to the unit. Counts above 2^36 are counted as 2^36. Not wired: MODEL stays 2. Also: the two close-ingress pins moved after a re-read; the files changed by a cfg line alone (target_has_atomic), and no clause of the reason moves.",
+      "changes_bullets": [
+        "`crates/wz-capture/src/zenoh_mixture.rs` (new, public, no_std): `log2_q64`, `log2_gamma_q64`, `SnMixture` and `MAX_STEPS`, with six tests; `lib.rs` declares it.",
+        "`docs/flow-zenoh-verdict.md` 6.6: what exists now and what is left (the prior as generated parameters, `sn_steps_weight` taking the mixture, the pinned examples, the model number).",
+        "`docs/reason-review-pins.md`: the session-close-ingress rows of drive.rs and session_actions.rs, which peers changed by one cfg predicate each."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1631 pass with lz4 and 1616 without, the six mixture tests pass, clippy clean for three builds including no default features. The first gate run failed two rows: 84 (my module docs linked by bare name and cargo doc could not resolve them, now by path) and 59 (the pins of two files a peer changed, read and moved). Then the static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open, in order: the prior as generated parameters (a rounded fit in the calibration file, like the rest), sn_steps_weight taking the mixture in place of the two constants, the pinned examples that move with it, the model number and the zenoh-analyzer session (null no flows read undecided under the units candidate). A flow with more steps than 2^36 is counted as 2^36. The prior is a maximum-likelihood point, the null side of the steps is derived, kappa of the units needs zenoh groups that fail units. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
+      ],
+      "publishable_decision_summary": "The SN mixture computed in integers, wired into nothing. The weights are integers in a no_std crate with no third-party dependency and no float maths outside tests, so the mixture of round 4089 needed its arithmetic first. zenoh_mixture.rs: log2 of an integer to 64 fractional bits by squaring a 128-bit mantissa, exact for the powers of two and within 1e-12 bits of the floating-point logarithm elsewhere; a gamma ratio by shifting the argument up to 16 and Stirling, so the cost does not grow with the steps a flow holds; the Beta parameters as fractions of one denominator, so a rising factorial is a product of integers over it. Held to a floating-point sum over three priors and 64 step counts (within the rounding), to the rising factorial up to 1e5 factors (3e-9 bits) and to eleven values computed apart from it, to the unit. Counts above 2^36 are counted as 2^36. Not wired: MODEL stays 2. Also: the two close-ingress pins moved after a re-read; the files changed by a cfg line alone (target_has_atomic), and no clause of the reason moves.",
+      "publishable_changes_bullets": [
+        "`crates/wz-capture/src/zenoh_mixture.rs` (new, public, no_std): `log2_q64`, `log2_gamma_q64`, `SnMixture` and `MAX_STEPS`, with six tests; `lib.rs` declares it.",
+        "`docs/flow-zenoh-verdict.md` 6.6: what exists now and what is left (the prior as generated parameters, `sn_steps_weight` taking the mixture, the pinned examples, the model number).",
+        "`docs/reason-review-pins.md`: the session-close-ingress rows of drive.rs and session_actions.rs, which peers changed by one cfg predicate each."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1631 pass with lz4 and 1616 without, the six mixture tests pass, clippy clean for three builds including no default features. The first gate run failed two rows: 84 (my module docs linked by bare name and cargo doc could not resolve them, now by path) and 59 (the pins of two files a peer changed, read and moved). Then the static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open, in order: the prior as generated parameters (a rounded fit in the calibration file, like the rest), sn_steps_weight taking the mixture in place of the two constants, the pinned examples that move with it, the model number and the zenoh-analyzer session (null no flows read undecided under the units candidate). A flow with more steps than 2^36 is counted as 2^36. The prior is a maximum-likelihood point, the null side of the steps is derived, kappa of the units needs zenoh groups that fail units. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
