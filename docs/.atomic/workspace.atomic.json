@@ -306784,6 +306784,54 @@
         "The Zephyr venv exists on one machine only, so Layers Qz and Qzk cannot be run on a build host through bx; declaring it as a capability of the fleet and of bx.toml is open. The pins of stack_call_contracts.json are integers moved by hand at every SCE pin; a ledger the build writes and the gate compares is open. Layer M's wz_router_hat_advertises_group_sub_reaches_pico_zsub failed once on hosted and was not reproduced."
       ]
     },
+    "Round 4147": {
+      "decision_summary": "The cooperative engine now decides a second link to a held node in the link's handshake, as the tokio nodes do, instead of after both ends have brought it up. The table behind the decision moved into wz-session-core (LinkBook, and LinkRegistry over the runtime's own lock) so that one table answers for every engine; the tokio registry is an alias of it. Each cooperative link takes a lease before its handshake runs, an established link keeps its place, and of two links still in their handshake the one the lower zid dialled is kept. The face swap after the handshake (admission, displace) is gone: the engine builds only where pointer atomics exist, so the branch for a target without them could not be compiled. The dial role's face that a node refused stands by until no other face reaches that node, read from the face table at each step, so a link that dies in its handshake frees the node as well.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/link_admission.rs: LinkBook (the pure table and its rule) and LinkRegistry over a runtime's Mutex; LinkLease keeps the node it last asked about and reserve takes it mutably; the table's tests moved here and run on LinkBook.",
+        "crates/wz-session-core/src/session_actions.rs: link_admission_node, the node a link's admission was asked about, which a link refused at the InitAck can still name.",
+        "crates/wz-runtime-tokio/src/link_registry.rs: LinkRegistry is an alias of the shared one on the tokio runtime; a test holds the lock side (four inbound links to one node admit exactly one).",
+        "crates/wz-capi-coop/src/engine.rs: one admission per engine, installed on every link before its handshake; the dial role's refused face stands by as Held and is dialled again when no other face reaches the node; the post-handshake admission, displace, release_held and the face's dialled flag are removed.",
+        "crates/wz-capi-coop/src/admission_gate.rs and src/tests/one_face.rs: the gate now holds input until the face is brought up; the crossing-dial test asserts one face up and none down at each node."
+      ],
+      "verification_bullets": [
+        "Build machine: wz-session-core link_admission tests 11 passed; wz-runtime-tokio (routing-router-hat, router-connect-reconcile) link_registry test, router_mutual_dial_e2e and link_admission_mutual_dial_e2e passed; wz-capi-coop lib 40 of 40 passed on three consecutive runs (listen, query, queryable, local-queryable, connectivity), its crossing-dial test five runs in a row with one face up and none down at each node.",
+        "clippy -D warnings rc 0 for wz-session-core, wz-runtime-tokio, and wz-capi-coop (default, no default features, and with listen); cargo check of wz-capi-core tests rc 0.",
+        "Not run: the hosted lanes, the pico drop-in lanes that use the cooperative engine, and a build of the engine for a target without pointer atomics (it does not build there today: wz-capi-port needs alloc::sync)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the hosted verdicts for this round and the earlier router admission, and the lanes that run the cooperative engine against a listener.",
+        "Owed: a refused dial is retried on the schedule with no upper bound on the tokio side; the cooperative engine's dial role stands by instead, but a refusal that the peer made (it holds the node, this end does not yet) still takes the schedule.",
+        "Owed: the accepting side of a loop that aggregates links (max_links above one) is outside the registry by design; two links dialled at the same time are not barriered against each other.",
+        "Owed, still: regions scenario 7 about 0.3 percent (repeated timestamp and an equality assertion of a queque test, not attributed), the alias table that only allocates, a whole-process stop in about 1 of 30 runs, the aggregate reply retraction of peer-hat faces."
+      ],
+      "publishable_decision_summary": "The cooperative engine now decides a second link to a held node in the link's handshake, as the tokio nodes do, instead of after both ends have brought it up. The table behind the decision moved into wz-session-core (LinkBook, and LinkRegistry over the runtime's own lock) so that one table answers for every engine; the tokio registry is an alias of it. Each cooperative link takes a lease before its handshake runs, an established link keeps its place, and of two links still in their handshake the one the lower zid dialled is kept. The face swap after the handshake (admission, displace) is gone: the engine builds only where pointer atomics exist, so the branch for a target without them could not be compiled. The dial role's face that a node refused stands by until no other face reaches that node, read from the face table at each step, so a link that dies in its handshake frees the node as well.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/link_admission.rs: LinkBook (the pure table and its rule) and LinkRegistry over a runtime's Mutex; LinkLease keeps the node it last asked about and reserve takes it mutably; the table's tests moved here and run on LinkBook.",
+        "crates/wz-session-core/src/session_actions.rs: link_admission_node, the node a link's admission was asked about, which a link refused at the InitAck can still name.",
+        "crates/wz-runtime-tokio/src/link_registry.rs: LinkRegistry is an alias of the shared one on the tokio runtime; a test holds the lock side (four inbound links to one node admit exactly one).",
+        "crates/wz-capi-coop/src/engine.rs: one admission per engine, installed on every link before its handshake; the dial role's refused face stands by as Held and is dialled again when no other face reaches the node; the post-handshake admission, displace, release_held and the face's dialled flag are removed.",
+        "crates/wz-capi-coop/src/admission_gate.rs and src/tests/one_face.rs: the gate now holds input until the face is brought up; the crossing-dial test asserts one face up and none down at each node."
+      ],
+      "publishable_verification_bullets": [
+        "Build machine: wz-session-core link_admission tests 11 passed; wz-runtime-tokio (routing-router-hat, router-connect-reconcile) link_registry test, router_mutual_dial_e2e and link_admission_mutual_dial_e2e passed; wz-capi-coop lib 40 of 40 passed on three consecutive runs (listen, query, queryable, local-queryable, connectivity), its crossing-dial test five runs in a row with one face up and none down at each node.",
+        "clippy -D warnings rc 0 for wz-session-core, wz-runtime-tokio, and wz-capi-coop (default, no default features, and with listen); cargo check of wz-capi-core tests rc 0.",
+        "Not run: the hosted lanes, the pico drop-in lanes that use the cooperative engine, and a build of the engine for a target without pointer atomics (it does not build there today: wz-capi-port needs alloc::sync)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the hosted verdicts for this round and the earlier router admission, and the lanes that run the cooperative engine against a listener.",
+        "Owed: a refused dial is retried on the schedule with no upper bound on the tokio side; the cooperative engine's dial role stands by instead, but a refusal that the peer made (it holds the node, this end does not yet) still takes the schedule.",
+        "Owed: the accepting side of a loop that aggregates links (max_links above one) is outside the registry by design; two links dialled at the same time are not barriered against each other.",
+        "Owed, still: regions scenario 7 about 0.3 percent (repeated timestamp and an equality assertion of a queque test, not attributed), the alias table that only allocates, a whole-process stop in about 1 of 30 runs, the aggregate reply retraction of peer-hat faces."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
