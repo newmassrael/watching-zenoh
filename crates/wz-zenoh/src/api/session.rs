@@ -469,6 +469,12 @@ impl Engine {
             && node_engine_allowed()
         {
             Some(tokio_engine::NodeRole::Peer)
+        } else if expanded.mode() == zenoh_protocol::core::WhatAmI::Client
+            && plan.client_fits_node()
+            && node_engine_allowed()
+        {
+            // A client that keeps a south apart is the gateway of the nodes that find it.
+            Some(tokio_engine::NodeRole::Client)
         } else {
             None
         };

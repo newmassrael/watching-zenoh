@@ -42,6 +42,9 @@ pub enum NodeRole {
     Router,
     /// A peer that forwards between the sessions it accepts and dials.
     Peer,
+    /// A client that keeps a south apart (`gateway/south`): the gateway of the nodes that find it,
+    /// which forwards between them and the router it dialled.
+    Client,
 }
 
 impl NodeRole {
@@ -50,6 +53,7 @@ impl NodeRole {
         match self {
             Self::Router => WhatAmI::Router,
             Self::Peer => WhatAmI::Peer,
+            Self::Client => WhatAmI::Client,
         }
     }
 }
@@ -421,7 +425,16 @@ pub(crate) fn open_router_blocking(
     let own_zid = Zid::from_slice(&wire_zid);
     let forwarder = match role {
         NodeRole::Router => RouterForwarder::with_timestamping(own_zid, timestamping),
+        // A client node routes on the peer node's tables: its south is kept apart by the same
+        // partition, and what it owes the router it dialled is what a peer owes its gateway, which
+        // declares nothing of what its other remotes hold, so every message whose source is south
+        // goes up to it (`zenoh/src/net/routing/hat/peer/pubsub.rs`, and the client hat sends all
+        // it has north). What differs is how the node announces itself: as a client, which the
+        // router tells only what the node asked for, so the interest of its south goes north.
         NodeRole::Peer => RouterForwarder::peer_with_timestamping(own_zid, timestamping),
+        NodeRole::Client => {
+            RouterForwarder::peer_with_timestamping(own_zid, timestamping).as_client_of_north()
+        }
     };
     #[cfg(feature = "routing-namespace")]
     let forwarder = match namespace {
@@ -587,10 +600,14 @@ pub(crate) fn open_router_blocking(
                 // link came up, which reaches it after the open has returned. The peers this
                 // node's gossip made it dial are connectors of the open as well, and so are
                 // waited for until their face is up and has ended its declarations.
-                NodeRole::Peer if dials > 0 => {
+                //
+                // A client node is told no gossip by the router it dialled, which holds it for a
+                // client, so its start condition is the connection and the end of the router's
+                // initial declarations.
+                NodeRole::Peer | NodeRole::Client if dials > 0 => {
                     let deadline = std::time::Instant::now() + window;
                     while (forwarder.face_snapshots().len() < dials
-                        || forwarder.ingested() < dials
+                        || (role == NodeRole::Peer && forwarder.ingested() < dials)
                         || (declares
                             && (forwarder.initial_declares_pending() > 0
                                 || forwarder.autoconnects_pending() > 0)))
@@ -599,7 +616,7 @@ pub(crate) fn open_router_blocking(
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
                 }
-                NodeRole::Peer => {}
+                NodeRole::Peer | NodeRole::Client => {}
             }
             Ok(RouterState {
                 zid: wire_zid,

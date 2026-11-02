@@ -672,6 +672,21 @@ impl OpenPlan {
             && self.listen_phase.policy.exit_on_failure
     }
 
+    /// Whether a client opened with this plan can run as a forwarding node
+    /// ([`OpenArguments::run_node`] with [`NodeRole::Client`](crate::drive::NodeRole::Client)):
+    /// it accepts sessions and keeps a south apart (`gateway/south` names subregions), which makes
+    /// it the gateway of the nodes that find it, and it is told where its router is, so that it
+    /// scouts for no one. A client that fits no node is the registry of faces, which has no south
+    /// to keep apart.
+    #[cfg(feature = "router-node")]
+    pub fn client_fits_node(&self) -> bool {
+        !self.listen.is_empty()
+            && !self.connect.is_empty()
+            && self.groups.is_empty()
+            && matches!(self.gateway_south, SouthPartition::Custom(_))
+            && self.listen_phase.policy.exit_on_failure
+    }
+
     /// Read the document for the role `role` (see [`dial_role`]) and the endpoints the caller
     /// stated, and refuse what the open cannot carry out.
     ///
@@ -1290,6 +1305,36 @@ mod tests {
         assert!(
             listening(r#"{ scouting: { multicast: { enabled: false } } }"#).peer_fits_node(),
             "a peer that does not scout is a node whatever its south"
+        );
+    }
+
+    /// A client is a node only when it is the gateway of a south it keeps apart: it accepts
+    /// sessions, is told its router, and its `gateway/south` names subregions. A client without
+    /// them is the registry of faces, as every client was before.
+    #[cfg(feature = "router-node")]
+    #[test]
+    fn a_client_is_a_node_only_when_it_holds_a_south_and_a_router() {
+        let gateway =
+            r#"{ gateway: { south: [ { filters: [ { modes: ["client", "peer"] } ] } ] } }"#;
+        let client = |connect: &[&str], listen: &[&str], document: &str| {
+            plan_of(WhatAmI::Client, connect, listen, document)
+                .expect("a document a client opens with")
+        };
+        assert!(
+            client(&["tcp/127.0.0.1:7447"], &["tcp/127.0.0.1:0"], gateway).client_fits_node(),
+            "a client that listens, dials its router and holds a south is a node"
+        );
+        assert!(
+            !client(&["tcp/127.0.0.1:7447"], &["tcp/127.0.0.1:0"], "{}").client_fits_node(),
+            "a client with no south to keep apart has nothing to forward between"
+        );
+        assert!(
+            !client(&["tcp/127.0.0.1:7447"], &[], gateway).client_fits_node(),
+            "a client that accepts no session has no south"
+        );
+        assert!(
+            !client(&[], &["tcp/127.0.0.1:0"], gateway).client_fits_node(),
+            "a client that is told no router has nothing north"
         );
     }
 

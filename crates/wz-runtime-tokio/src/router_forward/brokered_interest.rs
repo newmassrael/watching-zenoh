@@ -73,6 +73,17 @@ struct FinalizedResources {
     queryables: HashSet<String>,
 }
 
+/// One FUTURE interest a face south of this node holds, which is what the node re-sends to a
+/// gateway that comes up after the interest was made: the pin's `RemoteInterest` of the south
+/// hat, read by `repropagate_interests` on a new north face
+/// (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn repropagate_interests`).
+#[derive(Clone, Debug)]
+struct HeldInterest {
+    kinds: InterestKinds,
+    aggregate: bool,
+    target: Option<String>,
+}
+
 /// What the broker keeps: the pending table, its deadline, the live CurrentFuture copies and
 /// what each gateway has finalized. State of the node and not of any one region, so it is the
 /// forwarder's and not the tables'.
@@ -80,6 +91,9 @@ pub(super) struct InterestBroker {
     pending: PlainMutex<PendingCurrentInterests>,
     timeout: PlainCell<Duration>,
     future: PlainMutex<HashMap<(FaceId, u64), Vec<BrokeredCopy>>>,
+    /// The future interests of the faces this node brokers for, by face and the id the face gave
+    /// them, whether or not a gateway was there to be sent a copy.
+    held: PlainMutex<HashMap<(FaceId, u64), HeldInterest>>,
     /// Lives as long as the gateway's face, as the pin's face context does.
     finalized: PlainMutex<HashMap<FaceId, FinalizedResources>>,
 }
@@ -90,6 +104,7 @@ impl InterestBroker {
             pending: PlainMutex::new(PendingCurrentInterests::new()),
             timeout: PlainCell::new(DEFAULT_INTEREST_TIMEOUT),
             future: PlainMutex::new(HashMap::new()),
+            held: PlainMutex::new(HashMap::new()),
             finalized: PlainMutex::new(HashMap::new()),
         }
     }
@@ -273,8 +288,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         future: bool,
         target: Option<&str>,
     ) -> usize {
-        if self.tables.node_mode != WhatAmI::Peer || !self.is_client_face(inbound) {
+        if self.tables.node_mode != WhatAmI::Peer {
             return 0;
+        }
+        // A client's interest is brokered. So is the interest of a face south of a node that is a
+        // client of its north: the router tells that node only what it asked for, and a south
+        // peer that asks the node has no other way to reach it.
+        let south_asking = self.tables.north_is_client && self.asks_for_declarations(inbound);
+        if !self.is_client_face(inbound) && !south_asking {
+            return 0;
+        }
+        if future {
+            if let Some(kinds) = interest_kinds_of(options) {
+                self.broker.held.guard().insert(
+                    (inbound, src_interest_id),
+                    HeldInterest {
+                        kinds,
+                        aggregate: options.ag(),
+                        target: target.map(str::to_owned),
+                    },
+                );
+            }
         }
         let upstreams = self.interest_upstreams(inbound, future);
         self.propagate_current_interest(
@@ -293,6 +327,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Final under the id the gateway was given (`zenoh/src/net/routing/hat/peer/interests.rs` @
     /// `mode: InterestMode::Final,`), which is the minted one, not the client's.
     pub(super) fn finalize_brokered_future(&self, client: FaceId, client_id: Option<u64>) {
+        self.broker
+            .held
+            .guard()
+            .retain(|(face, id), _| *face != client || client_id.is_some_and(|c| c != *id));
         let copies: Vec<BrokeredCopy> = {
             let mut table = self.broker.future.guard();
             let keys: Vec<(FaceId, u64)> = table
@@ -311,6 +349,53 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 NetworkMessage::Interest(build_interest_final_propagated(copy.up_id)),
             );
             self.unset_brokered_finalized(&copy);
+        }
+    }
+
+    /// A gateway has come up: send it the future interests the faces south of this node already
+    /// hold, as the pin's hat does on a new north face
+    /// (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn repropagate_interests`, and the
+    /// peer hat's). Each goes as `CurrentFuture` under a fresh id and with no pending entry: the
+    /// face that made the interest was answered when it asked, and what the gateway holds reaches
+    /// it as declarations, which the ordinary ingest pushes to the faces whose interest matches.
+    pub(super) fn repropagate_brokered_interests(&self, gateway: FaceId) {
+        let mut held: Vec<((FaceId, u64), HeldInterest)> = self
+            .broker
+            .held
+            .guard()
+            .iter()
+            .filter(|((face, _), _)| *face != gateway)
+            .map(|(key, interest)| (*key, interest.clone()))
+            .collect();
+        held.sort_unstable_by_key(|(key, _)| *key);
+        for ((face, id), interest) in held {
+            let up_id = self.broker.pending.guard().allocate_id();
+            let Ok(msg) = build_interest_propagated(
+                up_id,
+                interest.kinds,
+                interest.aggregate,
+                true,
+                interest.target.as_deref().map(|t| (0, Some(t))),
+            ) else {
+                continue;
+            };
+            let mut carrier = Some(NetworkMessage::Interest(msg));
+            if !self.send_to_face(gateway, true, || carrier.take().expect("built once")) {
+                continue;
+            }
+            self.broker
+                .future
+                .guard()
+                .entry((face, id))
+                .or_default()
+                .push(BrokeredCopy {
+                    upstream: gateway,
+                    up_id,
+                    target: interest.target,
+                    subscribers: interest.kinds.bits() & InterestKinds::SUBSCRIBERS.bits() != 0,
+                    queryables: interest.kinds.bits() & InterestKinds::QUERYABLES.bits() != 0,
+                    finalized: false,
+                });
         }
     }
 
@@ -358,7 +443,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 NetworkMessage::Declare(Box::new(relayed)),
             );
         }
-        true
+        // A face of a south region the peer hat serves is told this token again when it is
+        // withdrawn, and the node can only withdraw what it holds: the token is also registered
+        // as the gateway's declaration, as a subscriber or a queryable answer is. The face holds
+        // it once, since a token has one id on a face ([`OnTables::number_declaration`]),
+        // whether it is sent as the answer or in the flood of the registration.
+        !self.asks_for_declarations(interest.src_face)
     }
 
     /// The UNWIND: a gateway answered (or died, or timed out), so its pending entry is dropped
@@ -416,7 +506,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .lookup(upstream, up_id)
                 .is_none()
             {
-                return false;
+                // A copy re-sent to a gateway that came up later holds no pending entry, no face
+                // waits for its final; the final still finalizes the resource on that gateway.
+                let resent = self
+                    .broker
+                    .future
+                    .guard()
+                    .values()
+                    .flatten()
+                    .any(|c| c.upstream == upstream && c.up_id == up_id);
+                if resent {
+                    self.mark_brokered_finalized(upstream, up_id);
+                }
+                return resent;
             }
             self.mark_brokered_finalized(upstream, up_id);
             let finished = self.broker.pending.guard().resolve(upstream, up_id);

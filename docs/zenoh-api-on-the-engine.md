@@ -1006,12 +1006,20 @@ Each lands whole with its surface lines, tests and faults in one round.
       take `gateway/south`, with the region names of the remote's Init), the peer that holds a
       multicast group and dials what it scouts as a node, the client that holds a group, then
       the spans. The spans were met (rounds 4029 to 4032) and the peer that scouts is a node
-      when it keeps a south apart: scenario 2 passes whole, and 115 of 126 pass (measured
-      2026-11-01, a process per test). What is left is scenario 1 (ten tests, a client node that
-      listens, answers scouts and forwards between its router and the peers that find it: the
-      forwarder has no client role yet) and the intermittent tests of scenarios 6 and 7.
-    - **Open:** `routing` (the two above), `regions` (above) and `open_time` (its tests are
-      ignored upstream).
+      when it keeps a south apart: scenario 2 passes whole, and so does scenario 1 now: a
+      client that listens, is told its router and keeps a south apart is a node that forwards
+      between the router and the peers that find it, and all 126 pass (measured twice on
+      2026-11-02, a process per test; 124 passed in the run before the link admission repairs).
+      Three things were missing for the client node, each found by the tests: a router keeps
+      what a client declares by the id the client numbered it with, and a node that sent every
+      declaration as id 0 had each replace the last, so the node numbers them for the face
+      (one id for each key; a south peer is numbered the same for its tokens, which reach it
+      in the flood and again in an answer); a client is told only what it asked, so the
+      interest of a peer south of the node is brokered north, and sent again to a router that
+      comes up after it; and a token the node learned as an answer was relayed and not held,
+      so its withdrawal reached no one. The client node runs on the tables of the peer node and
+      announces itself as a client; the forwarder has no client hat of its own.
+    - **Open:** `routing` (the two above) and `open_time` (its tests are ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
       to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome
       it has, the fewest tests that pass and whether the lane runs it; `scripts/lib/z8_expectation_gate.py`
@@ -1025,7 +1033,8 @@ Each lands whole with its surface lines, tests and faults in one round.
       table and not in the lane (each failing test waits out a minute). The harness raises the
       open files limit of its runs: a dozen sessions of one process pass a shell's 1,024.
     - **Owed:** the files it asks for a `Runtime` of (the arm with `internal`), Windows, a margin
-      gate for the lane once it has measured runs, and the rows of `regions` that fail today.
+      gate for the lane once it has measured runs, and the `regions` file in the lane, which
+      takes ten minutes for one run.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

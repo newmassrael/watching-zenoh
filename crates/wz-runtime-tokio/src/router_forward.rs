@@ -449,6 +449,7 @@ use wz_session_core::wire::{PushOwned, RequestOwned, ResponseOwned};
 
 #[cfg(feature = "routing-interest-pending-gc")]
 mod brokered_interest;
+mod declaration_ids;
 mod egress;
 #[cfg(test)]
 mod egress_tests;
@@ -1719,6 +1720,9 @@ struct RouterFaceState {
     /// the link came up is held when the program can declare anything
     /// ([`RouterForwarder::initial_declares_pending`]). Set by the arrival, never by a timer.
     initial_final: bool,
+    /// The ids this node gave the declarations it sent to the face, when the face keeps them by
+    /// id ([`declaration_ids`]).
+    declaration_ids: PlainMutex<declaration_ids::DeclarationIds>,
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -2398,6 +2402,10 @@ pub(crate) struct Tables {
     /// ([`RouterForwarder::with_south_partition`]). `Auto` is the pin's preset
     /// and every router's default.
     partition: SouthPartition,
+    /// Whether this node is a CLIENT of its north ([`RouterForwarder::as_client_of_north`]): the
+    /// router it is attached to sends it a declaration only in answer to an interest of its own,
+    /// so the interest of a face south of it is brokered north as a client's is.
+    north_is_client: bool,
     /// Held faces keyed by id, each carrying its send seam, its tier, and (once
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
@@ -4070,6 +4078,21 @@ impl RouterForwarder {
         }
         self
     }
+
+    /// Make this node a CLIENT of its north: a node that keeps a south apart
+    /// ([`with_south_partition`](Self::with_south_partition)) and announces itself as a client to
+    /// the router it dials. Upstream builds its north as the client hat
+    /// (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn route_interest`), which sends the
+    /// interest of a face south of it on to its one north face; the router in turn tells a client
+    /// only what the client asked for. The interest of a south face is therefore brokered north
+    /// ([`broker_current_interest`](OnTables::broker_current_interest)) as a client's is.
+    ///
+    /// The routing tables stay a peer node's: the north region has no client hat of its own here,
+    /// and the answers a router gives a client are the ones it gives a peer that asks.
+    pub fn as_client_of_north(self) -> Self {
+        self.on_tables_mut().tables.north_is_client = true;
+        self
+    }
 }
 
 impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
@@ -4192,6 +4215,7 @@ impl RouterForwarder {
                     .collect(),
                 node_mode,
                 partition: SouthPartition::Auto,
+                north_is_client: false,
                 faces: HashMap::new(),
                 #[cfg(feature = "resource-snapshot")]
                 receive_ledger: Default::default(),
@@ -5634,6 +5658,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // DESTINATION face's subject before it leaves — a denied outbound is
         // dropped for THIS face (not sent, not counted) and witnessed. The
         // outbound interceptor gate; empty chain (no ACL) is a no-op fast path.
+        //
+        // A declaration for a face that keeps declarations by id is numbered first: the gate then
+        // reads the message that goes out.
+        let msg = self.number_declaration(state, msg);
         let verdict = self.admit_outbound(id, state, &msg, known);
         if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped.bump();
@@ -8712,6 +8740,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .tables
             .faces
             .iter()
+            // A link is a number in the graph of its own region: a face of another region has a
+            // link in that graph, and the same number in this one names another face's link.
+            .filter(|(_, state)| state.tier == NORTH_REGION)
             .filter(|(_, state)| {
                 state
                     .link
@@ -12205,6 +12236,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 held: egress::Queues::default(),
                 gate_wake: Arc::new(tokio::sync::Notify::new()),
                 initial_final: false,
+                declaration_ids: PlainMutex::new(declaration_ids::DeclarationIds::default()),
             },
         );
         self.shed_registry.add(id, actions.clone());
@@ -12230,6 +12262,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             for (interest_id, keyexpr, queryables) in own {
                 self.send_own_interest(id, interest_id, &keyexpr, queryables);
             }
+        }
+        // A gateway that comes up is sent what the faces south of the node already asked for.
+        #[cfg(feature = "routing-interest-pending-gc")]
+        if self.tables.node_mode == WhatAmI::Peer && self.gateway_faces().contains(&id) {
+            self.repropagate_brokered_interests(id);
         }
         // A node being dialled is connected: it is a face now, and the face is what is waited on.
         if let Some(zid) = peer_zid_routing(actions) {
@@ -16463,6 +16500,77 @@ mod tests {
         assert_eq!(
             forwarded_declare(&sink_client.frame_bytes(0)).interest_id,
             Some(5)
+        );
+    }
+
+    /// A gateway that comes up after a client asked is sent what the client asked, as the pin's
+    /// hat does on a new north face (`repropagate_interests`); a client that has since ended its
+    /// interest is not.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_gateway_that_comes_up_later_is_sent_the_future_interests_held() {
+        use wz_session_core::interest_build::{build_interest_final, build_interest_subscribers};
+
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        sink_client.reset();
+        for id in [4, 5] {
+            let interest = build_interest_subscribers(id, true, true, 0, Some("demo/**"))
+                .expect("build current-future interest");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Interest(interest));
+        }
+        // The client had no gateway to ask, so it was answered at once.
+        assert_eq!(fwd.pending_interests_len(), 0, "nothing was brokered");
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Interest(build_interest_final(5)),
+        );
+
+        // The interests a recorded sink was sent: a routing face is also sent the link-state
+        // bootstrap, which is no interest.
+        let interests_sent = |sink: &RecordingLinkDriver| -> Vec<InterestOwned> {
+            use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+            (0..sink.frame_count())
+                .filter_map(|i| {
+                    let Ok(InboundFrame::Frame { payload, .. }) =
+                        parse_inbound(&sink.frame_bytes(i))
+                    else {
+                        return None;
+                    };
+                    match parse_frame_payload(&payload).ok()?.into_iter().next() {
+                        Some(NetworkMessage::Interest(interest)) => Some(interest),
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+
+        let (gateway, sink_gateway) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(1), &gateway);
+        let asked = interests_sent(&sink_gateway);
+        assert_eq!(
+            asked.len(),
+            1,
+            "the gateway is asked for the one interest the client still holds"
+        );
+        assert!(
+            asked[0].f() && asked[0].c(),
+            "as CurrentFuture, as the pin's hat sends it"
+        );
+
+        // The client ends it: the gateway is told, under the id it was given.
+        sink_gateway.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Interest(build_interest_final(4)),
+        );
+        assert_eq!(
+            interests_sent(&sink_gateway).len(),
+            1,
+            "the end is passed on"
         );
     }
 
