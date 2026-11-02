@@ -5,7 +5,8 @@
     "^core::str::slice_error_fail"
   ],
   "site_pins": {
-    "engine-host": {"zephyr-client-fixed": 39, "zephyr-client-heap": 39, "zephyr-client-fixed-batching": 39, "zephyr-client-fixed-get": 39},
+    "engine-host": {"zephyr-client-fixed": 38, "zephyr-client-heap": 38, "zephyr-client-fixed-batching": 38, "zephyr-client-fixed-get": 38},
+    "engine-turn": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
     "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1},
     "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
     "engine-behaviour": {"zephyr-client-fixed": 13, "zephyr-client-heap": 13, "zephyr-client-fixed-batching": 13, "zephyr-client-fixed-get": 13},
@@ -118,6 +119,12 @@
       "where": {"file": "engine.rs"},
       "callees": "engine::MainLoop>::",
       "why": "the engine's one shared copy of Appendix D asks the machine it drives (its host, behind a reference to MainLoop) for its state, its queues and its invocations"
+    },
+    {
+      "id": "engine-turn",
+      "where": {"function": "engine::Turn>::run$"},
+      "callees": "engine::MainLoop>::",
+      "why": "the same asks as the rule above, made by `Turn::run` (the entry into the initial configuration and the main event loop it hands over to), whose register call the image's line table gives no file since the SCE pin 955774d15a: `Turn` holds the machine as a `&mut dyn MainLoop` (engine.rs `struct Turn`), and its `core`, `behaviour`, `queue` and `start_pending_invokes` are the methods of that trait. The site was one of the 39 of `engine-host` before the pin and is claimed here by the function, not the file; the two pins sum to the 39 of before"
     },
     {
       "id": "engine-behaviour",
