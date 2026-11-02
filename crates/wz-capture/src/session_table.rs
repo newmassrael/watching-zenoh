@@ -528,8 +528,8 @@ impl LinkIngest {
     /// `integrity` is the weakest of the packets that carried them, `None`
     /// when one of them failed its checksum.
     ///
-    /// `weigh_reading` is `false` for the unit of a datagram whose front was
-    /// weighed foreign first ([`Self::observe_datagram_front`]), because such a
+    /// `weigh_reading` is `false` for the unit of a delimited batch whose front
+    /// was weighed foreign first ([`Self::observe_batch_front`]), because such a
     /// unit cannot read but `undecoded` and the front already said so. Its
     /// reading is still counted.
     pub(crate) fn observe_unit_weighed(
@@ -559,18 +559,20 @@ impl LinkIngest {
         }
     }
 
-    /// The first byte of a datagram this link delimits, as evidence of the test
+    /// The first byte of a batch the link delimits (a UDP or raweth datagram,
+    /// a WebSocket message), as evidence of the test
     /// ([`crate::zenoh_evidence::Check::WireFront`]), weighed before the unit
     /// read out of it. Answers whether that unit's reading is to be weighed:
     /// not when the front was foreign.
     ///
-    /// A zenoh sender writes a batch at the datagram's first byte, and what it
-    /// may write there is [`wz_codecs::wire_const::is_wire_front`]: a transport
-    /// message's header, a batch header, or on a lowlatency link a network
-    /// message's header. `integrity` is what the datagram's checksums said
-    /// ([`crate::link::Checksums::integrity`]); a datagram whose checksum failed
-    /// (`None`) is not weighed: its bytes are known to be altered.
-    pub(crate) fn observe_datagram_front(
+    /// A zenoh sender writes a batch at the delimited unit's first byte, and
+    /// what it may write there is [`wz_codecs::wire_const::is_wire_front`]: a
+    /// transport message's header, a batch header, or on a lowlatency link a
+    /// network message's header. `integrity` is what the checksums of the
+    /// packets that carried the byte said ([`crate::link::Checksums::integrity`]);
+    /// bytes whose checksum failed (`None`) are not weighed: they are known to
+    /// be altered.
+    pub(crate) fn observe_batch_front(
         &mut self,
         payload: &[u8],
         integrity: Option<Integrity>,

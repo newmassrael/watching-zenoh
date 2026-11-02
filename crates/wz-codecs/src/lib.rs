@@ -1213,6 +1213,12 @@ mod transport_header_space {
             }
         }
         assert!(!is_wire_front(0x08) && !is_wire_front(0x18) && !is_wire_front(0xF0));
+        // A scan's reading of a front on a link it holds no configuration of
+        // (`is_credible_lowlatency_header`) is the transport and network headers.
+        let credible = (0u8..=255)
+            .filter(|b| is_credible_lowlatency_header(*b))
+            .count();
+        assert_eq!(credible, 42 + 7 * 8, "transport and network headers");
     }
 
     /// A MID outside the space is rejected whatever its flags, and a MID

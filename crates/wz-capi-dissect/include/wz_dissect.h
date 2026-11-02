@@ -1300,7 +1300,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":53,"key":"kind","values":[...],
+ *     {"name":"fields","revision":54,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -2231,7 +2231,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":9},"ok":true,
+ *     {"document":{"name":"session_table","revision":10},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -2241,7 +2241,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                   "zenoh_evidence":{"log2_lr_millibits":64363,
  *                     "log2_lr_no_millibits":89344,
  *                     "yes_at_millibits":20000,"no_at_millibits":-20000,
- *                     "model":5,"crossed_at_packet":2,
+ *                     "model":6,"crossed_at_packet":2,
  *                     "log2_lr_max_millibits":64363,"log2_lr_min_millibits":0,
  *                     "log2_lr_no_max_millibits":89344,
  *                     "log2_lr_no_min_millibits":0,
@@ -2342,8 +2342,9 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * version 0x09. `zenoh` is a SEQUENTIAL TEST over what the flow's messages keep
  * that other protocols rarely keep by chance, on every row and flow here and on
  * every flow object of the field document (revision 43). It keeps TWO sums in
- * millibits (model 5, field-document revision 53 and session_table revision 9;
- * model 4 was revisions 50 and 8, model 3 revisions 49 and 7):
+ * millibits (model 6, field-document revision 54 and session_table revision
+ * 10; model 5 was revisions 53 and 9, model 4 revisions 50 and 8, model 3
+ * revisions 49 and 7):
  * the `yes` sum is the log2 of an e-process against "another protocol", the `no`
  * sum of one against "zenoh". Each hypothesis leaves rates unknown; the one a
  * sum rejects is taken at a bound on its likeliest over what the corpus allows
@@ -2377,7 +2378,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * `zenoh_evidence` is the test, so a consumer can show what the word rests on:
  *
  *   {"log2_lr_millibits":L,"log2_lr_no_millibits":M,"yes_at_millibits":20000,
- *    "no_at_millibits":-20000,"model":5,"crossed_at_packet":P,
+ *    "no_at_millibits":-20000,"model":6,"crossed_at_packet":P,
  *    "log2_lr_max_millibits":L1,"log2_lr_min_millibits":L0,
  *    "log2_lr_no_max_millibits":M1,"log2_lr_no_min_millibits":M0,
  *    "checks":[{"check":"init_roles","strength":"handshake","confirmed":1,
@@ -2422,13 +2423,16 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                     model 4), or, from model 5, a unit of a TCP direction
  *                     the capture holds from its SYN, read on a chain of length
  *                     prefixes unbroken since that start: its first byte past
- *                     the prefix. A zenoh sender writes nothing else there, so
+ *                     the prefix; or, from model 6, a WebSocket message on such
+ *                     a direction whose deframer never lost its framing since
+ *                     the upgrade: its first payload byte, unmasked. A zenoh
+ *                     sender writes nothing else there, so
  *                     a foreign front is an alteration on the way, of chance at
  *                     most 2^-24 where the transport checksum of the packet that
  *                     carried it verified and 2^-10 where none did; its
  *                     `eps_basis` is `derived`. Bytes whose checksum failed are
- *                     not weighed. A datagram whose front is foreign is not
- *                     weighed again by `unit_reading`, nor a direction whose
+ *                     not weighed. A datagram or message whose front is foreign
+ *                     is not weighed again by `unit_reading`, nor a direction whose
  *                     first front is by `stream_framing`. This is what makes a
  *                     `no`: the test rejects zenoh of THIS wire (version 0x09).
  *
@@ -4961,7 +4965,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":53,"key":"state",
+ *     "value_families":[{"name":"fields","revision":54,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

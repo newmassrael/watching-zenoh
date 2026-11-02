@@ -2644,7 +2644,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":9},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":10},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
@@ -2652,7 +2652,7 @@ static int check_session_table_doors(void) {
         "\"announced_version\":\"none\","
         "\"zenoh_evidence\":{\"log2_lr_millibits\":362,"
         "\"log2_lr_no_millibits\":11045,"
-        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":5,"
+        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":6,"
         "\"crossed_at_packet\":null,"
         "\"log2_lr_max_millibits\":363,\"log2_lr_min_millibits\":-2,"
         "\"log2_lr_no_max_millibits\":11045,\"log2_lr_no_min_millibits\":0,"
@@ -4019,8 +4019,10 @@ int main(void) {
      * pairing. Values move under stationary keys.
      * 53: model 5 of the zenoh test: `wire_front` on stream chains and on
      * the network ids, and `version_header`'s zenoh side derived. Values and
-     * words move under stationary keys. */
-    revisioned[2].revision = 53;
+     * words move under stationary keys.
+     * 54: model 6: `wire_front` on a WebSocket message's first byte. Values
+     * move under stationary keys. */
+    revisioned[2].revision = 54;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4173,9 +4175,10 @@ int main(void) {
      * 7: model 3, as the field document's 49, and a row of a pair is a test
      * of its own over what its flows observed after each named the pair.
      * 8: model 4, as the field document's 50.
-     * 9: model 5, as the field document's 53. */
+     * 9: model 5, as the field document's 53.
+     * 10: model 6, as the field document's 54. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 9;
+    revisioned[12].revision = 10;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

@@ -232,8 +232,15 @@ enum WsCandidate {
 ///
 /// The last clause is this crate's rather than RFC6455's, and it is the one
 /// that makes the scan affordable: a non-empty Binary frame opens a zenoh
-/// BATCH, so its first payload byte must be a byte a zenoh transport header
-/// could be (`is_credible_transport_header`, 42 of 256). Without it the
+/// BATCH, so its first payload byte must be a byte a batch could begin with on
+/// a link whose configuration the scan does not hold
+/// (`is_credible_lowlatency_header`, 98 of 256: a transport header, or a
+/// network header a lowlatency link writes bare). Model 6
+/// (`docs/flow-zenoh-verdict.md` §6.11) widened it from the transport headers
+/// alone (42 of 256), which refused every frame of a lowlatency link. A batch
+/// header of `0x00` (an uncompressed batch on a link that negotiated
+/// compression) is still refused: zero runs are common in any payload, and
+/// accepting it let a zero-filled buffer confirm a chain. Without it the
 /// per-offset false-accept rate is a frame-shape rate; with it the question
 /// asked is the one this crate actually has — "is this ws carrying zenoh" —
 /// and `the_ws_chain_discriminator_refuses_noise` measures both.
@@ -312,7 +319,7 @@ fn ws_candidate_at(buf: &[u8], at: usize, assembling: bool) -> WsCandidate {
             return WsCandidate::Short { needed: cursor + 1 };
         }
         let header = buf[cursor] ^ if masked { key[0] } else { 0 };
-        if !wz_session_core::wire_const::is_credible_transport_header(header) {
+        if !wz_session_core::wire_const::is_credible_lowlatency_header(header) {
             return WsCandidate::Refuted;
         }
     }

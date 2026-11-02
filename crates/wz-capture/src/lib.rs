@@ -4031,7 +4031,9 @@ impl FlowDissection {
             Direction::B => b,
         };
         deframer.push(bytes);
-        let mut ready: Vec<ws::WsMessage> = Vec::new();
+        // Each message with whether its front is a batch's first byte the test
+        // may weigh: read on a framing this deframer never lost.
+        let mut ready: Vec<(ws::WsMessage, bool)> = Vec::new();
         let mut resyncs: Vec<ws::WsResync> = Vec::new();
         while let Some(msg) = deframer.next_spanned_message() {
             // R311y612 — drained HERE and not after the loop, so a recovery is
@@ -4045,7 +4047,10 @@ impl FlowDissection {
             while let Some(resync) = deframer.take_resync() {
                 resyncs.push(resync);
             }
-            ready.push(msg);
+            // A message found by a scan, or after one, stands where a frame
+            // looked like a zenoh one: its front was chosen, and is no evidence.
+            let unbroken = deframer.accounting().desyncs == 0;
+            ready.push((msg, unbroken));
         }
         // A scan that has not confirmed a boundary yet still HAPPENED, and a
         // recovery that lands with no message behind it in this push must not
@@ -4056,12 +4061,18 @@ impl FlowDissection {
         for resync in resyncs {
             self.ws_resyncs.push((direction, resync));
         }
-        for ws::WsMessage {
-            offset,
-            end,
-            spans,
-            payload,
-        } in ready
+        // The direction's HTTP upgrade is its first bytes only where the capture
+        // holds the stream's SYN.
+        let start_held = self.assembler(direction).synced_from_syn();
+        for (
+            ws::WsMessage {
+                offset,
+                end,
+                spans,
+                payload,
+            },
+            unbroken,
+        ) in ready
         {
             // R311y709 — the payload, which is what a decoder sees. The frame
             // headers this deframer consumed are recovered and never fed, and
@@ -4081,6 +4092,21 @@ impl FlowDissection {
                 .instant_of_offset(offset)
                 .or(self.session.observed_at_nanos());
             let handshake = wz_session_core::passive::LinkHandshake::Present;
+            // Model 5 (`docs/flow-zenoh-verdict.md` §6.10) — the message is a
+            // batch, so its first payload byte is where a zenoh sender writes a
+            // batch's first byte, as at a datagram's. Weighed where the upgrade
+            // was read from the stream's start and the framing never lost, of
+            // the integrity of the packets that carried that byte and, on a
+            // masked frame, the key it is read through.
+            let weigh_reading = match spans.first() {
+                Some(first) if unbroken && start_held => {
+                    let integrity = self
+                        .assembler(direction)
+                        .integrity_of(first.needs_from(), first.at + 1);
+                    self.ingest.observe_batch_front(&payload, integrity)
+                }
+                _ => true,
+            };
             let Some(mut unit) = self
                 .session
                 .next_datagram_unit_at(direction, &payload, offset, handshake, instant)
@@ -4097,7 +4123,7 @@ impl FlowDissection {
             // carried them vouch for them.
             let integrity = self.assembler(direction).integrity_of(offset, end);
             self.ingest
-                .observe_unit_weighed(&unit.frames, true, integrity);
+                .observe_unit_weighed(&unit.frames, weigh_reading, integrity);
             match self.keep {
                 // Open-debt item 924, step 4c — a payload is not copied: it
                 // stands in the stream, as its frame's bytes (or those bytes
@@ -9056,7 +9082,7 @@ impl Dissection {
         // Model 4 — the link delimits the datagram, so its first byte is where
         // a zenoh sender writes its batch's first header.
         let integrity = d.checksums.integrity();
-        let weigh_reading = flow.ingest.observe_datagram_front(d.payload, integrity);
+        let weigh_reading = flow.ingest.observe_batch_front(d.payload, integrity);
         if let Some(unit) =
             flow.session
                 .next_datagram_unit_on(direction, d.payload, d.packet_index, handshake)
@@ -17457,6 +17483,11 @@ mod ws_flow_tests {
     /// Ethernet + IPv4 + TCP, with both ports explicit so a test can build
     /// BOTH directions of one connection.
     fn tcp_packet(sport: u16, dport: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+        tcp_flagged(sport, dport, seq, 0x10, payload)
+    }
+
+    /// [`tcp_packet`] with the TCP flags given: `0x02` for a SYN.
+    fn tcp_flagged(sport: u16, dport: u16, seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
         let (src, dst) = if sport == 1111 {
             ([10u8, 0, 0, 1], [10u8, 0, 0, 2])
         } else {
@@ -17468,7 +17499,7 @@ mod ws_flow_tests {
         tcp.extend_from_slice(&seq.to_be_bytes());
         tcp.extend_from_slice(&0u32.to_be_bytes());
         tcp.push(5 << 4);
-        tcp.push(0x10);
+        tcp.push(flags);
         tcp.extend_from_slice(&64u16.to_be_bytes());
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(&0u16.to_be_bytes());
@@ -17494,6 +17525,61 @@ mod ws_flow_tests {
             eth.push(0);
         }
         eth
+    }
+
+    /// MODEL 5 (`docs/flow-zenoh-verdict.md` §6.10) — A WS MESSAGE'S FRONT IS
+    /// WEIGHED where the upgrade is the stream's start. The client's masked
+    /// message opens with a network header a lowlatency link writes bare, which
+    /// is of the wire; the server's opens with an id in neither space, which is
+    /// not. Both segments' checksums verify. Without the SYNs the upgrade may
+    /// not be where the stream began, and no front is weighed.
+    #[test]
+    fn a_ws_messages_front_is_weighed_where_the_upgrade_is_the_streams_start() {
+        use crate::zenoh_evidence::Check;
+        let client_open = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        let server_open = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+        let read = |with_syn: bool| {
+            let mut d = Dissection::new();
+            let mut n = 0usize;
+            let mut push = |d: &mut Dissection, packet: Vec<u8>| {
+                d.push_packet(LINKTYPE_ETHERNET, n, &packet);
+                n += 1;
+            };
+            if with_syn {
+                push(&mut d, tcp_flagged(1111, 7447, 999, 0x02, &[]));
+                push(&mut d, tcp_flagged(7447, 1111, 1999, 0x12, &[]));
+            }
+            push(&mut d, tcp_packet(1111, 7447, 1000, client_open));
+            push(&mut d, tcp_packet(7447, 1111, 2000, server_open));
+            let push_bare = [0x1D, 0x00, 0x01, 0x02];
+            push(
+                &mut d,
+                tcp_packet(
+                    1111,
+                    7447,
+                    1000 + client_open.len() as u32,
+                    &binary_frame(&push_bare, Some([0x37, 0xFA, 0x21, 0x3D])),
+                ),
+            );
+            push(
+                &mut d,
+                tcp_packet(
+                    7447,
+                    1111,
+                    2000 + server_open.len() as u32,
+                    &binary_frame(&[0x0B, 0x00, 0x00], None),
+                ),
+            );
+            d.finish();
+            assert!(d.flows()[0].framing().is_websocket());
+            d.flows()[0].zenoh_evidence().tally(Check::WireFront)
+        };
+        let held = read(true);
+        assert_eq!((held.confirmed, held.violated), (1, 1), "{held:?}");
+        // A verified foreign front is the bound itself, `2^-24`.
+        assert!(held.no_millibits < -20_000, "{held:?}");
+        let joined = read(false);
+        assert!(!joined.observed(), "{joined:?}");
     }
 
     /// One RFC6455 BINARY frame, masked the way a client's really is.

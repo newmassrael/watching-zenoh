@@ -3,8 +3,8 @@
 
 //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.
 //!
-//! The counts of the corpus and model 5's parameters computed from them
-//! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.10), written by
+//! The counts of the corpus and model 6's parameters computed from them
+//! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.11), written by
 //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which
 //! fails when this file is not what the corpus gives. Regenerate with
 //! `scripts/regen-calibration.sh` and commit the result with the capture
@@ -438,7 +438,7 @@ pub const ROLES_CELLS: [u64; 80] = [
     210_068_428_946_615,
 ];
 
-/// Model 5's parameters.
+/// Model 6's parameters.
 pub const PARAMS: Params = Params {
     units: Measured {
         zenoh: Prior {

@@ -67,8 +67,9 @@ pub enum Check {
     StreamFraming,
     /// A batch's first byte is one a sender of this wire may write there: of a
     /// datagram the link delimits (model 4, `docs/flow-zenoh-verdict.md` §6.9),
-    /// or past a length prefix on a stream chain held from its start (model 5,
-    /// §6.10).
+    /// past a length prefix on a stream chain held from its start (model 5,
+    /// §6.10), or of a WebSocket message read from the upgrade on (model 6,
+    /// §6.11).
     WireFront,
 }
 
@@ -241,7 +242,7 @@ pub mod model {
 
     /// The model these sums are, written into the document so that a consumer
     /// can tell two models apart.
-    pub const MODEL: u32 = 5;
+    pub const MODEL: u32 = 6;
 
     /// `log2` of the largest chance that a packet whose transport checksum
     /// verified reaches the capture with a byte of its payload altered:
@@ -419,8 +420,8 @@ pub enum Observation {
         held: bool,
     },
     /// A batch's first byte, against what the wire allows there: of a datagram
-    /// the link delimits, or past a length prefix on a stream chain held from
-    /// its start.
+    /// or a WebSocket message the link delimits, or past a length prefix on a
+    /// stream chain held from its start.
     WireFront {
         /// It is a byte a sender of this wire may write there
         /// ([`wz_codecs::wire_const::is_wire_front`]).

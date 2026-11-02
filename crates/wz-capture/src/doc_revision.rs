@@ -2428,6 +2428,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R45_CARRIES,
     },
+    // Revision 54 IS MODEL 6 OF THE ZENOH TEST (`docs/flow-zenoh-verdict.md`
+    // §6.11), and moves no key and no word. `model` reads 6. A WebSocket
+    // message delimits a batch as a datagram does, so `wire_front` weighs its
+    // first payload byte, where the capture holds the direction's SYN and the
+    // deframer has not lost its framing since the upgrade, of the integrity of
+    // the segments that carried the byte and its mask. The values move on
+    // WebSocket flows only; a document of revision 53 should be read again.
+    DocumentShape {
+        document: FIELDS,
+        revision: 54,
+        keys: FIELDS_R51_KEYS,
+        retiring: &[],
+        families: FIELDS_R50_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R45_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3244,6 +3260,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: SESSION_TABLE,
         revision: 9,
+        keys: SESSION_TABLE_R7_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R8_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R5_CARRIES,
+    },
+    // Revision 10 is the field document's revision 54 on a row and on every
+    // flow of a row: model 6, `wire_front` on a WebSocket message's first
+    // byte. No key moves and nothing retires.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 10,
         keys: SESSION_TABLE_R7_KEYS,
         retiring: &[],
         families: SESSION_TABLE_R8_FAMILIES,
@@ -21849,8 +21877,9 @@ mod tests {
             // first crossing, `crossed_at_packet` and the sums' extremes. Keys
             // arrive and words move.
             // To 50 with model 4, to 51 and 52 with the round trips on the
-            // rows that end them, to 53 with model 5: words and values move.
-            (FIELDS, 53),
+            // rows that end them, to 53 with model 5, to 54 with model 6:
+            // words and values move.
+            (FIELDS, 54),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -21945,9 +21974,9 @@ mod tests {
             // row and flow carried `announced_version` and `zenoh_evidence`.
             // To 6 with model 2 of the zenoh test, as the field document's 46.
             // To 7 with model 3, as the field document's 49, and a row of a
-            // pair a test of its own. To 8 and 9 with models 4 and 5, as the
-            // field document's 50 and 53.
-            (SESSION_TABLE, 9),
+            // pair a test of its own. To 8, 9 and 10 with models 4, 5 and 6,
+            // as the field document's 50, 53 and 54.
+            (SESSION_TABLE, 10),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

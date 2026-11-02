@@ -1895,7 +1895,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     let row = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
                \"zenoh_evidence\":{\"log2_lr_millibits\":64363,\
                \"log2_lr_no_millibits\":89344,\
-               \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":5,\
+               \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":6,\
                \"crossed_at_packet\":2,\
                \"log2_lr_max_millibits\":64363,\"log2_lr_min_millibits\":0,\
                \"log2_lr_no_max_millibits\":89344,\"log2_lr_no_min_millibits\":0,\
@@ -1910,7 +1910,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     let flow = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
                 \"zenoh_evidence\":{\"log2_lr_millibits\":81360,\
                 \"log2_lr_no_millibits\":112682,\
-                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":5,\
+                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":6,\
                 \"crossed_at_packet\":2,\
                 \"log2_lr_max_millibits\":81360,\"log2_lr_min_millibits\":0,\
                 \"log2_lr_no_max_millibits\":112682,\"log2_lr_no_min_millibits\":0,\
@@ -1927,7 +1927,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":31679,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":9}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":10}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
@@ -2163,7 +2163,7 @@ fn a_session_with_its_handshake_is_zenoh() {
     let head = alloc::format!(
         "\"zenoh\":\"yes\",\"announced_version\":\"own\",\"zenoh_evidence\":\
          {{\"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":20000,\
-         \"no_at_millibits\":-20000,\"model\":5,\"crossed_at_packet\":2,\
+         \"no_at_millibits\":-20000,\"model\":6,\"crossed_at_packet\":2,\
          \"log2_lr_max_millibits\":{},\"log2_lr_min_millibits\":{},\
          \"log2_lr_no_max_millibits\":{},\"log2_lr_no_min_millibits\":{},\
          \"checks\":[{{\"check\":\"cookie_echo\"",
