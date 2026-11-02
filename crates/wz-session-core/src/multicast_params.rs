@@ -37,8 +37,10 @@ pub const PROTOCOL_DEFAULT_RESOLUTION: u8 = 0x02;
 /// `_Z_DEFAULT_MULTICAST_BATCH_SIZE`, protocol/definitions/core.h:21).
 /// NOTE: pico's shipped CONFIG default (`Z_BATCH_MULTICAST_SIZE`,
 /// CMakeLists 2048) differs from this protocol constant — a default-built
-/// pico therefore always advertises S=1 in its JOIN.
-pub const PROTOCOL_DEFAULT_BATCH_SIZE: u16 = 8192;
+/// pico therefore always advertises S=1 in its JOIN. The value is
+/// [`crate::peer_init_caps::DEFAULT_MULTICAST_BATCH_SIZE`], which the passive
+/// reader of a JOIN applies as well.
+pub const PROTOCOL_DEFAULT_BATCH_SIZE: u16 = crate::peer_init_caps::DEFAULT_MULTICAST_BATCH_SIZE;
 
 /// Pack the JOIN resolution cbyte: `seq_num_res` in bits 0-1,
 /// `req_id_res` in bits 2-3 (zenoh-pico `_z_join_encode`,

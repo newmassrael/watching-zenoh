@@ -114,3 +114,36 @@ pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
 pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
     decode_join(bytes).map(|join| join.zid)
 }
+
+/// The identity of the JOIN QoS extension: id `0x1`, mandatory, a ZBuf
+/// (`commons/zenoh-protocol/src/transport/join.rs` @ `pub type QoS = zextzbuf!(0x1, true);`),
+/// which is zenoh-pico's `_Z_MSG_EXT_ID_JOIN_QOS` (protocol/ext.h:46). Compared
+/// against [`crate::ext_header::ext_eid`] of a received header, so a chained and
+/// an unchained one are the same extension.
+pub const JOIN_QOS_EXT_EID: u8 =
+    crate::ext_header::ext_identity(0x1, true, crate::ext_header::EXT_ENC_ZBUF);
+
+/// The next SNs a JOIN QoS extension states, one pair per priority, read off the
+/// extension's ZBuf BODY (the bytes behind its header and length).
+///
+/// Upstream writes `Priority::NUM` pairs of VLE `(reliable, best_effort)` in
+/// priority order (`commons/zenoh-codec/src/transport/join.rs` @
+/// `for p in ext_qos.iter_mut() {`), and with the extension present the body's
+/// own `next_sn` is not read: a receiver seeds every priority from the extension
+/// (`io/zenoh-transport/src/multicast/transport.rs` @ `let next_sns = match join.ext_qos.as_ref() {`).
+/// `None` when the body holds fewer than `Priority::NUM` pairs.
+///
+/// One reader for the multicast participant, which finds the body in the
+/// datagram (`crate::multicast_join::decode_join_qos`), and for the passive
+/// observer, which finds it in the decoded extension chain.
+pub fn qos_next_sns(
+    body: &[u8],
+) -> Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]> {
+    let mut inner = SceCursor::new(body);
+    let mut pairs = [crate::sn::MulticastRxPair::default(); crate::qos::Priority::NUM];
+    for p in pairs.iter_mut() {
+        p.reliable = inner.read_vle_u64().ok()?;
+        p.best_effort = inner.read_vle_u64().ok()?;
+    }
+    Some(pairs)
+}

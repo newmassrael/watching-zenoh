@@ -170,6 +170,7 @@ pub enum SessionPhase {
 /// | [`Self::negotiated()`] | both Inits are seen | stays set; a `Close` does not clear it |
 /// | [`Self::lowlatency()`], [`Self::compression()`], [`Self::qos()`] | both Inits are seen | the `&=` of the two offers |
 /// | [`Self::caps`], so [`Self::sn_mask()`] and [`Self::batch_size()`] | the InitAck is seen | the acceptor's answer |
+/// | [`Self::joined_caps`], so [`Self::sn_mask_of()`] and, where the senders agree, [`Self::sn_mask()`] | a direction's JOIN is seen, on a link with no handshake | what that sender's latest JOIN states |
 /// | [`Self::patch`] | any Init is seen | the `min` of the announcements seen; the session's once negotiated |
 /// | [`Self::version`] | any Init is seen | the InitAck's, else the InitSyn's |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +277,25 @@ pub struct FlowContext {
     /// defaults are non-obvious, so a second decoder would be a second place
     /// to get it wrong.
     pub caps: Option<PeerInitCaps>,
+    /// Per direction, indexed as [`Self::open_seen`] is, the size parameters the
+    /// direction's latest JOIN states, `None` until it has carried one.
+    ///
+    /// The [`Self::caps`] of a link with no handshake. A multicast group has no
+    /// InitAck to say what ring its SNs run on, and every sender says it instead,
+    /// in the JOIN it sends before its first frame and periodically after
+    /// (`io/zenoh-transport/src/multicast/link.rs` @ `let message: TransportMessage = Join {`).
+    /// A receiver reads a sender's frames on the ring that sender's JOIN states
+    /// (`io/zenoh-transport/src/multicast/transport.rs` @ `join.resolution.get(Field::FrameSN),`),
+    /// so the two directions are kept apart: one flow can hold two senders, on a
+    /// raweth link whose mapping addresses each node to the other.
+    ///
+    /// A JOIN with its S flag clear states the defaults
+    /// ([`PeerInitCaps::from_join_body`]); that is a reading of the message, not
+    /// a guess. Never set on a link with a handshake, where a JOIN is not
+    /// admissible and is not folded ([`PassiveFrame::inadmissible_on_link`]),
+    /// and [`Self::caps`] is never set on a link without one, so at most one of
+    /// the two speaks for a flow.
+    pub joined_caps: [Option<PeerInitCaps>; 2],
     /// The protocol version the handshake announced, `None` until an Init has
     /// been observed. `Some(0)` and `None` are different, as for [`Self::patch`]:
     /// the first says a peer announced version zero, the second that no Init was
@@ -737,6 +757,7 @@ impl Default for FlowContext {
             shm_offered: false,
             multilink_offered: false,
             caps: None,
+            joined_caps: [None; 2],
             version: None,
         }
     }
@@ -1011,14 +1032,52 @@ impl FlowContext {
     /// is why this returns an absence rather than a guess. The chain router is
     /// told the absence (`reassembly_dispatch::SnRing::Unknown`) and follows a
     /// chain on steps of plain `+1` alone.
+    ///
+    /// On a link with no handshake it is the ring the senders' JOINs state
+    /// ([`Self::joined_caps`]), when every direction that carried one states
+    /// the same; `None` when two senders state different rings, whose frames
+    /// are judged each on its own ([`Self::sn_mask_of`]).
     pub fn sn_mask(&self) -> Option<u64> {
-        self.caps.map(|c| crate::sn::mask_from_res(c.seq_num_res))
+        self.agreed(|c| c.seq_num_res).map(crate::sn::mask_from_res)
     }
 
     /// R311y585 (A5) — the batch ceiling the acceptor agreed to, `None` until
-    /// an InitAck has been observed.
+    /// an InitAck has been observed. On a link with no handshake it is the
+    /// batch size the senders' JOINs state, on the rule [`Self::sn_mask`]
+    /// follows.
     pub fn batch_size(&self) -> Option<u16> {
-        self.caps.map(|c| c.batch_size)
+        self.agreed(|c| c.batch_size)
+    }
+
+    /// The size parameters `direction`'s frames are read in: the InitAck's on
+    /// a link with a handshake, the direction's own JOIN's on one without.
+    pub fn caps_of(&self, direction: Direction) -> Option<PeerInitCaps> {
+        self.caps
+            .or(self.joined_caps[usize::from(direction == Direction::B)])
+    }
+
+    /// The SN ring `direction`'s frames are judged on ([`Self::caps_of`]),
+    /// with [`Self::sn_mask`]'s rule that an unknown ring is `None`.
+    pub fn sn_mask_of(&self, direction: Direction) -> Option<u64> {
+        self.caps_of(direction)
+            .map(|c| crate::sn::mask_from_res(c.seq_num_res))
+    }
+
+    /// The batch ceiling `direction`'s units are held to ([`Self::caps_of`]).
+    pub fn batch_size_of(&self, direction: Direction) -> Option<u16> {
+        self.caps_of(direction).map(|c| c.batch_size)
+    }
+
+    /// One size parameter for the whole flow: the InitAck's, or the one value
+    /// every JOIN-stated direction agrees on.
+    fn agreed<T: PartialEq>(&self, field: impl Fn(PeerInitCaps) -> T) -> Option<T> {
+        if let Some(caps) = self.caps {
+            return Some(field(caps));
+        }
+        match self.joined_caps.map(|c| c.map(&field)) {
+            [Some(a), Some(b)] if a != b => None,
+            [a, b] => a.or(b),
+        }
     }
 
     pub fn fragmentation_markers(&self) -> bool {
@@ -1296,6 +1355,12 @@ pub struct PassiveFrame {
     /// Not an error: the frame decoded, and a dissector shows it with the
     /// violation flagged rather than dropping it. Dropping is what makes a
     /// non-conforming peer invisible.
+    ///
+    /// On a link with no handshake the ceiling is the batch size the sender's
+    /// own JOIN states ([`FlowContext::batch_size_of`]): a group negotiates
+    /// nothing, every member must state the same size
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `if join.batch_size != batch_size {`),
+    /// and a sender that exceeds what it stated breaks its own word.
     pub exceeds_negotiated_batch: bool,
     /// R311y583 (A2) — what this frame carried ABOVE the transport layer.
     ///
@@ -1309,9 +1374,10 @@ pub struct PassiveFrame {
     /// R311y608 — this message cannot occur on the link that carried it, so it
     /// was decoded and reported but NOT folded into the session context.
     ///
-    /// Only ever true for an INIT or an OPEN on a multicast-capability link
-    /// (see [`PassiveSession::next_datagram_on`]). Always `false` on a stream
-    /// link, which is unicast by construction.
+    /// True for an INIT or an OPEN on a multicast-capability link (see
+    /// [`PassiveSession::next_datagram_on`]), and for a JOIN on a link with a
+    /// handshake, a stream link included: each kind of link refuses the
+    /// other's establishment message (`inadmissible_on`).
     ///
     /// A flag rather than an error, for the reason
     /// [`Self::exceeds_negotiated_batch`] is one: the bytes decoded, and what
@@ -1596,6 +1662,26 @@ fn is_handshake_message(frame: &InboundFrame) -> bool {
         #[cfg(feature = "codec-open-body")]
         InboundFrame::Open { .. } => true,
         _ => false,
+    }
+}
+
+/// Is `frame` a message no participant on a link of this kind accepts?
+///
+/// The two kinds refuse each other's establishment message. A link with no
+/// handshake discards an INIT and an OPEN ([`is_handshake_message`]). A link
+/// with one has no use for a JOIN: upstream's unicast receiver acts on a
+/// Frame, a Fragment, a Close and a KeepAlive and only logs any other
+/// (`io/zenoh-transport/src/unicast/universal/rx.rs` @ `TransportBody::KeepAlive(KeepAlive { .. }) => {}`),
+/// and wz's own maps it to a framing error
+/// ([`crate::inbound::inbound_to_fsm_event`]). Folding one there would let a
+/// stray JOIN restate the ring the InitAck set.
+fn inadmissible_on(handshake: LinkHandshake, frame: &InboundFrame) -> bool {
+    match handshake {
+        LinkHandshake::Absent => is_handshake_message(frame),
+        #[cfg(feature = "codec-join")]
+        LinkHandshake::Present => matches!(frame, InboundFrame::Join { .. }),
+        #[cfg(not(feature = "codec-join"))]
+        LinkHandshake::Present => false,
     }
 }
 
@@ -1955,6 +2041,11 @@ pub struct PassiveSession {
     /// before unringed SNs were kept.
     #[cfg(feature = "codec-frame")]
     sn_unringed: [bool; 2],
+    /// Per direction, who the sender of its latest JOIN said it was: what
+    /// tells a JOIN that starts a sender's SNs from one that only repeats
+    /// them ([`Self::start_sns_at_join`]).
+    #[cfg(feature = "codec-join")]
+    joined: [Option<JoinStatement>; 2],
     /// R311y611 (§1.4b) — messages decoded whose header set a flag bit its own
     /// MID does not define, per direction.
     ///
@@ -2171,6 +2262,8 @@ impl Default for PassiveSession {
             sn_steps: [SnSteps::default(); 2],
             #[cfg(feature = "codec-frame")]
             sn_unringed: [false; 2],
+            #[cfg(feature = "codec-join")]
+            joined: [None; 2],
             reserved_headers: [0; 2],
             undefined_mandatory_exts: [0; 2],
             unaccounted_batch_bytes: [0; 2],
@@ -2938,7 +3031,7 @@ impl PassiveSession {
         acc.frames += 1;
         let conduit = sn_conduit(priority, reliable);
         let steps = &mut self.sn_steps[idx];
-        let Some(mask) = self.context.sn_mask() else {
+        let Some(mask) = self.context.sn_mask_of(direction) else {
             acc.without_resolution += 1;
             // No ring, so no verdict; the step to the next integer is still a
             // fact (see `SnSteps`). A repeated SN leaves the slot as it is.
@@ -3219,13 +3312,14 @@ impl PassiveSession {
             priority,
             markers,
         } = fragment;
-        // The ring is the InitAck's. Without one the router is told so and
+        // The ring is the InitAck's, or on a link with no handshake the one
+        // this direction's JOIN states. Without one the router is told so and
         // follows a chain on plain `+1` steps, which are consecutive on every
         // ring; it is never handed a guessed mask (see [`FlowContext::sn_mask`]).
         // The step it cannot judge ends the chain as `Unresolvable`, below.
         let ring = self
             .context
-            .sn_mask()
+            .sn_mask_of(direction)
             .map_or(SnRing::Unknown, SnRing::Known);
         let markers_on = self.context.fragmentation_markers();
         let idx = usize::from(direction == Direction::B);
@@ -3287,7 +3381,81 @@ impl PassiveSession {
                 self.lease_ms[seat].get_or_insert(body.lease);
             }
             InboundFrame::Close { .. } => self.close_seen[seat] = true,
+            #[cfg(feature = "codec-join")]
+            InboundFrame::Join {
+                body, extensions, ..
+            } => {
+                let stated = JoinStatement::of(body, extensions);
+                if self.joined[seat] != Some(stated) {
+                    self.joined[seat] = Some(stated);
+                    self.start_sns_at_join(seat, body, extensions);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Start `seat`'s SN conduits where its JOIN says the sender's next frame
+    /// is, on the ring the JOIN states, as a receiver does for a sender it
+    /// learns: each conduit holds the SN BEFORE `next_sn`, so a frame at
+    /// `next_sn` follows and a frame past it is a gap
+    /// (`io/zenoh-transport/src/common/priority.rs` @ `// Set the sequence number in the state as it had received a message with sn - 1`).
+    ///
+    /// Run for a sender's first JOIN and for a JOIN that makes it another
+    /// sender ([`JoinStatement`]), and for no other. A later JOIN of the same
+    /// sender moves nothing, as upstream's receiver checks it and keeps its
+    /// state (`io/zenoh-transport/src/multicast/rx.rs` @ `pub(super) fn handle_join_from_peer(`):
+    /// a frame lost before it is counted by the frame that follows, against the
+    /// last one seen.
+    ///
+    /// With the QoS extension every priority starts at its own pair and the
+    /// body's `next_sn` is not read; without it the body's pair starts the
+    /// default priority, the only one a sender without QoS sends on. An SN the
+    /// ring cannot hold starts nothing, as upstream's `SeqNum::set` refuses it
+    /// (`io/zenoh-transport/src/common/seq_num.rs` @ `bail!("The sequence number value must be smaller than the resolution");`),
+    /// and neither does an extension whose body does not read: that conduit's
+    /// first frame is its baseline.
+    #[cfg(feature = "codec-join")]
+    fn start_sns_at_join(
+        &mut self,
+        seat: usize,
+        body: &wz_codecs::join::JoinOwned,
+        extensions: &[ExtEntryOwned],
+    ) {
+        use crate::ext_view::ExtEntryView as _;
+        use crate::qos::Priority;
+        use crate::sn::MulticastRxPair;
+        let last = &mut self.sn_last[seat];
+        *last = [None; SN_CONDUITS];
+        // The SNs kept before this sender had a ring belong to no ring; the
+        // JOIN replaces them, so the next frame must not clear what it wrote.
+        self.sn_unringed[seat] = false;
+        let Some(caps) = self.context.joined_caps[seat] else {
+            return;
+        };
+        let mask = crate::sn::mask_from_res(caps.seq_num_res);
+        let mut start = |priority: Priority, next: MulticastRxPair| {
+            for (reliable, sn) in [(true, next.reliable), (false, next.best_effort)] {
+                if sn & !mask == 0 {
+                    last[sn_conduit(priority, reliable)] = Some(crate::sn::decrement(mask, sn));
+                }
+            }
+        };
+        match join_qos_ext(extensions) {
+            Some(ext) => {
+                if let Some(pairs) = ext.plain_zbuf().and_then(crate::join_decode::qos_next_sns) {
+                    for (wire, pair) in (0u8..).zip(pairs) {
+                        start(Priority::from_wire(wire), pair);
+                    }
+                }
+            }
+            None => start(
+                Priority::DEFAULT,
+                MulticastRxPair {
+                    reliable: body.next_sn_reliable,
+                    best_effort: body.next_sn_best_effort,
+                },
+            ),
         }
     }
 
@@ -3358,9 +3526,68 @@ impl FlowContext {
                 }
             }
             InboundFrame::Close { .. } => self.phase = SessionPhase::Closed,
+            // Every JOIN, not the first one only: a sender that restarts with
+            // another ring says so in its next JOIN, and the ring is what the
+            // JOIN states now ([`Self::joined_caps`]). Where the SNs start is
+            // the session's record, not the context's
+            // ([`PassiveSession::fold`]).
+            #[cfg(feature = "codec-join")]
+            InboundFrame::Join { body, .. } => {
+                self.joined_caps[usize::from(direction == Direction::B)] =
+                    Some(PeerInitCaps::from_join_body(body.sn_res, body.batch_size));
+            }
             _ => {}
         }
     }
+}
+
+/// What one sender's JOIN says about who it is, the facts upstream's receiver
+/// holds a known sender to.
+///
+/// A JOIN from a sender already known that states another value of any of
+/// these is not that sender any more: upstream's receiver refuses it as
+/// "Inconsistent parameters" and tears the transport down
+/// (`io/zenoh-transport/src/multicast/rx.rs` @ `|| join.resolution != peer.resolution`
+/// and `io/zenoh-transport/src/multicast/link.rs` @ `zenoh_runtime::ZRuntime::Net.spawn(async move { c_transport.delete().await });`),
+/// so the next JOIN from it is a new sender's. The version is not
+/// here because a JOIN of another version is not decoded at all, and the batch
+/// size is not because upstream does not compare it.
+#[cfg(feature = "codec-join")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JoinStatement {
+    zid: [u8; 16],
+    zid_len: u8,
+    whatami: u8,
+    seq_num_res: u8,
+    req_id_res: u8,
+    lease_ms: u64,
+    qos: bool,
+}
+
+#[cfg(feature = "codec-join")]
+impl JoinStatement {
+    fn of(body: &wz_codecs::join::JoinOwned, extensions: &[ExtEntryOwned]) -> Self {
+        let caps = PeerInitCaps::from_join_body(body.sn_res, body.batch_size);
+        let wire_zid = body.zid.as_slice();
+        let mut zid = [0u8; 16];
+        let zid_len = wire_zid.len().min(zid.len());
+        zid[..zid_len].copy_from_slice(&wire_zid[..zid_len]);
+        Self {
+            zid,
+            zid_len: zid_len as u8,
+            whatami: body.whatami(),
+            seq_num_res: caps.seq_num_res,
+            req_id_res: caps.req_id_res,
+            lease_ms: body.lease,
+            qos: join_qos_ext(extensions).is_some(),
+        }
+    }
+}
+
+/// The JOIN QoS extension of a decoded chain, if it carries one.
+#[cfg(feature = "codec-join")]
+fn join_qos_ext(extensions: &[ExtEntryOwned]) -> Option<&ExtEntryOwned> {
+    crate::ext_view::find_by_eid(extensions, crate::join_decode::JOIN_QOS_EXT_EID)
 }
 
 /// What a `Fragment` came to, as the chain router judged it.
@@ -3606,10 +3833,11 @@ fn walk_unit(
     judge.note_last_seen(seat, unit_instant);
     // R311y585 (A5) — the ceiling is on what the WIRE carried, so it is judged
     // on these bytes and not on anything decompressed out of them. Never true
-    // before an InitAck: see [`PassiveFrame::exceeds_negotiated_batch`].
+    // before an InitAck, or a JOIN of this direction where there is no
+    // handshake: see [`PassiveFrame::exceeds_negotiated_batch`].
     let exceeds_negotiated_batch = judge
         .context()
-        .batch_size()
+        .batch_size_of(direction)
         .is_some_and(|max| bytes.len() > max as usize);
     // THE BATCH HEADER, INFERRED. With no Init in the capture nothing
     // negotiated the header, and a compressed session's batches carry it all
@@ -3758,8 +3986,7 @@ fn walk_unit(
             unaccounted = true;
             break;
         }
-        let inadmissible =
-            handshake == LinkHandshake::Absent && frame.as_ref().is_ok_and(is_handshake_message);
+        let inadmissible = frame.as_ref().is_ok_and(|f| inadmissible_on(handshake, f));
         if let Ok(ref f) = frame {
             if !inadmissible {
                 judge.fold(direction, f);
@@ -8131,6 +8358,321 @@ mod tests {
             2,
             "and the whole unit is unaccounted for, because its extent is what \
              is unknown"
+        );
+    }
+}
+
+/// A multicast group's SNs, judged on the ring and from the start each
+/// sender's JOIN states ([`FlowContext::joined_caps`],
+/// [`PassiveSession::start_sns_at_join`]).
+///
+/// The JOINs are the codec's bytes, and every frame carries a real OAM record,
+/// so a reading that disagrees with the encoders fails here. The capture of
+/// stock zenohd that holds the same rule on upstream's own bytes is
+/// `wz-capture`'s.
+#[cfg(all(test, feature = "codec-join"))]
+mod join_ring_tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::*;
+    use wz_codecs::wire_const;
+
+    const MULTICAST: LinkHandshake = LinkHandshake::Absent;
+
+    /// A JOIN from the peer `zid`, its next SNs `next` (reliable, best effort),
+    /// with the S flag and `sn_res` when `sn_res` is given, and with the QoS
+    /// extension stating `qos` when that is given.
+    fn join(zid: u8, sn_res: Option<u8>, next: (u64, u64), qos: Option<&[(u64, u64)]>) -> Vec<u8> {
+        let body = wz_codecs::join::Join {
+            version: wire_const::PROTOCOL_VERSION,
+            // whatami peer (0x01), a 4-byte zid.
+            cbyte: (3 << 4) | 0x01,
+            zid: &[zid; 4],
+            sn_res,
+            batch_size: sn_res.map(|_| 2048),
+            lease: 10_000,
+            next_sn_reliable: next.0,
+            next_sn_best_effort: next.1,
+        };
+        let mut flags = 0;
+        if sn_res.is_some() {
+            flags |= wire_const::FLAG_T_JOIN_S;
+        }
+        if qos.is_some() {
+            flags |= wire_const::FLAG_T_Z;
+        }
+        let mut wire = vec![wire_const::T_MID_JOIN | flags];
+        wire.extend_from_slice(
+            &body
+                .encode_to_vec(u8::from(sn_res.is_some()))
+                .expect("a fixture join is encodable"),
+        );
+        if let Some(pairs) = qos {
+            let mut ext_body = Vec::new();
+            for (reliable, best_effort) in pairs {
+                crate::vle::encode_vle_u64_into(&mut ext_body, *reliable);
+                crate::vle::encode_vle_u64_into(&mut ext_body, *best_effort);
+            }
+            wire.push(crate::join_decode::JOIN_QOS_EXT_EID);
+            crate::vle::encode_vle_u64_into(&mut wire, ext_body.len() as u64);
+            wire.extend_from_slice(&ext_body);
+        }
+        wire
+    }
+
+    /// A reliable FRAME at `sn` on `priority`, carrying one OAM record. The
+    /// priority rides the frame's QoS extension (id `0x1`, mandatory, z64)
+    /// unless it is the default, which a sender without QoS never writes.
+    fn frame(sn: u64, priority: crate::qos::Priority) -> Vec<u8> {
+        let mut header = wire_const::T_MID_FRAME | wire_const::FLAG_T_FRAME_R;
+        let qos = priority != crate::qos::Priority::DEFAULT;
+        if qos {
+            header |= wire_const::FLAG_T_Z;
+        }
+        let mut wire = vec![header];
+        crate::vle::encode_vle_u64_into(&mut wire, sn);
+        if qos {
+            wire.push(crate::ext_header::ext_identity(
+                0x1,
+                true,
+                crate::ext_header::EXT_ENC_Z64,
+            ));
+            crate::vle::encode_vle_u64_into(&mut wire, u64::from(priority.wire_byte()));
+        }
+        wire.extend_from_slice(
+            &wz_codecs::oam::Oam {
+                id: sn,
+                ..Default::default()
+            }
+            .encode_to_vec()
+            .expect("a fixture oam record is encodable"),
+        );
+        wire
+    }
+
+    fn data(sn: u64) -> Vec<u8> {
+        frame(sn, crate::qos::Priority::DEFAULT)
+    }
+
+    /// Read `units` as datagrams of `direction` on a multicast group, and
+    /// return the SN verdict of every message, in order.
+    fn read(
+        s: &mut PassiveSession,
+        direction: Direction,
+        units: &[Vec<u8>],
+    ) -> Vec<Option<SnVerdict>> {
+        units
+            .iter()
+            .enumerate()
+            .flat_map(|(i, unit)| s.next_datagram_on(direction, unit, i, MULTICAST))
+            .map(|f| {
+                assert!(f.frame.is_ok(), "every fixture decodes: {:?}", f.frame);
+                assert!(!f.inadmissible_on_link, "{:?}", f.frame);
+                f.sn_verdict
+            })
+            .collect()
+    }
+
+    /// The claim as it was filed: a JOIN with its S flag clear states the
+    /// default ring and where the sender's SNs are, so the frame lost after it
+    /// is counted, and only the frame before it is without a ring.
+    #[test]
+    fn a_join_starts_its_senders_sns_and_the_frame_lost_after_it_is_counted() {
+        let mut s = PassiveSession::new();
+        let got = read(
+            &mut s,
+            Direction::A,
+            &[
+                data(3),
+                join(0xA1, None, (10, 0), None),
+                data(10),
+                data(11),
+                data(13),
+            ],
+        );
+        assert_eq!(
+            got,
+            vec![
+                Some(SnVerdict::WithoutResolution),
+                None,
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Gap { missing: 1 }),
+            ]
+        );
+        let acc = s.sn_accounting(Direction::A);
+        assert_eq!((acc.missing, acc.gaps, acc.without_resolution), (1, 1, 1));
+        assert_eq!(s.context().sn_mask(), Some(crate::sn::mask_from_res(2)));
+        assert_eq!(
+            s.context().batch_size(),
+            Some(crate::peer_init_caps::DEFAULT_MULTICAST_BATCH_SIZE),
+            "an S-clear JOIN states the multicast default, not the unicast one"
+        );
+    }
+
+    /// The JOIN's `next_sn` is the baseline, not the first frame after it: a
+    /// frame lost right after the JOIN is a gap, as upstream's receiver, which
+    /// syncs to `next_sn`, would drop the frame before the one it accepts.
+    #[test]
+    fn the_first_frame_after_a_join_is_judged_against_its_next_sn() {
+        let mut s = PassiveSession::new();
+        let got = read(
+            &mut s,
+            Direction::A,
+            &[join(0xA1, None, (10, 0), None), data(12)],
+        );
+        assert_eq!(got, vec![None, Some(SnVerdict::Gap { missing: 2 })]);
+        assert_eq!(s.sn_accounting(Direction::A).without_resolution, 0);
+    }
+
+    /// The ring is the one the JOIN states, and only that tells this apart
+    /// from a default: on the 7-bit ring of an S-set JOIN with `sn_res` 0, SN
+    /// 1 after 127 is a gap of one across the wrap, where the default ring
+    /// would read it as far behind.
+    #[test]
+    fn an_s_set_join_states_a_narrow_ring_and_a_gap_across_its_wrap_is_counted() {
+        let mut s = PassiveSession::new();
+        let got = read(
+            &mut s,
+            Direction::A,
+            &[
+                join(0xA1, Some(0x00), (126, 0), None),
+                data(126),
+                data(127),
+                data(1),
+            ],
+        );
+        assert_eq!(
+            got,
+            vec![
+                None,
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Gap { missing: 1 }),
+            ]
+        );
+        assert_eq!(s.context().sn_mask(), Some(127));
+        assert_eq!(s.context().batch_size(), Some(2048));
+        assert_eq!(s.sn_accounting(Direction::A).missing, 1);
+    }
+
+    /// A later JOIN of the same sender moves nothing, so what was lost before
+    /// it is counted by the next frame; a JOIN that names another sender
+    /// starts the SNs again, at its own `next_sn`.
+    #[test]
+    fn a_later_join_of_the_same_sender_moves_nothing_and_another_sender_restarts() {
+        let mut s = PassiveSession::new();
+        let got = read(
+            &mut s,
+            Direction::A,
+            &[
+                join(0xA1, None, (10, 0), None),
+                data(10),
+                data(11),
+                // 12 and 13 were sent and lost; the periodic JOIN says 14.
+                join(0xA1, None, (14, 0), None),
+                data(14),
+                // Another zid on the same socket: a new sender.
+                join(0xB2, None, (500, 0), None),
+                data(500),
+            ],
+        );
+        assert_eq!(
+            got,
+            vec![
+                None,
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Continuous),
+                None,
+                Some(SnVerdict::Gap { missing: 2 }),
+                None,
+                Some(SnVerdict::Continuous),
+            ]
+        );
+        assert_eq!(s.sn_accounting(Direction::A).missing, 2);
+    }
+
+    /// With the QoS extension each priority starts at its own pair, and the
+    /// body's `next_sn` is not read.
+    #[test]
+    fn a_qos_join_starts_every_priority_at_its_own_pair() {
+        use crate::qos::Priority;
+        let pairs: Vec<(u64, u64)> = (0..Priority::NUM as u64)
+            .map(|p| (100 + p, 200 + p))
+            .collect();
+        let mut s = PassiveSession::new();
+        let got = read(
+            &mut s,
+            Direction::A,
+            &[
+                // The body's pair is upstream's decoy under QoS
+                // (`(PrioritySn::DEFAULT, Some(Box::new(tmp)))`).
+                join(0xA1, None, (0, 0), Some(&pairs)),
+                frame(102, Priority::from_wire(2)),
+                frame(107, Priority::DEFAULT),
+            ],
+        );
+        assert_eq!(
+            got,
+            vec![
+                None,
+                Some(SnVerdict::Continuous),
+                // DEFAULT is priority 5, which starts at 105.
+                Some(SnVerdict::Gap { missing: 2 }),
+            ]
+        );
+    }
+
+    /// A JOIN on a link with a handshake is refused by every participant there,
+    /// so it states no ring and the InitAck's stays the only one.
+    #[test]
+    fn a_join_on_a_link_with_a_handshake_is_inadmissible_and_states_nothing() {
+        let mut s = PassiveSession::new();
+        let frames = s.next_datagram(Direction::A, &join(0xA1, None, (10, 0), None), 0);
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].inadmissible_on_link);
+        assert_eq!(s.context().joined_caps, [None; 2]);
+        assert_eq!(s.context().sn_mask(), None);
+        let frames = s.next_datagram(Direction::A, &data(10), 1);
+        assert_eq!(frames[0].sn_verdict, Some(SnVerdict::WithoutResolution));
+    }
+
+    /// Two senders on one flow each have their own ring; the flow states none
+    /// when they disagree, and each direction's frames are judged on its own.
+    #[test]
+    fn two_senders_on_one_flow_are_judged_each_on_the_ring_its_join_states() {
+        let mut s = PassiveSession::new();
+        read(
+            &mut s,
+            Direction::A,
+            &[join(0xA1, Some(0x00), (126, 0), None)],
+        );
+        read(&mut s, Direction::B, &[join(0xB2, None, (126, 0), None)]);
+        assert_eq!(
+            s.context().sn_mask(),
+            None,
+            "the senders state different rings"
+        );
+        assert_eq!(s.context().sn_mask_of(Direction::A), Some(127));
+        assert_eq!(
+            s.context().sn_mask_of(Direction::B),
+            Some(crate::sn::mask_from_res(2))
+        );
+        assert_eq!(
+            read(&mut s, Direction::A, &[data(127), data(1)]),
+            vec![
+                Some(SnVerdict::Gap { missing: 1 }),
+                Some(SnVerdict::Gap { missing: 1 })
+            ]
+        );
+        assert_eq!(
+            read(&mut s, Direction::B, &[data(126), data(128)]),
+            vec![
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Gap { missing: 1 })
+            ],
+            "128 is on B's ring, which is wider than 7 bits"
         );
     }
 }

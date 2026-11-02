@@ -251,6 +251,11 @@ pub mod session_table;
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
+/// Captures of upstream software outside the calibration corpus
+/// (`captures/upstream/`), each read for the behaviour it was taken to hold,
+/// through the field document a consumer reads.
+#[cfg(all(test, feature = "dissect"))]
+mod upstream_capture_tests;
 /// The counts of `captures/corpus/` and the weights computed from them, written
 /// by a test and never by hand (`zenoh_calibration_tests`).
 pub(crate) mod zenoh_calibration_generated;

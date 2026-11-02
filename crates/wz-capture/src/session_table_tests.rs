@@ -3397,10 +3397,12 @@ fn the_repositorys_captures_read_as_what_they_are() {
     assert_eq!(joined.1.units(), 2);
 
     // The raweth capture is seven units with one version header and one SN
-    // break: about ten and a half bits for `yes`, which model 2 does not call
-    // (model 1 did, on a unit weight the real mDNS of the corpus beats). A
+    // step that follows: its JOIN names 0 as the next best-effort SN and its
+    // Fragment carries 0, and a link with no handshake starts a sender's SNs
+    // where its JOIN says. Read without the JOIN, that step was a break and the
+    // capture `undecided` under model 2, about ten and a half bits for `yes`; a
     // unit read whole is weak evidence against a protocol that reads whole a
-    // third of the time.
+    // third of the time, and the step that follows is what calls it.
     for (name, bytes, want) in [
         (
             "publisher",
@@ -3410,7 +3412,7 @@ fn the_repositorys_captures_read_as_what_they_are() {
         (
             "raweth",
             &include_bytes!("../../../captures/raweth-transport-messages.pcap")[..],
-            ZenohVerdict::Undecided,
+            ZenohVerdict::Yes,
         ),
     ] {
         for (verdict, readings) in read(bytes) {

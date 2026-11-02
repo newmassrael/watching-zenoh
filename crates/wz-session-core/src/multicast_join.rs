@@ -54,7 +54,7 @@ use crate::sn::MulticastTxConduits;
 // (transport.c @ `_Z_MSG_EXT_ID_JOIN_QOS` before `_Z_MSG_EXT_ID_JOIN_PATCH`), and
 // carries the chain-MORE bit (`0x80`) exactly then — see [`write_join_qos_ext`].
 #[cfg(feature = "transport-qos")]
-const JOIN_QOS_EXT_HEADER: u8 = 0x51;
+const JOIN_QOS_EXT_HEADER: u8 = crate::join_decode::JOIN_QOS_EXT_EID;
 /// The ext-id mask (`_Z_EXT_FULL_ID_MASK`, ext.h:30) — strips the chain-MORE bit
 /// so a chained (`0xD1`) and an un-chained (`0x51`) QoS ext compare equal.
 #[cfg(feature = "transport-qos")]
@@ -419,13 +419,7 @@ pub fn decode_join_qos(
     // allocator does not have).
     let ext_len = usize::try_from(cursor.read_vle_u64().ok()?).ok()?;
     let ext_body = cursor.peek_slice(ext_len).ok()?;
-    let mut inner = SceCursor::new(ext_body);
-    let mut pairs = [crate::sn::MulticastRxPair::default(); crate::qos::Priority::NUM];
-    for p in pairs.iter_mut() {
-        p.reliable = inner.read_vle_u64().ok()?;
-        p.best_effort = inner.read_vle_u64().ok()?;
-    }
-    Some(pairs)
+    crate::join_decode::qos_next_sns(ext_body)
 }
 
 // R311y605 — the DECODE half now lives in [`crate::join_decode`], gated on

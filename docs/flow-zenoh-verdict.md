@@ -428,7 +428,10 @@ What moved on the corpus: no zenoh flow and no other flow changed word; every
 new zenoh flow reads `yes`. Of the repository's own captures, the seven-unit
 raweth capture moved from `yes` to `undecided`: a version header, seven units
 read whole and one SN break come to about ten and a half bits, and model 1's
-crossing rested on the unit weight the real mDNS beats.
+crossing rested on the unit weight the real mDNS beats. Since a JOIN states
+where its sender's SNs start on a link with no handshake (2026-11-02), that step
+is no break: the capture's Fragment carries the SN its JOIN names next, the step
+follows, and the capture reads `yes` under model 2 as well.
 
 Every zenoh capture added since (the links above and the releases below) moved
 the counts and with them the weights, and the null captures moved with them. A
@@ -970,7 +973,7 @@ zenoh-analyzer session takes them with model 3. The shape agreed with it on
   is what the keys mean; how a consumer words it is the consumer's and moves
   nothing here.
 - The keys move the `fields` and `session_table` documents one revision each
-  (47 and 6 today), numbered when model 3 ships, and the numbers are told to the
+  (48 and 6 today), numbered when model 3 ships, and the numbers are told to the
   consumer then. Nothing in wz waits on the consumer's side of the change.
 
 **D5. The model is frozen by a ledger entry before a validation corpus is

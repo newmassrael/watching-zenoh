@@ -1,0 +1,20 @@
+// Captures of upstream software, outside the calibration corpus (README.md says
+// why). The manifest is the anonymiser's: `capture_anonymise.py --verify-corpus
+// captures/upstream` reads `file` and `scope` from it and holds every file to
+// being one the anonymiser would leave as it is. `packets` is the record count
+// after anonymisation; the behaviour each file holds is read by
+// crates/wz-capture/src/upstream_capture_tests.rs.
+{
+  files: [
+    {
+      file: "zenoh-1-10-0-udp-multicast.pcap",
+      scope: "own",
+      protocol: "zenoh/udp multicast",
+      source: "two eclipse/zenoh 1.10.0 peers on one UDP multicast group (udp/224.0.0.224:7447), scouting and gossip off, one with the REST plugin, one with a memory storage on demo/**",
+      capture: "the bridge of a docker network of its own, from before either peer started; 30 PUTs through the REST peer, 100 ms apart",
+      taken: "2026-11-02",
+      packets: 42,
+      notes: "each JOIN is S clear (the default ring, stated); the SN judge on a multicast group",
+    },
+  ],
+}

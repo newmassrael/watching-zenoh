@@ -1069,13 +1069,15 @@ const HELD: u16 = 1 << 7;
 const LOGGED: u16 = 1 << 8;
 /// The datagram's link carries no handshake ([`LinkHandshake::Absent`]).
 ///
-/// Kept so a datagram is read again with the input it was first read with. No
-/// reachable state makes the two readings of an entry differ today: the walk
-/// reads the flag to judge a handshake message inadmissible, and such a row is
-/// kept whole, and to look for a batch header, which only an InitAck folded on
-/// the link turns on, and a link without a handshake folds none. The redecode
-/// gate therefore cannot tell this flag from its absence, and the flag does not
-/// depend on that holding.
+/// Kept so a datagram is read again with the input it was first read with, and
+/// one reachable state needs it: a JOIN. The walk reads the flag to judge a
+/// message inadmissible on its link, and an inadmissible row is kept whole, so
+/// a JOIN that is an entry is one read where there is no handshake, which folds
+/// the ring its sender states; read again as if the link had one, it would be
+/// inadmissible, fold nothing, and leave the rows behind it in its unit read in
+/// another context. The flag's other use, looking for a batch header, cannot
+/// make the readings differ: only an InitAck folded on the link turns one on,
+/// and a link without a handshake folds none.
 const NO_HANDSHAKE: u16 = 1 << 9;
 /// The row's end on the wire is the index's to say ([`Index::wire_ends`]), not
 /// the end of its bytes: a WebSocket message's last frame, the TLS record that

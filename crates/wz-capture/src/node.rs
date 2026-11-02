@@ -26,8 +26,9 @@
 //! R311y608's rule is enforced here rather than re-derived: a frame carrying
 //! `inadmissible_on_link` is a message the LINK cannot carry, and pico's raweth
 //! is exactly that case — it gives every raweth link the multicast transport,
-//! whose receive path takes an INIT and does nothing with it. The zid in such a
-//! message was genuinely on the wire, so it is recorded as SEEN; it never
+//! whose receive path takes an INIT and does nothing with it. A JOIN on a link
+//! with a handshake is the same case the other way round: a unicast receiver
+//! drops it. The zid in such a message was genuinely on the wire, so it is recorded as SEEN; it never
 //! establishes a link, because no session exists for it to be a link of. An
 //! observer that skipped this distinction would report a topology assembled
 //! from messages no participant acted on.

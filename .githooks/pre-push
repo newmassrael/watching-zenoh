@@ -1247,6 +1247,9 @@ round_fed_gates=(
     # hundred KB, no build.
     "capture_anonymise.py --selftest"
     "capture_anonymise.py --verify-corpus captures/corpus"
+    # captures/upstream/ holds real captures outside the calibration corpus, under
+    # the same anonymiser and the same fixed-point rule.
+    "capture_anonymise.py --verify-corpus captures/upstream"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

@@ -944,6 +944,15 @@
  *     or `without_resolution` (no InitAck seen, so the ring is unknown). That
  *     word stays on a Fragment whose chain IS followed without the ring (see
  *     the fragment chain paragraph above): following a chain is not a verdict.
+ *     On a multicast group (field-document revision 48) the ring is the one
+ *     the frame's SENDER stated in its `Join`, and the `Join` also states
+ *     where that sender's SNs start: the first frame after it is judged
+ *     against the `Join`'s `next_sn` (per priority under QoS), so it reads
+ *     `continuous` or `gap` and not `baseline`, and a frame lost right after
+ *     the `Join` is counted. Only a frame before its sender's first `Join` is
+ *     `without_resolution`. A later `Join` of the same sender moves nothing (a
+ *     frame lost before it is counted by the next frame); one that names
+ *     another zid, ring, role, lease or QoS starts the sender again.
  *     `priority` is one of `Control`, `RealTime`, `InteractiveHigh`,
  *     `InteractiveLow`, `DataHigh`, `Data`, `DataLow`, `Background`.
  *
@@ -1049,10 +1058,14 @@
  *     is `false`. When it is `true`, each is `true` only if BOTH sides offered
  *     it, and `false` otherwise: `null` is "not known", a different answer
  *     from `false`. `sn_mask` and `batch_size` are the InitAck's answer and
- *     are `null` until one was observed. `patch` and `version` are what the
- *     Inits seen announced: with one Init seen they are that Init's
- *     announcement and not yet the session's agreement, and `negotiated` says
- *     whether both were seen. A cell that does not follow from an observed
+ *     are `null` until one was observed. On a link with no handshake (UDP
+ *     multicast, raweth) they are what the senders' `Join`s state, from
+ *     field-document revision 48: the protocol defaults for a `Join` with its
+ *     S flag clear, and `null` where two senders on one flow state different
+ *     values, whose frames are each judged on their own sender's ring.
+ *     `patch` and `version` are what the Inits seen announced: with one Init
+ *     seen they are that Init's announcement and not yet the session's
+ *     agreement, and `negotiated` says whether both were seen. A cell that does not follow from an observed
  *     message is `null`, never a default.
  *
  *     The values that moved at revision 26: a flow that began at its `Close`,

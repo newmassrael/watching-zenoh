@@ -28,6 +28,18 @@
 //! `pub use` re-export so the `crate::session_glue::PeerInitCaps`
 //! callsites resolve unchanged. A DP3 leaf out of `session_glue.rs`.
 
+/// The batch size a JOIN with its S flag clear states: upstream's
+/// `batch_size::MULTICAST` (`commons/zenoh-protocol/src/transport/mod.rs` @
+/// `pub const MULTICAST: BatchSize = 8_192;`) and zenoh-pico's
+/// `_Z_DEFAULT_MULTICAST_BATCH_SIZE` (protocol/definitions/core.h:21).
+///
+/// A PROTOCOL constant, not a configuration default: pico's shipped
+/// `Z_BATCH_MULTICAST_SIZE` is 2048, so a default-built pico sets S and states
+/// its own. Defined here, beside the unicast default `decode_wire_caps`
+/// applies, because the passive reader of a JOIN and the multicast participant
+/// both need it and only this module is in every build.
+pub const DEFAULT_MULTICAST_BATCH_SIZE: u16 = 8192;
+
 /// Peer-advertised resolution + batch-size capabilities decoded from an
 /// INIT body — the InitSyn and InitAck share the wire layout
 /// (`wz_codecs::init_body`), so the Accepting side decodes the peer's
@@ -129,6 +141,23 @@ impl PeerInitCaps {
             req_id_res,
             batch_size,
         }
+    }
+
+    /// The size parameters a JOIN states, its S-clear defaults applied.
+    ///
+    /// A JOIN packs `sn_res` as an Init does, and its S flag gates the same two
+    /// fields, but a clear S means the MULTICAST batch size and not the unicast
+    /// one: upstream's decoder starts from `batch_size::MULTICAST`
+    /// (`commons/zenoh-codec/src/transport/join.rs` @ `let mut batch_size = batch_size::MULTICAST.to_le_bytes();`),
+    /// pico's from `_Z_DEFAULT_MULTICAST_BATCH_SIZE`. A JOIN states these rather
+    /// than negotiating them: a receiver whose own differ ignores the JOIN
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `if join.resolution != self.manager.config.resolution {`).
+    /// A wire batch size of 0 is normalized as [`Self::from_init_body`] does.
+    pub fn from_join_body(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
+        Self::from_init_body(
+            sn_res_byte,
+            Some(batch_size.unwrap_or(DEFAULT_MULTICAST_BATCH_SIZE)),
+        )
     }
 
     /// Re-pack the two resolutions into the INIT-body `sn_res` byte.

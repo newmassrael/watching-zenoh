@@ -4443,8 +4443,12 @@ impl core::fmt::Display for TallyJson {
 /// they gave through its `Open` and its `Close`.
 ///
 /// `sn_mask` is the ring the SN verdicts on this flow were judged at, `null`
-/// until an `InitAck` (or `Join`) was observed — and `null` is then why every
-/// `sn.verdict` on the flow is `without_resolution`. ⚠ It can reach
+/// until an `InitAck` was observed or, on a multicast group, until a sender's
+/// `Join` was: the ring that `Join` states, its defaults when its S flag is
+/// clear. `null` is then why every `sn.verdict` on the flow is
+/// `without_resolution`. A flow carrying two senders whose `Join`s state
+/// different rings reads `null` here and judges each sender's frames on its own
+/// ring ([`wz_session_core::passive::FlowContext::sn_mask_of`]). ⚠ It can reach
 /// `2^63 - 1`, past what an IEEE double holds exactly: read it as an integer.
 ///
 /// `version` is the protocol version the handshake announced, the acceptor's

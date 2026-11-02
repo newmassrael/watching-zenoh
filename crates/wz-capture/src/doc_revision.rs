@@ -2292,6 +2292,29 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R45_CARRIES,
     },
+    // Revision 48 moves no key and no word. On a link with no handshake (UDP
+    // multicast, raweth) a sender's `Join` now states the ring its Frame and
+    // Fragment SNs are judged on, and where they start: the first frame after
+    // it is judged against the `Join`'s `next_sn`, so `sn.verdict` reads
+    // `continuous` or `gap` where it read `without_resolution`, and only a
+    // frame before its sender's first `Join` still does. A later `Join` of the
+    // same sender moves nothing; one naming another zid, ring, role, lease or
+    // QoS starts the sender again. `context.sn_mask` and `context.batch_size`
+    // (and their `parameters` entries, basis `stated`) are the `Join`'s, `null`
+    // when two senders on one flow state different values. A `Join` on a link
+    // with a handshake is inadmissible there (`inadmissible`), and states
+    // nothing. The `zenoh` word moves on such flows, as an SN step is evidence,
+    // and the session table's words and loss counts move for the same flows,
+    // with no key of its own moving.
+    DocumentShape {
+        document: FIELDS,
+        revision: 48,
+        keys: FIELDS_R47_KEYS,
+        retiring: &[],
+        families: FIELDS_R46_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R45_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3696,6 +3719,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: CENSUS,
         revision: 21,
+        keys: CENSUS_R21_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
+    // Revision 22 moves no key and no word. A `Join` on a link with a handshake
+    // is inadmissible there, as an `Init` or `Open` is on a link without one:
+    // every unicast receiver drops it. The node it names is counted under a
+    // node's `evidence.inadmissible` rather than `evidence.join`, and it seats
+    // no end of the flow. A `Join` on a multicast group counts as before. The
+    // field document's revision 48 is the same change, and the ring a `Join`
+    // states.
+    DocumentShape {
+        document: CENSUS,
+        revision: 22,
         keys: CENSUS_R21_KEYS,
         retiring: &[],
         families: CENSUS_R20_FAMILIES,
@@ -20629,7 +20668,9 @@ mod tests {
             // (`sender_end`, a passenger), and no value moves under an old key.
             // To 21 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
-            (CENSUS, 21u32),
+            // To 22 when a `Join` on a link with a handshake became
+            // inadmissible: values only.
+            (CENSUS, 22u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -20766,7 +20807,9 @@ mod tests {
             // and measured weights. Keys arrive and words move.
             // To 47 when `sn_mask` and `batch_size` gained `at_least`, the floor
             // the bytes put under them. Keys arrive; nothing retires.
-            (FIELDS, 47),
+            // To 48 when a sender's `Join` stated the ring and the start its
+            // SNs are judged on, on a link with no handshake: values only.
+            (FIELDS, 48),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
