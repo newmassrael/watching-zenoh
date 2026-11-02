@@ -517,9 +517,16 @@ Each lands whole with its surface lines, tests and faults in one round.
     engine no longer says. Open: the node records no timestamp stack on a query or a reply and takes its own clock, not the
     session's custom one, for the route point; a token undeclared by a peer stays in the node's
     liveliness history; the matching status of a querier says there is a remote queryable when
-    there is none; a queryable of the node does not answer an upstream get; and the burst of an
-    upstream publisher is not received to the end (the scenario does not finish, and the
-    control with the old order does not either).
+    there is none; and the burst of an upstream publisher is not received to the end (the
+    scenario does not finish, and the control with the old order does not either).
+  - **Repaired after round 4109: a queryable of the node did not answer an upstream get.** A
+    peer node sent every declaration to its peers as id 0 with the key inline, and a peer of the
+    pin's peer hat keeps a face's queryables by the id they carry: for an id it already holds it
+    takes the new info and keeps the first resource. The node declares its two admin queryables
+    before the application's, so the peer knew the admin keys alone and routed no query to
+    `demo/q/**`. A peer node now numbers what it leaves for its north, as the client of a router
+    already did (`numbers_every_declaration_to`), and the differential of the queryable is
+    equal to upstream's. wz peers among themselves hold with the numbers (the peer mesh tests).
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

@@ -3381,6 +3381,17 @@ impl Tables {
         self.face_based(region) && region.bound().is_south()
     }
 
+    /// Whether every declaration this node sends to a face of `region` leaves with an id of its
+    /// own ([`declaration_ids`]). Two north faces keep declarations by the id they carry: the
+    /// router that holds this node as a client, and a peer of the pin's peer hat, which the
+    /// region of a peer node is made of. The peer registers a queryable under the id it was
+    /// sent with and, for an id it already holds, takes the new info and keeps the first
+    /// resource (`zenoh/src/net/routing/hat/peer/queries.rs` @ `.and_modify(|(_, old_info)| *old_info = *info)`),
+    /// so a node that sends every declaration as id 0 is known to it by the first key alone.
+    fn numbers_every_declaration_to(&self, region: Region) -> bool {
+        region == NORTH_REGION && (self.north_is_client || is_peer_hat(region, self.node_mode))
+    }
+
     /// Whether `region`'s hat is a peer hat running wz's link-state peer
     /// extension: a peer node whose hat net is full link-state. See
     /// [`face_based`](Self::face_based).

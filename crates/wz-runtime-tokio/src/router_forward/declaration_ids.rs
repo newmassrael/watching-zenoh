@@ -92,7 +92,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// client, tokens for a face of a south region the peer hat serves (its subscribers and
     /// queryables carry the id of the interest that asked for them).
     fn numbered_for(&self, state: &RouterFaceState) -> Numbered {
-        if self.tables.north_is_client && state.tier == NORTH_REGION {
+        if self.tables.numbers_every_declaration_to(state.tier) {
             Numbered::Everything
         } else if self.tables.serves_asking_peers(state.tier) {
             Numbered::Tokens
@@ -193,6 +193,31 @@ mod tests {
         let q = ids.declare(Plane::Queryable, "demo/a".to_owned());
         assert!(a != 0 && b != 0 && q != 0);
         assert!(a != b && a != q && b != q);
+    }
+
+    /// A peer of the pin's peer hat keeps a node's queryables by the id they were sent with and
+    /// holds the first resource of an id it already has, so a peer node numbers what it sends
+    /// north, as the client of a router does. A router's own faces and the faces south of a peer
+    /// node are not of that kind.
+    #[test]
+    fn a_peer_node_and_a_client_node_number_what_they_send_north() {
+        let zid = Zid::from_slice(&[7, 7, 7, 7]);
+        let numbers = |node: &RouterForwarder, region: Region| {
+            node.on_tables().tables.numbers_every_declaration_to(region)
+        };
+        let peer = RouterForwarder::peer(zid);
+        assert!(numbers(&peer, NORTH_REGION));
+        assert!(
+            !numbers(&peer, CLIENTS_REGION),
+            "the clients south of a peer node are told by the interest that asked"
+        );
+        let router = RouterForwarder::new(zid);
+        assert!(
+            !numbers(&router, NORTH_REGION),
+            "a router's north keeps declarations by key"
+        );
+        let client = RouterForwarder::peer(zid).as_client_of_north();
+        assert!(numbers(&client, NORTH_REGION));
     }
 
     /// The planes a face is numbered for: a south peer's subscribers and queryables carry the id
