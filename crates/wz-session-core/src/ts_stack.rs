@@ -21,7 +21,7 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{CodecStorage, SceByteBuf};
+use sce_forge_runtime::codec::{Bounded, CodecStorage, SceByteBuf};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -233,10 +233,19 @@ pub fn record_interception<S: CodecStorage>(
     true
 }
 
-/// [`record_interception`] on the message a node is about to send: a Push, a Request or a
-/// Response. Any other message carries no stack, and a message that carries none is left alone.
-/// The stack replaces the entry that held it, so the chain does not grow and stays within its
-/// bound.
+/// [`record_interception`] on the chain a message holds. The stack replaces the entry that held
+/// it, so the chain does not grow and stays within its bound.
+pub fn record_on_chain<S: CodecStorage, const MAX: usize>(
+    chain: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX>>,
+    at: u8,
+    timestamp: impl FnOnce() -> Option<Vec<u8>>,
+) -> bool {
+    crate::held_list::edit_chain(chain, |chain| record_interception(chain, at, timestamp))
+        .unwrap_or(false)
+}
+
+/// [`record_on_chain`] on the message a node is about to send: a Push, a Request or a Response.
+/// Any other message carries no stack, and a message that carries none is left alone.
 pub fn record_on_message(
     message: &mut crate::network_message::NetworkMessage,
     at: u8,
@@ -247,24 +256,15 @@ pub fn record_on_message(
     match message {
         #[cfg(feature = "codec-push")]
         crate::network_message::NetworkMessage::Push(push) => {
-            crate::held_list::edit_chain(&mut push.extensions, |chain| {
-                record_interception(chain, at, timestamp)
-            })
-            .unwrap_or(false)
+            record_on_chain(&mut push.extensions, at, timestamp)
         }
         #[cfg(feature = "codec-request")]
         crate::network_message::NetworkMessage::Request(request) => {
-            crate::held_list::edit_chain(&mut request.extensions, |chain| {
-                record_interception(chain, at, timestamp)
-            })
-            .unwrap_or(false)
+            record_on_chain(&mut request.extensions, at, timestamp)
         }
         #[cfg(feature = "codec-response")]
         crate::network_message::NetworkMessage::Response(response) => {
-            crate::held_list::edit_chain(&mut response.extensions, |chain| {
-                record_interception(chain, at, timestamp)
-            })
-            .unwrap_or(false)
+            record_on_chain(&mut response.extensions, at, timestamp)
         }
         _ => {
             let _ = (at, timestamp);

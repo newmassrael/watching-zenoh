@@ -29,7 +29,7 @@
 
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::init_body::InitBody;
+use wz_codecs::init_body::{InitBody, InitBodyS};
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
@@ -115,17 +115,15 @@ fn oracle_init(
         version: wire_const::PROTOCOL_VERSION,
         cbyte: p.whatami.to_wire() | (((p.zid.len() as u8 - 1) & 0x0F) << 4),
         zid: &p.zid,
-        sn_res: Some((caps.seq_num_res & 0x03) | ((caps.req_id_res & 0x03) << 2)),
-        batch_size: Some(caps.batch_size),
+        s: Some(InitBodyS {
+            sn_res: (caps.seq_num_res & 0x03) | ((caps.req_id_res & 0x03) << 2),
+            batch_size: caps.batch_size,
+        }),
         cookie_len: cookie.map(|c| c.len() as u64),
         cookie,
     };
     let mut out = vec![flags | wire_const::T_MID_INIT];
-    out.extend_from_slice(
-        &body
-            .encode_to_vec((flags >> 6) & 1, (flags >> 5) & 1)
-            .expect("an oracle init body encodes"),
-    );
+    out.extend_from_slice(&body.encode_to_vec().expect("an oracle init body encodes"));
     out.extend_from_slice(&oracle_chain(entries));
     out
 }
@@ -161,11 +159,7 @@ fn oracle_open(
         cookie: (!is_ack).then_some(cookie),
     };
     let mut out = vec![flags | wire_const::T_MID_OPEN];
-    out.extend_from_slice(
-        &body
-            .encode_to_vec((flags >> 5) & 1)
-            .expect("an oracle open body encodes"),
-    );
+    out.extend_from_slice(&body.encode_to_vec());
     out.extend_from_slice(&oracle_chain(entries));
     out
 }

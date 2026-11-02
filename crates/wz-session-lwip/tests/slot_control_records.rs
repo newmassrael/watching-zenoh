@@ -395,7 +395,6 @@ mod record {
             done.try_as_borrowed()
                 .expect("a borrowed view")
                 .encode_to_vec()
-                .expect("an encoded ResponseFinal")
         }
         bytes(&build_response_final(rid, QosLevel::default()))
     }
@@ -408,7 +407,6 @@ mod record {
             ..Oam::default()
         }
         .encode_to_vec()
-        .expect("an encoded Oam")
     }
 
     /// A record whose header names a network MID this build has no decoder for.

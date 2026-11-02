@@ -3537,7 +3537,10 @@ impl FlowContext {
             #[cfg(feature = "codec-join")]
             InboundFrame::Join { body, .. } => {
                 self.joined_caps[usize::from(direction == Direction::B)] =
-                    Some(PeerInitCaps::from_join_body(body.sn_res, body.batch_size));
+                    Some(PeerInitCaps::from_join_body(
+                        body.s.as_ref().map(|s| s.sn_res),
+                        body.s.as_ref().map(|s| s.batch_size),
+                    ));
             }
             _ => {}
         }
@@ -3570,7 +3573,10 @@ struct JoinStatement {
 #[cfg(feature = "codec-join")]
 impl JoinStatement {
     fn of(body: &wz_codecs::join::JoinOwned, extensions: &[ExtEntryOwned]) -> Self {
-        let caps = PeerInitCaps::from_join_body(body.sn_res, body.batch_size);
+        let caps = PeerInitCaps::from_join_body(
+            body.s.as_ref().map(|s| s.sn_res),
+            body.s.as_ref().map(|s| s.batch_size),
+        );
         let wire_zid = body.zid.as_slice();
         let mut zid = [0u8; 16];
         let zid_len = wire_zid.len().min(zid.len());
@@ -8388,8 +8394,10 @@ mod join_ring_tests {
             // whatami peer (0x01), a 4-byte zid.
             cbyte: (3 << 4) | 0x01,
             zid: &[zid; 4],
-            sn_res,
-            batch_size: sn_res.map(|_| 2048),
+            s: sn_res.map(|sn_res| wz_codecs::join::JoinS {
+                sn_res,
+                batch_size: 2048,
+            }),
             lease: 10_000,
             next_sn_reliable: next.0,
             next_sn_best_effort: next.1,
@@ -8402,11 +8410,7 @@ mod join_ring_tests {
             flags |= wire_const::FLAG_T_Z;
         }
         let mut wire = vec![wire_const::T_MID_JOIN | flags];
-        wire.extend_from_slice(
-            &body
-                .encode_to_vec(u8::from(sn_res.is_some()))
-                .expect("a fixture join is encodable"),
-        );
+        wire.extend_from_slice(&body.encode_to_vec().expect("a fixture join is encodable"));
         if let Some(pairs) = qos {
             let mut ext_body = Vec::new();
             for (reliable, best_effort) in pairs {
@@ -8444,8 +8448,7 @@ mod join_ring_tests {
                 id: sn,
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture oam record is encodable"),
+            .encode_to_vec(),
         );
         wire
     }

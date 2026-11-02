@@ -1001,8 +1001,7 @@ fn a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it() {
         id: 7,
         ..Default::default()
     }
-    .encode_to_vec()
-    .expect("an encoded Oam");
+    .encode_to_vec();
     pair.frame_exts.set(FrameExts::default());
     let chained = frame_wire(pair.next_sn(), &CHAIN, &oam);
     let (_, polls, _) = pair.turn(&chained);

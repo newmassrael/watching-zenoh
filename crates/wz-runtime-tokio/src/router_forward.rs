@@ -7861,7 +7861,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             #[cfg(feature = "pubsub-ts-stack")]
             let push = {
                 let mut push = push;
-                wz_session_core::ts_stack::record_interception(
+                wz_session_core::ts_stack::record_on_chain(
                     &mut push.extensions,
                     wz_session_core::ts_stack::point::ROUTE,
                     || self.node_hlc.interception_timestamp(),
@@ -10075,12 +10075,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let recorded;
         #[cfg(feature = "pubsub-ts-stack")]
         let push = if wz_session_core::ts_stack::read_ts_stack(
-            push.extensions.as_deref().unwrap_or(&[]).iter(),
+            wz_session_core::held_list::HeldList::entries(&push.extensions)
+                .unwrap_or(&[])
+                .iter(),
         )
         .is_some()
         {
             let mut routed = push.clone();
-            wz_session_core::ts_stack::record_interception(
+            wz_session_core::ts_stack::record_on_chain(
                 &mut routed.extensions,
                 wz_session_core::ts_stack::point::ROUTE,
                 || self.node_hlc.interception_timestamp(),
@@ -10651,12 +10653,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let recorded;
         #[cfg(feature = "pubsub-ts-stack")]
         let request = if wz_session_core::ts_stack::read_ts_stack(
-            request.extensions.as_deref().unwrap_or(&[]).iter(),
+            wz_session_core::held_list::HeldList::entries(&request.extensions)
+                .unwrap_or(&[])
+                .iter(),
         )
         .is_some()
         {
             let mut routed = request.clone();
-            wz_session_core::ts_stack::record_interception(
+            wz_session_core::ts_stack::record_on_chain(
                 &mut routed.extensions,
                 wz_session_core::ts_stack::point::ROUTE,
                 || self.node_hlc.interception_timestamp(),
@@ -29268,7 +29272,10 @@ mod tests {
         fn stacked_push(conf_flags: u8) -> NetworkMessage {
             let mut push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
                 .expect("build push");
-            let present = set_ts_stack(&mut push.extensions, Some(&started(conf_flags)));
+            let present = wz_session_core::held_list::edit_chain(&mut push.extensions, |chain| {
+                set_ts_stack(chain, Some(&started(conf_flags)))
+            })
+            .expect("a stack replaces its entry");
             wz_session_core::ext_nodeid::sync_header_z(&mut push.header, present);
             NetworkMessage::Push(Box::new(push))
         }
@@ -29277,7 +29284,11 @@ mod tests {
             let mut request =
                 wz_session_core::request_build::build_request_query(rid, 0, Some("demo/q"))
                     .expect("build request");
-            let present = set_ts_stack(&mut request.extensions, Some(&started(conf_flags)));
+            let present =
+                wz_session_core::held_list::edit_chain(&mut request.extensions, |chain| {
+                    set_ts_stack(chain, Some(&started(conf_flags)))
+                })
+                .expect("a stack replaces its entry");
             wz_session_core::ext_nodeid::sync_header_z(&mut request.header, present);
             NetworkMessage::Request(Box::new(request))
         }
@@ -29286,7 +29297,11 @@ mod tests {
             let mut response =
                 wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
                     .expect("build response");
-            let present = set_ts_stack(&mut response.extensions, Some(&started(conf_flags)));
+            let present =
+                wz_session_core::held_list::edit_chain(&mut response.extensions, |chain| {
+                    set_ts_stack(chain, Some(&started(conf_flags)))
+                })
+                .expect("a stack replaces its entry");
             wz_session_core::ext_nodeid::sync_header_z(&mut response.header, present);
             NetworkMessage::Response(Box::new(response))
         }
