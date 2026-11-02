@@ -120,7 +120,14 @@ IMAGES = (
         # b2ff4da1cb, 5,488 at 11e90bcd77 and 5,352 from dc579571aa on. It is the chain of direct
         # calls, with 6 calls through a register on the path not followed, so it is what a change
         # to the code moves and not a bound on a run.
-        peak=7664,
+        #
+        # 2026-11-02 -- 7,956 bytes over 13 frames (+292), read by Layer Q on hosted run
+        # 41411911409 and on a build host at main's 0796630b67, with 5 calls through a register on
+        # the path not followed (6 before). `wz_task` is still 5,352, so the 292 are in the frames
+        # beneath it, the session's receive path. Which of the commits to that path since the
+        # figure was read moved it (the Frame read in place, `c7afd33520` and `0a522369e2`, or the
+        # SCE pin moves of the day) is not separated: the frames of the chain are not printed.
+        peak=7956,
     ),
     Image(
         key="frt2",

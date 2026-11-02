@@ -1084,8 +1084,18 @@ declare -A BASELINE_MC_TEXT=(
     # hosted Layer Q on run 41140796607 (main's c27afce985, the same SCE pin 11e90bcd77), whose
     # bss is 270112 against 270120 above: the two readings were on different machines, and the
     # hosted one is the one that grades. The size is not attributed to a commit. Old: 71556/71592.
-    ["thumbv7m-none-eabi"]=71148
-    ["thumbv7em-none-eabihf"]=71228
+    #
+    # 2026-11-02 -- thumbv7m 71148 -> 72296, thumbv7em-hf 71228 -> 72436 (+1148 / +1208), read by
+    # hosted Layer Q on run 41411911409 (main's 55df79c930). BISECTED on the build hosts for
+    # thumbv7m (`size` of the built image, whose bss is 270120 against 270112 hosted): 71948 at
+    # `8e37dda152`, 71952 at `c4e9a65195` (the link admission, +4), 71956 at `da222d0afb` and at
+    # `81e87c37f5` (the dial of a refused link, +0), and 72292 at the head (+336). So about 800 of
+    # the growth was there before 11-01 12:04 and is not attributed to a commit; the Frame
+    # read in place (`c7afd33520`, `0a522369e2`) and the SCE pin moves of the day are what the head
+    # has over `81e87c37f5`, and the share of each is not separated. data is 4 and bss 270112 on
+    # both. Old: 71148/71228.
+    ["thumbv7m-none-eabi"]=72296
+    ["thumbv7em-none-eabihf"]=72436
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
