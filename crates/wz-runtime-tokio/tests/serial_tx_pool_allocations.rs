@@ -205,7 +205,7 @@ fn stuffer_allocations(payload: &[u8]) -> usize {
     let env = wz_codecs::serial_envelope::SerialEnvelope {
         header: 0x00,
         payload_len: payload.len() as u16,
-        payload,
+        payload: wz_codecs::Bounded::new(payload).expect("a serial frame's payload"),
         crc32: wz_codecs::crc32::crc32(payload),
     };
     let mut pre = [0u8; wz_session_core::serial_link::SERIAL_MFS];

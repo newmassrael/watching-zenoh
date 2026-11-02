@@ -114,16 +114,16 @@ fn oracle_init(
     let body = InitBody {
         version: wire_const::PROTOCOL_VERSION,
         cbyte: p.whatami.to_wire() | (((p.zid.len() as u8 - 1) & 0x0F) << 4),
-        zid: &p.zid,
+        zid: wz_codecs::Bounded::new(p.zid.as_slice()).expect("a session zid is 1..=16 bytes"),
         s: Some(InitBodyS {
             sn_res: (caps.seq_num_res & 0x03) | ((caps.req_id_res & 0x03) << 2),
             batch_size: caps.batch_size,
         }),
         cookie_len: cookie.map(|c| c.len() as u64),
-        cookie,
+        cookie: cookie.map(|c| wz_codecs::Bounded::new(c).expect("a test cookie fits the field")),
     };
     let mut out = vec![flags | wire_const::T_MID_INIT];
-    out.extend_from_slice(&body.encode_to_vec().expect("an oracle init body encodes"));
+    out.extend_from_slice(&body.encode_to_vec());
     out.extend_from_slice(&oracle_chain(entries));
     out
 }
@@ -156,7 +156,8 @@ fn oracle_open(
         lease,
         initial_sn,
         cookie_len: (!is_ack).then_some(cookie.len() as u64),
-        cookie: (!is_ack).then_some(cookie),
+        cookie: (!is_ack)
+            .then(|| wz_codecs::Bounded::new(cookie).expect("a test cookie fits the field")),
     };
     let mut out = vec![flags | wire_const::T_MID_OPEN];
     out.extend_from_slice(&body.encode_to_vec());

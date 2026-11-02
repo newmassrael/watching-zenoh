@@ -204,9 +204,9 @@ mod tests {
         scout.set_what(0x03);
         scout.set_i(true);
         scout.set_zid_len_m1((zid.len() - 1) as u8);
-        scout.zid = Some(zid);
+        scout.zid = Some(wz_codecs::Bounded::new(zid).unwrap());
         let mut wire = vec![crate::wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture scout is encodable"));
+        wire.extend_from_slice(&scout.encode_to_vec());
         wire
     }
 
@@ -310,8 +310,7 @@ mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection of owned Hello")
-            .encode_to_vec()
-            .expect("a fixture hello is encodable");
+            .encode_to_vec();
 
         let mut wire = vec![if l_flag == 1 {
             crate::wire_const::S_MID_HELLO | crate::wire_const::FLAG_S_HELLO_L

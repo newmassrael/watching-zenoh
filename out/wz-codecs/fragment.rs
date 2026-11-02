@@ -21,15 +21,58 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `payload` of `Fragment`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct Fragment<'a> {
+pub struct FragmentPayloadField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<FragmentPayloadField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<65536>;
+}
+
+/// What `FragmentIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait FragmentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<FragmentPayloadField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<FragmentPayloadField>> FragmentStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside FragmentStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait FragmentFrom<'f>: FragmentStorage + ::sce_forge_runtime::codec::StoresBytes<'f, FragmentPayloadField> {}
+
+impl<'f, S: FragmentStorage + ::sce_forge_runtime::codec::StoresBytes<'f, FragmentPayloadField>> FragmentFrom<'f> for S {}
+
+// `FragmentIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `Fragment<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `FragmentOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct FragmentIn<S: FragmentStorage> {
     pub sn: u64,
-    pub payload: &'a [u8],
+    pub payload: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<FragmentPayloadField>>::Bytes, 65536>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type Fragment<'a> = FragmentIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type FragmentOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = FragmentIn<S>;
+
+impl<S: FragmentStorage> Default for FragmentIn<S> {
+    fn default() -> Self {
+        Self {
+            sn: Default::default(),
+            payload: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> Fragment<'a> {
+impl<S: FragmentStorage> FragmentIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -45,7 +88,7 @@ impl<'a> Fragment<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: FragmentFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -61,7 +104,24 @@ impl<'a> Fragment<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: FragmentFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                Fragment::store_into(&mut _frame, &mut Fragment::default())?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: FragmentFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -77,11 +137,16 @@ impl<'a> Fragment<'a> {
         let sn = cursor.read_vle_u64()?;
         let payload = {
             let _n = cursor.remaining();
+            if _n > 65536 {
+                return Err(CodecError::LengthOutOfRange);
+            }
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
             _v
         };
+        let payload = ::sce_forge_runtime::codec::Bounded::new(payload).ok_or(CodecError::LengthOutOfRange)?;
+        let payload = payload.store::<S, FragmentPayloadField>()?;
         _out.sn = sn;
         _out.payload = payload;
         Ok(())
@@ -98,8 +163,8 @@ impl<'a> Fragment<'a> {
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        Fragment::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -130,14 +195,14 @@ pub trait FragmentSource {
     /// The `sn` field.
     fn sn(&self) -> u64;
     /// The `payload` field.
-    fn payload(&self) -> &[u8];
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65536>;
 }
 
 impl<T: FragmentSource + ?Sized> FragmentSource for &T {
     fn sn(&self) -> u64 {
         (**self).sn()
     }
-    fn payload(&self) -> &[u8] {
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65536> {
         (**self).payload()
     }
 }
@@ -151,33 +216,24 @@ pub struct FragmentParts<'a> {
     /// The `sn` field.
     pub sn: u64,
     /// The `payload` field.
-    pub payload: &'a [u8],
+    pub payload: ::sce_forge_runtime::codec::Bytes<'a, 65536>,
 }
 
 impl<'a> FragmentSource for FragmentParts<'a> {
     fn sn(&self) -> u64 {
         self.sn
     }
-    fn payload(&self) -> &[u8] {
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65536> {
         self.payload
     }
 }
 
-impl<'a> FragmentSource for Fragment<'a> {
+impl<S: FragmentStorage> FragmentSource for FragmentOwned<S> {
     fn sn(&self) -> u64 {
         self.sn
     }
-    fn payload(&self) -> &[u8] {
-        self.payload
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> FragmentSource for FragmentOwned<S> {
-    fn sn(&self) -> u64 {
-        self.sn
-    }
-    fn payload(&self) -> &[u8] {
-        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload)
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65536> {
+        self.payload.as_bytes()
     }
 }
 
@@ -196,7 +252,7 @@ impl<'a> Fragment<'a> {
     #[doc(hidden)]
     pub fn write_source<S: FragmentSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         w.write_vle_u64(src.sn())?;
-        w.write_bytes(src.payload())?;
+        w.write_bytes(src.payload().into_inner())?;
         Ok(())
     }
 
@@ -293,17 +349,9 @@ impl<'a> Fragment<'a> {
 // `let v: FragmentOwned = FragmentOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct FragmentOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub sn: u64,
-    pub payload: S::Bytes<65536>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> Fragment<'a> {
@@ -313,15 +361,16 @@ impl<'a> Fragment<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<FragmentOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: FragmentFrom<'a>>(self) -> Result<FragmentOwned<S>, CodecError> {
         Ok(FragmentOwned {
             sn: self.sn,
-            payload: <S::Bytes<65536> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.payload)?,
+            payload: self.payload.store::<S, FragmentPayloadField>()?,
         })
     }
 
@@ -333,7 +382,7 @@ impl<'a> Fragment<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> FragmentOwned<S> {
+impl<S: FragmentStorage> FragmentOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -357,7 +406,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> FragmentOwned<S> {
     /// and is not to be read.
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut Fragment<'o>) {
         _out.sn = self.sn;
-        _out.payload = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload);
+        _out.payload = self.payload.as_bytes();
         
     }
 
@@ -369,33 +418,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> FragmentOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<FragmentOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> FragmentFrom<'x>>(&self) -> Result<FragmentOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> FragmentOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`Fragment::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Fragment::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Fragment::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -412,10 +436,10 @@ impl<'a> Fragment<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<FragmentOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: FragmentStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<FragmentOwned<S>, CodecError> {
         Ok(FragmentOwned {
             sn: self.sn,
-            payload: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<65536>(origin, self.payload)?,
+            payload: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<FragmentPayloadField>(origin, self.payload.into_inner()))?,
         })
     }
 }

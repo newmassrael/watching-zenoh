@@ -190,7 +190,7 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
             Counting(zid),
             || params(zid),
             config(),
-            |_| |_: wz_session_core::driver_loop::IterationEvent<'_>| {},
+            |_| |_: wz_session_core::driver_loop::IterationEvent<'_, '_>| {},
         )
     }
 

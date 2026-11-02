@@ -143,7 +143,7 @@ fn puts(session: usize) -> usize {
 }
 
 /// An `on_event` that counts the Puts it is handed, into [`PUTS`], and nothing else.
-fn counting(session: usize) -> impl FnMut(IterationEvent<'_>) + 'static {
+fn counting(session: usize) -> impl FnMut(IterationEvent<'_, '_>) + 'static {
     move |event| {
         if matches!(event, IterationEvent::InPlace(_)) {
             PUTS[session].fetch_add(1, Ordering::SeqCst);

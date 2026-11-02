@@ -203,7 +203,7 @@ pub async fn run_acceptor_e2e<H>(
             Some(DRIVE_MAX_ITERS),
             &clock,
             &session_timeouts,
-            |event: IterationEvent<'_>| {
+            |event: IterationEvent<'_, '_>| {
                 session_for_dispatch.dispatch_iteration_event(event);
             },
         ) => Some(o),
@@ -316,7 +316,7 @@ pub async fn run_initiator_e2e<H>(
             Some(DRIVE_MAX_ITERS),
             &clock,
             &session_timeouts,
-            |event: IterationEvent<'_>| {
+            |event: IterationEvent<'_, '_>| {
                 session_for_dispatch.dispatch_iteration_event(event);
             },
         ) => Some(o),
@@ -402,7 +402,7 @@ pub async fn run_silent_acceptor_e2e(
             Some(DRIVE_MAX_ITERS),
             &clock,
             &session_timeouts,
-            |_event: IterationEvent<'_>| {
+            |_event: IterationEvent<'_, '_>| {
                 // DELIBERATE SILENCE. This is the whole point of this function:
                 // the inbound event is dropped here and reaches no application
                 // plane, so no Reply and no ResponseFinal can ever be produced,

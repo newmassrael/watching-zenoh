@@ -1,4 +1,4 @@
-// SCE-MAP: open_body:49 :: _forge_body
+// SCE-MAP: open_body:55 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -21,17 +21,62 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `cookie` of `OpenBody`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct OpenBody<'a> {
+pub struct OpenBodyCookieField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<OpenBodyCookieField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<4294967295>;
+}
+
+/// What `OpenBodyIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait OpenBodyStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<OpenBodyCookieField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<OpenBodyCookieField>> OpenBodyStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside OpenBodyStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait OpenBodyFrom<'f>: OpenBodyStorage + ::sce_forge_runtime::codec::StoresBytes<'f, OpenBodyCookieField> {}
+
+impl<'f, S: OpenBodyStorage + ::sce_forge_runtime::codec::StoresBytes<'f, OpenBodyCookieField>> OpenBodyFrom<'f> for S {}
+
+// `OpenBodyIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `OpenBody<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `OpenBodyOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenBodyIn<S: OpenBodyStorage> {
     pub lease: u64,
     pub initial_sn: u64,
     pub cookie_len: Option<u64>,
-    pub cookie: Option<&'a [u8]>,
+    pub cookie: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<OpenBodyCookieField>>::Bytes, 4294967295>>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type OpenBody<'a> = OpenBodyIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type OpenBodyOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = OpenBodyIn<S>;
+
+impl<S: OpenBodyStorage> Default for OpenBodyIn<S> {
+    fn default() -> Self {
+        Self {
+            lease: Default::default(),
+            initial_sn: Default::default(),
+            cookie_len: Default::default(),
+            cookie: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> OpenBody<'a> {
+impl<S: OpenBodyStorage> OpenBodyIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -47,7 +92,7 @@ impl<'a> OpenBody<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>, a: u8) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>, a: u8) -> Result<Self, CodecError> where S: OpenBodyFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out, a)?;
         Ok(_out)
@@ -63,7 +108,24 @@ impl<'a> OpenBody<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, a: u8) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, a: u8) -> Result<(), CodecError> where S: OpenBodyFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out, a) {
+            Err(CodecError::CapacityExceeded) => {
+                OpenBody::store_into(&mut _frame, &mut OpenBody::default(), a)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, a: u8) -> Result<(), CodecError> where S: OpenBodyFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -90,7 +152,11 @@ impl<'a> OpenBody<'a> {
             None
         };
         let cookie = if (a & 0x01u8) == 0 {
-            let _n = cookie_len.unwrap() as usize;
+            let _len = cookie_len.unwrap();
+            if _len > 4294967295 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes)?;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
@@ -98,6 +164,8 @@ impl<'a> OpenBody<'a> {
         } else {
             None
         };
+        let cookie = cookie.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
+        let cookie = cookie.map(|_v| _v.store::<S, OpenBodyCookieField>()).transpose()?;
         _out.lease = lease;
         _out.initial_sn = initial_sn;
         _out.cookie_len = cookie_len;
@@ -105,24 +173,19 @@ impl<'a> OpenBody<'a> {
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 155;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        OpenBody::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
     /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
     /// no value and the vector cannot run out of room. Callers targeting
     /// zero-alloc hot paths should call `encode` directly against a
@@ -134,7 +197,7 @@ impl<'a> OpenBody<'a> {
     /// primary `encode`.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -150,7 +213,7 @@ pub trait OpenBodySource {
     /// The `initial_sn` field.
     fn initial_sn(&self) -> u64;
     /// The `cookie` field.
-    fn cookie(&self) -> Option<&[u8]>;
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>>;
 }
 
 impl<T: OpenBodySource + ?Sized> OpenBodySource for &T {
@@ -160,7 +223,7 @@ impl<T: OpenBodySource + ?Sized> OpenBodySource for &T {
     fn initial_sn(&self) -> u64 {
         (**self).initial_sn()
     }
-    fn cookie(&self) -> Option<&[u8]> {
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         (**self).cookie()
     }
 }
@@ -176,7 +239,7 @@ pub struct OpenBodyParts<'a> {
     /// The `initial_sn` field.
     pub initial_sn: u64,
     /// The `cookie` field.
-    pub cookie: Option<&'a [u8]>,
+    pub cookie: Option<::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
 }
 
 impl<'a> OpenBodySource for OpenBodyParts<'a> {
@@ -186,32 +249,20 @@ impl<'a> OpenBodySource for OpenBodyParts<'a> {
     fn initial_sn(&self) -> u64 {
         self.initial_sn
     }
-    fn cookie(&self) -> Option<&[u8]> {
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         self.cookie
     }
 }
 
-impl<'a> OpenBodySource for OpenBody<'a> {
+impl<S: OpenBodyStorage> OpenBodySource for OpenBodyOwned<S> {
     fn lease(&self) -> u64 {
         self.lease
     }
     fn initial_sn(&self) -> u64 {
         self.initial_sn
     }
-    fn cookie(&self) -> Option<&[u8]> {
-        self.cookie
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> OpenBodySource for OpenBodyOwned<S> {
-    fn lease(&self) -> u64 {
-        self.lease
-    }
-    fn initial_sn(&self) -> u64 {
-        self.initial_sn
-    }
-    fn cookie(&self) -> Option<&[u8]> {
-        self.cookie.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice)
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+        self.cookie.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes)
     }
 }
 
@@ -249,7 +300,7 @@ impl<'a> OpenBody<'a> {
             w.write_vle_u64(_d_cookie_len)?;
         }
         if let Some(_v) = src.cookie() {
-            w.write_bytes(_v)?;
+            w.write_bytes(_v.into_inner())?;
         }
         Ok(())
     }
@@ -347,19 +398,9 @@ impl<'a> OpenBody<'a> {
 // `let v: OpenBodyOwned = OpenBodyOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct OpenBodyOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub lease: u64,
-    pub initial_sn: u64,
-    pub cookie_len: Option<u64>,
-    pub cookie: Option<S::Bytes<128>>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> OpenBody<'a> {
@@ -369,17 +410,18 @@ impl<'a> OpenBody<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<OpenBodyOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: OpenBodyFrom<'a>>(self) -> Result<OpenBodyOwned<S>, CodecError> {
         Ok(OpenBodyOwned {
             lease: self.lease,
             initial_sn: self.initial_sn,
             cookie_len: self.cookie_len,
-            cookie: self.cookie.map(<S::Bytes<128> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
+            cookie: self.cookie.map(|_v| _v.store::<S, OpenBodyCookieField>()).transpose()?,
         })
     }
 
@@ -391,7 +433,7 @@ impl<'a> OpenBody<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> OpenBodyOwned<S> {
+impl<S: OpenBodyStorage> OpenBodyOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -417,7 +459,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> OpenBodyOwned<S> {
         _out.lease = self.lease;
         _out.initial_sn = self.initial_sn;
         _out.cookie_len = self.cookie_len;
-        _out.cookie = self.cookie.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice);
+        _out.cookie = self.cookie.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes);
         
     }
 
@@ -429,33 +471,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> OpenBodyOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<OpenBodyOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> OpenBodyFrom<'x>>(&self) -> Result<OpenBodyOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> OpenBodyOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`OpenBody::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        OpenBody::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(OpenBody::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -472,12 +489,12 @@ impl<'a> OpenBody<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<OpenBodyOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: OpenBodyStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<OpenBodyOwned<S>, CodecError> {
         Ok(OpenBodyOwned {
             lease: self.lease,
             initial_sn: self.initial_sn,
             cookie_len: self.cookie_len,
-            cookie: self.cookie.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<128>(origin, _v)).transpose()?,
+            cookie: self.cookie.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<OpenBodyCookieField>(origin, _v.into_inner()))).transpose()?,
         })
     }
 }

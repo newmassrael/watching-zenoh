@@ -38,14 +38,17 @@
 //! (or `regen` / no arg = regenerate everything wired so far).
 
 use std::path::{Path, PathBuf};
+#[cfg(feature = "switchboards")]
 use std::process::Command;
 
 use sce_build::{
     compile_forge_with_imports, generator::Language, DocumentLabel, ForgeCompileOptions,
 };
+#[cfg(feature = "switchboards")]
 use wz_switchboard_codegen::{
     generate, parse_codec_facts, parse_event_schema_facts, parse_machine_facts, GenInput,
 };
+#[cfg(feature = "switchboards")]
 use wz_switchboard_schema::SwitchboardSpec;
 
 /// Codec SCXMLs to emit, in dependency order (leaves first, composers last) so
@@ -230,6 +233,17 @@ fn regen_codecs(root: &Path) {
         );
     }
 
+    match regen_codec_deployment(root, &resource_dir, &options) {
+        Ok(file) => generated.push(file),
+        Err(refusal) => {
+            eprintln!("xtask: {refusal}");
+            panic!(
+                "sce-build refused the codec deployment; nothing was written to {}",
+                out_dir.display()
+            );
+        }
+    }
+
     let written = generated.len();
     for (target_name, stripped) in &generated {
         let target = out_dir.join(target_name);
@@ -241,6 +255,90 @@ fn regen_codecs(root: &Path) {
         "xtask: regenerated {written} codec files into {}",
         out_dir.display()
     );
+}
+
+/// The deploy input of the `Node` profile, what a wz node stores of each codec
+/// field whose bound is the protocol's (SCE ADR 0077 section 7).
+const NODE_DEPLOYMENT: &str = "deploy/codec_node.yaml";
+
+/// The `cfg` each codec module of `wz-codecs/src/lib.rs` is compiled under,
+/// for the codecs that have one. The deployment file names every codec of the
+/// set as `super::<codec>`, so a module the build leaves out must be left out
+/// of the file by the same predicate, or the file names a module that is not
+/// there. A gate for a codec the set does not hold is refused by the
+/// generator, and a module gated in `lib.rs` but missing here fails the
+/// reduced-feature lanes, so the two cannot drift silently.
+const CODEC_GATES: &[(&str, &str)] = &[
+    ("serial_envelope", "codec-serial"),
+    ("close", "codec-close"),
+    ("frame", "codec-frame"),
+    ("fragment", "codec-fragment"),
+    ("scout", "codec-scout"),
+    ("init_body", "codec-init-body"),
+    ("open_body", "codec-open-body"),
+    ("join", "codec-join"),
+    ("hello", "codec-hello"),
+    ("keep_alive", "codec-keep-alive"),
+    ("push", "codec-push"),
+    ("response_final", "codec-response-final"),
+    ("query_value_zbuf", "codec-request"),
+    ("query_ext_entry", "codec-request"),
+    ("query", "codec-request"),
+    ("request", "codec-request"),
+    ("reply", "codec-response"),
+    ("err", "codec-response"),
+    ("response", "codec-response"),
+    ("decl_final", "codec-declare"),
+    ("decl_kexpr", "codec-declare"),
+    ("undecl_kexpr", "codec-declare"),
+    ("decl_subscriber", "codec-declare"),
+    ("decl_queryable", "codec-declare"),
+    ("decl_token", "codec-declare"),
+    ("undecl_subscriber", "codec-declare"),
+    ("undecl_queryable", "codec-declare"),
+    ("undecl_token", "codec-declare"),
+    ("declare", "codec-declare"),
+    ("linkstate_link", "codec-linkstate"),
+    ("linkstate_weight", "codec-linkstate"),
+    ("linkstate", "codec-linkstate"),
+    ("linkstate_list", "codec-linkstate"),
+];
+
+/// Generate the `Node` deployment (SCE ADR 0077 section 7): the profile that
+/// holds every field of every codec of the set inline, at the capacity
+/// `deploy/codec_node.yaml` gives it or at the field's bound. It answers for
+/// the same documents the tree is generated from, under the same options, and
+/// lands beside the codec modules, which it names as `super::<codec>`.
+fn regen_codec_deployment(
+    root: &Path,
+    resource_dir: &Path,
+    options: &ForgeCompileOptions,
+) -> Result<(String, String), String> {
+    let deploy = sce_build::mesh::deploy::parse_deploy(&root.join(NODE_DEPLOYMENT))
+        .map_err(|e| format!("{NODE_DEPLOYMENT}: {e}"))?;
+    let deployment = sce_build::forge::deployment::RustDeployment {
+        name: "Node".to_string(),
+        capacities: deploy.codec_capacities(),
+        gates: CODEC_GATES
+            .iter()
+            .map(|(codec, feature)| (codec.to_string(), format!("feature = \"{feature}\"")))
+            .collect(),
+        source: NODE_DEPLOYMENT.to_string(),
+    };
+    let documents: Vec<PathBuf> = CODECS
+        .iter()
+        .map(|stem| resource_dir.join(format!("{stem}.scxml")))
+        .collect();
+    let document_refs: Vec<&Path> = documents.iter().map(PathBuf::as_path).collect();
+    let options = ForgeCompileOptions {
+        include_dirs: vec![resource_dir.to_path_buf()],
+        ..options.clone()
+    };
+    let output = sce_build::compile_rust_deployment(&document_refs, &deployment, &options)
+        .map_err(|e| format!("deployment Node: {e}"))?;
+    let [(file, text)] = <[_; 1]>::try_from(output.files)
+        .map_err(|files| format!("deployment Node: {} files, one expected", files.len()))?;
+    Ok((file, text))
 }
 
 /// Regenerate the binary-path statecharts + buffer-pools (R311y22b) via the
@@ -385,12 +483,14 @@ fn repo_relative(root: &Path, p: &Path) -> PathBuf {
 /// Named ONCE here rather than per target: it is not a property of any
 /// switchboard, it is the machine whose lifecycle verbs a sidecar may declare
 /// rows for, and every profile has exactly this one.
+#[cfg(feature = "switchboards")]
 const SESSION_MACHINE: &str = "session_fsm_unicast";
 
 /// One switchboard 2-stage codegen target (R311y22c), mirroring each
 /// switchboard build.rs: stage 1 = sce-codegen `--emit-ast` per source doc
 /// (machine + schemas + codecs); stage 2 = `wz_switchboard_codegen::generate`
 /// over the forge-ASTs + the `wz-switchboard.yaml` sidecar -> dispatch.
+#[cfg(feature = "switchboards")]
 struct Switchboard {
     /// out/<krate> directory + the consuming crate's identity.
     krate: &'static str,
@@ -407,6 +507,7 @@ struct Switchboard {
     codecs: &'static [&'static str],
 }
 
+#[cfg(feature = "switchboards")]
 const SWITCHBOARDS: &[Switchboard] = &[
     Switchboard {
         krate: "wz-ap-demo-app",
@@ -441,6 +542,7 @@ const SWITCHBOARDS: &[Switchboard] = &[
 /// same sce-codegen `--emit-ast` invocation (+ the same `#![...]` strip) and
 /// the same `wz_switchboard_codegen::generate` call. SOURCE_DATE_EPOCH=0 (set
 /// in `main`) keeps the machine/codec emit's `generated-at` byte-stable.
+#[cfg(feature = "switchboards")]
 fn regen_switchboards(root: &Path) {
     let sce_workspace = root
         .join("vendor/sce")
@@ -558,6 +660,7 @@ fn regen_switchboards(root: &Path) {
 
 /// `sce-codegen generate -l rust [--no-std] --emit-ast <ast>` for `<stem>.scxml`
 /// (the SAME invocation the switchboard build.rs used). Returns the AST path.
+#[cfg(feature = "switchboards")]
 fn emit_ast(
     stem: &str,
     src: &Path,
@@ -614,6 +717,7 @@ fn emit_ast(
     ast
 }
 
+#[cfg(feature = "switchboards")]
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
@@ -650,15 +754,31 @@ fn main() {
     match what.as_str() {
         "codecs" => regen_codecs(&root),
         "statecharts" => regen_statecharts_and_pools(&root),
+        // Stage 1 alone: what a build without `switchboards` can write.
+        "stage1" => {
+            regen_codecs(&root);
+            regen_statecharts_and_pools(&root);
+        }
+        #[cfg(feature = "switchboards")]
         "switchboards" => regen_switchboards(&root),
+        #[cfg(feature = "switchboards")]
         "regen" => {
             regen_codecs(&root);
             regen_statecharts_and_pools(&root);
             regen_switchboards(&root);
         }
+        #[cfg(not(feature = "switchboards"))]
+        "switchboards" | "regen" => {
+            eprintln!(
+                "xtask: '{what}' needs the switchboard generator, which this build leaves out \
+                 (built without the `switchboards` feature); run stage 1 here and \
+                 `switchboards` from a default build"
+            );
+            std::process::exit(2);
+        }
         other => {
             eprintln!(
-                "xtask: unknown target '{other}' (expected: codecs | statecharts | switchboards | regen)"
+                "xtask: unknown target '{other}' (expected: codecs | statecharts | stage1 | switchboards | regen)"
             );
             std::process::exit(2);
         }

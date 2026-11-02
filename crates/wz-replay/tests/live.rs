@@ -103,7 +103,7 @@ async fn the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples() {
             Some(ITER_CAP),
             &clock,
             &timeouts,
-            |event: IterationEvent<'_>| {
+            |event: IterationEvent<'_, '_>| {
                 let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event
                 else {
                     return;
@@ -230,7 +230,7 @@ async fn the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing() {
             Some(ITER_CAP),
             &clock,
             &timeouts,
-            |event: IterationEvent<'_>| {
+            |event: IterationEvent<'_, '_>| {
                 let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event
                 else {
                     return;
@@ -430,7 +430,7 @@ async fn an_alert_fans_to_every_destination_and_retries_the_one_that_is_down() {
             Some(ITER_CAP),
             &clock,
             &timeouts,
-            |event: IterationEvent<'_>| {
+            |event: IterationEvent<'_, '_>| {
                 let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event
                 else {
                     return;
@@ -535,8 +535,12 @@ fn keyexpr_and_payload(message: &NetworkMessage) -> Option<(String, Vec<u8>)> {
     // distinct types even though their fields read alike, which is the same
     // distinction `KeyexprSpaces::resolve` turns into a choice of TABLE.
     let (id, suffix) = match &push.keyexpr.body {
-        WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref()),
-        WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprLocal(a) => {
+            (a.id, a.suffix.as_ref().map(|s| s.as_text().into_inner()))
+        }
+        WireexprOwnedVariant::WireexprNonlocal(a) => {
+            (a.id, a.suffix.as_ref().map(|s| s.as_text().into_inner()))
+        }
     };
     assert_eq!(id, 0, "a replay must publish literal keyexprs");
     // The payload is read through the layout SSOT: a replay emits inline Puts,

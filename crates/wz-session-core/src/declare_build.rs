@@ -1188,7 +1188,10 @@ mod tests {
                             w.id, 0,
                             "inner Wireexpr.id is the literal-keyexpr sentinel 0"
                         );
-                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("demo/test")
+                        );
                         assert_eq!(w.suffix_len, Some(9));
                     }
                     _ => panic!(
@@ -1291,7 +1294,10 @@ mod tests {
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
-                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("tail")
+                        );
                         assert_eq!(w.suffix_len, Some(4));
                     }
                     _ => panic!("composite must use WireexprLocal arm"),
@@ -1308,7 +1314,10 @@ mod tests {
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0, "literal sentinel id=0");
-                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("demo/test")
+                        );
                     }
                     _ => panic!("literal must use WireexprLocal arm"),
                 }
@@ -1431,7 +1440,10 @@ mod tests {
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
-                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("tail")
+                        );
                         assert_eq!(w.suffix_len, Some(4));
                     }
                     _ => panic!("composite must use WireexprLocal arm"),
@@ -1448,7 +1460,10 @@ mod tests {
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0, "literal sentinel id=0");
-                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("demo/test")
+                        );
                     }
                     _ => panic!("literal must use WireexprLocal arm"),
                 }
@@ -1603,7 +1618,10 @@ mod tests {
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
-                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("tail")
+                        );
                     }
                     _ => panic!(),
                 }
@@ -1619,7 +1637,10 @@ mod tests {
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0);
-                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("demo/test")
+                        );
                     }
                     _ => panic!(),
                 }
@@ -2301,7 +2322,10 @@ mod tests {
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0, "literal-keyexpr sentinel 0");
-                        assert_eq!(w.suffix.as_deref(), Some("demo/key"));
+                        assert_eq!(
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                            Some("demo/key")
+                        );
                     }
                     _ => panic!("reply keyexpr must be the literal WireexprLocal form"),
                 }

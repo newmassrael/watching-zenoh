@@ -76,7 +76,10 @@ use wz_session_core::slot_observer::{
 /// `dispatch_slot` over a process-wide `SlotObserver` and the session's tables in its
 /// slot.
 #[cfg(feature = "alloc")]
-pub fn dispatch_to<C, D, H, O>(observer: O, actions: H) -> impl FnMut(IterationEvent<'_>) + 'static
+pub fn dispatch_to<C, D, H, O>(
+    observer: O,
+    actions: H,
+) -> impl FnMut(IterationEvent<'_, '_>) + 'static
 where
     C: ClockSource + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
@@ -186,7 +189,7 @@ impl<K: ObserverSinks> Default for SlotApp<K> {
 #[cfg(feature = "session-slot")]
 pub trait SessionEvents {
     /// One iteration of the session's drive loop.
-    fn on_event(&mut self, event: IterationEvent<'_>);
+    fn on_event(&mut self, event: IterationEvent<'_, '_>);
 
     /// One record of an inbound frame, lent for the call: what the receive hands over while the
     /// frame still lies on the stack under it.
@@ -197,7 +200,7 @@ pub trait SessionEvents {
     /// frame of that send are never on the stack together. Defaults to [`Self::on_event`] with
     /// the event that carries the record, which is right for a layer that sends nothing of its
     /// own.
-    fn on_record(&mut self, record: InPlaceRecord<'_>) {
+    fn on_record(&mut self, record: InPlaceRecord<'_, '_>) {
         self.on_event(IterationEvent::InPlace(record));
     }
 }
@@ -272,7 +275,7 @@ where
     K: ObserverSinks + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
-    fn on_event(&mut self, event: IterationEvent<'_>) {
+    fn on_event(&mut self, event: IterationEvent<'_, '_>) {
         {
             let mut peers = self.handle.peers().borrow_mut();
             let mut observer = self.observer.borrow_mut();
@@ -463,7 +466,7 @@ pub fn dispatch_slot<C, R, G, K, D>(
     observer: &'static ObserverCell<K>,
     handle: SlotRef<CoopRuntime<C, D>, CoopTime<C>>,
     requesters: Requesters<R, G>,
-) -> impl FnMut(IterationEvent<'_>) + 'static
+) -> impl FnMut(IterationEvent<'_, '_>) + 'static
 where
     C: ClockSource + 'static,
     R: ReplySink + 'static,
@@ -535,7 +538,7 @@ mod tests {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
             }),
         }
     }
@@ -593,7 +596,10 @@ mod tests {
             };
             if let PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
                 put.payload_len = Some(4);
-                put.payload = Some(b"21.0");
+                put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(b"21.0" as &[u8]).unwrap(),
+                };
             }
             NetworkMessage::Push(Box::new(
                 push.try_into_owned_in::<wz_session_core::wire::WireStorage>()

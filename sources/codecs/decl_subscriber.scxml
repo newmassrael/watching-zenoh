@@ -38,7 +38,7 @@
      Body byte-identical to upstream wire RFC. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="decl_subscriber">
+       sce:kind="codec" sce:default-endian="big" name="decl_subscriber">
   <!-- R121h-pre: B5-ν ownership invert. DeclSubscriber.header bit 6 =
        `_Z_DECL_SUBSCRIBER_FLAG_M = 0x40` (zenoh-pico
        declarations.h:30). -->
@@ -74,7 +74,7 @@
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
-                   max-depth="8" on-overflow="reject"
+                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>

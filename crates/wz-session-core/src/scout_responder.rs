@@ -420,10 +420,17 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
     // longer than the 4-bit field, which is the whole reason it is a
     // constructor rather than a struct literal.
     hello.set_zid_len_m1((identity.zid.len() - 1) as u8);
-    hello.zid = &identity.zid;
+    hello.zid = sce_forge_runtime::codec::Bounded::new(identity.zid.as_slice())
+        .expect("`try_new` holds a zid of 1..=16 bytes, the codec's bounds");
 
     let mut locators = sce_forge_runtime::heapless::Vec::<Locator<'_>, 64>::new();
     for l in advertised {
+        // A locator past the `u8` length the protocol reads one with has no
+        // frame, so it is left out of the list as a locator the list has no
+        // room for is.
+        let Some(locator) = sce_forge_runtime::codec::Bounded::new(l.as_str()) else {
+            continue;
+        };
         // The bound is the codec's declared `sce:max-count`, so overflowing it
         // is not an error to propagate but a list to TRUNCATE: a Hello carrying
         // 64 of a node's locators is still a usable dial hint, while a
@@ -431,7 +438,7 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
         if locators
             .push(Locator {
                 locator_len: l.len() as u64,
-                locator: l.as_str(),
+                locator,
             })
             .is_err()
         {
@@ -441,13 +448,10 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
     let has_locators = !locators.is_empty();
     if has_locators {
         hello.num_locators = Some(locators.len() as u64);
-        hello.locators = Some(locators);
+        hello.locators = Some(locators.into());
     }
 
-    // The locators were cut to the codec's own bound above, so the encode has no refusal to give.
-    let body = hello
-        .encode_to_vec()
-        .expect("a hello within the codec's own bounds encodes");
+    let body = hello.encode_to_vec();
     let mut datagram = Vec::with_capacity(1 + body.len());
     let mut header = wire_const::S_MID_HELLO;
     if has_locators {
@@ -501,9 +505,9 @@ mod tests {
         if let Some(z) = zid {
             scout.set_i(true);
             scout.set_zid_len_m1((z.len() - 1) as u8);
-            scout.zid = Some(z);
+            scout.zid = Some(wz_codecs::Bounded::new(z).unwrap());
         }
-        let body = scout.encode_to_vec().expect("a fixture scout is encodable");
+        let body = scout.encode_to_vec();
         let mut wire = vec![wire_const::S_MID_SCOUT];
         wire.extend_from_slice(&body);
         wire

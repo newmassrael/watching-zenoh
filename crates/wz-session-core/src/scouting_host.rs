@@ -284,12 +284,13 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
             // present-if gate; zenoh-pico `message.c` writes the same).
             scout.set_i(true);
             scout.set_zid_len_m1((zid.len() - 1) as u8);
-            scout.zid = Some(zid);
+            // The id is at most the codec's own bound (`zid_len_m1` is four bits).
+            scout.zid = Some(
+                sce_forge_runtime::codec::Bounded::new(zid.as_slice())
+                    .expect("a scouting zid is 1..=16 bytes, the codec's bounds"),
+            );
         }
-        // The id is at most the codec's own bound (`zid_len_m1` is four bits), so no refusal.
-        let body = scout
-            .encode_to_vec()
-            .expect("a scout within the codec's own bounds encodes");
+        let body = scout.encode_to_vec();
         let mut datagram = Vec::with_capacity(1 + body.len());
         // The scouting-message envelope: the MID header byte the body codec omits.
         datagram.push(wire_const::S_MID_SCOUT);

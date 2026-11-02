@@ -878,10 +878,10 @@ impl StreamWriteDriver {
             // envelope); `bytes.len() <= u16::MAX` is the caller's to guarantee.
             StreamEnvelope {
                 payload_len: bytes.len() as u16,
-                payload: bytes,
+                payload: wz_codecs::Bounded::new(bytes)
+                    .expect("the caller holds a payload within the u16 prefix"),
             }
             .encode_to_vec()
-            .expect("a payload within the u16 prefix encodes")
         }
     }
 
@@ -1415,10 +1415,10 @@ mod tests {
                     // to the SSOT the byte door goes through.
                     let envelope = StreamEnvelope {
                         payload_len: payload.len() as u16,
-                        payload,
+                        payload: wz_codecs::Bounded::new(payload)
+                            .expect("a test payload fits the u16 stream envelope"),
                     }
-                    .encode_to_vec()
-                    .expect("a test payload fits the u16 stream envelope");
+                    .encode_to_vec();
                     assert_eq!(by_lend, envelope);
                 }
             }
@@ -1677,10 +1677,10 @@ mod tests {
         assert_eq!(frames.len(), 1, "one push is one frame");
         let envelope = StreamEnvelope {
             payload_len: frames[0].len() as u16,
-            payload: &frames[0],
+            payload: wz_codecs::Bounded::new(frames[0].as_slice())
+                .expect("a one-push frame fits the u16 stream envelope"),
         }
-        .encode_to_vec()
-        .expect("a one-push frame fits the u16 stream envelope");
+        .encode_to_vec();
         assert_eq!(wire, envelope);
     }
 
@@ -1801,10 +1801,10 @@ mod tests {
         );
         let envelope = StreamEnvelope {
             payload_len: frames[0].len() as u16,
-            payload: &frames[0],
+            payload: wz_codecs::Bounded::new(frames[0].as_slice())
+                .expect("a one-push frame fits the u16 stream envelope"),
         }
-        .encode_to_vec()
-        .expect("a one-push frame fits the u16 stream envelope");
+        .encode_to_vec();
         assert_eq!(wire, envelope);
     }
 
@@ -1884,10 +1884,10 @@ mod tests {
                 if !lowlatency {
                     let envelope = StreamEnvelope {
                         payload_len: payload.len() as u16,
-                        payload,
+                        payload: wz_codecs::Bounded::new(payload)
+                            .expect("a test payload fits the u16 stream envelope"),
                     }
-                    .encode_to_vec()
-                    .expect("a test payload fits the u16 stream envelope");
+                    .encode_to_vec();
                     assert_eq!(by_lend, envelope);
                 }
             }
@@ -2010,10 +2010,10 @@ mod tests {
         assert_eq!(frames.len(), 1, "one push is one frame");
         let envelope = StreamEnvelope {
             payload_len: frames[0].len() as u16,
-            payload: &frames[0],
+            payload: wz_codecs::Bounded::new(frames[0].as_slice())
+                .expect("a one-push frame fits the u16 stream envelope"),
         }
-        .encode_to_vec()
-        .expect("a one-push frame fits the u16 stream envelope");
+        .encode_to_vec();
         assert_eq!(wire, envelope);
     }
 

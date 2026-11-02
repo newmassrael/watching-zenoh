@@ -445,14 +445,12 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(keyexpr_literal.len() as u64),
-                suffix: Some(keyexpr_literal),
+                suffix: Some(wz_codecs::Bounded::new(keyexpr_literal).unwrap()),
             }),
         },
         ..Push::default()
     };
-    let push_bytes = wz_codecs_test_support::with_empty_inline_put(push)
-        .encode_to_vec()
-        .expect("a fixture Push encodes");
+    let push_bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
     // Frame envelope: T_MID_FRAME | R = 0x25, sn=1 VLE (0x01), tail = push_bytes.
     let mut frame_wire = vec![0x25, 0x01];
     frame_wire.extend_from_slice(&push_bytes);

@@ -2297,10 +2297,10 @@ pub(crate) mod tests {
         if let Some(z) = zid {
             scout.set_i(true);
             scout.set_zid_len_m1((z.len() - 1) as u8);
-            scout.zid = Some(z);
+            scout.zid = Some(wz_codecs::Bounded::new(z).unwrap());
         }
         let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout is encodable"));
+        wire.extend_from_slice(&scout.encode_to_vec());
         wire
     }
 
@@ -2331,8 +2331,7 @@ pub(crate) mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec()
-            .expect("a fixture Hello is encodable");
+            .encode_to_vec();
         let mut header = wz_session_core::wire_const::S_MID_HELLO;
         if l != 0 {
             header |= wz_session_core::wire_const::FLAG_S_HELLO_L;
@@ -2794,9 +2793,9 @@ pub(crate) mod tests {
         let cookie: &[u8] = &[0xAA, 0xBB];
         let mut body = wz_codecs::init_body::InitBody {
             version: 0x09,
-            zid,
+            zid: wz_codecs::Bounded::new(zid).unwrap(),
             cookie_len: ack.then_some(cookie.len() as u64),
-            cookie: ack.then_some(cookie),
+            cookie: ack.then(|| wz_codecs::Bounded::new(cookie).unwrap()),
             ..Default::default()
         };
         body.set_whatami(role);
@@ -2806,11 +2805,7 @@ pub(crate) mod tests {
         } else {
             wz_session_core::wire_const::T_MID_INIT
         }];
-        wire.extend_from_slice(
-            &body
-                .encode_to_vec()
-                .expect("a fixture InitBody is encodable"),
-        );
+        wire.extend_from_slice(&body.encode_to_vec());
         let mut framed = (wire.len() as u16).to_le_bytes().to_vec();
         framed.extend_from_slice(&wire);
         framed
@@ -2822,14 +2817,14 @@ pub(crate) mod tests {
     fn built_join(role: u8, zid: &[u8]) -> Vec<u8> {
         let mut join = wz_codecs::join::Join {
             version: 0x09,
-            zid,
+            zid: wz_codecs::Bounded::new(zid).unwrap(),
             lease: 10,
             ..Default::default()
         };
         join.set_whatami(role);
         join.set_zid_len_m1(zid.len() as u8 - 1);
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
-        wire.extend_from_slice(&join.encode_to_vec().expect("a fixture Join is encodable"));
+        wire.extend_from_slice(&join.encode_to_vec());
         wire
     }
 

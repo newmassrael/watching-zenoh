@@ -83,7 +83,7 @@ impl FaceForwarder for CapturingForwarder {
         self.state.lock().unwrap().deregistered += 1;
     }
 
-    fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
+    fn forward(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             reliable,
             sn,

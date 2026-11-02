@@ -1,4 +1,4 @@
-// SCE-MAP: init_body:60 :: _forge_body
+// SCE-MAP: init_body:67 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -21,19 +21,75 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `zid` of `InitBody`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct InitBody<'a> {
+pub struct InitBodyZidField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<InitBodyZidField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<16>;
+}
+
+/// The field `cookie` of `InitBody`, which a storage profile
+/// answers for by this type.
+#[allow(dead_code)]
+pub struct InitBodyCookieField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<InitBodyCookieField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<65535>;
+}
+
+/// What `InitBodyIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait InitBodyStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<InitBodyZidField> + ::sce_forge_runtime::codec::HoldsBytes<InitBodyCookieField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<InitBodyZidField> + ::sce_forge_runtime::codec::HoldsBytes<InitBodyCookieField>> InitBodyStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside InitBodyStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait InitBodyFrom<'f>: InitBodyStorage + ::sce_forge_runtime::codec::StoresBytes<'f, InitBodyZidField> + ::sce_forge_runtime::codec::StoresBytes<'f, InitBodyCookieField> {}
+
+impl<'f, S: InitBodyStorage + ::sce_forge_runtime::codec::StoresBytes<'f, InitBodyZidField> + ::sce_forge_runtime::codec::StoresBytes<'f, InitBodyCookieField>> InitBodyFrom<'f> for S {}
+
+// `InitBodyIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `InitBody<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `InitBodyOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct InitBodyIn<S: InitBodyStorage> {
     pub version: u8,
     pub cbyte: u8,
-    pub zid: &'a [u8],
+    pub zid: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<InitBodyZidField>>::Bytes, 16, 1>,
     pub s: Option<InitBodyS>,
     pub cookie_len: Option<u64>,
-    pub cookie: Option<&'a [u8]>,
+    pub cookie: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<InitBodyCookieField>>::Bytes, 65535>>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type InitBody<'a> = InitBodyIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type InitBodyOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = InitBodyIn<S>;
+
+impl<S: InitBodyStorage> Default for InitBodyIn<S> {
+    fn default() -> Self {
+        Self {
+            version: Default::default(),
+            cbyte: Default::default(),
+            zid: Default::default(),
+            s: Default::default(),
+            cookie_len: Default::default(),
+            cookie: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> InitBody<'a> {
+impl<S: InitBodyStorage> InitBodyIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -49,7 +105,7 @@ impl<'a> InitBody<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>, s: u8, a: u8) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>, s: u8, a: u8) -> Result<Self, CodecError> where S: InitBodyFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out, s, a)?;
         Ok(_out)
@@ -65,7 +121,24 @@ impl<'a> InitBody<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, s: u8, a: u8) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, s: u8, a: u8) -> Result<(), CodecError> where S: InitBodyFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out, s, a) {
+            Err(CodecError::CapacityExceeded) => {
+                InitBody::store_into(&mut _frame, &mut InitBody::default(), s, a)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, s: u8, a: u8) -> Result<(), CodecError> where S: InitBodyFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -97,12 +170,15 @@ impl<'a> InitBody<'a> {
             _v
         };
         let zid = {
-            let _n = (((cbyte >> 4) & 0xF) as usize).wrapping_add(1);
+            let _len = (cbyte >> 4) & 0xF;
+            let _n = (_len as usize) + 1;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
             _v
         };
+        let zid = ::sce_forge_runtime::codec::Bounded::new(zid).ok_or(CodecError::LengthOutOfRange)?;
+        let zid = zid.store::<S, InitBodyZidField>()?;
         let sn_res = if (s & 0x01u8) != 0 {
             let raw = cursor.peek_slice(1)?;
             let _v = raw[0];
@@ -126,7 +202,11 @@ impl<'a> InitBody<'a> {
             None
         };
         let cookie = if (a & 0x01u8) != 0 {
-            let _n = cookie_len.unwrap() as usize;
+            let _len = cookie_len.unwrap();
+            if _len > 65535 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
@@ -134,6 +214,8 @@ impl<'a> InitBody<'a> {
         } else {
             None
         };
+        let cookie = cookie.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
+        let cookie = cookie.map(|_v| _v.store::<S, InitBodyCookieField>()).transpose()?;
         _out.version = version;
         _out.cbyte = cbyte;
         _out.zid = zid;
@@ -169,37 +251,34 @@ impl<'a> InitBody<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 159;
+    pub const MAX_ENCODED_BYTES: usize = 65566;
 
-    /// Encode `self` into the caller-owned sink. Returns the value's refusal
-    /// when the encoding cannot carry it (a length past its type, a list past
-    /// its bound, a gate that disagrees with a presence; the document declares
-    /// `sce:encode-may-fail`), or the sink's own error:
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
-    /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w)
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        InitBody::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
-    /// `encode` refuses a value with: one the encoding cannot carry (a
-    /// length past its type, a list past its bound) or one a gate
-    /// disagrees with. Callers targeting zero-alloc hot paths should call
-    /// `encode` directly against a caller-owned sink.
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -225,9 +304,9 @@ pub trait InitBodySource {
     /// The `cbyte` field.
     fn cbyte(&self) -> u8;
     /// The `zid` field.
-    fn zid(&self) -> &[u8];
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1>;
     /// The `cookie` field.
-    fn cookie(&self) -> Option<&[u8]>;
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 65535>>;
     /// The fields `S` decides, held together (docs/adr/0065 §6 R4).
     fn s(&self) -> Option<InitBodyS>;
 }
@@ -239,10 +318,10 @@ impl<T: InitBodySource + ?Sized> InitBodySource for &T {
     fn cbyte(&self) -> u8 {
         (**self).cbyte()
     }
-    fn zid(&self) -> &[u8] {
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         (**self).zid()
     }
-    fn cookie(&self) -> Option<&[u8]> {
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 65535>> {
         (**self).cookie()
     }
     fn s(&self) -> Option<InitBodyS> {
@@ -261,9 +340,9 @@ pub struct InitBodyParts<'a> {
     /// The `cbyte` field.
     pub cbyte: u8,
     /// The `zid` field.
-    pub zid: &'a [u8],
+    pub zid: ::sce_forge_runtime::codec::Bytes<'a, 16, 1>,
     /// The `cookie` field.
-    pub cookie: Option<&'a [u8]>,
+    pub cookie: Option<::sce_forge_runtime::codec::Bytes<'a, 65535>>,
     /// The fields `S` decides, held together (docs/adr/0065 §6 R4).
     pub s: Option<InitBodyS>,
 }
@@ -278,15 +357,15 @@ impl<'a> InitBodySource for InitBodyParts<'a> {
     fn cbyte(&self) -> u8 {
         self.cbyte
     }
-    fn zid(&self) -> &[u8] {
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         self.zid
     }
-    fn cookie(&self) -> Option<&[u8]> {
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 65535>> {
         self.cookie
     }
 }
 
-impl<'a> InitBodySource for InitBody<'a> {
+impl<S: InitBodyStorage> InitBodySource for InitBodyOwned<S> {
     fn s(&self) -> Option<InitBodyS> {
         self.s
     }
@@ -296,29 +375,11 @@ impl<'a> InitBodySource for InitBody<'a> {
     fn cbyte(&self) -> u8 {
         self.cbyte
     }
-    fn zid(&self) -> &[u8] {
-        self.zid
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
+        self.zid.as_bytes()
     }
-    fn cookie(&self) -> Option<&[u8]> {
-        self.cookie
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InitBodySource for InitBodyOwned<S> {
-    fn s(&self) -> Option<InitBodyS> {
-        self.s
-    }
-    fn version(&self) -> u8 {
-        self.version
-    }
-    fn cbyte(&self) -> u8 {
-        self.cbyte
-    }
-    fn zid(&self) -> &[u8] {
-        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid)
-    }
-    fn cookie(&self) -> Option<&[u8]> {
-        self.cookie.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice)
+    fn cookie(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 65535>> {
+        self.cookie.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes)
     }
 }
 
@@ -327,9 +388,9 @@ impl<'a> InitBody<'a> {
     /// Encode what `src` says into the caller-owned sink: the bytes
     /// [`Self::encode`] writes for the value it holds, read through
     /// [`InitBodySource`]. A length, a count or a gate flag is computed from what
-    /// `src` presents, and a value the encoding cannot carry is refused
-    /// before the first byte is written.
-    pub fn encode_source<S: InitBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: InitBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source(src, w)
     }
 
@@ -349,27 +410,24 @@ impl<'a> InitBody<'a> {
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: InitBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: InitBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let (_m_sn_res, _m_batch_size) = match src.s() {
             Some(InitBodyS { sn_res, batch_size }) => (Some(sn_res), Some(batch_size)),
             None => (None, None),
         };
         let a: u8 = u8::from(InitBodySource::cookie(src).is_some());
-        let _n_d_cbyte_zid_len_m1_0: usize = src.zid().len().checked_sub(1).ok_or(CodecError::LengthOutOfRange)?;
+        let _n_d_cbyte_zid_len_m1_0: usize = src.zid().len() - 1;
         let _n_d_cookie_len_0: usize = match src.cookie() {
             Some(_v) => _v.len(),
             None => 0,
         };
         let _f_d_cookie_len: Option<usize> = if src.cookie().is_some() { Some(_n_d_cookie_len_0) } else { None };
         let _d_cookie_len: u64 = ::sce_forge_runtime::codec::widen_usize(_f_d_cookie_len.unwrap_or(0));
-        if _n_d_cbyte_zid_len_m1_0 > 0xF {
-            return Err(CodecError::LengthOutOfRange);
-        }
         let _v_cbyte_zid_len_m1: u8 = _n_d_cbyte_zid_len_m1_0 as u8;
         let _c_cbyte: u8 = (src.cbyte() & !0xF0) | (_v_cbyte_zid_len_m1 << 4);
         w.write_u8(src.version())?;
         w.write_u8(_c_cbyte)?;
-        w.write_bytes(src.zid())?;
+        w.write_bytes(src.zid().into_inner())?;
         if let Some(_v) = _m_sn_res {
             w.write_u8(_v)?;
         }
@@ -381,7 +439,7 @@ impl<'a> InitBody<'a> {
             w.write_vle_u64(_d_cookie_len)?;
         }
         if let Some(_v) = src.cookie() {
-            w.write_bytes(_v)?;
+            w.write_bytes(_v.into_inner())?;
         }
         Ok(())
     }
@@ -389,17 +447,17 @@ impl<'a> InitBody<'a> {
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: InitBodySource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+    pub fn count_source<S: InitBodySource + ?Sized>(src: &S) -> usize {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c)?;
-        Ok(_c.len())
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
     }
 }
 
 impl<'a, S: InitBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for InitBody<'a> {
-    type Error<E> = CodecError;
+    type Error<E> = E;
 
-    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
         Self::write_source(src, w)
     }
 }
@@ -407,10 +465,12 @@ impl<'a, S: InitBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> 
 #[allow(dead_code)]
 impl<'a> InitBody<'a> {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
-    /// with nothing written, or the refusal that encode would give. The result
-    /// writes the frame into a window of exactly that size and cannot fail.
-    pub fn measure<S: InitBodySource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
-        ::sce_forge_runtime::codec::measure(src)
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: InitBodySource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
     }
 
     /// Write `src` into `window` in one pass and return the bytes it is, for a
@@ -477,38 +537,9 @@ impl<'a> InitBody<'a> {
 // `let v: InitBodyOwned = InitBodyOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct InitBodyOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub version: u8,
-    pub cbyte: u8,
-    pub zid: S::Bytes<16>,
-    pub s: Option<InitBodyS>,
-    pub cookie_len: Option<u64>,
-    pub cookie: Option<S::Bytes<128>>,
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InitBodyOwned<S> {
-    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
-    // bit getters over the copied carrier (rkyv Archived↔native getter
-    // parity), so owned consumers read `{Codec}Owned` with the same API as
-    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
-    // Read-only — write accessors belong with an owned-encode path, which
-    // does not exist yet.
-    pub fn whatami(&self) -> u8 {
-        self.cbyte & 0x03
-    }
-
-    pub fn zid_len_m1(&self) -> u8 {
-        (self.cbyte >> 4) & 0x0F
-    }
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> InitBody<'a> {
@@ -518,19 +549,20 @@ impl<'a> InitBody<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<InitBodyOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: InitBodyFrom<'a>>(self) -> Result<InitBodyOwned<S>, CodecError> {
         Ok(InitBodyOwned {
             version: self.version,
             cbyte: self.cbyte,
-            zid: <S::Bytes<16> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.zid)?,
+            zid: self.zid.store::<S, InitBodyZidField>()?,
             s: self.s,
             cookie_len: self.cookie_len,
-            cookie: self.cookie.map(<S::Bytes<128> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
+            cookie: self.cookie.map(|_v| _v.store::<S, InitBodyCookieField>()).transpose()?,
         })
     }
 
@@ -542,7 +574,7 @@ impl<'a> InitBody<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InitBodyOwned<S> {
+impl<S: InitBodyStorage> InitBodyOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -567,10 +599,10 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> InitBodyOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut InitBody<'o>) {
         _out.version = self.version;
         _out.cbyte = self.cbyte;
-        _out.zid = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid);
+        _out.zid = self.zid.as_bytes();
         _out.s = self.s;
         _out.cookie_len = self.cookie_len;
-        _out.cookie = self.cookie.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice);
+        _out.cookie = self.cookie.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes);
         
     }
 
@@ -582,37 +614,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> InitBodyOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<InitBodyOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> InitBodyFrom<'x>>(&self) -> Result<InitBodyOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InitBodyOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`InitBody::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        InitBody::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(InitBody::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
     }
 }
 
@@ -629,14 +632,14 @@ impl<'a> InitBody<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InitBodyOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: InitBodyStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InitBodyOwned<S>, CodecError> {
         Ok(InitBodyOwned {
             version: self.version,
             cbyte: self.cbyte,
-            zid: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<16>(origin, self.zid)?,
+            zid: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<InitBodyZidField>(origin, self.zid.into_inner()))?,
             s: self.s,
             cookie_len: self.cookie_len,
-            cookie: self.cookie.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<128>(origin, _v)).transpose()?,
+            cookie: self.cookie.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<InitBodyCookieField>(origin, _v.into_inner()))).transpose()?,
         })
     }
 }

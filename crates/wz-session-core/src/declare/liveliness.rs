@@ -205,9 +205,9 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
         feature = "storage-profile",
         feature = "session-slot"
     ))]
-    pub fn dispatch_declare_view<'a>(
+    pub fn dispatch_declare_view<'a, 'f>(
         &mut self,
-        body: &DeclareVariant<'a>,
+        body: &DeclareVariant<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
@@ -286,7 +286,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         self.dispatch_iteration_event_unclaimed(event, peer_keyexpr_table, &|_| false);
@@ -297,7 +297,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {

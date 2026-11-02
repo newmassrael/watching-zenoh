@@ -6576,7 +6576,7 @@ mod tests {
                     wz_codecs::wireexpr_local::WireexprLocal {
                         id: 0,
                         suffix_len: Some(key.len() as u64),
-                        suffix: Some(key),
+                        suffix: Some(wz_codecs::Bounded::new(key).unwrap()),
                     },
                 ),
             },
@@ -6588,13 +6588,15 @@ mod tests {
                     schema: None,
                 }),
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture message is encodable")
     }
 
     /// R311y875 — THE TWO ENCODING FINDINGS, AND THEIR TALLY, THROUGH THE
@@ -7272,8 +7274,7 @@ mod tests {
                 .expect("the production builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec()
-                .expect("a fixture message is encodable");
+                .encode_to_vec();
         let put = |key: &str, payload: &[u8]| {
             wz_codecs::push::Push {
                 header: wz_codecs::push::Push::default().header
@@ -7283,19 +7284,21 @@ mod tests {
                         wz_codecs::wireexpr_local::WireexprLocal {
                             id: 0,
                             suffix_len: Some(key.len() as u64),
-                            suffix: Some(key),
+                            suffix: Some(wz_codecs::Bounded::new(key).unwrap()),
                         },
                     ),
                 },
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                     payload_len: Some(payload.len() as u64),
-                    payload: Some(payload),
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: None,
+                        payload: wz_codecs::Bounded::new(payload).unwrap(),
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture message is encodable")
         };
         let packets = [
             udp_to_zenoh_port(&frame_carrying(&declare)),
@@ -7399,8 +7402,7 @@ mod tests {
                 .expect("the production interest builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec()
-                .expect("a fixture message is encodable"),
+                .encode_to_vec(),
             )
         };
         let reply = |id: u64, ke: &str| {
@@ -7409,8 +7411,7 @@ mod tests {
                     .expect("the production reply builder")
                     .try_as_borrowed()
                     .expect("re-borrow")
-                    .encode_to_vec()
-                    .expect("a fixture message is encodable"),
+                    .encode_to_vec(),
             )
         };
         let closed = |id: u64| {
@@ -7418,8 +7419,7 @@ mod tests {
                 &wz_session_core::declare_build::build_declare_final_reply(id)
                     .try_as_borrowed()
                     .expect("re-borrow")
-                    .encode_to_vec()
-                    .expect("a fixture message is encodable"),
+                    .encode_to_vec(),
             )
         };
         let packets = [
@@ -8067,7 +8067,6 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture message is encodable")
         }
 
         /// One datagram on the link whose peer is `10.0.0.<host>`, in either
@@ -8311,7 +8310,7 @@ mod tests {
                 wz_codecs::wireexpr_local::WireexprLocal {
                     id,
                     suffix_len: suffix.map(|s| s.len() as u64),
-                    suffix,
+                    suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
                 },
             ),
         }
@@ -8338,13 +8337,15 @@ mod tests {
                     schema: None,
                 }),
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture message is encodable")
     }
 
     /// One UDP datagram to a zenoh port carrying `payload`.
@@ -9976,7 +9977,6 @@ mod quic_pass_tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture message is encodable")
         }
 
         let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(9).wrapping_add(4));

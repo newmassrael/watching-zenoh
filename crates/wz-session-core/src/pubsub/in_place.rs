@@ -54,7 +54,10 @@ use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBoun
 
 /// The sample a Push read in place is delivered as: every field a range of the
 /// frame or a value read off it, valid for the delivery call.
-struct LentSample<'s> {
+///
+/// `'s` is the delivery's borrow of the decoded record; `'f` is the frame's, in
+/// which the codec's lent timestamp and encoding are invariant.
+struct LentSample<'s, 'f> {
     keyexpr: &'s str,
     payload: &'s [u8],
     kind: SampleKind,
@@ -62,15 +65,15 @@ struct LentSample<'s> {
     qos: Option<QosLevel>,
     attachment: Option<&'s [u8]>,
     source_info: Option<SourceInfo>,
-    timestamp: Option<&'s Timestamp<'s>>,
+    timestamp: Option<&'s Timestamp<'f>>,
     #[cfg(feature = "alloc")]
     timestamp_hint: OnceCell<TimestampHint>,
-    encoding: Option<&'s Encoding<'s>>,
+    encoding: Option<&'s Encoding<'f>>,
     #[cfg(feature = "alloc")]
     encoding_hint: OnceCell<EncodingHint>,
 }
 
-impl SampleView for LentSample<'_> {
+impl SampleView for LentSample<'_, '_> {
     fn keyexpr(&self) -> &str {
         self.keyexpr
     }
@@ -108,11 +111,15 @@ impl SampleView for LentSample<'_> {
     // The parts are the wire's own fields, read where they lie: nothing is built to
     // answer, so this is the accessor a build with no allocator has.
     fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
-        self.timestamp.map(|ts| (ts.time, ts.zid))
+        self.timestamp.map(|ts| (ts.time, ts.zid.into_inner()))
     }
     fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
-        self.encoding
-            .map(|encoding| (encoding.packed_id, encoding.schema))
+        self.encoding.map(|encoding| {
+            (
+                encoding.packed_id,
+                encoding.schema.map(|schema| schema.into_inner()),
+            )
+        })
     }
     fn source_info(&self) -> Option<&SourceInfo> {
         self.source_info.as_ref()
@@ -128,12 +135,13 @@ impl SampleView for LentSample<'_> {
 }
 
 /// The body-level fields of a Put or a Del read in place, before the keyexpr is
-/// known: what `dispatch_push`'s body match projects, on the lent form.
-struct LentBody<'s> {
+/// known: what `dispatch_push`'s body match projects, on the lent form. The
+/// lifetimes are [`LentSample`]'s.
+struct LentBody<'s, 'f> {
     kind: SampleKind,
     payload: &'s [u8],
-    timestamp: Option<&'s Timestamp<'s>>,
-    encoding: Option<&'s Encoding<'s>>,
+    timestamp: Option<&'s Timestamp<'f>>,
+    encoding: Option<&'s Encoding<'f>>,
     attachment: Option<&'s [u8]>,
     source_info: Option<SourceInfo>,
 }
@@ -153,22 +161,21 @@ enum Fallback {
 /// The body of `push` as a lent sample delivers it, `Ok(None)` for a body the
 /// owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
-fn lent_body<'s>(push: &'s Push<'s>) -> Result<Option<LentBody<'s>>, Fallback> {
+fn lent_body<'s, 'f>(push: &'s Push<'f>) -> Result<Option<LentBody<'s, 'f>>, Fallback> {
     match &push.body {
         #[cfg(feature = "pubsub-put")]
         PushVariant::CodecZenohMsgPut(put) => {
-            if put.slices.is_some() {
+            let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
+                &put.extensions_has_0x12
+            else {
                 return Err(Fallback::Sliced);
-            }
-            let exts: &[wz_codecs::ext_entry::ExtEntry<'s>] =
-                put.extensions.as_deref().unwrap_or(&[]);
+            };
+            let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = crate::put_payload::chain(put);
             #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
             let _ = exts;
             Ok(Some(LentBody {
                 kind: SampleKind::Put,
-                // A Put with neither layout populated is an empty inline payload,
-                // as `put_payload::layout` reads it.
-                payload: put.payload.unwrap_or(&[]),
+                payload: payload.into_inner(),
                 #[cfg(feature = "pubsub-timestamp")]
                 timestamp: put.timestamp.as_ref(),
                 #[cfg(not(feature = "pubsub-timestamp"))]
@@ -192,8 +199,10 @@ fn lent_body<'s>(push: &'s Push<'s>) -> Result<Option<LentBody<'s>>, Fallback> {
         }
         #[cfg(feature = "pubsub-delete")]
         PushVariant::CodecZenohMsgDel(del) => {
-            let exts: &[wz_codecs::ext_entry::ExtEntry<'s>] =
-                del.extensions.as_deref().unwrap_or(&[]);
+            let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = del
+                .extensions
+                .as_ref()
+                .map_or(&[][..], |chain| chain.as_slice());
             #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
             let _ = exts;
             Ok(Some(LentBody {
@@ -236,7 +245,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     pub(super) fn dispatch_in_place(
         &mut self,
         peer: &SubscriberPeer<P>,
-        record: &InPlaceRecord<'_>,
+        record: &InPlaceRecord<'_, '_>,
     ) {
         // A lent Request or Response is the queryables' or the pending gets'.
         let Some(push) = record.push() else {
@@ -303,8 +312,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             Ok(None) => return Ok(()),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
-        let outer: &[wz_codecs::ext_entry::ExtEntry<'_>] =
-            push.extensions.as_deref().unwrap_or(&[]);
+        let outer: &[wz_codecs::ext_entry::ExtEntry<'_>] = push
+            .extensions
+            .as_ref()
+            .map_or(&[][..], |chain| chain.as_slice());
         #[cfg(feature = "pubsub-qos")]
         let qos = crate::sample::extract_qos_in(outer);
         #[cfg(not(feature = "pubsub-qos"))]
@@ -520,10 +531,7 @@ mod tests {
 
     /// The wire bytes of `push`, as a peer sends them.
     fn wire_of(push: &crate::wire::PushOwned) -> Vec<u8> {
-        push.try_as_borrowed()
-            .expect("a view")
-            .encode_to_vec()
-            .expect("a fixture push is encodable")
+        push.try_as_borrowed().expect("a view").encode_to_vec()
     }
 
     /// `push` delivered lent (the in-place path) and owned (the copying path)
@@ -801,13 +809,18 @@ mod tests {
             let _ = slices.push(wz_codecs::zbuf_slice::ZbufSlice {
                 kind: u32::from(crate::put_payload::SLICE_KIND_RAW),
                 len: bytes.len() as u64,
-                bytes,
+                bytes: sce_forge_runtime::codec::Bounded::new(bytes).unwrap(),
             });
         }
-        put.payload = None;
+        // The sliced layout: the chain is the shared-memory marker alone, which the
+        // header's `Z` flag announces, and the payload is the list of slices.
+        put.header |= crate::ext_nodeid::MESSAGE_FLAG_Z;
         put.payload_len = None;
         put.slice_count = Some(2);
-        put.slices = Some(slices);
+        put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 {
+            extensions: Default::default(),
+            slices: sce_forge_runtime::codec::Bounded::new(slices).unwrap(),
+        };
         let (lent, owned, fallbacks) = both_ways(&push, "demo/s", |_| {});
         assert_eq!(lent, owned);
         // Without the shared-memory transport the owned projection joins the
@@ -883,7 +896,7 @@ mod tests {
         let ts = Timestamp {
             time: 1,
             zid_len: 1,
-            zid: &[7],
+            zid: sce_forge_runtime::codec::Bounded::new(&b"\x07"[..]).unwrap(),
         };
         let sample = LentSample {
             keyexpr: "k",

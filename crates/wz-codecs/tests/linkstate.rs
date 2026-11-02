@@ -21,8 +21,17 @@
 #![cfg(feature = "codec-linkstate")]
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::linkstate::Linkstate;
+use wz_codecs::linkstate::{Linkstate, LinkstateOptionsH};
+use wz_codecs::linkstate_link::LinkstateLink;
 use wz_codecs::linkstate_list::LinkstateList;
+
+/// The links of `ls`, in whichever arm of the weights flag it was read.
+fn links_of<'l>(ls: &'l Linkstate<'_>) -> &'l [LinkstateLink] {
+    match &ls.options_h {
+        LinkstateOptionsH::H { links_weights } => links_weights.first().as_slice(),
+        LinkstateOptionsH::NotH { links } => links.as_slice(),
+    }
+}
 
 /// Rich LinkState exercising P (zid) + W (whatami) + L (locators) +
 /// the links list. H=0.
@@ -71,19 +80,26 @@ fn rich_linkstate_round_trips_byte_exact() {
     assert_eq!(ls.psid, 42);
     assert_eq!(ls.sn, 7);
     assert_eq!(ls.zid_len, Some(3));
-    assert_eq!(ls.zid, Some(&[0x01u8, 0x02, 0x03][..]));
+    assert_eq!(
+        ls.zid.map(|zid| zid.into_inner()),
+        Some(&[0x01u8, 0x02, 0x03][..])
+    );
     assert_eq!(ls.whatami, Some(2));
     assert_eq!(ls.num_locators, Some(1));
     let locs = ls.locators.as_ref().expect("L set => locators present");
     assert_eq!(locs.len(), 1);
     assert_eq!(locs[0].locator, "tcp/127.0.0.1:7447");
     assert_eq!(ls.links_len, 2);
-    assert_eq!(ls.links.len(), 2);
-    assert_eq!(ls.links[0].psid, 5);
-    assert_eq!(ls.links[1].psid, 9);
-    assert!(ls.weights.is_none(), "H clear => no weights block");
+    assert!(
+        matches!(ls.options_h, LinkstateOptionsH::NotH { .. }),
+        "H clear => no weights block"
+    );
+    let links = links_of(&ls);
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0].psid, 5);
+    assert_eq!(links[1].psid, 9);
 
-    let wire = ls.encode_to_vec().expect("encode RICH LinkState");
+    let wire = ls.encode_to_vec();
     assert_eq!(wire, RICH, "encode(decode(RICH)) must be byte-identical");
 }
 
@@ -101,10 +117,13 @@ fn minimal_linkstate_round_trips_byte_exact() {
     assert_eq!(ls.num_locators, None, "L clear => no locator count");
     assert!(ls.locators.is_none(), "L clear => no locators");
     assert_eq!(ls.links_len, 0);
-    assert_eq!(ls.links.len(), 0);
-    assert!(ls.weights.is_none(), "H clear => no weights block");
+    assert!(
+        matches!(ls.options_h, LinkstateOptionsH::NotH { .. }),
+        "H clear => no weights block"
+    );
+    assert_eq!(links_of(&ls).len(), 0);
 
-    let wire = ls.encode_to_vec().expect("encode minimal LinkState");
+    let wire = ls.encode_to_vec();
     assert_eq!(wire, MIN, "encode(decode(MIN)) must be byte-identical");
 }
 
@@ -120,17 +139,21 @@ fn weighted_linkstate_round_trips_byte_exact() {
     assert_eq!(ls.whatami, None);
     assert!(ls.locators.is_none());
     assert_eq!(ls.links_len, 2);
-    assert_eq!(ls.links.len(), 2);
-    assert_eq!(ls.links[0].psid, 5);
-    assert_eq!(ls.links[1].psid, 9);
+    let links = links_of(&ls);
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0].psid, 5);
+    assert_eq!(links[1].psid, 9);
 
     // weights: count borrowed from links_len (2), VLE u16 elements.
-    let weights = ls.weights.as_ref().expect("H set => weights present");
+    let LinkstateOptionsH::H { links_weights } = &ls.options_h else {
+        panic!("H set => weights present");
+    };
+    let weights = links_weights.second();
     assert_eq!(weights.len(), 2, "weight count == links count");
     assert_eq!(weights[0].weight, 100);
     assert_eq!(weights[1].weight, 300, "multi-byte VLE u16");
 
-    let wire = ls.encode_to_vec().expect("encode weighted LinkState");
+    let wire = ls.encode_to_vec();
     assert_eq!(
         wire, WEIGHTED,
         "encode(decode(WEIGHTED)) must be byte-identical"
@@ -152,12 +175,12 @@ fn linkstate_list_round_trips_byte_exact() {
     assert_eq!(lst.link_states.len(), 2);
     // entry 0 = minimal, entry 1 = rich
     assert_eq!(lst.link_states[0].psid, 1);
-    assert_eq!(lst.link_states[0].links.len(), 0);
+    assert_eq!(links_of(&lst.link_states[0]).len(), 0);
     assert_eq!(lst.link_states[1].psid, 42);
-    assert_eq!(lst.link_states[1].links.len(), 2);
-    assert_eq!(lst.link_states[1].links[1].psid, 9);
+    assert_eq!(links_of(&lst.link_states[1]).len(), 2);
+    assert_eq!(links_of(&lst.link_states[1])[1].psid, 9);
 
-    let wire = lst.encode_to_vec().expect("encode LinkStateList");
+    let wire = lst.encode_to_vec();
     assert_eq!(
         wire, list_wire,
         "encode(decode(list)) must be byte-identical"

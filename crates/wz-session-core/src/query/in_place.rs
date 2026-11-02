@@ -103,7 +103,7 @@ fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bo
 /// The Query's chain is walked where it lies, once for each field that reads it: the attachment,
 /// the source info and the value each scan it for their own extension, as they scanned the held
 /// chain, and the bytes they hand out stay in the frame.
-fn lent_projection<'q>(query: &QueryView<'q>) -> QueryProjection<'q> {
+fn lent_projection<'q, 'f: 'q>(query: &'q QueryView<'f>) -> QueryProjection<'q> {
     #[cfg(not(any(
         feature = "query-attachment",
         feature = "query-source-info",
@@ -112,7 +112,7 @@ fn lent_projection<'q>(query: &QueryView<'q>) -> QueryProjection<'q> {
     let _ = query.extensions;
     QueryProjection {
         #[cfg(feature = "query-selector-parameters")]
-        parameters: query.parameters,
+        parameters: query.parameters.map(|parameters| parameters.into_inner()),
         #[cfg(not(feature = "query-selector-parameters"))]
         parameters: None,
         #[cfg(feature = "query-attachment")]

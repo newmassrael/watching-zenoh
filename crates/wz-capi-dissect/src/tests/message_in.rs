@@ -81,7 +81,6 @@ fn declare_message() -> Vec<u8> {
         .try_as_borrowed()
         .expect("borrow")
         .encode_to_vec()
-        .expect("a fixture Declare is encodable")
 }
 
 fn push_message(payload: &[u8]) -> Vec<u8> {
@@ -90,13 +89,15 @@ fn push_message(payload: &[u8]) -> Vec<u8> {
         keyexpr: literal("demo/temp"),
         body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
             payload_len: Some(payload.len() as u64),
-            payload: Some(payload),
+            extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(payload).unwrap(),
+            },
             ..Default::default()
         }),
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture Push is encodable")
 }
 
 fn request_message() -> Vec<u8> {

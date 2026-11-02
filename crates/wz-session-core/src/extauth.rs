@@ -26,9 +26,8 @@
 
 use crate::codec_owned::owned_bytes;
 use crate::ext_header::EXT_ENC_ZBUF;
+use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned};
 use sce_forge_runtime::codec::CodecError;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
 
 /// Z_EXT_AUTH ext id on the Init / Open establishment messages — zenoh
 /// `init.rs:156` / `open.rs:121` `zextzbuf!(0x3, false)`. Distinct from the

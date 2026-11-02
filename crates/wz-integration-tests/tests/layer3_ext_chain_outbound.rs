@@ -175,7 +175,7 @@ fn wz_oracle_chain() -> Vec<ExtEntryOwned> {
     zbuf.set_enc(2);
     zbuf.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
         value_len: ENTRY2_ZBUF_VAL.len() as u64,
-        value: &ENTRY2_ZBUF_VAL,
+        value: wz_codecs::Bounded::new(&ENTRY2_ZBUF_VAL as &[u8]).unwrap(),
     });
 
     // `set_ext_chain` now takes the lifetime-free owned ext chain, so

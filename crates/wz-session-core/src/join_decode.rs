@@ -112,7 +112,7 @@ pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
 /// announcer's zid (a sub-slice borrow of `bytes`). Returns `None` for a
 /// non-JOIN MID or a malformed body. Thin projection of [`decode_join`].
 pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
-    decode_join(bytes).map(|join| join.zid)
+    decode_join(bytes).map(|join| join.zid.into_inner())
 }
 
 /// The identity of the JOIN QoS extension: id `0x1`, mandatory, a ZBuf

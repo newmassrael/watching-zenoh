@@ -30,9 +30,7 @@ use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
 #[test]
 fn declare_default_round_trips_through_parse_frame_payload() {
-    let wire = Declare::default()
-        .encode_to_vec()
-        .expect("a default Declare encodes");
+    let wire = Declare::default().encode_to_vec();
     assert_eq!(
         wire,
         &[0x1E, 0x1A],
@@ -49,13 +47,10 @@ fn declare_default_round_trips_through_parse_frame_payload() {
             let re_encoded = decl
                 .try_as_borrowed()
                 .expect("test: <=N exts by construction")
-                .encode_to_vec()
-                .expect("the parsed Declare re-encodes");
+                .encode_to_vec();
             assert_eq!(
                 re_encoded,
-                canonical
-                    .encode_to_vec()
-                    .expect("the canonical Declare encodes"),
+                canonical.encode_to_vec(),
                 "parse_frame_payload-produced Declare must field-match the canonical decode"
             );
             assert_eq!(re_encoded, wire, "round-trip byte-equivalence preserved");
@@ -78,18 +73,13 @@ fn declare_dispatch_does_not_swallow_subsequent_records() {
     let mut push = Push::default();
     if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
         put.payload_len = Some(0);
-        put.payload = Some(&[]);
+        put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+            extensions: None,
+            payload: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
+        };
     }
-    wire.extend_from_slice(
-        &push
-            .encode_to_vec()
-            .expect("the explicit-payload Push encodes"),
-    );
-    wire.extend_from_slice(
-        &Declare::default()
-            .encode_to_vec()
-            .expect("a default Declare encodes"),
-    );
+    wire.extend_from_slice(&push.encode_to_vec());
+    wire.extend_from_slice(&Declare::default().encode_to_vec());
     wire.extend_from_slice(&ResponseFinal::default().encode_to_vec());
 
     let messages = parse_frame_payload(&wire).expect("parse 3-record batch");

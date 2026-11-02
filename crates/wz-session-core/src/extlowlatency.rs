@@ -41,7 +41,7 @@
 //! ext lands later, the guard belongs at the offer-injection point, not in this
 //! codec.
 
-use wz_codecs::ext_entry::ExtEntryOwned;
+use crate::transport_profile::ExtEntryOwned;
 
 use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 

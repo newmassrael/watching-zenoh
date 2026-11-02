@@ -2040,7 +2040,7 @@ pub fn ingest_multicast_fragment<
     on_event: &mut F,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     ingest_multicast_fragment_qos(
         dispatcher,
@@ -2079,7 +2079,7 @@ pub fn ingest_multicast_fragment_qos<
     on_event: &mut F,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     ingest_multicast_fragment_counted(
         dispatcher,
@@ -2127,7 +2127,7 @@ pub(crate) fn ingest_multicast_fragment_counted<
     count: &mut C,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     C: FnMut(&[u8], &crate::network_message::NetworkMessage),
 {
     // R311y227 — a qos peer's oversize frame fragments ride its per-`priority`
@@ -2311,7 +2311,7 @@ pub(crate) fn ingest_multicast_fragment_in_place<
     on_event: &mut F,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     let (peer_idx, sn_mask) =
         match dispatcher.ingest_fragment_by_src_qos(src, priority, reliable, sn, now_ms) {
@@ -3700,7 +3700,7 @@ mod tests {
             drops: Vec<ReassemblyDropReason>,
         }
 
-        fn capture(cap: &mut Captured) -> impl FnMut(IterationEvent<'_>) + '_ {
+        fn capture(cap: &mut Captured) -> impl FnMut(IterationEvent<'_, '_>) + '_ {
             |event| match event {
                 IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                     reliable,
@@ -3999,7 +3999,7 @@ mod tests {
 
             let mut saw_push = false;
             {
-                let mut on_event = |event: IterationEvent<'_>| {
+                let mut on_event = |event: IterationEvent<'_, '_>| {
                     if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                         messages, ..
                     }) = event
@@ -4550,7 +4550,7 @@ mod tests {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: alias_id,
                 suffix_len: suffix.map(|s| s.len() as u64),
-                suffix: suffix.map(|s| crate::codec_owned::owned_string::<128>(s).unwrap()),
+                suffix: suffix.map(|s| crate::codec_owned::owned_string(s).unwrap()),
             }),
         };
         NetworkMessage::Declare(Box::new(DeclareOwned {

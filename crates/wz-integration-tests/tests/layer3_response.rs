@@ -80,12 +80,13 @@ fn layer3_response_default_byte_equivalent() {
     if let wz_codecs::response::ResponseVariant::CodecZenohReply(reply) = &mut response.body {
         if let wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put) = &mut reply.body {
             put.payload_len = Some(0);
-            put.payload = Some(&[]);
+            put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
+            };
         }
     }
-    let wz = response
-        .encode_to_vec()
-        .expect("a default Response encodes");
+    let wz = response.encode_to_vec();
     let pico = zenoh_pico_encode_response_default();
     assert_eq!(
         wz, pico,
@@ -173,8 +174,7 @@ fn layer3_response_err_byte_equivalent() {
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned response")
-            .encode_to_vec()
-            .expect("the err response encodes");
+            .encode_to_vec();
         let pico = zenoh_pico_encode_response_err(payload, None, None);
         assert_ne!(
             pico,
@@ -223,8 +223,7 @@ fn layer3_response_err_with_encoding_byte_equivalent() {
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned response")
-        .encode_to_vec()
-        .expect("the err response with an encoding encodes");
+        .encode_to_vec();
     let pico = zenoh_pico_encode_response_err(PAYLOAD, Some(ENCODING_ID as u16), Some(KEYEXPR));
     assert_ne!(
         pico,

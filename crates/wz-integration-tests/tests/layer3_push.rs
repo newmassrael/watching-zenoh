@@ -84,11 +84,12 @@ fn layer3_push_default_byte_equivalent() {
     let mut push = Push::default();
     if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
         put.payload_len = Some(0);
-        put.payload = Some(&[]);
+        put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+            extensions: None,
+            payload: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
+        };
     }
-    let wz = push
-        .encode_to_vec()
-        .expect("a default Push with an empty payload encodes");
+    let wz = push.encode_to_vec();
     let pico = zenoh_pico_encode_push_default();
     assert_eq!(
         wz, pico,
@@ -213,8 +214,7 @@ fn layer3_push_with_timestamp_and_attachment_byte_equivalent() {
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned push")
-        .encode_to_vec()
-        .expect("the meta-bearing push encodes");
+        .encode_to_vec();
     let pico = zenoh_pico_encode_push_with_meta(KEYEXPR, PAYLOAD, TS_TIME, TS_ZID, ATTACHMENT);
 
     assert_ne!(

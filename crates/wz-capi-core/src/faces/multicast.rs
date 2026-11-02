@@ -820,7 +820,7 @@ impl SharedSession {
 /// whose subscribers and queryables run, and then the gets that expired on it
 /// are ended, on the thread that runs the session's callbacks, as
 /// [`SharedSession::dispatch`] ends a unicast face's.
-pub fn dispatch_mcast_event(session: &TokioMulticastSession, event: IterationEvent<'_>) {
+pub fn dispatch_mcast_event(session: &TokioMulticastSession, event: IterationEvent<'_, '_>) {
     session.dispatch_multicast_iteration_event(event);
     #[cfg(feature = "query")]
     if session.sweep_expired_queries_staged() > 0 {

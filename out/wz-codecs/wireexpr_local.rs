@@ -1,4 +1,4 @@
-// SCE-MAP: wireexpr_local:108 :: _forge_body
+// SCE-MAP: wireexpr_local:114 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -21,16 +21,60 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `suffix` of `WireexprLocal`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct WireexprLocal<'a> {
+pub struct WireexprLocalSuffixField;
+
+impl ::sce_forge_runtime::codec::HoldsStr<WireexprLocalSuffixField> for ::sce_forge_runtime::codec::Inline {
+    type Str = ::sce_forge_runtime::codec::InlineStr<65535>;
+}
+
+/// What `WireexprLocalIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait WireexprLocalStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<WireexprLocalSuffixField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<WireexprLocalSuffixField>> WireexprLocalStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside WireexprLocalStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait WireexprLocalFrom<'f>: WireexprLocalStorage + ::sce_forge_runtime::codec::StoresStr<'f, WireexprLocalSuffixField> {}
+
+impl<'f, S: WireexprLocalStorage + ::sce_forge_runtime::codec::StoresStr<'f, WireexprLocalSuffixField>> WireexprLocalFrom<'f> for S {}
+
+// `WireexprLocalIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `WireexprLocal<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `WireexprLocalOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct WireexprLocalIn<S: WireexprLocalStorage> {
     pub id: u64,
     pub suffix_len: Option<u64>,
-    pub suffix: Option<&'a str>,
+    pub suffix: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsStr<WireexprLocalSuffixField>>::Str, 65535>>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type WireexprLocal<'a> = WireexprLocalIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type WireexprLocalOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = WireexprLocalIn<S>;
+
+impl<S: WireexprLocalStorage> Default for WireexprLocalIn<S> {
+    fn default() -> Self {
+        Self {
+            id: Default::default(),
+            suffix_len: Default::default(),
+            suffix: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> WireexprLocal<'a> {
+impl<S: WireexprLocalStorage> WireexprLocalIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -46,7 +90,7 @@ impl<'a> WireexprLocal<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>, n: u8) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>, n: u8) -> Result<Self, CodecError> where S: WireexprLocalFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out, n)?;
         Ok(_out)
@@ -62,7 +106,24 @@ impl<'a> WireexprLocal<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, n: u8) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, n: u8) -> Result<(), CodecError> where S: WireexprLocalFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out, n) {
+            Err(CodecError::CapacityExceeded) => {
+                WireexprLocal::store_into(&mut _frame, &mut WireexprLocal::default(), n)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, n: u8) -> Result<(), CodecError> where S: WireexprLocalFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -88,7 +149,11 @@ impl<'a> WireexprLocal<'a> {
             None
         };
         let suffix = if (n & 0x01u8) != 0 {
-            let _n = suffix_len.unwrap() as usize;
+            let _len = suffix_len.unwrap();
+            if _len > 65535 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = core::str::from_utf8(raw)
                 .map_err(|_| CodecError::InvalidUtf8)?;
@@ -97,6 +162,8 @@ impl<'a> WireexprLocal<'a> {
         } else {
             None
         };
+        let suffix = suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
+        let suffix = suffix.map(|_v| _v.store::<S, WireexprLocalSuffixField>()).transpose()?;
         _out.id = id;
         _out.suffix_len = suffix_len;
         _out.suffix = suffix;
@@ -107,15 +174,15 @@ impl<'a> WireexprLocal<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 146;
+    pub const MAX_ENCODED_BYTES: usize = 65553;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        WireexprLocal::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -146,14 +213,14 @@ pub trait WireexprLocalSource {
     /// The `id` field.
     fn id(&self) -> u64;
     /// The `suffix` field.
-    fn suffix(&self) -> Option<&str>;
+    fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>>;
 }
 
 impl<T: WireexprLocalSource + ?Sized> WireexprLocalSource for &T {
     fn id(&self) -> u64 {
         (**self).id()
     }
-    fn suffix(&self) -> Option<&str> {
+    fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
         (**self).suffix()
     }
 }
@@ -167,33 +234,24 @@ pub struct WireexprLocalParts<'a> {
     /// The `id` field.
     pub id: u64,
     /// The `suffix` field.
-    pub suffix: Option<&'a str>,
+    pub suffix: Option<::sce_forge_runtime::codec::Text<'a, 65535>>,
 }
 
 impl<'a> WireexprLocalSource for WireexprLocalParts<'a> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn suffix(&self) -> Option<&str> {
+    fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
         self.suffix
     }
 }
 
-impl<'a> WireexprLocalSource for WireexprLocal<'a> {
+impl<S: WireexprLocalStorage> WireexprLocalSource for WireexprLocalOwned<S> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn suffix(&self) -> Option<&str> {
-        self.suffix
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprLocalSource for WireexprLocalOwned<S> {
-    fn id(&self) -> u64 {
-        self.id
-    }
-    fn suffix(&self) -> Option<&str> {
-        self.suffix.as_ref().map(::sce_forge_runtime::codec::SceStr::as_str)
+    fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
+        self.suffix.as_ref().map(::sce_forge_runtime::codec::Bounded::as_text)
     }
 }
 
@@ -230,7 +288,7 @@ impl<'a> WireexprLocal<'a> {
             w.write_vle_u64(_d_suffix_len)?;
         }
         if let Some(_v) = src.suffix() {
-            w.write_bytes(_v.as_bytes())?;
+            w.write_bytes(_v.into_inner().as_bytes())?;
         }
         Ok(())
     }
@@ -328,18 +386,9 @@ impl<'a> WireexprLocal<'a> {
 // `let v: WireexprLocalOwned = WireexprLocalOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct WireexprLocalOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub id: u64,
-    pub suffix_len: Option<u64>,
-    pub suffix: Option<S::Str<128>>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> WireexprLocal<'a> {
@@ -349,16 +398,17 @@ impl<'a> WireexprLocal<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<WireexprLocalOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: WireexprLocalFrom<'a>>(self) -> Result<WireexprLocalOwned<S>, CodecError> {
         Ok(WireexprLocalOwned {
             id: self.id,
             suffix_len: self.suffix_len,
-            suffix: self.suffix.map(<S::Str<128> as ::sce_forge_runtime::codec::SceStr>::from_view).transpose()?,
+            suffix: self.suffix.map(|_v| _v.store::<S, WireexprLocalSuffixField>()).transpose()?,
         })
     }
 
@@ -370,7 +420,7 @@ impl<'a> WireexprLocal<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprLocalOwned<S> {
+impl<S: WireexprLocalStorage> WireexprLocalOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -395,7 +445,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprLocalOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut WireexprLocal<'o>) {
         _out.id = self.id;
         _out.suffix_len = self.suffix_len;
-        _out.suffix = self.suffix.as_ref().map(::sce_forge_runtime::codec::SceStr::as_str);
+        _out.suffix = self.suffix.as_ref().map(::sce_forge_runtime::codec::Bounded::as_text);
         
     }
 
@@ -407,33 +457,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprLocalOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<WireexprLocalOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> WireexprLocalFrom<'x>>(&self) -> Result<WireexprLocalOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprLocalOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`WireexprLocal::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        WireexprLocal::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(WireexprLocal::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -450,11 +475,11 @@ impl<'a> WireexprLocal<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprLocalOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: WireexprLocalStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprLocalOwned<S>, CodecError> {
         Ok(WireexprLocalOwned {
             id: self.id,
             suffix_len: self.suffix_len,
-            suffix: self.suffix.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<128>(origin, _v)).transpose()?,
+            suffix: self.suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<WireexprLocalSuffixField>(origin, _v.into_inner()))).transpose()?,
         })
     }
 }

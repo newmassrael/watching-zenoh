@@ -77,11 +77,10 @@
 //!   `RouterForwarder::interceptor_dropped` counter.
 
 use wz_codecs::push::PushOwnedVariant;
-use wz_codecs::query_ext_entry::QueryExtEntryOwned;
+use wz_codecs::query_ext_entry::{QueryExtEntryOwned, QueryExtEntryStorage};
 use wz_codecs::reply::ReplyOwnedVariant;
 use wz_codecs::request::RequestOwnedVariant;
 use wz_codecs::response::ResponseOwnedVariant;
-use wz_codecs::CodecStorage;
 use wz_session_core::attachment::{
     decode_attachment_ext, ATTACHMENT_EXT_ID_DEL, ATTACHMENT_EXT_ID_PUSH, ATTACHMENT_EXT_ID_QUERY,
 };
@@ -280,11 +279,16 @@ impl LowPassInterceptor {
 /// SSOT (Push body id `0x03`, Query id `0x05`) instead of a struct read.
 ///
 /// Generic over the kind of entry, because a Query's chain holds its own
-/// (R3044) and every other message's holds the generic one.
-fn attachment_len<E: ExtEntryView>(extensions: Option<&Vec<E>>, ext_id: u8) -> usize {
-    extensions
-        .and_then(|exts| decode_attachment_ext(exts, ext_id))
-        .map_or(0, <[u8]>::len)
+/// (R3044) and every other message's holds the generic one. A Put's chain is
+/// read through `put_payload::chain`, which holds it in the arm of its payload's
+/// layout.
+fn attachment_len<E: ExtEntryView>(extensions: &[E], ext_id: u8) -> usize {
+    decode_attachment_ext(extensions, ext_id).map_or(0, <[u8]>::len)
+}
+
+/// The entries of a chain held as an optional list, none for a message without one.
+fn entries<E>(extensions: Option<&Vec<E>>) -> &[E] {
+    extensions.map(Vec::as_slice).unwrap_or_default()
 }
 
 /// The query-body payload byte count — zenoh's
@@ -296,7 +300,9 @@ fn attachment_len<E: ExtEntryView>(extensions: Option<&Vec<E>>, ext_id: u8) -> u
 /// slices after a shared-memory marker is counted by the buffers the slices
 /// name, as a sliced Put's payload is, so a large value in shared memory is not
 /// under the limit for want of bytes on the wire (R3045).
-fn query_value_len<S: CodecStorage>(extensions: Option<&Vec<QueryExtEntryOwned<S>>>) -> usize {
+fn query_value_len<S: QueryExtEntryStorage>(
+    extensions: Option<&Vec<QueryExtEntryOwned<S>>>,
+) -> usize {
     extensions.map_or(0, |exts| query_value_payload_len(exts))
 }
 
@@ -319,12 +325,15 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             PushOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
                 put_payload_len(put),
-                attachment_len(put.extensions.as_deref(), ATTACHMENT_EXT_ID_PUSH),
+                attachment_len(
+                    wz_session_core::put_payload::chain(put),
+                    ATTACHMENT_EXT_ID_PUSH,
+                ),
             )),
             PushOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(del.extensions.as_deref(), ATTACHMENT_EXT_ID_DEL),
+                attachment_len(entries(del.extensions.as_deref()), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
@@ -332,17 +341,23 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             RequestOwnedVariant::CodecZenohQuery(query) => Some((
                 LowPassMessage::Query,
                 query_value_len(query.extensions.as_deref()),
-                attachment_len(query.extensions.as_deref(), ATTACHMENT_EXT_ID_QUERY),
+                attachment_len(
+                    entries(query.extensions.as_deref()),
+                    ATTACHMENT_EXT_ID_QUERY,
+                ),
             )),
             RequestOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
                 put_payload_len(put),
-                attachment_len(put.extensions.as_deref(), ATTACHMENT_EXT_ID_PUSH),
+                attachment_len(
+                    wz_session_core::put_payload::chain(put),
+                    ATTACHMENT_EXT_ID_PUSH,
+                ),
             )),
             RequestOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(del.extensions.as_deref(), ATTACHMENT_EXT_ID_DEL),
+                attachment_len(entries(del.extensions.as_deref()), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
@@ -351,12 +366,15 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => Some((
                     LowPassMessage::Reply,
                     put_payload_len(put),
-                    attachment_len(put.extensions.as_deref(), ATTACHMENT_EXT_ID_PUSH),
+                    attachment_len(
+                        wz_session_core::put_payload::chain(put),
+                        ATTACHMENT_EXT_ID_PUSH,
+                    ),
                 )),
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => Some((
                     LowPassMessage::Reply,
                     0,
-                    attachment_len(del.extensions.as_deref(), ATTACHMENT_EXT_ID_DEL),
+                    attachment_len(entries(del.extensions.as_deref()), ATTACHMENT_EXT_ID_DEL),
                 )),
                 _ => None,
             },
@@ -633,10 +651,16 @@ mod tests {
         let PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
             panic!("build_push_literal emits a Put body");
         };
-        put.extensions = Some(wz_session_core::held_list::one_entry(
-            encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, attachment).expect("encode attachment"),
-        ));
-        put.header |= 0x80; // the Z chain bit, as `build_msg_put_with_meta` sets it
+        // The chain's `Z` flag on the Put header follows the chain, as
+        // `build_msg_put_with_meta` sets it.
+        wz_session_core::put_payload::set_chain(
+            put,
+            [
+                encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, attachment)
+                    .expect("encode attachment"),
+            ],
+        )
+        .expect("one entry is within the chain's bound");
 
         let msg = NetworkMessage::Push(Box::new(push));
         let (kind, payload, measured) = message_size(&msg).expect("a Put is sized");

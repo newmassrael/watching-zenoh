@@ -770,7 +770,7 @@ pub trait FaceForwarder {
     /// One inbound iteration event from the face `id` — the per-face observer
     /// the loop installs on each held session's drive loop. A routing
     /// forwarder inspects it for declarations / Puts to route.
-    fn forward(&self, id: FaceId, event: IterationEvent<'_>);
+    fn forward(&self, id: FaceId, event: IterationEvent<'_, '_>);
 
     /// A Push RECEIVED on the multicast INGRESS group (the deferred `mcast_faces`
     /// plane, I1) — folded from the separate multicast drive-loop task into this
@@ -1128,7 +1128,7 @@ pub struct NoOpForwarder;
 impl FaceForwarder for NoOpForwarder {
     fn register(&self, _id: FaceId, _actions: &Arc<SessionLinkActions>) {}
     fn deregister(&self, _id: FaceId) {}
-    fn forward(&self, _id: FaceId, _event: IterationEvent<'_>) {}
+    fn forward(&self, _id: FaceId, _event: IterationEvent<'_, '_>) {}
 }
 
 /// What an [`accept_loop`] run accomplished, returned when the shutdown future
@@ -5828,7 +5828,7 @@ mod tests {
     impl FaceForwarder for OverlapProbe {
         fn register(&self, _id: FaceId, _actions: &Arc<SessionLinkActions>) {}
         fn deregister(&self, _id: FaceId) {}
-        fn forward(&self, _id: FaceId, event: IterationEvent<'_>) {
+        fn forward(&self, _id: FaceId, event: IterationEvent<'_, '_>) {
             if !matches!(event, IterationEvent::Poll(_)) {
                 return;
             }
@@ -6234,7 +6234,7 @@ mod tests {
                 false
             }
             fn deregister(&self, _id: FaceId) {}
-            fn forward(&self, _id: FaceId, _event: IterationEvent<'_>) {}
+            fn forward(&self, _id: FaceId, _event: IterationEvent<'_, '_>) {}
         }
 
         let (listener, addr) = bind_loopback().await;

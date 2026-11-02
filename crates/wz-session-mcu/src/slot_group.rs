@@ -338,7 +338,7 @@ where
         };
         let observer = self.observer;
         let mut requesters = Requesters::<NoReplies, NoReplies>::new();
-        let on_event = move |event: IterationEvent<'_>| {
+        let on_event = move |event: IterationEvent<'_, '_>| {
             match event {
                 IterationEvent::MulticastPeerArrived(_) => state.member_arrived(),
                 IterationEvent::MulticastPeerLost(_) => state.member_lost(),

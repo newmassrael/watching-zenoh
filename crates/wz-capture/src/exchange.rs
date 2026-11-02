@@ -1433,28 +1433,32 @@ pub(crate) mod tests {
     const HIGH: [u8; 4] = [10, 0, 0, 2];
 
     /// `M=1` — the id lives in the SENDER's space.
-    pub(crate) fn sender_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+    ///
+    /// At the lifetime of the record it goes into: the codec's borrowed messages
+    /// are invariant in theirs, so a key made at `'static` could ride only with a
+    /// `'static` payload.
+    pub(crate) fn sender_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
         Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id,
                 suffix_len: suffix.map(|s| s.len() as u64),
-                suffix,
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
             }),
         }
     }
 
     /// `M=0` — the id lives in the RECEIVER's space.
-    fn receiver_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+    fn receiver_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
         Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id,
                 suffix_len: suffix.map(|s| s.len() as u64),
-                suffix,
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
             }),
         }
     }
 
-    pub(crate) fn has_suffix(keyexpr: &Wireexpr<'static>) -> bool {
+    pub(crate) fn has_suffix(keyexpr: &Wireexpr<'_>) -> bool {
         match &keyexpr.body {
             WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
             WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
@@ -1490,7 +1494,7 @@ pub(crate) mod tests {
     /// property of the codec's reach, not of this fixture; a `bytes` term over
     /// this plane is therefore driven with the shape whose size the decoder
     /// actually knows.
-    pub(crate) fn request_put(rid: u64, keyexpr: Wireexpr<'static>, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn request_put<'a>(rid: u64, keyexpr: Wireexpr<'a>, payload: &'a [u8]) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::request::Request {
             header: wz_codecs::request::Request::default().header | n,
@@ -1499,7 +1503,10 @@ pub(crate) mod tests {
             body: wz_codecs::request::RequestVariant::CodecZenohMsgPut(
                 wz_codecs::msg_put::MsgPut {
                     payload_len: Some(payload.len() as u64),
-                    payload: Some(payload),
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: None,
+                        payload: wz_codecs::Bounded::new(payload).unwrap(),
+                    },
                     ..Default::default()
                 },
             ),
@@ -1510,10 +1517,10 @@ pub(crate) mod tests {
     }
 
     /// A `Response` carrying a `Reply` with `payload`, echoing `request_id`.
-    pub(crate) fn response_reply(
+    pub(crate) fn response_reply<'a>(
         request_id: u64,
-        keyexpr: Wireexpr<'static>,
-        payload: &[u8],
+        keyexpr: Wireexpr<'a>,
+        payload: &'a [u8],
     ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::response::Response {
@@ -1524,7 +1531,11 @@ pub(crate) mod tests {
                 body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
                     wz_codecs::msg_put::MsgPut {
                         payload_len: Some(payload.len() as u64),
-                        payload: Some(payload),
+                        extensions_has_0x12:
+                            wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                                extensions: None,
+                                payload: wz_codecs::Bounded::new(payload).unwrap(),
+                            },
                         ..Default::default()
                     },
                 ),
@@ -1533,7 +1544,6 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Response is encodable")
     }
 
     /// A `Response` carrying an `Err`, echoing `request_id`.
@@ -1545,13 +1555,12 @@ pub(crate) mod tests {
             keyexpr,
             body: wz_codecs::response::ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
                 payload_len: 3,
-                payload: b"nak",
+                payload: wz_codecs::Bounded::new(b"nak" as &[u8]).unwrap(),
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Response is encodable")
     }
 
     /// The closing `ResponseFinal`.
@@ -1578,7 +1587,6 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Declare is encodable")
     }
 
     /// One record per UDP datagram, with the capture instant the tuple names.

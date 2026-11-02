@@ -48,9 +48,9 @@
 // R2859 — gated: only the rendered `admin_region` needs an allocator. The
 // bound, its read and the region computation are allocation-free and compile
 // on the no-alloc MCU profile, which is where this import broke the build.
+use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 
 use crate::WhatAmI;
 

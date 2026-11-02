@@ -33,10 +33,15 @@
      byte has met a kind this node does not know, and the host refuses it
      rather than guessing.
 
-     `bytes` carries `sce:max-size="256"` like the unsliced `payload` it
-     replaces: the no-alloc owned projection keeps that as its inline
-     capacity and the alloc projection is unbounded, so a RAW slice is no
-     tighter than the payload was. A descriptor is far shorter than that.
+     `bytes` carries `sce:max-size="4294967295"`, the bound upstream puts on
+     a slice's length: it reads it as a usize through the same bounded-u32
+     codec (`commons/zenoh-codec/src/core/zbuf.rs` @
+     `let len: usize = self.codec.read(&mut *reader)?;`, with
+     `commons/zenoh-codec/src/zenoh/put.rs` @
+     `let codec = Zenoh080Sliced::<u32>::new(ext_shm.is_some());`), so the
+     bound is exactly u32's, the same as the unsliced `payload`. Since ADR
+     0077 step 1 the attribute is the wire bound and what a node stores is
+     its deployment's capacity. A descriptor is far shorter than that.
 
      Imported by `msg_put.scxml`, which gates its two layouts on the
      extension chain with `extensions.has(0x12)` (SCE's chain-membership
@@ -49,6 +54,6 @@
     <sce:field id="kind"  sce:type="uint32" sce:byte="0" sce:bit-size="vle"/>
     <sce:field id="len"   sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:field id="bytes" sce:type="bytes"  sce:byte="2" sce:bit-size="length-ref"
-               sce:length-field="len" sce:max-size="256"/>
+               sce:length-field="len" sce:max-size="4294967295"/>
   </datamodel>
 </scxml>

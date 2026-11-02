@@ -311,9 +311,9 @@ mod tests {
         scout.set_what(0x03);
         scout.set_i(true);
         scout.set_zid_len_m1(3);
-        scout.zid = Some(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        scout.zid = Some(wz_codecs::Bounded::new(&[0xAAu8, 0xBB, 0xCC, 0xDD] as &[u8]).unwrap());
         let mut wire = alloc::vec![wire_const::S_MID_SCOUT | flags];
-        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture scout is encodable"));
+        wire.extend_from_slice(&scout.encode_to_vec());
         wire
     }
 
@@ -361,9 +361,9 @@ mod tests {
         hello.version = 0x09;
         hello.set_whatami(0x01);
         hello.set_zid_len_m1(3);
-        hello.zid = &[1, 2, 3, 4];
+        hello.zid = wz_codecs::Bounded::new(&[1u8, 2, 3, 4] as &[u8]).unwrap();
         let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-        wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
+        wire.extend_from_slice(&hello.encode_to_vec());
         match parse_scouting(&wire).expect("a well-formed HELLO must decode") {
             ScoutingFrame::Hello { body, .. } => {
                 assert_eq!(body.version, 0x09);
@@ -382,9 +382,9 @@ mod tests {
         hello.version = 0x08;
         hello.set_whatami(0x01);
         hello.set_zid_len_m1(3);
-        hello.zid = &[1, 2, 3, 4];
+        hello.zid = wz_codecs::Bounded::new(&[1u8, 2, 3, 4] as &[u8]).unwrap();
         let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-        wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
+        wire.extend_from_slice(&hello.encode_to_vec());
         assert!(parse_scouting(&wire).is_ok());
         assert!(matches!(
             parse_scouting_observed(&wire),
@@ -446,9 +446,9 @@ mod tests {
             hello.version = 0x09;
             hello.set_whatami(0x01);
             hello.set_zid_len_m1((len - 1) as u8);
-            hello.zid = &zid;
+            hello.zid = wz_codecs::Bounded::new(zid.as_slice()).unwrap();
             let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-            wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
+            wire.extend_from_slice(&hello.encode_to_vec());
 
             match parse_scouting(&wire).expect("a well-formed HELLO must decode") {
                 ScoutingFrame::Hello { body, .. } => {
@@ -521,9 +521,10 @@ mod kind_name_tests {
             scout.set_what(0x03);
             scout.set_i(true);
             scout.set_zid_len_m1(3);
-            scout.zid = Some(&[0x11, 0x22, 0x33, 0x44]);
+            scout.zid =
+                Some(wz_codecs::Bounded::new(&[0x11u8, 0x22, 0x33, 0x44] as &[u8]).unwrap());
             let mut wire = alloc::vec![wire_const::S_MID_SCOUT];
-            wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture scout is encodable"));
+            wire.extend_from_slice(&scout.encode_to_vec());
             cases.push((wire, "Scout"));
         }
 
@@ -533,9 +534,9 @@ mod kind_name_tests {
             hello.version = 0x09;
             hello.set_whatami(0x01);
             hello.set_zid_len_m1(3);
-            hello.zid = &[0xA0, 0xA1, 0xA2, 0xA3];
+            hello.zid = wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap();
             let mut wire = alloc::vec![wire_const::S_MID_HELLO];
-            wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture hello is encodable"));
+            wire.extend_from_slice(&hello.encode_to_vec());
             cases.push((wire, "Hello"));
         }
 

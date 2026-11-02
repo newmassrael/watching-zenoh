@@ -119,7 +119,7 @@ const GROUP_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
 const MEMBER_ZID: &[u8] = &[0x01, 0x02, 0x03, 0x04];
 
 /// The payloads of every Put a drive event carries, in order.
-fn put_payloads(event: &IterationEvent<'_>) -> Vec<Vec<u8>> {
+fn put_payloads(event: &IterationEvent<'_, '_>) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
         for m in messages.iter() {

@@ -66,8 +66,8 @@ fn frame(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
 /// record read where its frame lies.
 fn both_declare(
     declare: &DeclareOwned,
-    mut owned: impl FnMut(IterationEvent<'_>),
-    mut lent: impl FnMut(IterationEvent<'_>),
+    mut owned: impl FnMut(IterationEvent<'_, '_>),
+    mut lent: impl FnMut(IterationEvent<'_, '_>),
 ) {
     owned(IterationEvent::Poll(&frame(vec![NetworkMessage::Declare(
         Box::new(declare.clone()),

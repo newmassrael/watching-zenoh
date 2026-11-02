@@ -206,10 +206,10 @@ async fn written(sink: &Sink, bytes: usize) {
 fn envelope(payload: &[u8]) -> Vec<u8> {
     StreamEnvelope {
         payload_len: payload.len() as u16,
-        payload,
+        payload: wz_codecs::Bounded::new(payload)
+            .expect("a test payload fits the u16 stream envelope"),
     }
     .encode_to_vec()
-    .expect("a payload within the u16 prefix encodes")
 }
 
 /// One round: `frames` frames of `payload` through `send`, and the writer let

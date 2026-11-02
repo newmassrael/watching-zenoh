@@ -963,7 +963,7 @@ pub async fn drive_session_until_terminal<D, F, T>(
 ) -> DriverOutcome
 where
     D: LinkDriver,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     T: TimeSource,
 {
     // A constant-`None` deadline with no revision source: the wake `min` below
@@ -1227,7 +1227,7 @@ async fn park_on_drain<T, F>(
     on_event: &mut F,
 ) where
     T: TimeSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     tokio::pin!(drain);
     // THE FAST PATH, and it is a correctness-of-cost matter rather than a micro
@@ -1345,7 +1345,7 @@ pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G, H, P, 
 ) -> DriverOutcome
 where
     D: LinkDriver,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     T: TimeSource,
     G: FnMut() -> Option<u64>,
     H: FnMut(&mut wz_session_core::driver_loop::DriverLoopOutcome),
@@ -3958,7 +3958,7 @@ mod rx_sn_gate_tests {
 
         let mut reasm: ReassemblyDispatcher<4, 4096> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
-        let mut sink = |_e: wz_session_core::driver_loop::IterationEvent<'_>| {};
+        let mut sink = |_e: wz_session_core::driver_loop::IterationEvent<'_, '_>| {};
 
         // Begin a reliable chain (more=1) through the production helper.
         let begin = DriverLoopOutcome::Fragment {
@@ -4032,7 +4032,7 @@ mod rx_sn_gate_tests {
         // Capture the band of the whole-frame the PRODUCTION caller synthesizes
         // (Cell so the FnMut sink's borrow does not conflict with the read below).
         let delivered: Cell<Option<Priority>> = Cell::new(None);
-        let mut sink = |e: IterationEvent<'_>| {
+        let mut sink = |e: IterationEvent<'_, '_>| {
             if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { priority, .. }) = e {
                 delivered.set(Some(*priority));
             }

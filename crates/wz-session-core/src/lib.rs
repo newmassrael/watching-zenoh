@@ -252,6 +252,12 @@ pub mod pool_gauge;
 /// bound/error mapping.
 pub mod codec_owned;
 
+/// The storage profile the owned parts of a transport message are held at
+/// (the heap with an allocator, the node's deployment without one), named in
+/// one place for every transport module. Unconditional, like the extension
+/// modules that name it.
+pub mod transport_profile;
+
 // R311gb (Track 2) — shared `RegisterError` taxonomy for the bounded
 // application-layer registries (the SSOT for "a registration was
 // rejected at declared capacity"); replaces the per-registry error
@@ -1087,8 +1093,8 @@ pub mod plain_push;
 
 /// The payload of a Put body and the one rule that picks between its two wire
 /// layouts (a length and bytes, or the slices a shared-memory Put carries).
-/// `MsgPutOwned` holds the four fields of both layouts; every site that builds
-/// or reads a Put payload goes through here so the layouts cannot drift. Gated
+/// `MsgPutOwned` holds the chain and the payload as one of two arms; every site
+/// that builds or reads a Put's payload or chain goes through here. Gated
 /// on either Put-carrying codec: a Push body and a Reply body both hold one.
 /// R3044 -- and on the Query's, whose value is the same list of slices after the
 /// same marker and is read by the same walk (`collect_slices`).

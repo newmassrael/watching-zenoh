@@ -23,9 +23,9 @@
 //! consumer features select.
 
 use crate::ext_view::ExtEntryView;
-use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
+use sce_forge_runtime::codec::{Bounded, CodecError};
+use wz_codecs::ext_entry::{ExtEntryFrom, ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
 
 /// Attachment ext id inside a PUT push body — zenoh-pico
 /// `_z_push_body_decode_extensions` matches `0x03` at message.c 314-322, and
@@ -85,27 +85,31 @@ const ATTACHMENT_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
 /// surrounding codec applies the chain-continuation `Z` bit; this helper
 /// emits the entry with `Z` clear (terminator) so a caller appending it
 /// as the sole / last entry needs no fix-up.
-pub fn encode_attachment_ext<S: CodecStorage>(
+pub fn encode_attachment_ext<S: for<'x> ExtEntryFrom<'x>>(
     ext_id: u8,
     payload: &[u8],
 ) -> Result<ExtEntryOwned<S>, CodecError> {
-    // W3: the ext_zbuf `value` owned mirror is `SceBytes<32>` — under `alloc`
-    // an UNBOUNDED `Vec` (the `32` is advisory; proven by the 200-byte reply
-    // (A8a) + query (A8c-1) attachment tests), under `no_std` a
-    // `heapless::Vec<u8, 32>` that returns `TooManyElements` past 32. So this
-    // is fallible only on the `no_std` profile; under `alloc` any length rides.
+    // The ext_zbuf `value` is bounded by the protocol's `u32` length, so a
+    // payload past it is refused as `LengthOutOfRange`. Under `alloc` the
+    // container grows to any length within that (proven by the 200-byte reply
+    // (A8a) + query (A8c-1) attachment tests); a profile that stores it inline
+    // at a smaller capacity (a node's deployment) refuses a longer one as
+    // `CapacityExceeded`.
     //
     // R3011 — generic over the storage profile, because the entry goes into a
     // chain whose profile the CALLER chose (a message built to be encoded and
     // dispatched locally is on the wire profile; an attachment on a transport
-    // message is on the default). The value is built by that profile's own
-    // byte container, which is a copy of `payload` on every profile: this
-    // builds a field that has no frame to share.
+    // message is on the default). The value is stored by that profile from a
+    // slice of any lifetime, which is a copy of `payload` on every profile:
+    // this builds a field that has no frame to share.
+    let value = Bounded::new(payload)
+        .ok_or(CodecError::LengthOutOfRange)?
+        .store::<S, ExtZbufValueField>()?;
     Ok(ExtEntryOwned {
         header: ATTACHMENT_EXT_HEADER_ENC_ZBUF | ext_id,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: payload.len() as u64,
-            value: <S::Bytes<32> as SceByteBuf>::from_slice(payload)?,
+            value,
         }),
     })
 }

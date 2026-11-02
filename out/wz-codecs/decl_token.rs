@@ -15,12 +15,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-// RFC §synth-5-B B2/B3: bounded inline list storage for repeat / tlv-chain
-// fields — heap-free `heapless::Vec<T, N>` (re-exported by the runtime),
-// the Rust mirror of the C11 `T elems[MAX]; len` representation. Always
-// available (no `alloc` gate) so list-bearing codecs compile on the
-// pure no_std no-alloc MCU tier.
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::wireexpr::Wireexpr;
 use super::ext_entry::ExtEntry;
@@ -33,23 +27,52 @@ use super::ext_entry::ExtEntryView;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+use super::wireexpr::WireexprOwned;
+use super::ext_entry::ExtEntryOwned;
+/// The field `extensions` of `DeclToken`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeclToken<'a> {
-    pub header: u8,
-    pub id: u64,
-    pub keyexpr: Wireexpr<'a>,
-    pub extensions: Option<HeaplessVec<ExtEntry<'a>, 8>>,
+pub struct DeclTokenExtensionsField;
+
+impl ::sce_forge_runtime::codec::HoldsList<DeclTokenExtensionsField> for ::sce_forge_runtime::codec::Inline {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
 }
 
-// RFC variant-default-uniformity: at least one field's
-// `<sce:flags>` carrier declares a wire-MID constant via
-// `<sce:flag value="N"/>`. Manual `impl Default` bakes the OR of
-// every declared `(value & mask) << bit` into that carrier so a
-// freshly-constructed instance carries the wire-MID for its own
-// dispatch tag. Fields without declared values fall through to
-// `Default::default()` (preserving derive(Default) semantics).
-impl<'a> Default for DeclToken<'a> {
+/// What `DeclTokenIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait DeclTokenStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclTokenExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclTokenExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage> DeclTokenStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside DeclTokenStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait DeclTokenFrom<'f>: DeclTokenStorage + super::wireexpr::WireexprFrom<'f> + super::ext_entry::ExtEntryFrom<'f> {}
+
+impl<'f, S: DeclTokenStorage + super::wireexpr::WireexprFrom<'f> + super::ext_entry::ExtEntryFrom<'f>> DeclTokenFrom<'f> for S {}
+
+// `DeclTokenIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `DeclToken<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `DeclTokenOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclTokenIn<S: DeclTokenStorage> {
+    pub header: u8,
+    pub id: u64,
+    pub keyexpr: WireexprOwned<S>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<DeclTokenExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type DeclToken<'a> = DeclTokenIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type DeclTokenOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = DeclTokenIn<S>;
+
+impl<S: DeclTokenStorage> Default for DeclTokenIn<S> {
     fn default() -> Self {
         Self {
             header: 0x06u8,
@@ -61,7 +84,7 @@ impl<'a> Default for DeclToken<'a> {
 }
 
 #[allow(dead_code)]
-impl<'a> DeclToken<'a> {
+impl<S: DeclTokenStorage> DeclTokenIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -77,7 +100,7 @@ impl<'a> DeclToken<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: DeclTokenFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -93,7 +116,24 @@ impl<'a> DeclToken<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: DeclTokenFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                DeclTokenView::decode(&mut _frame)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: DeclTokenFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -113,25 +153,27 @@ impl<'a> DeclToken<'a> {
             _v
         };
         let id = cursor.read_vle_u64()?;
-        Wireexpr::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
+        WireexprOwned::<S>::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
         if (header & 0x80u8) != 0 {
-            let _vec = _out.extensions.insert(HeaplessVec::<ExtEntry<'a>, 8>::new());
-            let mut _more = false;
-            for _ in 0..8u32 {
-                let _entry = ExtEntry::decode(cursor)?;
-                _more = _entry.z();
-                // Bounded by max-depth on both sides — loop count and `_vec`
-                // capacity are the same literal — so this push cannot fail. An
-                // over-long chain is refused by the guard after the loop.
-                _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
-                if !_more { break; }
-            }
-            if _more && cursor.remaining() == 0 {
-                return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TlvChainOverflow);
-            }
+            _out.extensions.insert(Default::default()).refill(|_vec| {
+                let mut _more = false;
+                for _ in 0..8u32 {
+                    let _entry = ExtEntryOwned::<S>::decode(cursor)?;
+                    _more = _entry.z();
+                    // The loop walks the chain's depth and `_vec` holds the capacity, so
+                // this push fails only where the deployment holds fewer entries than
+                // the frame says. An over-long chain is refused after the loop.
+                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    if !_more { break; }
+                }
+                if _more && cursor.remaining() == 0 {
+                    return Err(CodecError::NeedMoreBytes);
+                }
+                if _more {
+                    return Err(CodecError::TooManyElements);
+                }
+                Ok(())
+            })?;
         } else {
             _out.extensions = None;
         }
@@ -190,60 +232,33 @@ impl<'a> DeclToken<'a> {
         }
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 602;
 
-    /// Encode `self` into the caller-owned sink. Returns the value's refusal
-    /// when the encoding cannot carry it (a length past its type, a list past
-    /// its bound, a gate that disagrees with a presence; the document declares
-    /// `sce:encode-may-fail`), or the sink's own error:
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
-    /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w)
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        DeclToken::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
-    /// `encode` refuses a value with: one the encoding cannot carry (a
-    /// length past its type, a list past its bound) or one a gate
-    /// disagrees with. Callers targeting zero-alloc hot paths should call
-    /// `encode` directly against a caller-owned sink.
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
-    }
-}
-
-/// Flags of `DeclToken` a parent sets in place of the ones a value presents:
-/// the end flag of a chain whose entries are `DeclToken`, which the chain
-/// derives from where an entry stands.
-#[doc(hidden)]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DeclTokenOverrides {
-    /// The `N` flag of `header`, when a parent sets it.
-    pub header_n: Option<bool>,
-}
-
-#[allow(dead_code)]
-impl DeclTokenOverrides {
-    /// Sets `N` of `header` and nothing else.
-    #[allow(clippy::needless_update)]
-    pub fn header_n(value: bool) -> Self {
-        Self { header_n: Some(value), ..Self::default() }
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::new();
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -259,7 +274,7 @@ pub trait DeclTokenSource {
     /// The `keyexpr` field.
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
 }
 
 impl<T: DeclTokenSource + ?Sized> DeclTokenSource for &T {
@@ -272,7 +287,7 @@ impl<T: DeclTokenSource + ?Sized> DeclTokenSource for &T {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         (**self).keyexpr()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
         (**self).extensions()
     }
 }
@@ -290,7 +305,7 @@ pub struct DeclTokenParts<'a> {
     /// The `keyexpr` field.
     pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
 }
 
 impl<'a> DeclTokenSource for DeclTokenParts<'a> {
@@ -303,12 +318,12 @@ impl<'a> DeclTokenSource for DeclTokenParts<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
-impl<'a> DeclTokenSource for DeclToken<'a> {
+impl<S: DeclTokenStorage> DeclTokenSource for DeclTokenOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
@@ -318,8 +333,8 @@ impl<'a> DeclTokenSource for DeclToken<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
-        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -333,23 +348,8 @@ impl<'a> DeclTokenSource for DeclTokenView<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclTokenSource for DeclTokenOwned<S> {
-    fn header(&self) -> u8 {
-        self.header
-    }
-    fn id(&self) -> u64 {
-        self.id
-    }
-    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
-        &self.keyexpr
-    }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
-        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -358,33 +358,24 @@ impl<'a> DeclToken<'a> {
     /// Encode what `src` says into the caller-owned sink: the bytes
     /// [`Self::encode`] writes for the value it holds, read through
     /// [`DeclTokenSource`]. A length, a count or a gate flag is computed from what
-    /// `src` presents, and a value the encoding cannot carry is refused
-    /// before the first byte is written.
-    pub fn encode_source<S: DeclTokenSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::count_source(src)?;
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: DeclTokenSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source(src, w)
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: DeclTokenSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::write_source_in(src, w, &DeclTokenOverrides::default())
-    }
-
-    /// [`Self::write_source`] with the flags a parent sets in place of the
-    /// ones `src` presents.
-    #[doc(hidden)]
-    pub fn write_source_in<S: DeclTokenSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &DeclTokenOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: DeclTokenSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
+        let _n_d_header_n_0: usize = usize::from(Wireexpr::input_n(src.keyexpr()));
         let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(src.keyexpr()) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
         let _p_header_z_0: bool = src.extensions().is_some();
-        let mut _c_header: u8 = (((src.header() & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
-        if let Some(_o) = over.header_n {
-            _c_header = (_c_header & !0x20) | (u8::from(_o) << 5);
-        }
+        let _v_header_n: u8 = _n_d_header_n_0 as u8;
+        let _c_header: u8 = (((((src.header() & !0x20) | (_v_header_n << 5)) & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         w.write_vle_u64(src.id())?;
-        Wireexpr::write_source(src.keyexpr(), w, (_c_header >> 5) & 0x1)?;
+        Wireexpr::write_source(src.keyexpr(), w)?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
                 ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
@@ -396,17 +387,17 @@ impl<'a> DeclToken<'a> {
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: DeclTokenSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+    pub fn count_source<S: DeclTokenSource + ?Sized>(src: &S) -> usize {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c)?;
-        Ok(_c.len())
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
     }
 }
 
 impl<'a, S: DeclTokenSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for DeclToken<'a> {
-    type Error<E> = CodecError;
+    type Error<E> = E;
 
-    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
         Self::write_source(src, w)
     }
 }
@@ -414,10 +405,12 @@ impl<'a, S: DeclTokenSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S>
 #[allow(dead_code)]
 impl<'a> DeclToken<'a> {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
-    /// with nothing written, or the refusal that encode would give. The result
-    /// writes the frame into a window of exactly that size and cannot fail.
-    pub fn measure<S: DeclTokenSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
-        ::sce_forge_runtime::codec::measure(src)
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: DeclTokenSource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
     }
 
     /// Write `src` into `window` in one pass and return the bytes it is, for a
@@ -460,7 +453,7 @@ pub struct DeclTokenView<'a> {
     pub header: u8,
     pub id: u64,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, DeclTokenExtensionsWalk, 0>, 8>>,
+    pub extensions: Option<Bounded<ListView<'a, DeclTokenExtensionsWalk, 0>, 8, 1>>,
 }
 
 impl<'a> Default for DeclTokenView<'a> {
@@ -529,9 +522,9 @@ impl<'a> DeclTokenView<'a> {
                 return Err(CodecError::NeedMoreBytes);
             }
             if _more {
-                return Err(CodecError::TlvChainOverflow);
+                return Err(CodecError::TooManyElements);
             }
-            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TlvChainOverflow)?);
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
             _out.extensions = None;
         }
@@ -555,24 +548,20 @@ impl<'a> DeclTokenView<'a> {
         _out.id = self.id;
         self.keyexpr.into_builder(&mut _out.keyexpr)?;
         match &self.extensions {
-            Some(_l) => {
-                let _vec = _out.extensions.insert(HeaplessVec::new());
-                _vec.clear();
-                for _e in _l.iter() {
-                    _vec.push(ExtEntry::default()).map_err(|_| CodecError::TooManyElements)?;
-                    if let Some(_slot) = _vec.last_mut() {
-                        _e.into_builder(_slot)?;
+            Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
+                    for _e in _l.iter() {
+                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
+                        if let Some(_slot) = _vec.last_mut() {
+                            _e.into_builder(_slot)?;
+                        }
                     }
-                }
-            }
+                    Ok(())
+                })?,
             None => _out.extensions = None,
         }
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec, as
-    /// [`DeclToken::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 602;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`DeclToken::encode`] writes for the value [`Self::into_builder`]
@@ -580,18 +569,17 @@ impl<'a> DeclTokenView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
         DeclToken::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
-    /// value it cannot carry.
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
+    /// value (docs/adr/0065).
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::new();
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 
     pub fn mid(&self) -> u8 {
@@ -641,46 +629,9 @@ impl<'a> DeclTokenView<'a> {
 // `let v: DeclTokenOwned = DeclTokenOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::wireexpr::WireexprOwned;
-use super::ext_entry::ExtEntryOwned;
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeclTokenOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub header: u8,
-    pub id: u64,
-    pub keyexpr: WireexprOwned<S>,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclTokenOwned<S> {
-    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
-    // bit getters over the copied carrier (rkyv Archived↔native getter
-    // parity), so owned consumers read `{Codec}Owned` with the same API as
-    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
-    // Read-only — write accessors belong with an owned-encode path, which
-    // does not exist yet.
-    pub fn mid(&self) -> u8 {
-        self.header & 0x1F
-    }
-
-    pub fn n(&self) -> bool {
-        (self.header & 0x20) != 0
-    }
-
-    pub fn m(&self) -> bool {
-        (self.header & 0x40) != 0
-    }
-
-    pub fn z(&self) -> bool {
-        (self.header & 0x80) != 0
-    }
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> DeclToken<'a> {
@@ -690,12 +641,13 @@ impl<'a> DeclToken<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<DeclTokenOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: DeclTokenFrom<'a>>(self) -> Result<DeclTokenOwned<S>, CodecError> {
         Ok(DeclTokenOwned {
             header: self.header,
             id: self.id,
@@ -712,7 +664,7 @@ impl<'a> DeclToken<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclTokenOwned<S> {
+impl<S: DeclTokenStorage> DeclTokenOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -743,7 +695,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclTokenOwned<S> {
         _out.id = self.id;
         self.keyexpr.as_borrowed_into(&mut _out.keyexpr);
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => _out.extensions.insert(Default::default()).refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, _l.inner(), |_e| Ok(_e.as_borrowed())))?,
             None => _out.extensions = None,
         }
         Ok(())
@@ -757,37 +709,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclTokenOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<DeclTokenOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> DeclTokenFrom<'x>>(&self) -> Result<DeclTokenOwned<D>, CodecError> {
         self.try_as_borrowed()?.try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclTokenOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `try_as_borrowed` followed by
-    /// [`DeclToken::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        DeclToken::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(DeclToken::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
     }
 }
 
@@ -804,7 +727,7 @@ impl<'a> DeclToken<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<DeclTokenOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: DeclTokenStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<DeclTokenOwned<S>, CodecError> {
         Ok(DeclTokenOwned {
             header: self.header,
             id: self.id,

@@ -15,12 +15,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-// RFC §synth-5-B B2/B3: bounded inline list storage for repeat / tlv-chain
-// fields — heap-free `heapless::Vec<T, N>` (re-exported by the runtime),
-// the Rust mirror of the C11 `T elems[MAX]; len` representation. Always
-// available (no `alloc` gate) so list-bearing codecs compile on the
-// pure no_std no-alloc MCU tier.
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::ext_entry::ExtEntry;
 use super::interest_body::InterestBody;
@@ -33,23 +27,57 @@ use super::interest_body::InterestBodyView;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+use super::ext_entry::ExtEntryOwned;
+use super::interest_body::InterestBodyOwned;
+/// The field `extensions` of `Interest`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct Interest<'a> {
-    pub header: u8,
-    pub interest_id: u64,
-    pub header_c_or_f: Option<InterestHeaderCOrF<InterestBody<'a>>>,
-    pub extensions: Option<HeaplessVec<ExtEntry<'a>, 8>>,
+pub struct InterestExtensionsField;
+
+impl ::sce_forge_runtime::codec::HoldsList<InterestExtensionsField> for ::sce_forge_runtime::codec::Inline {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
 }
 
-// RFC variant-default-uniformity: at least one field's
-// `<sce:flags>` carrier declares a wire-MID constant via
-// `<sce:flag value="N"/>`. Manual `impl Default` bakes the OR of
-// every declared `(value & mask) << bit` into that carrier so a
-// freshly-constructed instance carries the wire-MID for its own
-// dispatch tag. Fields without declared values fall through to
-// `Default::default()` (preserving derive(Default) semantics).
-impl<'a> Default for Interest<'a> {
+/// What `InterestIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait InterestStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<InterestExtensionsField> + super::ext_entry::ExtEntryStorage + super::interest_body::InterestBodyStorage {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<InterestExtensionsField> + super::ext_entry::ExtEntryStorage + super::interest_body::InterestBodyStorage> InterestStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside InterestStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait InterestFrom<'f>: InterestStorage + super::ext_entry::ExtEntryFrom<'f> + super::interest_body::InterestBodyFrom<'f> {}
+
+impl<'f, S: InterestStorage + super::ext_entry::ExtEntryFrom<'f> + super::interest_body::InterestBodyFrom<'f>> InterestFrom<'f> for S {}
+
+/// The group `InterestHeaderCOrF` as `InterestOwned` holds it, in the storage
+/// profile `S`.
+#[allow(dead_code)]
+pub type InterestHeaderCOrFOwned<S> = InterestHeaderCOrF<InterestBodyOwned<S>>;
+
+// `InterestIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `Interest<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `InterestOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterestIn<S: InterestStorage> {
+    pub header: u8,
+    pub interest_id: u64,
+    pub header_c_or_f: Option<InterestHeaderCOrFOwned<S>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<InterestExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type Interest<'a> = InterestIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type InterestOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = InterestIn<S>;
+
+impl<S: InterestStorage> Default for InterestIn<S> {
     fn default() -> Self {
         Self {
             header: 0x19u8,
@@ -61,7 +89,7 @@ impl<'a> Default for Interest<'a> {
 }
 
 #[allow(dead_code)]
-impl<'a> Interest<'a> {
+impl<S: InterestStorage> InterestIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -77,7 +105,7 @@ impl<'a> Interest<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: InterestFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -93,7 +121,24 @@ impl<'a> Interest<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: InterestFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                InterestView::decode(&mut _frame)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: InterestFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -113,30 +158,32 @@ impl<'a> Interest<'a> {
             _v
         };
         let interest_id = cursor.read_vle_u64()?;
-        let mut body: Option<InterestBody<'a>> = None;
+        let mut body: Option<InterestBodyOwned<S>> = None;
         if (header & 0x20u8) != 0 || (header & 0x40u8) != 0 {
-            InterestBody::decode_into(cursor, body.insert(InterestBody::default()))?;
+            InterestBodyOwned::<S>::decode_into(cursor, body.insert(InterestBodyOwned::<S>::default()))?;
         } else {
             body = None;
         }
         if (header & 0x80u8) != 0 {
-            let _vec = _out.extensions.insert(HeaplessVec::<ExtEntry<'a>, 8>::new());
-            let mut _more = false;
-            for _ in 0..8u32 {
-                let _entry = ExtEntry::decode(cursor)?;
-                _more = _entry.z();
-                // Bounded by max-depth on both sides — loop count and `_vec`
-                // capacity are the same literal — so this push cannot fail. An
-                // over-long chain is refused by the guard after the loop.
-                _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
-                if !_more { break; }
-            }
-            if _more && cursor.remaining() == 0 {
-                return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TlvChainOverflow);
-            }
+            _out.extensions.insert(Default::default()).refill(|_vec| {
+                let mut _more = false;
+                for _ in 0..8u32 {
+                    let _entry = ExtEntryOwned::<S>::decode(cursor)?;
+                    _more = _entry.z();
+                    // The loop walks the chain's depth and `_vec` holds the capacity, so
+                // this push fails only where the deployment holds fewer entries than
+                // the frame says. An over-long chain is refused after the loop.
+                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    if !_more { break; }
+                }
+                if _more && cursor.remaining() == 0 {
+                    return Err(CodecError::NeedMoreBytes);
+                }
+                if _more {
+                    return Err(CodecError::TooManyElements);
+                }
+                Ok(())
+            })?;
         } else {
             _out.extensions = None;
         }
@@ -196,41 +243,33 @@ impl<'a> Interest<'a> {
         }
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 602;
 
-    /// Encode `self` into the caller-owned sink. Returns the value's refusal
-    /// when the encoding cannot carry it (a length past its type, a list past
-    /// its bound, a gate that disagrees with a presence; the document declares
-    /// `sce:encode-may-fail`), or the sink's own error:
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
-    /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w)
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        Interest::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
-    /// `encode` refuses a value with: one the encoding cannot carry (a
-    /// length past its type, a list past its bound) or one a gate
-    /// disagrees with. Callers targeting zero-alloc hot paths should call
-    /// `encode` directly against a caller-owned sink.
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::new();
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -266,7 +305,7 @@ pub trait InterestSource {
     /// The `interest_id` field.
     fn interest_id(&self) -> u64;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
     /// The fields `header.C || header.F` decides, held together (docs/adr/0065 §6 R4).
     fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>>;
 }
@@ -278,7 +317,7 @@ impl<T: InterestSource + ?Sized> InterestSource for &T {
     fn interest_id(&self) -> u64 {
         (**self).interest_id()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
         (**self).extensions()
     }
     fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
@@ -297,7 +336,7 @@ pub struct InterestParts<'a> {
     /// The `interest_id` field.
     pub interest_id: u64,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
     /// The fields `header.C || header.F` decides, held together (docs/adr/0065 §6 R4).
     pub header_c_or_f: Option<InterestHeaderCOrF<&'a super::interest_body::InterestBodyParts<'a>>>,
 }
@@ -316,12 +355,12 @@ impl<'a> InterestSource for InterestParts<'a> {
     fn interest_id(&self) -> u64 {
         self.interest_id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
-impl<'a> InterestSource for Interest<'a> {
+impl<S: InterestStorage> InterestSource for InterestOwned<S> {
     fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
         self.header_c_or_f.as_ref().map(|_g| match _g {
             InterestHeaderCOrF::C { body } => InterestHeaderCOrF::C { body },
@@ -335,8 +374,8 @@ impl<'a> InterestSource for Interest<'a> {
     fn interest_id(&self) -> u64 {
         self.interest_id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
-        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -354,27 +393,8 @@ impl<'a> InterestSource for InterestView<'a> {
     fn interest_id(&self) -> u64 {
         self.interest_id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestSource for InterestOwned<S> {
-    fn header_c_or_f(&self) -> Option<InterestHeaderCOrF<&impl super::interest_body::InterestBodySource>> {
-        self.header_c_or_f.as_ref().map(|_g| match _g {
-            InterestHeaderCOrF::C { body } => InterestHeaderCOrF::C { body },
-            InterestHeaderCOrF::F { body } => InterestHeaderCOrF::F { body },
-            InterestHeaderCOrF::CF { body } => InterestHeaderCOrF::CF { body },
-        })
-    }
-    fn header(&self) -> u8 {
-        self.header
-    }
-    fn interest_id(&self) -> u64 {
-        self.interest_id
-    }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>> {
-        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -383,16 +403,15 @@ impl<'a> Interest<'a> {
     /// Encode what `src` says into the caller-owned sink: the bytes
     /// [`Self::encode`] writes for the value it holds, read through
     /// [`InterestSource`]. A length, a count or a gate flag is computed from what
-    /// `src` presents, and a value the encoding cannot carry is refused
-    /// before the first byte is written.
-    pub fn encode_source<S: InterestSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::count_source(src)?;
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: InterestSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source(src, w)
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: InterestSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: InterestSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _m_body = src.header_c_or_f().map(|_g| match _g {
             InterestHeaderCOrF::C { body } | InterestHeaderCOrF::F { body } | InterestHeaderCOrF::CF { body } => body,
         });
@@ -417,17 +436,17 @@ impl<'a> Interest<'a> {
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: InterestSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+    pub fn count_source<S: InterestSource + ?Sized>(src: &S) -> usize {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c)?;
-        Ok(_c.len())
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
     }
 }
 
 impl<'a, S: InterestSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Interest<'a> {
-    type Error<E> = CodecError;
+    type Error<E> = E;
 
-    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
         Self::write_source(src, w)
     }
 }
@@ -435,10 +454,12 @@ impl<'a, S: InterestSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> 
 #[allow(dead_code)]
 impl<'a> Interest<'a> {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
-    /// with nothing written, or the refusal that encode would give. The result
-    /// writes the frame into a window of exactly that size and cannot fail.
-    pub fn measure<S: InterestSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
-        ::sce_forge_runtime::codec::measure(src)
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: InterestSource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
     }
 
     /// Write `src` into `window` in one pass and return the bytes it is, for a
@@ -481,7 +502,7 @@ pub struct InterestView<'a> {
     pub header: u8,
     pub interest_id: u64,
     pub header_c_or_f: Option<InterestHeaderCOrF<InterestBodyView<'a>>>,
-    pub extensions: Option<Bounded<ListView<'a, InterestExtensionsWalk, 0>, 8>>,
+    pub extensions: Option<Bounded<ListView<'a, InterestExtensionsWalk, 0>, 8, 1>>,
 }
 
 impl<'a> Default for InterestView<'a> {
@@ -555,9 +576,9 @@ impl<'a> InterestView<'a> {
                 return Err(CodecError::NeedMoreBytes);
             }
             if _more {
-                return Err(CodecError::TlvChainOverflow);
+                return Err(CodecError::TooManyElements);
             }
-            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TlvChainOverflow)?);
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
             _out.extensions = None;
         }
@@ -599,24 +620,20 @@ impl<'a> InterestView<'a> {
             None => _out.header_c_or_f = None,
         }
         match &self.extensions {
-            Some(_l) => {
-                let _vec = _out.extensions.insert(HeaplessVec::new());
-                _vec.clear();
-                for _e in _l.iter() {
-                    _vec.push(ExtEntry::default()).map_err(|_| CodecError::TooManyElements)?;
-                    if let Some(_slot) = _vec.last_mut() {
-                        _e.into_builder(_slot)?;
+            Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
+                    for _e in _l.iter() {
+                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
+                        if let Some(_slot) = _vec.last_mut() {
+                            _e.into_builder(_slot)?;
+                        }
                     }
-                }
-            }
+                    Ok(())
+                })?,
             None => _out.extensions = None,
         }
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec, as
-    /// [`Interest::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 602;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`Interest::encode`] writes for the value [`Self::into_builder`]
@@ -624,18 +641,17 @@ impl<'a> InterestView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
         Interest::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
-    /// value it cannot carry.
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
+    /// value (docs/adr/0065).
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::new();
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 
     pub fn mid(&self) -> u8 {
@@ -685,46 +701,9 @@ impl<'a> InterestView<'a> {
 // `let v: InterestOwned = InterestOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::ext_entry::ExtEntryOwned;
-use super::interest_body::InterestBodyOwned;
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct InterestOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub header: u8,
-    pub interest_id: u64,
-    pub header_c_or_f: Option<InterestHeaderCOrF<InterestBodyOwned<S>>>,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<ExtEntryOwned<S>, 8>, 8>>,
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestOwned<S> {
-    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
-    // bit getters over the copied carrier (rkyv Archived↔native getter
-    // parity), so owned consumers read `{Codec}Owned` with the same API as
-    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
-    // Read-only — write accessors belong with an owned-encode path, which
-    // does not exist yet.
-    pub fn mid(&self) -> u8 {
-        self.header & 0x1F
-    }
-
-    pub fn c(&self) -> bool {
-        (self.header & 0x20) != 0
-    }
-
-    pub fn f(&self) -> bool {
-        (self.header & 0x40) != 0
-    }
-
-    pub fn z(&self) -> bool {
-        (self.header & 0x80) != 0
-    }
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> Interest<'a> {
@@ -734,12 +713,13 @@ impl<'a> Interest<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<InterestOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: InterestFrom<'a>>(self) -> Result<InterestOwned<S>, CodecError> {
         Ok(InterestOwned {
             header: self.header,
             interest_id: self.interest_id,
@@ -756,7 +736,7 @@ impl<'a> Interest<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestOwned<S> {
+impl<S: InterestStorage> InterestOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -804,7 +784,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestOwned<S> {
             None => _out.header_c_or_f = None,
         }
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| Ok(_e.as_borrowed()))?,
+            Some(_l) => _out.extensions.insert(Default::default()).refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, _l.inner(), |_e| Ok(_e.as_borrowed())))?,
             None => _out.extensions = None,
         }
         Ok(())
@@ -818,37 +798,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<InterestOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> InterestFrom<'x>>(&self) -> Result<InterestOwned<D>, CodecError> {
         self.try_as_borrowed()?.try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `try_as_borrowed` followed by
-    /// [`Interest::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Interest::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Interest::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
     }
 }
 
@@ -865,7 +816,7 @@ impl<'a> Interest<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InterestOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: InterestStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InterestOwned<S>, CodecError> {
         Ok(InterestOwned {
             header: self.header,
             interest_id: self.interest_id,

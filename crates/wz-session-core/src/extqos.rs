@@ -62,7 +62,7 @@
 //! at the offer-injection point (`SessionLinkActions::set_qos_offer` refuses the
 //! QoS offer when a lowlatency offer is already staged), NOT in this codec.
 
-use wz_codecs::ext_entry::ExtEntryOwned;
+use crate::transport_profile::ExtEntryOwned;
 
 #[cfg(feature = "session-extqos")]
 use crate::extqos_offer::priority_try_from_wire;
@@ -357,7 +357,7 @@ pub fn qos_state_try_from_u64(value: u64) -> Result<PeerQos, QosLinkError> {
 /// `value` — zenoh `init::ext::QoSLink::new(state.to_u64())`.
 #[cfg(feature = "session-extqos")]
 pub fn encode_qos_link_ext(value: u64) -> ExtEntryOwned {
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    use crate::transport_profile::ExtEntryOwnedVariant;
     use wz_codecs::ext_zint::ExtZint;
     ExtEntryOwned {
         header: QOS_LINK_EXT_HEADER,
@@ -455,8 +455,8 @@ pub fn merge_qos_link_init_ack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
     use crate::unit_ext::encode_unit_ext;
-    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
     use wz_codecs::ext_zint::ExtZint;
 
     /// Locks the on-the-wire header byte (`0x01` = UNIT encoding | id 0x01, no

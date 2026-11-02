@@ -496,9 +496,9 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         feature = "codec-declare",
         feature = "session-slot"
     ))]
-    pub fn dispatch_declare_view<'a>(
+    pub fn dispatch_declare_view<'a, 'f>(
         &mut self,
-        declare: &wz_codecs::declare::Declare<'a>,
+        declare: &wz_codecs::declare::Declare<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         use wz_codecs::declare::DeclareVariant;
@@ -559,7 +559,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();

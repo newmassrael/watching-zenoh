@@ -27,7 +27,7 @@
 //! A description the wire cannot carry (an empty keyexpr) is REFUSED with a
 //! [`RequestRefusal`](crate::lent_request::RequestRefusal) and not repaired.
 
-use sce_forge_runtime::codec::{CodecError, SceSink};
+use sce_forge_runtime::codec::{Bounded, CodecError, SceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zint::ExtZint;
@@ -97,7 +97,9 @@ impl<'a> RequestWriter<'a> {
         Ok(Self { parts })
     }
 
-    /// Encode the `Request` into `sink`.
+    /// Encode the `Request` into `sink`. `LengthOutOfRange` for a keyexpr past the
+    /// protocol's `u16` length or parameters past its `u32` length, before a byte of
+    /// either is written.
     pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
     where
         CodecError: From<S::Error>,
@@ -124,7 +126,7 @@ impl<'a> RequestWriter<'a> {
             header: query_header,
             consolidation,
             parameters_len: parameters.map(|bytes| bytes.len() as u64),
-            parameters,
+            parameters: parameters.map(crate::codec_owned::sent).transpose()?,
             extensions: None,
         };
 
@@ -155,8 +157,10 @@ impl<'a> RequestWriter<'a> {
         Request {
             header,
             rid: parts.rid,
-            keyexpr: local(0, Some(parts.keyexpr)),
-            extensions: (!chain.is_empty()).then_some(chain),
+            keyexpr: local(0, Some(parts.keyexpr))?,
+            // A chain of no entry is none: the bounds of a chain hold one entry or more, and
+            // the list's capacity is the bound.
+            extensions: Bounded::new(chain),
             body: RequestVariant::CodecZenohQuery(query),
         }
         .encode(sink)
@@ -282,5 +286,27 @@ mod tests {
             RequestWriter::new(parts).err(),
             Some(RequestRefusal::EmptyKeyexpr)
         );
+    }
+
+    #[test]
+    fn a_get_of_a_keyexpr_past_its_protocol_bound_is_refused_at_encode() {
+        let past_bound = "k".repeat(usize::from(u16::MAX) + 1);
+        let parts = GetParts {
+            rid: 1,
+            keyexpr: &past_bound,
+            parameters: b"",
+            consolidation: None,
+            target: None,
+            timeout_ms: 0,
+            qos: QosLevel::DEFAULT,
+        };
+        let writer = RequestWriter::new(parts).expect("a non-empty keyexpr is writable");
+        let mut buffer = [0u8; 16];
+        let mut sink = SliceSink::new(&mut buffer);
+        assert_eq!(
+            writer.encode(&mut sink).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
+        assert_eq!(sink.position(), 0, "nothing is written");
     }
 }

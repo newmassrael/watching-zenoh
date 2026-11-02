@@ -4873,22 +4873,22 @@ mod tests {
             // the decoder read the wrong zid width, which is why it is
             // spelled out rather than guessed.
             cbyte: 0x31,
-            zid: &[0xAA; 4],
+            zid: wz_codecs::Bounded::new(&[0xAAu8; 4] as &[u8]).unwrap(),
             s: None,
             // The cookie is A-gated on Init: an InitAck carries it, an
             // InitSyn does not (`out/wz-codecs/init_body.rs:103-112`). The
             // fixture keeps it empty; presence, not content, is what the
             // decoder's field walk depends on.
             cookie_len: if is_ack { Some(0) } else { None },
-            cookie: if is_ack { Some(&[]) } else { None },
+            cookie: if is_ack {
+                Some(wz_codecs::Bounded::new(&[] as &[u8]).unwrap())
+            } else {
+                None
+            },
         };
         // The S (resolution present) and A (is-ack) discriminators ride the parent
         // header, and the body says both: S by its size group, A by its cookie.
-        wire.extend_from_slice(
-            &body
-                .encode_to_vec()
-                .expect("a fixture init body is encodable"),
-        );
+        wire.extend_from_slice(&body.encode_to_vec());
         if !exts.is_empty() {
             wire.extend_from_slice(&crate::ext_chain::encode_ext_chain(&exts));
         }
@@ -4970,7 +4970,11 @@ mod tests {
                 // INVERTED against Init: on Open the cookie rides the SYN
                 // (`a == 0`), not the ACK (`out/wz-codecs/open_body.rs:67-79`).
                 cookie_len: if is_ack { None } else { Some(0) },
-                cookie: if is_ack { None } else { Some(&[]) },
+                cookie: if is_ack {
+                    None
+                } else {
+                    Some(wz_codecs::Bounded::new(&[] as &[u8]).unwrap())
+                },
             }
             .encode_to_vec(),
         );
@@ -6554,7 +6558,6 @@ mod tests {
     #[test]
     fn a_declare_inside_a_frame_populates_the_keyexpr_tables() {
         use crate::passive_keyexpr::Resolved;
-        use sce_forge_runtime::codec::SceStr;
         use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
         use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
@@ -6563,7 +6566,7 @@ mod tests {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(path.len() as u64),
-                suffix: Some(sce_forge_runtime::codec::SceString::from_view(path).expect("fits")),
+                suffix: Some(crate::codec_owned::owned_string(path).expect("fits")),
             }),
         };
         // The headers carry the wire MIDs, and `Default` is what bakes them
@@ -6602,8 +6605,7 @@ mod tests {
         let record = declare
             .try_as_borrowed()
             .expect("owned -> borrowed")
-            .encode_to_vec()
-            .expect("a fixture declare is encodable");
+            .encode_to_vec();
 
         let mut s = established(vec![]);
         assert!(s.keyexprs().is_empty(Direction::A));
@@ -6625,9 +6627,7 @@ mod tests {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 42,
                 suffix_len: Some(6),
-                suffix: Some(
-                    sce_forge_runtime::codec::SceString::from_view("1/pose").expect("fits"),
-                ),
+                suffix: Some(crate::codec_owned::owned_string("1/pose").expect("fits")),
             }),
         };
         assert_eq!(
@@ -7439,17 +7439,13 @@ mod tests {
         let body = wz_codecs::init_body::InitBody {
             version: 0x09,
             cbyte: 0x31,
-            zid: &[0xAA; 4],
+            zid: wz_codecs::Bounded::new(&[0xAAu8; 4] as &[u8]).unwrap(),
             s: Some(wz_codecs::init_body::InitBodyS { sn_res, batch_size }),
             cookie_len: is_ack.then_some(cookie as u64),
-            cookie: is_ack.then_some(&zeros[..]),
+            cookie: is_ack.then(|| wz_codecs::Bounded::new(&zeros[..]).unwrap()),
         };
         let mut wire = vec![flags | wz_codecs::wire_const::T_MID_INIT];
-        wire.extend_from_slice(
-            &body
-                .encode_to_vec()
-                .expect("a fixture init body is encodable"),
-        );
+        wire.extend_from_slice(&body.encode_to_vec());
         wire
     }
 
@@ -8485,11 +8481,12 @@ mod join_ring_tests {
     /// with the S flag and `sn_res` when `sn_res` is given, and with the QoS
     /// extension stating `qos` when that is given.
     fn join(zid: u8, sn_res: Option<u8>, next: (u64, u64), qos: Option<&[(u64, u64)]>) -> Vec<u8> {
+        let zid = [zid; 4];
         let body = wz_codecs::join::Join {
             version: wire_const::PROTOCOL_VERSION,
             // whatami peer (0x01), a 4-byte zid.
             cbyte: (3 << 4) | 0x01,
-            zid: &[zid; 4],
+            zid: wz_codecs::Bounded::new(&zid[..]).unwrap(),
             s: sn_res.map(|sn_res| wz_codecs::join::JoinS {
                 sn_res,
                 batch_size: 2048,
@@ -8506,7 +8503,7 @@ mod join_ring_tests {
             flags |= wire_const::FLAG_T_Z;
         }
         let mut wire = vec![wire_const::T_MID_JOIN | flags];
-        wire.extend_from_slice(&body.encode_to_vec().expect("a fixture join is encodable"));
+        wire.extend_from_slice(&body.encode_to_vec());
         if let Some(pairs) = qos {
             let mut ext_body = Vec::new();
             for (reliable, best_effort) in pairs {

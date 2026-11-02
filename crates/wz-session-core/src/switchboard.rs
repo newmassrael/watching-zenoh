@@ -427,7 +427,7 @@ mod alloc_impl {
         /// (ACL = wire -> domain) path; local self-publishes do not inject.
         pub fn dispatch_iteration_event<'a>(
             &self,
-            event: IterationEvent<'_>,
+            event: IterationEvent<'_, '_>,
             peer_table: impl Into<MappingSpaces<'a>>,
             injector: &mut dyn EventInjector,
         ) -> usize {
@@ -790,7 +790,7 @@ mod tests {
                 body: WireexprVariant::WireexprLocal(WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
-                    suffix: Some(keyexpr),
+                    suffix: Some(sce_forge_runtime::codec::Bounded::new(keyexpr).unwrap()),
                 }),
             },
             ..Push::default()

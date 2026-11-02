@@ -100,7 +100,7 @@ fn layer3_frame_vle_width_boundaries() {
     for (sn, payload) in corpus {
         let wz_bytes = Frame {
             sn,
-            payload: &payload,
+            payload: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
         }
         .encode_to_vec();
         let pico_bytes = zenoh_pico_encode_frame(sn, &payload);
@@ -125,12 +125,12 @@ fn layer3_frame_matches_fragment_when_no_extension() {
     let payload = vec![0xCA, 0xFE, 0xBA, 0xBE];
     let frame_bytes = Frame {
         sn,
-        payload: &payload,
+        payload: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
     }
     .encode_to_vec();
     let fragment_bytes = wz_codecs::fragment::Fragment {
         sn,
-        payload: &payload,
+        payload: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
     }
     .encode_to_vec();
     assert_eq!(

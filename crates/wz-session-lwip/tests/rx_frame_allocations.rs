@@ -203,7 +203,7 @@ fn frame_of(sn: u64, n: usize) -> (Vec<u8>, Vec<u8>) {
         let push = wz_session_core::push_build::build_push_literal(KEY, &payload_of(i))
             .expect("a literal Put");
         let view = push.try_as_borrowed().expect("a borrowed view");
-        payload.extend_from_slice(&view.encode_to_vec().expect("an encoded Put"));
+        payload.extend_from_slice(&view.encode_to_vec());
     }
     (frame_wire(sn, &[], &payload), payload)
 }
@@ -318,7 +318,7 @@ fn delivery_of((payload, key, len, _): &Delivery) -> (Vec<u8>, String) {
 /// The two sessions, established, and what the acceptor's subscriber saw.
 struct Pair {
     acceptor: Pump,
-    on_event: Box<dyn FnMut(IterationEvent<'_>)>,
+    on_event: Box<dyn FnMut(IterationEvent<'_, '_>)>,
     /// What the acceptor's drive reported, by kind, since the last frame turn.
     polls: Rc<Cell<PollTally>>,
     /// The transport extension chain the latest `FramePayload` reported.
@@ -413,7 +413,7 @@ impl Pair {
         let tally = polls.clone();
         let frame_exts = Rc::new(Cell::new(FrameExts::default()));
         let exts = frame_exts.clone();
-        let mut on_event: Box<dyn FnMut(IterationEvent<'_>)> = Box::new(move |event| {
+        let mut on_event: Box<dyn FnMut(IterationEvent<'_, '_>)> = Box::new(move |event| {
             let mut t = tally.get();
             match &event {
                 IterationEvent::Poll(outcome) => match outcome {
@@ -444,7 +444,9 @@ impl Pair {
         for _ in 0..64 {
             runtime.run_until_idle();
             assert!(
-                initiator.step(&mut |_: IterationEvent<'_>| {}).is_none(),
+                initiator
+                    .step(&mut |_: IterationEvent<'_, '_>| {})
+                    .is_none(),
                 "the initiator ended"
             );
             assert!(acceptor.step(&mut on_event).is_none(), "the acceptor ended");
@@ -457,7 +459,9 @@ impl Pair {
         // The initiator has nothing more to say; settle whatever the last turn
         // left in flight so the measured iterations start from a quiet link.
         for _ in 0..4 {
-            assert!(initiator.step(&mut |_: IterationEvent<'_>| {}).is_none());
+            assert!(initiator
+                .step(&mut |_: IterationEvent<'_, '_>| {})
+                .is_none());
             assert!(acceptor.step(&mut on_event).is_none());
         }
 
@@ -798,7 +802,6 @@ mod query_and_reply {
         .try_as_borrowed()
         .expect("a borrowed view")
         .encode_to_vec()
-        .expect("an encoded reply")
     }
 
     fn request(rid: u64) -> Vec<u8> {

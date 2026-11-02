@@ -150,7 +150,7 @@ struct Told {
 struct End {
     actions: Handle,
     pump: Pump,
-    on_event: Box<dyn FnMut(IterationEvent<'_>)>,
+    on_event: Box<dyn FnMut(IterationEvent<'_, '_>)>,
     observer: Rc<RefCell<ApplicationLayerObserver>>,
     told: Arc<Told>,
     sender: SlotDriver<LwipUdpDriver>,
@@ -204,7 +204,7 @@ fn create(
 }
 
 /// The `on_event` an end's pump is driven with.
-type OnEvent = Box<dyn FnMut(IterationEvent<'_>)>;
+type OnEvent = Box<dyn FnMut(IterationEvent<'_, '_>)>;
 
 /// The application layer of the acceptor: an observer with a declaration observer
 /// that counts what the peer declared and undeclared.
@@ -337,7 +337,6 @@ mod record {
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec()
-            .expect("an encoded Declare")
     }
 
     /// The bytes of an owned `Interest`.
@@ -346,7 +345,6 @@ mod record {
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec()
-            .expect("an encoded Interest")
     }
 
     /// A `DeclKexpr` binding `id` to `suffix`.

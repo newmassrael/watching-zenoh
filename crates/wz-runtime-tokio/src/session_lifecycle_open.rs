@@ -228,7 +228,7 @@ impl PeerOpener for LinkstateOpener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sce_forge_runtime::codec::{Bounded, SceBytes, SceStr, SceString};
+    use sce_forge_runtime::codec::Bounded;
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::linkstate_list::LinkstateListOwned;
@@ -247,19 +247,20 @@ mod tests {
             psid,
             sn,
             zid_len: Some(zid.len() as u64),
-            zid: Some(SceBytes::from_slice(zid).unwrap()),
+            zid: Some(wz_session_core::codec_owned::owned_bytes(zid).unwrap()),
             whatami: Some(2),
             num_locators: None,
             locators: None,
             links_len: links.len() as u64,
-            links: Bounded::new(
-                links
-                    .iter()
-                    .map(|&psid| LinkstateLink { psid })
-                    .collect::<Vec<_>>(),
-            )
-            .expect("a fixture's links are within the bound"),
-            weights: None,
+            options_h: wz_codecs::linkstate::LinkstateOptionsH::NotH {
+                links: Bounded::new(
+                    links
+                        .iter()
+                        .map(|&psid| LinkstateLink { psid })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("a fixture's links are within the bound"),
+            },
         }
     }
 
@@ -278,7 +279,7 @@ mod tests {
                     locs.iter()
                         .map(|s| LocatorOwned {
                             locator_len: s.len() as u64,
-                            locator: SceString::from_view(s).unwrap(),
+                            locator: wz_session_core::codec_owned::owned_string(s).unwrap(),
                         })
                         .collect::<Vec<_>>(),
                 )

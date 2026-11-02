@@ -1,4 +1,4 @@
-// SCE-MAP: locator:32 :: _forge_body
+// SCE-MAP: locator:36 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -21,15 +21,58 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `locator` of `Locator`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct Locator<'a> {
+pub struct LocatorLocatorField;
+
+impl ::sce_forge_runtime::codec::HoldsStr<LocatorLocatorField> for ::sce_forge_runtime::codec::Inline {
+    type Str = ::sce_forge_runtime::codec::InlineStr<255>;
+}
+
+/// What `LocatorIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait LocatorStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<LocatorLocatorField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<LocatorLocatorField>> LocatorStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside LocatorStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait LocatorFrom<'f>: LocatorStorage + ::sce_forge_runtime::codec::StoresStr<'f, LocatorLocatorField> {}
+
+impl<'f, S: LocatorStorage + ::sce_forge_runtime::codec::StoresStr<'f, LocatorLocatorField>> LocatorFrom<'f> for S {}
+
+// `LocatorIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `Locator<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `LocatorOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocatorIn<S: LocatorStorage> {
     pub locator_len: u64,
-    pub locator: &'a str,
+    pub locator: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsStr<LocatorLocatorField>>::Str, 255>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type Locator<'a> = LocatorIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type LocatorOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = LocatorIn<S>;
+
+impl<S: LocatorStorage> Default for LocatorIn<S> {
+    fn default() -> Self {
+        Self {
+            locator_len: Default::default(),
+            locator: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> Locator<'a> {
+impl<S: LocatorStorage> LocatorIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -45,7 +88,7 @@ impl<'a> Locator<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: LocatorFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -61,7 +104,24 @@ impl<'a> Locator<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LocatorFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                Locator::store_into(&mut _frame, &mut Locator::default())?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LocatorFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -76,13 +136,19 @@ impl<'a> Locator<'a> {
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let locator_len = cursor.read_vle_u64()?;
         let locator = {
-            let _n = locator_len as usize;
+            let _len = locator_len;
+            if _len > 255 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = core::str::from_utf8(raw)
                 .map_err(|_| CodecError::InvalidUtf8)?;
             cursor.advance(_n)?;
             _v
         };
+        let locator = ::sce_forge_runtime::codec::Bounded::new(locator).ok_or(CodecError::LengthOutOfRange)?;
+        let locator = locator.store::<S, LocatorLocatorField>()?;
         _out.locator_len = locator_len;
         _out.locator = locator;
         Ok(())
@@ -92,15 +158,15 @@ impl<'a> Locator<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 137;
+    pub const MAX_ENCODED_BYTES: usize = 264;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        Locator::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -129,11 +195,11 @@ impl<'a> Locator<'a> {
 /// computes those from what is ([`Locator::encode_source`]).
 pub trait LocatorSource {
     /// The `locator` field.
-    fn locator(&self) -> &str;
+    fn locator(&self) -> ::sce_forge_runtime::codec::Text<'_, 255>;
 }
 
 impl<T: LocatorSource + ?Sized> LocatorSource for &T {
-    fn locator(&self) -> &str {
+    fn locator(&self) -> ::sce_forge_runtime::codec::Text<'_, 255> {
         (**self).locator()
     }
 }
@@ -145,24 +211,18 @@ impl<T: LocatorSource + ?Sized> LocatorSource for &T {
 #[derive(Debug, Clone, Copy)]
 pub struct LocatorParts<'a> {
     /// The `locator` field.
-    pub locator: &'a str,
+    pub locator: ::sce_forge_runtime::codec::Text<'a, 255>,
 }
 
 impl<'a> LocatorSource for LocatorParts<'a> {
-    fn locator(&self) -> &str {
+    fn locator(&self) -> ::sce_forge_runtime::codec::Text<'_, 255> {
         self.locator
     }
 }
 
-impl<'a> LocatorSource for Locator<'a> {
-    fn locator(&self) -> &str {
-        self.locator
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> LocatorSource for LocatorOwned<S> {
-    fn locator(&self) -> &str {
-        ::sce_forge_runtime::codec::SceStr::as_str(&self.locator)
+impl<S: LocatorStorage> LocatorSource for LocatorOwned<S> {
+    fn locator(&self) -> ::sce_forge_runtime::codec::Text<'_, 255> {
+        self.locator.as_text()
     }
 }
 
@@ -183,7 +243,7 @@ impl<'a> Locator<'a> {
         let _n_d_locator_len_0: usize = src.locator().len();
         let _d_locator_len: u64 = ::sce_forge_runtime::codec::widen_usize(_n_d_locator_len_0);
         w.write_vle_u64(_d_locator_len)?;
-        w.write_bytes(src.locator().as_bytes())?;
+        w.write_bytes(src.locator().into_inner().as_bytes())?;
         Ok(())
     }
 
@@ -280,17 +340,9 @@ impl<'a> Locator<'a> {
 // `let v: LocatorOwned = LocatorOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct LocatorOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub locator_len: u64,
-    pub locator: S::Str<128>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> Locator<'a> {
@@ -300,15 +352,16 @@ impl<'a> Locator<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<LocatorOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: LocatorFrom<'a>>(self) -> Result<LocatorOwned<S>, CodecError> {
         Ok(LocatorOwned {
             locator_len: self.locator_len,
-            locator: <S::Str<128> as ::sce_forge_runtime::codec::SceStr>::from_view(self.locator)?,
+            locator: self.locator.store::<S, LocatorLocatorField>()?,
         })
     }
 
@@ -320,7 +373,7 @@ impl<'a> Locator<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> LocatorOwned<S> {
+impl<S: LocatorStorage> LocatorOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -344,7 +397,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LocatorOwned<S> {
     /// and is not to be read.
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut Locator<'o>) {
         _out.locator_len = self.locator_len;
-        _out.locator = ::sce_forge_runtime::codec::SceStr::as_str(&self.locator);
+        _out.locator = self.locator.as_text();
         
     }
 
@@ -356,33 +409,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LocatorOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<LocatorOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> LocatorFrom<'x>>(&self) -> Result<LocatorOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> LocatorOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`Locator::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Locator::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Locator::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -399,10 +427,10 @@ impl<'a> Locator<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<LocatorOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: LocatorStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<LocatorOwned<S>, CodecError> {
         Ok(LocatorOwned {
             locator_len: self.locator_len,
-            locator: <S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<128>(origin, self.locator)?,
+            locator: ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<LocatorLocatorField>(origin, self.locator.into_inner()))?,
         })
     }
 }

@@ -378,21 +378,21 @@ pub enum SceType {
 /// access (e.g. `"decoded.sensor_id"`).
 ///
 /// SCE decodes a scalar `string` / `bytes` codec field as a **borrowed** view
-/// — `&'a str` / `&'a [u8]`, the lifetime tied to the wire buffer
-/// (`sce-build` generator: `(Rust, String) => "&'a str"`,
-/// `(Rust, Bytes) => "&'a [u8]"`). The native-lowered payload struct, by
-/// contrast, holds the field **owned** — `String` / `Vec<u8>`, no lifetime: it
-/// derives `Clone + Default` and the engine queues it past the buffer's life.
-/// For `string`, `.into()` bridges `<&str as Into<SceString<N>>>` — `SceString`
-/// is still a type alias, so the infallible `From` holds. `bytes` is NOT handled
-/// here: since SCE 1d439ea07 `SceBytes<N>` is an N-preserving newtype with only a
-/// fallible `from_slice` (no `From<&[u8]>`), so the caller threads a pre-conversion
+/// within the field's bound — `Bounded<&'a str, MAX>` / `Bounded<&'a [u8], MAX>`
+/// (SCE ADR 0077), the lifetime tied to the wire buffer; `.into_inner()` is the
+/// view itself. The native-lowered payload struct, by contrast, holds the field
+/// **owned** — `String` / `Vec<u8>`, no lifetime: it derives `Clone + Default`
+/// and the engine queues it past the buffer's life. For `string`, `.into()`
+/// bridges `<&str as Into<SceString<N>>>` — `SceString` is still a type alias,
+/// so the infallible `From` holds. `bytes` is NOT handled here: since SCE
+/// 1d439ea07 `SceBytes<N>` is an N-preserving newtype with only a fallible
+/// `from_slice` (no `From<&[u8]>`), so the caller threads a pre-conversion
 /// (`match SceBytes::from_slice(..) { .. Err => return false }`) instead. A
 /// primitive (`Copy`) field needs no conversion and moves verbatim, keeping the
 /// primitive-only golden byte-identical.
 fn owned_field_move(sce_type: &SceType, expr: &str) -> String {
     match sce_type {
-        SceType::Primitive(p) if p == "string" => format!("{expr}.into()"),
+        SceType::Primitive(p) if p == "string" => format!("{expr}.into_inner().into()"),
         _ => expr.to_string(),
     }
 }
@@ -818,7 +818,7 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                         .map(|f| match &f.sce_type {
                             SceType::Primitive(p) if p == "bytes" => {
                                 pre_conversions.push_str(&format!(
-                                    "\n        let {id} = match ::sce_rust_runtime::SceBytes::from_slice(decoded.{id}) {{\n            \
+                                    "\n        let {id} = match ::sce_rust_runtime::SceBytes::from_slice(decoded.{id}.into_inner()) {{\n            \
                                      Ok(_v) => _v,\n            Err(_) => return false,\n        }};",
                                     id = f.id
                                 ));
@@ -1956,15 +1956,15 @@ pub fn dispatch_switchboard(
 
         // Primitive moves verbatim (Copy out of the borrowed struct).
         assert!(out.contains("celsius_centi: decoded.celsius_centi,"));
-        // Borrowed string view is deep-copied via `.into()` (`&str -> SceString`,
-        // still a type alias so the infallible `From` holds).
-        assert!(out.contains("sensor_id: decoded.sensor_id.into(),"));
+        // Borrowed string view, out of its bound, is deep-copied via `.into()`
+        // (`&str -> SceString`, still a type alias so the infallible `From` holds).
+        assert!(out.contains("sensor_id: decoded.sensor_id.into_inner().into(),"));
         // Borrowed bytes view goes through the FALLIBLE `SceBytes::from_slice`
         // (N-preserving newtype since SCE 1d439ea07) in a pre-conversion that
         // bails like a decode miss — never `.into()`, never a panic.
-        assert!(
-            out.contains("let raw = match ::sce_rust_runtime::SceBytes::from_slice(decoded.raw) {")
-        );
+        assert!(out.contains(
+            "let raw = match ::sce_rust_runtime::SceBytes::from_slice(decoded.raw.into_inner()) {"
+        ));
         assert!(out.contains("Err(_) => return false,"));
         assert!(out.contains("\n            raw,"));
         assert!(!out.contains("raw: decoded.raw.into(),"));

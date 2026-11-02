@@ -217,7 +217,7 @@ impl Registry {
 
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
-    pub(super) fn dispatch_event(&mut self, id: FaceId, event: IterationEvent<'_>) {
+    pub(super) fn dispatch_event(&mut self, id: FaceId, event: IterationEvent<'_, '_>) {
         if let Some(Split { app, face, others }) = self.split(id) {
             app.dispatch_event_among(&mut face.peer, &mut face.gets, event, &others);
         }
@@ -262,7 +262,7 @@ impl Registry {
     /// Fan and drain in one call, the `Final`s with the rest: what a session with no queryable
     /// to wait for does with each event.
     #[cfg(not(feature = "queryable"))]
-    pub(super) fn dispatch<S>(&mut self, id: FaceId, event: IterationEvent<'_>, actions: &S)
+    pub(super) fn dispatch<S>(&mut self, id: FaceId, event: IterationEvent<'_, '_>, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {

@@ -1860,7 +1860,7 @@ fn keyexpr(suffix: &'static str) -> wz_codecs::wireexpr::Wireexpr<'static> {
             wz_codecs::wireexpr_local::WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
             },
         ),
     }
@@ -1900,7 +1900,10 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -1908,7 +1911,6 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// The closing `ResponseFinal`.
@@ -2322,13 +2324,15 @@ fn four_named_nodes() -> Vec<u8> {
                 keyexpr: keyexpr("demo/p"),
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                     payload_len: Some(payload.len() as u64),
-                    payload: Some(payload),
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: None,
+                        payload: wz_codecs::Bounded::new(payload).unwrap(),
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture message is encodable"),
+            .encode_to_vec(),
         );
         frame
     };
@@ -5653,7 +5657,7 @@ fn aliased_keyexpr(
             wz_codecs::wireexpr_local::WireexprLocal {
                 id,
                 suffix_len: suffix.map(|s| s.len() as u64),
-                suffix,
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
             },
         ),
     }
@@ -5674,7 +5678,6 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// A reply under an ALIASED keyexpr, carrying `payload`.
@@ -5696,7 +5699,10 @@ fn aliased_reply(
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -5704,7 +5710,6 @@ fn aliased_reply(
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// R311y701 ([REDACTED-REQ], PF2) — A KEYEXPR NAMED BY NUMERIC ID IS RESOLVED, and a

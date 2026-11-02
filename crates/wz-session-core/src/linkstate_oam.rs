@@ -357,11 +357,7 @@ mod tests {
         match try_parse_linkstate_oam(&oam) {
             LinkstateOam::Decoded(parsed) => {
                 assert_eq!(
-                    parsed
-                        .try_as_borrowed()
-                        .unwrap()
-                        .encode_to_vec()
-                        .expect("a parsed list is encodable"),
+                    parsed.try_as_borrowed().unwrap().encode_to_vec(),
                     list_wire,
                     "round-trip must reproduce the inner list bytes"
                 );
@@ -384,13 +380,7 @@ mod tests {
         let oam = decode_oam_owned(&OAM_WIRE);
         match try_parse_linkstate_oam(&oam) {
             LinkstateOam::Decoded(list) => {
-                assert_eq!(
-                    list.try_as_borrowed()
-                        .unwrap()
-                        .encode_to_vec()
-                        .expect("a parsed list is encodable"),
-                    LIST_WIRE
-                );
+                assert_eq!(list.try_as_borrowed().unwrap().encode_to_vec(), LIST_WIRE);
                 assert_eq!(list.num_link_states, 1);
                 assert_eq!(list.link_states.len(), 1);
                 assert_eq!(list.link_states[0].psid, 1);
@@ -582,11 +572,7 @@ mod tests {
                 minimal_list_wire(64),
             ] {
                 let list = decode_list_owned(&wire);
-                let by_codec = list
-                    .try_as_borrowed()
-                    .expect("in bound")
-                    .encode_to_vec()
-                    .expect("a list in bound is encodable");
+                let by_codec = list.try_as_borrowed().expect("in bound").encode_to_vec();
                 assert_eq!(encode_linkstate_list(&list), Ok(by_codec.clone()));
                 assert_eq!(by_codec, wire);
             }
@@ -654,10 +640,12 @@ mod tests {
     fn round_trips_weighted_list() {
         let list = round_trip(&WEIGHTED_LIST_WIRE);
         assert_eq!(list.link_states.len(), 1);
-        let weights = list.link_states[0]
-            .weights
-            .as_ref()
-            .expect("WGT set => weights present through the OAM carrier");
+        let wz_codecs::linkstate::LinkstateOptionsH::H { links_weights } =
+            &list.link_states[0].options_h
+        else {
+            panic!("WGT set => weights present through the OAM carrier");
+        };
+        let weights = links_weights.second();
         assert_eq!(weights.len(), 2);
         assert_eq!(weights[1].weight, 300);
     }

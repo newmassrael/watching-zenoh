@@ -47,7 +47,7 @@
 
 use alloc::boxed::Box;
 
-use wz_codecs::ext_entry::ExtEntryOwned;
+use crate::transport_profile::ExtEntryOwned;
 
 use crate::auth_dispatch::{AuthError, AuthMethod, AuthSubExt};
 
@@ -345,10 +345,10 @@ pub fn decode_multilink_ext(extensions: &[ExtEntryOwned], eid: u8) -> Option<Aut
 mod tests {
     use super::*;
     use crate::ext_chain::{decode_ext_chain, encode_ext_chain};
+    use crate::transport_profile::ExtEntryOwnedVariant;
     use alloc::vec;
     use alloc::vec::Vec;
     use sce_forge_runtime::codec::SceCursor;
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
 
     /// A codec-only mock method exercising the 0x4 envelope framing (header
     /// bytes + un-wrapped body + demux) in isolation from any RSA crypto (the
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn decode_tells_the_multilink_ext_by_its_identity_not_its_id() {
         use crate::ext_header::{lookalike_headers, EXT_FLAG_Z};
-        use wz_codecs::ext_zbuf::ExtZbufOwned;
+        use crate::transport_profile::ExtZbufOwned;
         let entry = |header: u8| ExtEntryOwned {
             header,
             body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
@@ -434,7 +434,7 @@ mod tests {
     /// because they are different extensions upstream.
     #[test]
     fn each_stage_reads_the_multilink_ext_of_its_own_identity() {
-        use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+        use crate::transport_profile::ExtEntryOwnedVariant;
         use wz_codecs::ext_unit::ExtUnit;
         let unit = ExtEntryOwned {
             header: MULTILINK_ACK_EXT_EID,

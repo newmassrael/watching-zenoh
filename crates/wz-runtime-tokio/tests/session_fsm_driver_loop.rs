@@ -398,9 +398,7 @@ async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
         header: 0x1D,
         ..Push::default()
     };
-    let push_bytes = wz_codecs_test_support::with_empty_inline_put(push)
-        .encode_to_vec()
-        .expect("a fixture Push encodes");
+    let push_bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
 
     // Frame envelope: T_MID_FRAME | R flag = 0x25, sn=2 VLE = 0x02,
     // tail = push_bytes.
@@ -962,9 +960,7 @@ async fn a_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
             header: 0x1D,
             ..Push::default()
         };
-        wz_codecs_test_support::with_empty_inline_put(push)
-            .encode_to_vec()
-            .expect("a fixture Push encodes")
+        wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec()
     };
     // [Frame(reliable, sn 1) Push][Frame(best-effort, sn 0) Push][Frame(reliable, sn 2) Push]
     let mut unit = vec![0x25, 0x01];
@@ -1025,9 +1021,7 @@ async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_uni
             header: 0x1D,
             ..Push::default()
         };
-        wz_codecs_test_support::with_empty_inline_put(push)
-            .encode_to_vec()
-            .expect("a fixture Push encodes")
+        wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec()
     };
     // [Frame(reliable, sn 1) Push][Frame(best-effort, sn 0) Push][Frame(reliable, sn 2) Push]
     let mut unit = vec![0x25, 0x01];
@@ -1039,7 +1033,7 @@ async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_uni
 
     let mut record = new_record_buf();
     let mut seen: Vec<(bool, u64)> = Vec::new();
-    let mut sink = |event: IterationEvent<'_>| match event {
+    let mut sink = |event: IterationEvent<'_, '_>| match event {
         IterationEvent::InPlace(rec) => seen.push((rec.reliable(), rec.sn())),
         IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             reliable,

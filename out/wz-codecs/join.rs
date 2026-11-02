@@ -21,20 +21,68 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `zid` of `Join`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct Join<'a> {
+pub struct JoinZidField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<JoinZidField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<16>;
+}
+
+/// What `JoinIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait JoinStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<JoinZidField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<JoinZidField>> JoinStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside JoinStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait JoinFrom<'f>: JoinStorage + ::sce_forge_runtime::codec::StoresBytes<'f, JoinZidField> {}
+
+impl<'f, S: JoinStorage + ::sce_forge_runtime::codec::StoresBytes<'f, JoinZidField>> JoinFrom<'f> for S {}
+
+// `JoinIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `Join<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `JoinOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinIn<S: JoinStorage> {
     pub version: u8,
     pub cbyte: u8,
-    pub zid: &'a [u8],
+    pub zid: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<JoinZidField>>::Bytes, 16, 1>,
     pub s: Option<JoinS>,
     pub lease: u64,
     pub next_sn_reliable: u64,
     pub next_sn_best_effort: u64,
 }
 
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
 #[allow(dead_code)]
-impl<'a> Join<'a> {
+pub type Join<'a> = JoinIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type JoinOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = JoinIn<S>;
+
+impl<S: JoinStorage> Default for JoinIn<S> {
+    fn default() -> Self {
+        Self {
+            version: Default::default(),
+            cbyte: Default::default(),
+            zid: Default::default(),
+            s: Default::default(),
+            lease: Default::default(),
+            next_sn_reliable: Default::default(),
+            next_sn_best_effort: Default::default(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<S: JoinStorage> JoinIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -50,7 +98,7 @@ impl<'a> Join<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>, s: u8) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>, s: u8) -> Result<Self, CodecError> where S: JoinFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out, s)?;
         Ok(_out)
@@ -66,7 +114,24 @@ impl<'a> Join<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, s: u8) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, s: u8) -> Result<(), CodecError> where S: JoinFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out, s) {
+            Err(CodecError::CapacityExceeded) => {
+                Join::store_into(&mut _frame, &mut Join::default(), s)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, s: u8) -> Result<(), CodecError> where S: JoinFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -97,12 +162,15 @@ impl<'a> Join<'a> {
             _v
         };
         let zid = {
-            let _n = (((cbyte >> 4) & 0xF) as usize).wrapping_add(1);
+            let _len = (cbyte >> 4) & 0xF;
+            let _n = (_len as usize) + 1;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
             _v
         };
+        let zid = ::sce_forge_runtime::codec::Bounded::new(zid).ok_or(CodecError::LengthOutOfRange)?;
+        let zid = zid.store::<S, JoinZidField>()?;
         let sn_res = if (s & 0x01u8) != 0 {
             let raw = cursor.peek_slice(1)?;
             let _v = raw[0];
@@ -160,35 +228,32 @@ impl<'a> Join<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 49;
 
-    /// Encode `self` into the caller-owned sink. Returns the value's refusal
-    /// when the encoding cannot carry it (a length past its type, a list past
-    /// its bound, a gate that disagrees with a presence; the document declares
-    /// `sce:encode-may-fail`), or the sink's own error:
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
-    /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w)
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        Join::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
-    /// `encode` refuses a value with: one the encoding cannot carry (a
-    /// length past its type, a list past its bound) or one a gate
-    /// disagrees with. Callers targeting zero-alloc hot paths should call
-    /// `encode` directly against a caller-owned sink.
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -214,7 +279,7 @@ pub trait JoinSource {
     /// The `cbyte` field.
     fn cbyte(&self) -> u8;
     /// The `zid` field.
-    fn zid(&self) -> &[u8];
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1>;
     /// The `lease` field.
     fn lease(&self) -> u64;
     /// The `next_sn_reliable` field.
@@ -232,7 +297,7 @@ impl<T: JoinSource + ?Sized> JoinSource for &T {
     fn cbyte(&self) -> u8 {
         (**self).cbyte()
     }
-    fn zid(&self) -> &[u8] {
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         (**self).zid()
     }
     fn lease(&self) -> u64 {
@@ -260,7 +325,7 @@ pub struct JoinParts<'a> {
     /// The `cbyte` field.
     pub cbyte: u8,
     /// The `zid` field.
-    pub zid: &'a [u8],
+    pub zid: ::sce_forge_runtime::codec::Bytes<'a, 16, 1>,
     /// The `lease` field.
     pub lease: u64,
     /// The `next_sn_reliable` field.
@@ -281,7 +346,7 @@ impl<'a> JoinSource for JoinParts<'a> {
     fn cbyte(&self) -> u8 {
         self.cbyte
     }
-    fn zid(&self) -> &[u8] {
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         self.zid
     }
     fn lease(&self) -> u64 {
@@ -295,7 +360,7 @@ impl<'a> JoinSource for JoinParts<'a> {
     }
 }
 
-impl<'a> JoinSource for Join<'a> {
+impl<S: JoinStorage> JoinSource for JoinOwned<S> {
     fn s(&self) -> Option<JoinS> {
         self.s
     }
@@ -305,32 +370,8 @@ impl<'a> JoinSource for Join<'a> {
     fn cbyte(&self) -> u8 {
         self.cbyte
     }
-    fn zid(&self) -> &[u8] {
-        self.zid
-    }
-    fn lease(&self) -> u64 {
-        self.lease
-    }
-    fn next_sn_reliable(&self) -> u64 {
-        self.next_sn_reliable
-    }
-    fn next_sn_best_effort(&self) -> u64 {
-        self.next_sn_best_effort
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinSource for JoinOwned<S> {
-    fn s(&self) -> Option<JoinS> {
-        self.s
-    }
-    fn version(&self) -> u8 {
-        self.version
-    }
-    fn cbyte(&self) -> u8 {
-        self.cbyte
-    }
-    fn zid(&self) -> &[u8] {
-        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid)
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
+        self.zid.as_bytes()
     }
     fn lease(&self) -> u64 {
         self.lease
@@ -348,9 +389,9 @@ impl<'a> Join<'a> {
     /// Encode what `src` says into the caller-owned sink: the bytes
     /// [`Self::encode`] writes for the value it holds, read through
     /// [`JoinSource`]. A length, a count or a gate flag is computed from what
-    /// `src` presents, and a value the encoding cannot carry is refused
-    /// before the first byte is written.
-    pub fn encode_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source(src, w)
     }
 
@@ -363,20 +404,17 @@ impl<'a> Join<'a> {
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: JoinSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let (_m_sn_res, _m_batch_size) = match src.s() {
             Some(JoinS { sn_res, batch_size }) => (Some(sn_res), Some(batch_size)),
             None => (None, None),
         };
-        let _n_d_cbyte_zid_len_m1_0: usize = src.zid().len().checked_sub(1).ok_or(CodecError::LengthOutOfRange)?;
-        if _n_d_cbyte_zid_len_m1_0 > 0xF {
-            return Err(CodecError::LengthOutOfRange);
-        }
+        let _n_d_cbyte_zid_len_m1_0: usize = src.zid().len() - 1;
         let _v_cbyte_zid_len_m1: u8 = _n_d_cbyte_zid_len_m1_0 as u8;
         let _c_cbyte: u8 = (src.cbyte() & !0xF0) | (_v_cbyte_zid_len_m1 << 4);
         w.write_u8(src.version())?;
         w.write_u8(_c_cbyte)?;
-        w.write_bytes(src.zid())?;
+        w.write_bytes(src.zid().into_inner())?;
         if let Some(_v) = _m_sn_res {
             w.write_u8(_v)?;
         }
@@ -393,17 +431,17 @@ impl<'a> Join<'a> {
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: JoinSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+    pub fn count_source<S: JoinSource + ?Sized>(src: &S) -> usize {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c)?;
-        Ok(_c.len())
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
     }
 }
 
 impl<'a, S: JoinSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Join<'a> {
-    type Error<E> = CodecError;
+    type Error<E> = E;
 
-    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
         Self::write_source(src, w)
     }
 }
@@ -411,10 +449,12 @@ impl<'a, S: JoinSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for 
 #[allow(dead_code)]
 impl<'a> Join<'a> {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
-    /// with nothing written, or the refusal that encode would give. The result
-    /// writes the frame into a window of exactly that size and cannot fail.
-    pub fn measure<S: JoinSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
-        ::sce_forge_runtime::codec::measure(src)
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: JoinSource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
     }
 
     /// Write `src` into `window` in one pass and return the bytes it is, for a
@@ -481,39 +521,9 @@ impl<'a> Join<'a> {
 // `let v: JoinOwned = JoinOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct JoinOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub version: u8,
-    pub cbyte: u8,
-    pub zid: S::Bytes<16>,
-    pub s: Option<JoinS>,
-    pub lease: u64,
-    pub next_sn_reliable: u64,
-    pub next_sn_best_effort: u64,
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
-    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
-    // bit getters over the copied carrier (rkyv Archived↔native getter
-    // parity), so owned consumers read `{Codec}Owned` with the same API as
-    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
-    // Read-only — write accessors belong with an owned-encode path, which
-    // does not exist yet.
-    pub fn whatami(&self) -> u8 {
-        self.cbyte & 0x03
-    }
-
-    pub fn zid_len_m1(&self) -> u8 {
-        (self.cbyte >> 4) & 0x0F
-    }
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> Join<'a> {
@@ -523,16 +533,17 @@ impl<'a> Join<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<JoinOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: JoinFrom<'a>>(self) -> Result<JoinOwned<S>, CodecError> {
         Ok(JoinOwned {
             version: self.version,
             cbyte: self.cbyte,
-            zid: <S::Bytes<16> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.zid)?,
+            zid: self.zid.store::<S, JoinZidField>()?,
             s: self.s,
             lease: self.lease,
             next_sn_reliable: self.next_sn_reliable,
@@ -548,7 +559,7 @@ impl<'a> Join<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
+impl<S: JoinStorage> JoinOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -573,7 +584,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut Join<'o>) {
         _out.version = self.version;
         _out.cbyte = self.cbyte;
-        _out.zid = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid);
+        _out.zid = self.zid.as_bytes();
         _out.s = self.s;
         _out.lease = self.lease;
         _out.next_sn_reliable = self.next_sn_reliable;
@@ -589,37 +600,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<JoinOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> JoinFrom<'x>>(&self) -> Result<JoinOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`Join::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Join::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Join::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
     }
 }
 
@@ -636,11 +618,11 @@ impl<'a> Join<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<JoinOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: JoinStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<JoinOwned<S>, CodecError> {
         Ok(JoinOwned {
             version: self.version,
             cbyte: self.cbyte,
-            zid: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<16>(origin, self.zid)?,
+            zid: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<JoinZidField>(origin, self.zid.into_inner()))?,
             s: self.s,
             lease: self.lease,
             next_sn_reliable: self.next_sn_reliable,

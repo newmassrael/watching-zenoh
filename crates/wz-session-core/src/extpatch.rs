@@ -53,7 +53,7 @@
 //! per-session state and the merge living in
 //! [`crate::session_actions`] / [`crate::drive`].
 
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
 
 /// `_Z_MSG_EXT_ID_INIT_PATCH` — the patch extension's id in the
 /// establishment (Init / Open) ext space (`0x1` QoS, `0x2` Shm, `0x3`

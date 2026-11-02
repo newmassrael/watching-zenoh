@@ -49,7 +49,7 @@
      envelope's default state is wired. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="declare">
+       sce:kind="codec" sce:default-endian="big" name="declare">
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <sce:import src="decl_final.scxml" kind="codec" as="codec_zenoh_decl_final"/>
   <sce:import src="decl_kexpr.scxml" kind="codec" as="codec_zenoh_decl_kexpr"/>
@@ -69,7 +69,7 @@
     <sce:field id="interest_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
                sce:present-if="header.I"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
-                   max-depth="8" on-overflow="reject"
+                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
     <sce:variant tag="peek.mid">

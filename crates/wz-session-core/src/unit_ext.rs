@@ -18,7 +18,7 @@
 //! says to abstract as the MECHANISM while keeping the DATA (the id constant + the
 //! zenoh-cited wrapper) per-capability.
 
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_unit::ExtUnit;
 
 /// Encode a zero-payload UNIT capability ext with `ext_id` (UNIT encoding, no

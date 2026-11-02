@@ -7424,14 +7424,16 @@ mod tests {
     }
 
     /// A literal keyexpr: `id 0` in the SENDER's space plus the suffix, which
-    /// resolves without a Declare having gone past before the tap started.
-    fn literal(keyexpr: &'static str) -> wz_codecs::wireexpr::Wireexpr<'static> {
+    /// resolves without a Declare having gone past before the tap started. At the
+    /// lifetime of the record it goes into, in which the codec's borrowed messages
+    /// are invariant, so it can ride with a payload the test holds locally.
+    fn literal<'a>(keyexpr: &'a str) -> wz_codecs::wireexpr::Wireexpr<'a> {
         wz_codecs::wireexpr::Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
                 wz_codecs::wireexpr_local::WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
-                    suffix: Some(keyexpr),
+                    suffix: Some(wz_codecs::Bounded::new(keyexpr).unwrap()),
                 },
             ),
         }
@@ -7465,8 +7467,7 @@ mod tests {
                 .expect("the production subscriber builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec()
-                .expect("the subscriber declare is encodable"),
+                .encode_to_vec(),
         );
         let put = framed_frame(
             1,
@@ -7475,13 +7476,15 @@ mod tests {
                 keyexpr: literal("demo/temp"),
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                     payload_len: Some(5),
-                    payload: Some(b"hello"),
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: None,
+                        payload: wz_codecs::Bounded::new(b"hello" as &[u8]).unwrap(),
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture Push is encodable"),
+            .encode_to_vec(),
         );
         let query = framed_frame(
             2,
@@ -7507,7 +7510,11 @@ mod tests {
                 body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
                     wz_codecs::msg_put::MsgPut {
                         payload_len: Some(6),
-                        payload: Some(b"answer"),
+                        extensions_has_0x12:
+                            wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                                extensions: None,
+                                payload: wz_codecs::Bounded::new(b"answer" as &[u8]).unwrap(),
+                            },
                         ..Default::default()
                     },
                 ),
@@ -7515,8 +7522,7 @@ mod tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture Response is encodable");
+        .encode_to_vec();
         answer_records.extend_from_slice(
             &wz_codecs::response_final::ResponseFinal {
                 request_id: 7,
@@ -7540,8 +7546,7 @@ mod tests {
             .expect("the production interest builder")
             .try_as_borrowed()
             .expect("re-borrow")
-            .encode_to_vec()
-            .expect("the interest is encodable"),
+            .encode_to_vec(),
         );
 
         let mut low_to_high = framed_init(&ZID_A);
@@ -8072,20 +8077,21 @@ mod tests {
                 .expect("subscriber")
                 .try_as_borrowed()
                 .expect("borrow")
-                .encode_to_vec()
-                .expect("the subscriber declare is encodable");
+                .encode_to_vec();
         let push = wz_codecs::push::Push {
             header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: literal("demo/temp"),
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 payload_len: Some(5),
-                payload: Some(b"hello"),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(b"hello" as &[u8]).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture Push is encodable");
+        .encode_to_vec();
         let units = [
             (false, framed(&[0x81, 9, 2, 1, 5], 2)),
             (true, framed(&[0xa1, 9, 2, 2, 0, 5], 2)),
@@ -9576,14 +9582,17 @@ mod tests {
                     body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
                         wz_codecs::msg_put::MsgPut {
                             payload_len: Some(frame.len() as u64),
-                            payload: Some(&frame),
+                            extensions_has_0x12:
+                                wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                                    extensions: None,
+                                    payload: wz_codecs::Bounded::new(&frame[..]).unwrap(),
+                                },
                             ..Default::default()
                         },
                     ),
                     ..Default::default()
                 }
-                .encode_to_vec()
-                .expect("a fixture Push is encodable"),
+                .encode_to_vec(),
             ));
         }
         let low = tcp_packet(1000, &low_to_high);
@@ -9689,13 +9698,15 @@ mod tests {
                 keyexpr: literal("demo/sensor"),
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                     payload_len: Some(payload.len() as u64),
-                    payload: Some(payload),
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: None,
+                        payload: wz_codecs::Bounded::new(payload).unwrap(),
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture Push is encodable"),
+            .encode_to_vec(),
         );
         let mut low_to_high = framed_init(&ZID_A);
         low_to_high.extend_from_slice(&put);
@@ -9759,13 +9770,15 @@ mod tests {
                         schema: None,
                     }),
                     payload_len: Some(payload.len() as u64),
-                    payload: Some(payload),
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: None,
+                        payload: wz_codecs::Bounded::new(payload).unwrap(),
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture Push is encodable"),
+            .encode_to_vec(),
         )
     }
 
@@ -13582,9 +13595,9 @@ mod tests {
         scout.set_what(0x03);
         scout.set_i(true);
         scout.set_zid_len_m1(3);
-        scout.zid = Some(&[0x11, 0x22, 0x33, 0x44]);
+        scout.zid = Some(wz_codecs::Bounded::new(&[0x11u8, 0x22, 0x33, 0x44] as &[u8]).unwrap());
         let mut wire = vec![wz_session_core::wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout is encodable"));
+        wire.extend_from_slice(&scout.encode_to_vec());
         udp_packet(asker, asker_port, [224, 0, 0, 224], 7446, &wire)
     }
 
@@ -13594,12 +13607,12 @@ mod tests {
         let hello = wz_codecs::hello::Hello {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
-            zid: &[0x55, 0x66, 0x77, 0x88],
+            zid: wz_codecs::Bounded::new(&[0x55u8, 0x66, 0x77, 0x88] as &[u8]).unwrap(),
             num_locators: None,
             locators: None,
         };
         let mut wire = vec![wz_session_core::wire_const::S_MID_HELLO];
-        wire.extend_from_slice(&hello.encode_to_vec().expect("a fixture Hello is encodable"));
+        wire.extend_from_slice(&hello.encode_to_vec());
         udp_packet(responder, 7447, asker, asker_port, &wire)
     }
 
@@ -16108,7 +16121,11 @@ mod tests {
                         body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
                             wz_codecs::msg_put::MsgPut {
                                 payload_len: Some(1),
-                                payload: Some(b"r"),
+                                extensions_has_0x12:
+                                    wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                                        extensions: None,
+                                        payload: wz_codecs::Bounded::new(b"r" as &[u8]).unwrap(),
+                                    },
                                 ..Default::default()
                             },
                         ),
@@ -16118,7 +16135,6 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture Response is encodable")
         };
         let close_of = |request_id: u64| {
             wz_codecs::response_final::ResponseFinal {
@@ -16135,12 +16151,14 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture Push is encodable")
         };
         let put = push(wz_codecs::push::PushVariant::CodecZenohMsgPut(
             wz_codecs::msg_put::MsgPut {
                 payload_len: Some(5),
-                payload: Some(b"hello"),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(b"hello" as &[u8]).unwrap(),
+                },
                 ..Default::default()
             },
         ));
@@ -16152,8 +16170,7 @@ mod tests {
                 .expect("the production subscriber builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec()
-                .expect("the subscriber declare is encodable");
+                .encode_to_vec();
         let interest = wz_session_core::interest_build::build_interest_subscribers(
             9,
             true,
@@ -16164,8 +16181,7 @@ mod tests {
         .expect("the production interest builder")
         .try_as_borrowed()
         .expect("re-borrow")
-        .encode_to_vec()
-        .expect("the interest is encodable");
+        .encode_to_vec();
 
         let mut low_to_high = framed_init(&ZID_A);
         low_to_high.extend_from_slice(&framed_transport(&[
@@ -16942,14 +16958,17 @@ mod tests {
                     body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
                         wz_codecs::msg_put::MsgPut {
                             payload_len: Some(frame.len() as u64),
-                            payload: Some(&frame),
+                            extensions_has_0x12:
+                                wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                                    extensions: None,
+                                    payload: wz_codecs::Bounded::new(&frame[..]).unwrap(),
+                                },
                             ..Default::default()
                         },
                     ),
                     ..Default::default()
                 }
-                .encode_to_vec()
-                .expect("a fixture Push is encodable"),
+                .encode_to_vec(),
             );
             packets.push(tcp_packet_on(2000 + flow as u16, true, next[flow], &record));
             next[flow] += record.len() as u32;
@@ -17422,7 +17441,11 @@ mod tests {
                 body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
                     wz_codecs::msg_put::MsgPut {
                         payload_len: Some(6),
-                        payload: Some(b"answer"),
+                        extensions_has_0x12:
+                            wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                                extensions: None,
+                                payload: wz_codecs::Bounded::new(b"answer" as &[u8]).unwrap(),
+                            },
                         ..Default::default()
                     },
                 ),
@@ -17430,8 +17453,7 @@ mod tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture Response is encodable");
+        .encode_to_vec();
         answer_records.extend_from_slice(
             &wz_codecs::response_final::ResponseFinal {
                 request_id: 7,

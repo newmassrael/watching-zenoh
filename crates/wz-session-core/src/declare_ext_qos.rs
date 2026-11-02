@@ -87,12 +87,11 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::CodecStorage;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::{Bounded, CodecError};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use wz_codecs::declare::DeclareOwned;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryStorage};
 use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "alloc")]
 use wz_codecs::interest::InterestOwned;
@@ -139,7 +138,7 @@ pub(crate) const DECLARE_ENVELOPE_HEADER: u8 =
 /// Build the `ext_qos` extension entry carrying `qos`. Terminal header (the
 /// caller's chain normalisation via [`ext_nodeid::apply_chain_z_bits`] sets the
 /// continuation bit if another entry follows).
-pub fn qos_ext<S: CodecStorage>(qos: QosLevel) -> ExtEntryOwned<S> {
+pub fn qos_ext<S: ExtEntryStorage>(qos: QosLevel) -> ExtEntryOwned<S> {
     ExtEntryOwned {
         header: QOS_EXT_HEADER,
         body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
@@ -174,7 +173,7 @@ pub fn qos_ext<S: CodecStorage>(qos: QosLevel) -> ExtEntryOwned<S> {
 /// change reverted.
 #[cfg(feature = "alloc")]
 #[inline(never)]
-pub fn declare_envelope_extensions() -> Bounded<Vec<ExtEntryOwned>, 8> {
+pub fn declare_envelope_extensions() -> Bounded<Vec<ExtEntryOwned>, 8, 1> {
     crate::held_list::one_entry(qos_ext(QOS_DECLARE))
 }
 
@@ -186,7 +185,7 @@ pub fn declare_envelope_extensions() -> Bounded<Vec<ExtEntryOwned>, 8> {
 /// Carrier-agnostic because the chain is: the two public readers below differ
 /// only in which struct's field they hand over.
 #[cfg(feature = "alloc")]
-fn read_qos_chain<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosLevel {
+fn read_qos_chain<S: ExtEntryStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosLevel {
     read_qos_in(exts.map(Vec::as_slice))
 }
 
@@ -231,8 +230,8 @@ pub(crate) fn qos_of_raw(raw: Option<u64>) -> QosLevel {
 /// An `Err` is a chain at its bound with no room for the entry
 /// ([`crate::held_list::edit_chain`]): the message cannot be sent.
 #[cfg(feature = "alloc")]
-fn set_qos_chain<S: CodecStorage, const MAX: usize>(
-    exts: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX>>,
+fn set_qos_chain<S: ExtEntryStorage, const MAX: usize, const MIN: usize>(
+    exts: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX, MIN>>,
     header: &mut u8,
     qos: QosLevel,
 ) -> Result<(), CodecError> {

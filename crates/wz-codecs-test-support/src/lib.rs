@@ -6,10 +6,10 @@
 //! wz-runtime-tokio byte-compare regression tests.
 //!
 //! The wz builders and registries hold the lifetime-free `*Owned`
-//! mirrors that the SCE borrowed-view absorb introduced; encoding lives
-//! on the zero-copy borrowed view, so a test obtains wire bytes via
-//! `owned.try_as_borrowed().encode_to_vec()`. `.wire()` centralises
-//! that chain so the byte-compare tests read `built.wire()` uniformly.
+//! mirrors that the SCE borrowed-view absorb introduced; an owned value
+//! encodes itself at any storage profile, so a test obtains wire bytes via
+//! `owned.encode_to_vec()`. `.wire()` centralises that call so the
+//! byte-compare tests read `built.wire()` uniformly.
 //!
 //! R311fu — this trait was duplicated as a local `trait TestWire` (plus
 //! a macro) in three places to satisfy coherence: the projected types
@@ -21,10 +21,6 @@
 //! `#[cfg(test)]` modules via a dev-dep path edge, so production builds
 //! of either crate carry zero of this code regardless of workspace-level
 //! Cargo feature unification (recorded in this project's own notes as the sibling-crate fixture rule).
-//!
-//! The `.expect()` is sound by construction: wz builders emit far fewer
-//! extensions than the heapless ext cap `N`, so `try_as_borrowed` never
-//! returns the capacity-exceeded error in test fixtures.
 
 #![no_std]
 
@@ -87,47 +83,57 @@ impl<E: core::fmt::Debug> Encoded for Result<Vec<u8>, E> {
     feature = "codec-response-final"
 ))]
 macro_rules! impl_test_wire_owned {
-    ($($owned:ident)::+) => {
+    ($($owned:ident)::+ ; $($storage:ident)::+) => {
         // Generic over the storage profile: a message a receive path hands up
-        // is not on the default profile, and a projection that named one
-        // profile would give a test no `.wire()` on the other.
-        impl<S: wz_codecs::CodecStorage> TestWire for $($owned)::+<S> {
+        // is not on the default profile, and an impl that named one profile
+        // would give a test no `.wire()` on the other.
+        impl<S: $($storage)::+> TestWire for $($owned)::+<S> {
             fn wire(&self) -> Vec<u8> {
-                self.try_as_borrowed()
-                    .expect("test: <=N exts by construction")
-                    .encode_to_vec()
-                    .encoded()
+                self.encode_to_vec().encoded()
             }
         }
     };
 }
 
 #[cfg(feature = "codec-push")]
-impl_test_wire_owned!(wz_codecs::push::PushOwned);
+impl_test_wire_owned!(wz_codecs::push::PushOwned; wz_codecs::push::PushStorage);
 #[cfg(feature = "codec-declare")]
-impl_test_wire_owned!(wz_codecs::declare::DeclareOwned);
+impl_test_wire_owned!(wz_codecs::declare::DeclareOwned; wz_codecs::declare::DeclareStorage);
 #[cfg(feature = "codec-declare")]
-impl_test_wire_owned!(wz_codecs::interest::InterestOwned);
+impl_test_wire_owned!(wz_codecs::interest::InterestOwned; wz_codecs::interest::InterestStorage);
 #[cfg(feature = "codec-request")]
-impl_test_wire_owned!(wz_codecs::request::RequestOwned);
+impl_test_wire_owned!(wz_codecs::request::RequestOwned; wz_codecs::request::RequestStorage);
 #[cfg(feature = "codec-response")]
-impl_test_wire_owned!(wz_codecs::response::ResponseOwned);
+impl_test_wire_owned!(wz_codecs::response::ResponseOwned; wz_codecs::response::ResponseStorage);
 #[cfg(feature = "codec-response-final")]
-impl_test_wire_owned!(wz_codecs::response_final::ResponseFinalOwned);
+impl_test_wire_owned!(
+    wz_codecs::response_final::ResponseFinalOwned;
+    wz_codecs::response_final::ResponseFinalStorage
+);
+
+/// `put` set to the inline layout with an EMPTY payload, keeping its extension
+/// chain. A Put whose chain carries the shared-memory marker holds the sliced
+/// layout instead, which has no inline payload to empty, and is left as it is.
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+fn empty_inline_payload(put: &mut wz_codecs::msg_put::MsgPut<'_>) {
+    if let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
+        &mut put.extensions_has_0x12
+    {
+        *payload = Default::default();
+        put.payload_len = Some(0);
+    }
+}
 
 /// `push` with its Put body carrying an EMPTY inline payload.
 ///
-/// A bare `Push::default()` is not an encodable message: the Put's payload is
-/// gated on the extension chain (`msg_put.scxml`), so a default Put names neither
-/// layout and the encoder refuses it (`PresentIfMismatch`). A test that wants "a
-/// Push, any Push" on the wire says which layout it means through this, once,
-/// instead of each one setting the two fields by hand. A Del or unknown body is
-/// returned untouched.
+/// The Put's payload layout is chosen by its extension chain (`msg_put.scxml`).
+/// A test that wants "a Push, any Push" on the wire says which layout it means
+/// through this, once, instead of each one setting the fields by hand. A Del or
+/// unknown body is returned untouched.
 #[cfg(feature = "codec-push")]
 pub fn with_empty_inline_put(mut push: wz_codecs::push::Push<'_>) -> wz_codecs::push::Push<'_> {
     if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
-        put.payload_len = Some(0);
-        put.payload = Some(&[]);
+        empty_inline_payload(put);
     }
     push
 }
@@ -141,8 +147,7 @@ pub fn with_empty_inline_put_reply(
 ) -> wz_codecs::response::Response<'_> {
     if let wz_codecs::response::ResponseVariant::CodecZenohReply(reply) = &mut response.body {
         if let wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put) = &mut reply.body {
-            put.payload_len = Some(0);
-            put.payload = Some(&[]);
+            empty_inline_payload(put);
         }
     }
     response

@@ -217,7 +217,7 @@ async fn play_into_session(
             Some(DRIVE_MAX_ITERS),
             &clock,
             &timeouts,
-            |event: IterationEvent<'_>| {
+            |event: IterationEvent<'_, '_>| {
                 session_for_dispatch.dispatch_iteration_event(event);
             },
         ) => Err(LiveError::Open(format!(

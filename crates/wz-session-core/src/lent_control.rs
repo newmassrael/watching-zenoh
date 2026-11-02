@@ -58,8 +58,9 @@
 //! (id `0` is the literal-keyexpr sentinel, and a declaration of it has no
 //! meaning), and say so.
 
+use sce_forge_runtime::codec::{Bounded, CodecError};
 #[cfg(feature = "codec-declare")]
-use sce_forge_runtime::codec::{CodecError, SceSink, SliceSink};
+use sce_forge_runtime::codec::{SceSink, SliceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zint::ExtZint;
@@ -104,11 +105,11 @@ use crate::sample::QosLevel;
 /// The chain a control message carries when it carries one extension: the one
 /// entry, in the codec's own fixed-capacity list. The capacity of that list is
 /// eight, so one entry always fits and the push cannot fail.
-fn chain_of<'a>(entry: ExtEntry<'a>) -> HeaplessVec<ExtEntry<'a>, 8> {
+fn chain_of<'a>(entry: ExtEntry<'a>) -> Bounded<HeaplessVec<ExtEntry<'a>, 8>, 8, 1> {
     let mut chain = HeaplessVec::new();
     // One entry in a list of eight.
     let _ = chain.push(entry);
-    chain
+    Bounded::new(chain).expect("one entry is within the chain's bounds")
 }
 
 /// An `ext_qos` entry carrying `qos`: `zextz64!(0x1, false)`, terminal (no
@@ -192,7 +193,8 @@ impl NamedKeyexpr {
             header: crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER,
             body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
                 value_len: self.len as u64,
-                value: &self.body[..self.len],
+                value: Bounded::new(&self.body[..self.len])
+                    .expect("a named key's body is within the u32 length"),
             }),
         }
     }
@@ -216,27 +218,33 @@ fn envelope<'a>(interest_id: Option<u64>, body: DeclareVariant<'a>) -> Declare<'
 }
 
 /// The `Local`-arm wireexpr every id-based declaration, and every restricted
-/// interest, names its keyexpr with.
-pub(crate) fn local<'a>(mapping_id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
-    Wireexpr {
+/// interest, names its keyexpr with. `LengthOutOfRange` for a suffix past its
+/// `u16` length ([`crate::codec_owned::sent_suffix`]), and so for every composer
+/// below that names a key.
+pub(crate) fn local<'a>(
+    mapping_id: u64,
+    suffix: Option<&'a str>,
+) -> Result<Wireexpr<'a>, CodecError> {
+    Ok(Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: mapping_id,
             suffix_len: suffix.map(|s| s.len() as u64),
-            suffix,
+            suffix: suffix.map(crate::codec_owned::sent_suffix).transpose()?,
         }),
-    }
+    })
 }
 
-/// The `Nonlocal`-arm wireexpr, which names an id of the PEER's table.
+/// The `Nonlocal`-arm wireexpr, which names an id of the PEER's table, refused as
+/// [`local`] is.
 #[cfg(feature = "codec-declare")]
-fn nonlocal<'a>(mapping_id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
-    Wireexpr {
+fn nonlocal<'a>(mapping_id: u64, suffix: Option<&'a str>) -> Result<Wireexpr<'a>, CodecError> {
+    Ok(Wireexpr {
         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
             id: mapping_id,
             suffix_len: suffix.map(|s| s.len() as u64),
-            suffix,
+            suffix: suffix.map(crate::codec_owned::sent_suffix).transpose()?,
         }),
-    }
+    })
 }
 
 /// The `N` flag of a declaration header: a suffix follows the id.
@@ -255,20 +263,20 @@ const fn n_flag(suffix: Option<&str>) -> u8 {
 /// Panics if `mapping_id == 0`, as the builder does: id zero is the
 /// literal-keyexpr sentinel and a declaration of it has no table semantics.
 #[cfg(feature = "codec-declare")]
-pub fn declare_kexpr(mapping_id: u64, suffix: &str) -> Declare<'_> {
+pub fn declare_kexpr(mapping_id: u64, suffix: &str) -> Result<Declare<'_>, CodecError> {
     assert!(
         mapping_id != 0,
         "declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
     );
-    envelope(
+    Ok(envelope(
         None,
         DeclareVariant::CodecZenohDeclKexpr(DeclKexpr {
             header: wire_const::D_MID_KEXPR | wire_const::FLAG_D_N,
             id: mapping_id,
-            keyexpr: local(0, Some(suffix)),
+            keyexpr: local(0, Some(suffix))?,
             extensions: None,
         }),
-    )
+    ))
 }
 
 /// `Declare(DeclSubscriber)` on `(keyexpr_mapping_id, keyexpr_suffix)`.
@@ -278,16 +286,16 @@ pub fn declare_subscriber(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare<'_> {
-    envelope(
+) -> Result<Declare<'_>, CodecError> {
+    Ok(envelope(
         None,
         DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
             header: wire_const::D_MID_SUBSCRIBER | n_flag(keyexpr_suffix),
             id: subscriber_id,
-            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix),
+            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
             extensions: None,
         }),
-    )
+    ))
 }
 
 /// `Declare(DeclQueryable)` on `(keyexpr_mapping_id, keyexpr_suffix)`, carrying
@@ -301,7 +309,7 @@ pub fn declare_queryable(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     info: crate::queryable_info::QueryableInfo,
-) -> Declare<'_> {
+) -> Result<Declare<'_>, CodecError> {
     let mut header = wire_const::D_MID_QUERYABLE | n_flag(keyexpr_suffix);
     let packed = crate::queryable_info::pack(info);
     let extensions = (packed != 0).then(|| {
@@ -311,15 +319,15 @@ pub fn declare_queryable(
             body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: packed }),
         })
     });
-    envelope(
+    Ok(envelope(
         None,
         DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
             header,
             id: queryable_id,
-            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix),
+            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
             extensions,
         }),
-    )
+    ))
 }
 
 /// `Declare(DeclToken)` on `(keyexpr_mapping_id, keyexpr_suffix)`.
@@ -329,16 +337,16 @@ pub fn declare_token(
     token_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare<'_> {
-    envelope(
+) -> Result<Declare<'_>, CodecError> {
+    Ok(envelope(
         None,
         DeclareVariant::CodecZenohDeclToken(DeclToken {
             header: wire_const::D_MID_TOKEN | n_flag(keyexpr_suffix),
             id: token_id,
-            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix),
+            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
             extensions: None,
         }),
-    )
+    ))
 }
 
 /// `Declare(DeclSubscriber)` naming an id of the PEER's table (the `Nonlocal`
@@ -349,20 +357,20 @@ pub fn declare_subscriber_nonlocal(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare<'_> {
+) -> Result<Declare<'_>, CodecError> {
     assert!(
         keyexpr_mapping_id != 0,
         "declare_subscriber_nonlocal requires a non-zero mapping id",
     );
-    envelope(
+    Ok(envelope(
         None,
         DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
             header: wire_const::D_MID_SUBSCRIBER | n_flag(keyexpr_suffix),
             id: subscriber_id,
-            keyexpr: nonlocal(keyexpr_mapping_id, keyexpr_suffix),
+            keyexpr: nonlocal(keyexpr_mapping_id, keyexpr_suffix)?,
             extensions: None,
         }),
-    )
+    ))
 }
 
 /// `Declare(DeclQueryable)` naming an id of the peer's table.
@@ -373,20 +381,20 @@ pub fn declare_queryable_nonlocal(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare<'_> {
+) -> Result<Declare<'_>, CodecError> {
     assert!(
         keyexpr_mapping_id != 0,
         "declare_queryable_nonlocal requires a non-zero mapping id",
     );
-    envelope(
+    Ok(envelope(
         None,
         DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
             header: wire_const::D_MID_QUERYABLE | n_flag(keyexpr_suffix),
             id: queryable_id,
-            keyexpr: nonlocal(keyexpr_mapping_id, keyexpr_suffix),
+            keyexpr: nonlocal(keyexpr_mapping_id, keyexpr_suffix)?,
             extensions: None,
         }),
-    )
+    ))
 }
 
 /// `Declare(DeclToken)` naming an id of the peer's table.
@@ -397,20 +405,20 @@ pub fn declare_token_nonlocal(
     token_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare<'_> {
+) -> Result<Declare<'_>, CodecError> {
     assert!(
         keyexpr_mapping_id != 0,
         "declare_token_nonlocal requires a non-zero mapping id",
     );
-    envelope(
+    Ok(envelope(
         None,
         DeclareVariant::CodecZenohDeclToken(DeclToken {
             header: wire_const::D_MID_TOKEN | n_flag(keyexpr_suffix),
             id: token_id,
-            keyexpr: nonlocal(keyexpr_mapping_id, keyexpr_suffix),
+            keyexpr: nonlocal(keyexpr_mapping_id, keyexpr_suffix)?,
             extensions: None,
         }),
-    )
+    ))
 }
 
 /// `Declare(UndeclKexpr)`: drop `mapping_id` from the peer's table.
@@ -541,22 +549,35 @@ pub fn answering(mut declare: Declare<'_>, interest_id: u64) -> Declare<'_> {
 /// id `0` on the literal `keyexpr`, answering `interest_id`.
 /// [`crate::declare_build::build_declare_token_reply`], written in place.
 #[cfg(feature = "codec-declare")]
-pub fn declare_token_reply(interest_id: u64, keyexpr: &str) -> Declare<'_> {
-    answering(declare_token(0, 0, Some(keyexpr)), interest_id)
+pub fn declare_token_reply(interest_id: u64, keyexpr: &str) -> Result<Declare<'_>, CodecError> {
+    Ok(answering(declare_token(0, 0, Some(keyexpr))?, interest_id))
 }
 
 /// [`declare_token_reply`] with a non-zero token id, the id a later FUTURE push of
 /// the same keyexpr reuses. [`crate::declare_build::build_declare_token_reply_with_id`].
 #[cfg(feature = "codec-declare")]
-pub fn declare_token_reply_with_id(interest_id: u64, token_id: u64, keyexpr: &str) -> Declare<'_> {
-    answering(declare_token(token_id, 0, Some(keyexpr)), interest_id)
+pub fn declare_token_reply_with_id(
+    interest_id: u64,
+    token_id: u64,
+    keyexpr: &str,
+) -> Result<Declare<'_>, CodecError> {
+    Ok(answering(
+        declare_token(token_id, 0, Some(keyexpr))?,
+        interest_id,
+    ))
 }
 
 /// The reply to a subscriber interest: a `DeclSubscriber` of id `0` on the literal
 /// `keyexpr`. [`crate::declare_build::build_declare_subscriber_reply`].
 #[cfg(feature = "codec-declare")]
-pub fn declare_subscriber_reply(interest_id: u64, keyexpr: &str) -> Declare<'_> {
-    answering(declare_subscriber(0, 0, Some(keyexpr)), interest_id)
+pub fn declare_subscriber_reply(
+    interest_id: u64,
+    keyexpr: &str,
+) -> Result<Declare<'_>, CodecError> {
+    Ok(answering(
+        declare_subscriber(0, 0, Some(keyexpr))?,
+        interest_id,
+    ))
 }
 
 /// [`declare_subscriber_reply`] with a non-zero id.
@@ -566,11 +587,11 @@ pub fn declare_subscriber_reply_with_id(
     interest_id: u64,
     subscriber_id: u64,
     keyexpr: &str,
-) -> Declare<'_> {
-    answering(
-        declare_subscriber(subscriber_id, 0, Some(keyexpr)),
+) -> Result<Declare<'_>, CodecError> {
+    Ok(answering(
+        declare_subscriber(subscriber_id, 0, Some(keyexpr))?,
         interest_id,
-    )
+    ))
 }
 
 /// The reply to a queryable interest: a `DeclQueryable` of id `0` on the literal
@@ -581,8 +602,11 @@ pub fn declare_queryable_reply(
     interest_id: u64,
     keyexpr: &str,
     info: crate::queryable_info::QueryableInfo,
-) -> Declare<'_> {
-    answering(declare_queryable(0, 0, Some(keyexpr), info), interest_id)
+) -> Result<Declare<'_>, CodecError> {
+    Ok(answering(
+        declare_queryable(0, 0, Some(keyexpr), info)?,
+        interest_id,
+    ))
 }
 
 /// [`declare_queryable_reply`] with a non-zero id.
@@ -593,11 +617,11 @@ pub fn declare_queryable_reply_with_id(
     queryable_id: u64,
     keyexpr: &str,
     info: crate::queryable_info::QueryableInfo,
-) -> Declare<'_> {
-    answering(
-        declare_queryable(queryable_id, 0, Some(keyexpr), info),
+) -> Result<Declare<'_>, CodecError> {
+    Ok(answering(
+        declare_queryable(queryable_id, 0, Some(keyexpr), info)?,
         interest_id,
-    )
+    ))
 }
 
 /// The terminator of an interest response: a `DeclFinal` answering `interest_id`.
@@ -622,12 +646,12 @@ pub fn interest<'a>(
     aggregate: bool,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&'a str>,
-) -> Interest<'a> {
+) -> Result<Interest<'a>, CodecError> {
     assert!(
         current || future,
         "an Interest with neither CURRENT nor FUTURE is a Final, which asks for nothing",
     );
-    Interest {
+    Ok(Interest {
         header: interest_header(current, future),
         interest_id,
         header_c_or_f: interest_body_arm(
@@ -639,11 +663,11 @@ pub fn interest<'a>(
                     Some(keyexpr_suffix.is_some()),
                     aggregate,
                 ),
-                keyexpr: Some(local(keyexpr_mapping_id, keyexpr_suffix)),
+                keyexpr: Some(local(keyexpr_mapping_id, keyexpr_suffix)?),
             },
         ),
         extensions: None,
-    }
+    })
 }
 
 /// An `Interest` with no keyexpr: every declaration of `kinds` is asked for
@@ -706,6 +730,16 @@ pub fn interest_final_propagated<'a>(interest_id: u64) -> Interest<'a> {
 
 // ── ResponseFinal ────────────────────────────────────────────────────────────
 
+/// The bytes [`response_final`] encodes to for the same arguments: what a sender with no
+/// allocator asks a link to lend for it, since a `ResponseFinal` has no size constant (its
+/// extension chain may carry a u32-long body). Its own frame, not inlined, so the value it
+/// counts is on the stack only while it counts.
+#[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
+#[inline(never)]
+pub fn response_final_len(request_id: u64, qos: QosLevel) -> usize {
+    wz_codecs::response_final::ResponseFinal::measure(&response_final(request_id, qos)).len()
+}
+
 /// A `ResponseFinal` closing the reply stream of `request_id`, carrying `qos` as
 /// `ext_qos` unless it is the default (the omit-on-default rule of
 /// [`crate::declare_ext_qos::set_response_final_qos`]).
@@ -749,19 +783,11 @@ mod tests {
 
     /// The bytes of an owned `Declare`, through the borrowed view that owns encode.
     fn owned_declare(declare: &DeclareOwned) -> Vec<u8> {
-        declare
-            .try_as_borrowed()
-            .expect("a view")
-            .encode_to_vec()
-            .expect("a fixture declare is encodable")
-    }
-
-    fn owned_interest_result(interest: &InterestOwned) -> Result<Vec<u8>, CodecError> {
-        interest.try_as_borrowed().expect("a view").encode_to_vec()
+        declare.try_as_borrowed().expect("a view").encode_to_vec()
     }
 
     fn owned_interest(interest: &InterestOwned) -> Vec<u8> {
-        owned_interest_result(interest).expect("a fixture interest is encodable")
+        interest.try_as_borrowed().expect("a view").encode_to_vec()
     }
 
     /// `(mapping id, suffix)` of every shape a declaration names a keyexpr by:
@@ -801,15 +827,13 @@ mod tests {
             for (mapping, suffix) in keys() {
                 assert_eq!(
                     declare_subscriber(id, mapping, suffix)
-                        .encode_to_vec()
-                        .expect("a declaration is encodable"),
+                        .unwrap()
+                        .encode_to_vec(),
                     owned_declare(&owned::build_declare_subscriber(id, mapping, suffix).unwrap()),
                     "subscriber {id} {mapping} {suffix:?}"
                 );
                 assert_eq!(
-                    declare_token(id, mapping, suffix)
-                        .encode_to_vec()
-                        .expect("a declaration is encodable"),
+                    declare_token(id, mapping, suffix).unwrap().encode_to_vec(),
                     owned_declare(&owned::build_declare_token(id, mapping, suffix).unwrap()),
                     "token {id} {mapping} {suffix:?}"
                 );
@@ -818,8 +842,8 @@ mod tests {
                     owned::set_declare_queryable_info(&mut built, info).expect("within the bound");
                     assert_eq!(
                         declare_queryable(id, mapping, suffix, info)
-                            .encode_to_vec()
-                            .expect("a declaration is encodable"),
+                            .unwrap()
+                            .encode_to_vec(),
                         owned_declare(&built),
                         "queryable {id} {mapping} {suffix:?} {info:?}"
                     );
@@ -828,8 +852,8 @@ mod tests {
                 if mapping != 0 {
                     assert_eq!(
                         declare_subscriber_nonlocal(id, mapping, suffix)
-                            .encode_to_vec()
-                            .expect("a declaration is encodable"),
+                            .unwrap()
+                            .encode_to_vec(),
                         owned_declare(
                             &owned::build_declare_subscriber_nonlocal(id, mapping, suffix).unwrap()
                         ),
@@ -837,8 +861,8 @@ mod tests {
                     );
                     assert_eq!(
                         declare_queryable_nonlocal(id, mapping, suffix)
-                            .encode_to_vec()
-                            .expect("a declaration is encodable"),
+                            .unwrap()
+                            .encode_to_vec(),
                         owned_declare(
                             &owned::build_declare_queryable_nonlocal(id, mapping, suffix).unwrap()
                         ),
@@ -846,8 +870,8 @@ mod tests {
                     );
                     assert_eq!(
                         declare_token_nonlocal(id, mapping, suffix)
-                            .encode_to_vec()
-                            .expect("a declaration is encodable"),
+                            .unwrap()
+                            .encode_to_vec(),
                         owned_declare(
                             &owned::build_declare_token_nonlocal(id, mapping, suffix).unwrap()
                         ),
@@ -857,48 +881,36 @@ mod tests {
                 compared += 2;
             }
             assert_eq!(
-                undeclare_subscriber(id)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_subscriber(id).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_subscriber(id))
             );
             assert_eq!(
-                undeclare_queryable(id)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_queryable(id).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_queryable(id))
             );
             assert_eq!(
-                undeclare_token(id)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_token(id).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_token(id))
             );
             compared += 3;
             if id != 0 {
                 for suffix in ["a/b", "", "x/y/z/w"] {
                     assert_eq!(
-                        declare_kexpr(id, suffix)
-                            .encode_to_vec()
-                            .expect("a declaration is encodable"),
+                        declare_kexpr(id, suffix).unwrap().encode_to_vec(),
                         owned_declare(&owned::build_declare_kexpr(id, suffix).unwrap()),
                         "kexpr {id} {suffix:?}"
                     );
                     compared += 1;
                 }
                 assert_eq!(
-                    undeclare_kexpr(id)
-                        .encode_to_vec()
-                        .expect("a declaration is encodable"),
+                    undeclare_kexpr(id).encode_to_vec(),
                     owned_declare(&owned::build_undeclare_kexpr(id))
                 );
                 compared += 1;
             }
         }
         assert_eq!(
-            declare_final()
-                .encode_to_vec()
-                .expect("a declaration is encodable"),
+            declare_final().encode_to_vec(),
             owned_declare(&owned::build_declare_final())
         );
         assert!(compared > 100, "the matrix ran: {compared} comparisons");
@@ -909,28 +921,28 @@ mod tests {
         for interest_id in [0u64, 1, 4242] {
             assert_eq!(
                 declare_token_reply(interest_id, "live/a")
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                    .unwrap()
+                    .encode_to_vec(),
                 owned_declare(&owned::build_declare_token_reply(interest_id, "live/a").unwrap())
             );
             assert_eq!(
                 declare_token_reply_with_id(interest_id, 9, "live/a")
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                    .unwrap()
+                    .encode_to_vec(),
                 owned_declare(
                     &owned::build_declare_token_reply_with_id(interest_id, 9, "live/a").unwrap()
                 )
             );
             assert_eq!(
                 declare_subscriber_reply(interest_id, "s/a")
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                    .unwrap()
+                    .encode_to_vec(),
                 owned_declare(&owned::build_declare_subscriber_reply(interest_id, "s/a").unwrap())
             );
             assert_eq!(
                 declare_subscriber_reply_with_id(interest_id, 3, "s/a")
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                    .unwrap()
+                    .encode_to_vec(),
                 owned_declare(
                     &owned::build_declare_subscriber_reply_with_id(interest_id, 3, "s/a").unwrap()
                 )
@@ -938,8 +950,8 @@ mod tests {
             for info in infos() {
                 assert_eq!(
                     declare_queryable_reply(interest_id, "q/a", info)
-                        .encode_to_vec()
-                        .expect("a declaration is encodable"),
+                        .unwrap()
+                        .encode_to_vec(),
                     owned_declare(
                         &owned::build_declare_queryable_reply(interest_id, "q/a", info).unwrap()
                     ),
@@ -947,8 +959,8 @@ mod tests {
                 );
                 assert_eq!(
                     declare_queryable_reply_with_id(interest_id, 6, "q/a", info)
-                        .encode_to_vec()
-                        .expect("a declaration is encodable"),
+                        .unwrap()
+                        .encode_to_vec(),
                     owned_declare(
                         &owned::build_declare_queryable_reply_with_id(interest_id, 6, "q/a", info)
                             .unwrap()
@@ -957,26 +969,17 @@ mod tests {
                 );
             }
             assert_eq!(
-                declare_final_reply(interest_id)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                declare_final_reply(interest_id).encode_to_vec(),
                 owned_declare(&owned::build_declare_final_reply(interest_id))
             );
         }
         // The I flag and the id are what the stamp adds, and they are on the wire.
-        let bytes = declare_final_reply(77)
-            .encode_to_vec()
-            .expect("a declaration is encodable");
+        let bytes = declare_final_reply(77).encode_to_vec();
         assert_eq!(
             bytes[0] & wire_const::FLAG_N_DECLARE_I,
             wire_const::FLAG_N_DECLARE_I
         );
-        assert_ne!(
-            bytes,
-            declare_final()
-                .encode_to_vec()
-                .expect("a declaration is encodable")
-        );
+        assert_ne!(bytes, declare_final().encode_to_vec());
     }
 
     #[test]
@@ -984,23 +987,17 @@ mod tests {
         for keyexpr in ["demo/data", "a", "x/y/z/**"] {
             let key = NamedKeyexpr::literal(keyexpr).unwrap();
             assert_eq!(
-                undeclare_subscriber_naming(0, &key)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_subscriber_naming(0, &key).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_subscriber_with_keyexpr(keyexpr).unwrap()),
                 "{keyexpr}"
             );
             assert_eq!(
-                undeclare_queryable_naming(0, &key)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_queryable_naming(0, &key).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_queryable_with_keyexpr(keyexpr).unwrap()),
                 "{keyexpr}"
             );
             assert_eq!(
-                undeclare_token_naming(0, &key)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_token_naming(0, &key).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_token_with_keyexpr(keyexpr).unwrap()),
                 "{keyexpr}"
             );
@@ -1013,27 +1010,21 @@ mod tests {
         ] {
             let key = NamedKeyexpr::new(mapping, suffix).unwrap();
             assert_eq!(
-                undeclare_subscriber_naming(id, &key)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_subscriber_naming(id, &key).encode_to_vec(),
                 owned_declare(
                     &owned::build_undeclare_subscriber_on_wire(id, mapping, suffix).unwrap()
                 ),
                 "{id} {mapping} {suffix:?}"
             );
             assert_eq!(
-                undeclare_queryable_naming(id, &key)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_queryable_naming(id, &key).encode_to_vec(),
                 owned_declare(
                     &owned::build_undeclare_queryable_on_wire(id, mapping, suffix).unwrap()
                 ),
                 "{id} {mapping} {suffix:?}"
             );
             assert_eq!(
-                undeclare_token_naming(id, &key)
-                    .encode_to_vec()
-                    .expect("a declaration is encodable"),
+                undeclare_token_naming(id, &key).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_token_on_wire(id, mapping, suffix).unwrap()),
                 "{id} {mapping} {suffix:?}"
             );
@@ -1047,9 +1038,7 @@ mod tests {
         // Even the widest id (nine VLE bytes) leaves room for a suffix at the bound.
         let key = NamedKeyexpr::new(u64::MAX, &at_bound).expect("at the bound");
         assert_eq!(
-            undeclare_token_naming(1, &key)
-                .encode_to_vec()
-                .expect("a declaration is encodable"),
+            undeclare_token_naming(1, &key).encode_to_vec(),
             owned_declare(&owned::build_undeclare_token_on_wire(1, u64::MAX, &at_bound).unwrap())
         );
         assert_eq!(
@@ -1066,7 +1055,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "neither CURRENT nor FUTURE")]
     fn a_lent_interest_that_asks_for_nothing_is_refused() {
-        interest(
+        let _ = interest(
             1,
             crate::interest_build::InterestKinds::SUBSCRIBERS,
             false,
@@ -1119,11 +1108,12 @@ mod tests {
                                     mapping,
                                     suffix,
                                 )
+                                .unwrap()
                                 .encode_to_vec();
-                                let owned = owned_interest_result(&built.unwrap());
+                                let owned = owned_interest(&built.unwrap());
                                 assert_eq!(
-                                    lent.expect("an interest is encodable"),
-                                    owned.expect("an interest is encodable"),
+                                    lent,
+                                    owned,
                                     "{interest_id} {kind:?} c={current} f={future} a={aggregate} {mapping} {suffix:?}"
                                 );
                             }
@@ -1135,17 +1125,19 @@ mod tests {
                 for aggregate in [false, true] {
                     for current_future in [false, true] {
                         assert_eq!(
-                            interest_propagated(interest(
-                                interest_id,
-                                kind,
-                                true,
-                                current_future,
-                                aggregate,
-                                4,
-                                Some("p/**")
-                            ))
-                            .encode_to_vec()
-                            .expect("an interest is encodable"),
+                            interest_propagated(
+                                interest(
+                                    interest_id,
+                                    kind,
+                                    true,
+                                    current_future,
+                                    aggregate,
+                                    4,
+                                    Some("p/**")
+                                )
+                                .unwrap()
+                            )
+                            .encode_to_vec(),
                             owned_interest(
                                 &ibuild::build_interest_propagated(
                                     interest_id,
@@ -1165,8 +1157,7 @@ mod tests {
                                 current_future,
                                 aggregate
                             ))
-                            .encode_to_vec()
-                            .expect("an interest is encodable"),
+                            .encode_to_vec(),
                             owned_interest(
                                 &ibuild::build_interest_propagated(
                                     interest_id,
@@ -1184,17 +1175,19 @@ mod tests {
             }
             for history in [false, true] {
                 assert_eq!(
-                    interest_propagated(interest(
-                        interest_id,
-                        K::TOKENS,
-                        history,
-                        true,
-                        false,
-                        0,
-                        Some("live/**")
-                    ))
-                    .encode_to_vec()
-                    .expect("an interest is encodable"),
+                    interest_propagated(
+                        interest(
+                            interest_id,
+                            K::TOKENS,
+                            history,
+                            true,
+                            false,
+                            0,
+                            Some("live/**")
+                        )
+                        .unwrap()
+                    )
+                    .encode_to_vec(),
                     owned_interest(
                         &ibuild::build_interest_liveliness_subscriber(
                             interest_id,
@@ -1217,23 +1210,19 @@ mod tests {
                     0,
                     Some("live/**")
                 )
-                .encode_to_vec()
-                .expect("an interest is encodable"),
+                .unwrap()
+                .encode_to_vec(),
                 owned_interest(
                     &ibuild::build_interest_liveliness_get(interest_id, 0, Some("live/**"))
                         .unwrap()
                 )
             );
             assert_eq!(
-                interest_final(interest_id)
-                    .encode_to_vec()
-                    .expect("an interest is encodable"),
+                interest_final(interest_id).encode_to_vec(),
                 owned_interest(&ibuild::build_interest_final(interest_id))
             );
             assert_eq!(
-                interest_final_propagated(interest_id)
-                    .encode_to_vec()
-                    .expect("an interest is encodable"),
+                interest_final_propagated(interest_id).encode_to_vec(),
                 owned_interest(&ibuild::build_interest_final_propagated(interest_id))
             );
             compared += 3;
@@ -1275,8 +1264,8 @@ mod tests {
     fn what_is_written_decodes_to_the_message_it_describes() {
         use wz_codecs::declare::{Declare as DeclareView, DeclareOwnedVariant};
         use wz_codecs::interest::Interest as InterestView;
-        let declare = declare_queryable(4, 9, Some("q/k"), QueryableInfo::local(true));
-        let bytes = declare.encode_to_vec().expect("a declaration is encodable");
+        let declare = declare_queryable(4, 9, Some("q/k"), QueryableInfo::local(true)).unwrap();
+        let bytes = declare.encode_to_vec();
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&bytes);
         let decoded = DeclareView::decode(&mut cursor)
             .expect("decodes")
@@ -1301,16 +1290,19 @@ mod tests {
             "the completeness rides the info extension"
         );
 
-        let interest = interest_propagated(interest(
-            8,
-            InterestKinds::SUBSCRIBERS,
-            true,
-            true,
-            false,
-            2,
-            Some("i/**"),
-        ));
-        let bytes = interest.encode_to_vec().expect("an interest is encodable");
+        let interest = interest_propagated(
+            interest(
+                8,
+                InterestKinds::SUBSCRIBERS,
+                true,
+                true,
+                false,
+                2,
+                Some("i/**"),
+            )
+            .unwrap(),
+        );
+        let bytes = interest.encode_to_vec();
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&bytes);
         let decoded = InterestView::decode(&mut cursor)
             .expect("decodes")
@@ -1330,6 +1322,43 @@ mod tests {
             crate::wireexpr_resolve::id_and_suffix(&keyexpr.body),
             (2, Some("i/**"))
         );
+    }
+
+    /// A suffix past the protocol's `u16` length is refused by every composer that
+    /// names a key, and one at the bound is written.
+    #[test]
+    fn a_suffix_past_its_protocol_bound_is_refused_and_one_at_the_bound_is_not() {
+        let at_bound = "k".repeat(usize::from(u16::MAX));
+        let past_bound = "k".repeat(usize::from(u16::MAX) + 1);
+        assert!(declare_subscriber(1, 0, Some(&at_bound)).is_ok());
+        let refused = Some(CodecError::LengthOutOfRange);
+        assert_eq!(declare_subscriber(1, 0, Some(&past_bound)).err(), refused);
+        assert_eq!(
+            declare_queryable(1, 0, Some(&past_bound), QueryableInfo::DEFAULT).err(),
+            refused
+        );
+        assert_eq!(declare_token(1, 0, Some(&past_bound)).err(), refused);
+        assert_eq!(declare_kexpr(1, &past_bound).err(), refused);
+        assert_eq!(
+            declare_token_nonlocal(1, 3, Some(&past_bound)).err(),
+            refused
+        );
+        assert_eq!(declare_token_reply(1, &past_bound).err(), refused);
+        assert_eq!(
+            interest(
+                1,
+                InterestKinds::TOKENS,
+                true,
+                false,
+                false,
+                0,
+                Some(&past_bound)
+            )
+            .err(),
+            refused
+        );
+        // No suffix at all is not a refusal.
+        assert!(declare_subscriber(1, 5, None).is_ok());
     }
 
     #[test]

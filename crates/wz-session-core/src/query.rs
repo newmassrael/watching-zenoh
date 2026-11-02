@@ -265,7 +265,10 @@ fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
 pub fn query_parameters(query: &QueryOwned) -> Option<&[u8]> {
     #[cfg(feature = "query-selector-parameters")]
     {
-        query.parameters.as_deref()
+        query
+            .parameters
+            .as_ref()
+            .map(|parameters| parameters.as_bytes().into_inner())
     }
     #[cfg(not(feature = "query-selector-parameters"))]
     {
@@ -3269,7 +3272,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// outcomes) are no-ops.
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut ReplyStage,
         pending_final_rids: &mut FinalStage,
@@ -3491,7 +3494,7 @@ mod tests {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: mapping_id,
                 suffix_len,
-                suffix,
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
             }),
         };
         Request {
@@ -3523,7 +3526,7 @@ mod tests {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len,
-                suffix,
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
             }),
         };
         // Build the attachment ext on the borrowed view (the `set_*`
@@ -3535,7 +3538,7 @@ mod tests {
         ext.set_enc(2);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
             value_len: attachment.len() as u64,
-            value: attachment,
+            value: wz_codecs::Bounded::new(attachment).unwrap(),
         });
         let mut query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
@@ -3565,7 +3568,7 @@ mod tests {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
             }),
         };
         Request {
@@ -3588,7 +3591,7 @@ mod tests {
                 wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
                     id: mapping_id,
                     suffix_len,
-                    suffix,
+                    suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
                 },
             ),
         };
@@ -3913,13 +3916,13 @@ mod tests {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
             }),
         };
         let query = Query {
             header: 0x40,
             parameters_len: Some(params.len() as u64),
-            parameters: Some(params),
+            parameters: Some(wz_codecs::Bounded::new(params).unwrap()),
             ..Query::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
@@ -3971,7 +3974,7 @@ mod tests {
         ext.set_enc(2); // ENC_ZBUF
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
             value_len: payload.len() as u64,
-            value: &payload,
+            value: wz_codecs::Bounded::new(&payload[..]).unwrap(),
         });
         let mut query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
@@ -3986,7 +3989,7 @@ mod tests {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
             }),
         };
         let mut request = Request {
@@ -4398,7 +4401,7 @@ mod tests {
                 match &reply.body {
                     wz_codecs::reply::ReplyOwnedVariant::CodecZenohMsgPut(put) => {
                         assert_eq!(put.header & 0x80, 0x80, "MsgPut Z bit set");
-                        let exts = put.extensions.as_ref().expect("body ext chain");
+                        let exts = crate::put_payload::chain(put);
                         assert_eq!(
                             crate::attachment::decode_attachment_ext(
                                 exts,
@@ -5758,7 +5761,7 @@ mod tests {
         let mut replies = ReplyStage::new();
         let query = Query {
             parameters_len: Some(b"_anyke".len() as u64),
-            parameters: Some(b"_anyke"),
+            parameters: Some(wz_codecs::Bounded::new(&b"_anyke"[..]).unwrap()),
             ..Query::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
@@ -6325,20 +6328,23 @@ mod tests {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len,
-                suffix,
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
             }),
         };
         // Per `crate::query_value_ext`: the ext body is pico `_z_value_encode`'s
         // inner content — `encoding_encode || payload` — with the surrounding
         // `ExtZbuf` `value_len` supplying pico's leading `zsize(total_len)`.
-        let mut body = encoding.to_codec().encode_to_vec();
+        let mut body = encoding
+            .to_codec()
+            .expect("a fixture's schema is within its bound")
+            .encode_to_vec();
         body.extend_from_slice(payload);
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x03); // QUERY_VALUE_EXT_ID
         ext.set_enc(2); // ENC_ZBUF
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
             value_len: body.len() as u64,
-            value: &body,
+            value: wz_codecs::Bounded::new(&body[..]).unwrap(),
         });
         let mut query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
@@ -6450,7 +6456,7 @@ mod tests {
         ext.set_enc(2); // ENC_ZBUF
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
             value_len: payload.len() as u64,
-            value: payload,
+            value: wz_codecs::Bounded::new(&payload[..]).unwrap(),
         });
         let replica = ext.try_into_owned().expect("fixture literals own");
         let ssot = crate::attachment::encode_attachment_ext(
@@ -6572,7 +6578,7 @@ mod request_decode_isolation_tests {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
             }),
         }
     }
@@ -6587,7 +6593,7 @@ mod request_decode_isolation_tests {
         ext.set_enc(2); // ENC_ZBUF
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
             value_len: attachment.len() as u64,
-            value: attachment,
+            value: wz_codecs::Bounded::new(attachment).unwrap(),
         });
         let mut query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
@@ -6619,7 +6625,7 @@ mod request_decode_isolation_tests {
         let query = Query {
             header: 0x40,
             parameters_len: Some(params.len() as u64),
-            parameters: Some(params),
+            parameters: Some(wz_codecs::Bounded::new(params).unwrap()),
             ..Query::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
@@ -6704,7 +6710,7 @@ mod request_decode_isolation_tests {
         ext.set_enc(2); // ENC_ZBUF
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
             value_len: payload.len() as u64,
-            value: &payload,
+            value: wz_codecs::Bounded::new(&payload[..]).unwrap(),
         });
         let mut query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()

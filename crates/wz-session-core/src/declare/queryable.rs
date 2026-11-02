@@ -765,7 +765,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableRegistry<D, U, P> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         self.table
@@ -777,7 +777,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableRegistry<D, U, P> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
@@ -1053,10 +1053,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         feature = "storage-profile",
         feature = "session-slot"
     ))]
-    pub fn dispatch_declare_view_with_local<'a>(
+    pub fn dispatch_declare_view_with_local<'a, 'f>(
         &mut self,
         peer: &mut RemoteQueryablePeer<P>,
-        body: &DeclareVariant<'a>,
+        body: &DeclareVariant<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
@@ -1076,9 +1076,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
                         return;
                     }
                 };
-                let complete =
-                    crate::queryable_info::read_queryable_info_in(decl.extensions.as_deref())
-                        .complete;
+                let complete = crate::queryable_info::read_queryable_info_in(
+                    crate::held_list::HeldList::entries(&decl.extensions),
+                )
+                .complete;
                 self.apply_declared(peer, decl.id, resolved, complete, local_matching);
             }
             DeclareVariant::CodecZenohUndeclQueryable(undecl) => {
@@ -1240,7 +1241,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         peer: &mut RemoteQueryablePeer<P>,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         self.dispatch_iteration_event_with_local(peer, event, peer_keyexpr_table, &|_| false)
@@ -1253,7 +1254,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
         peer: &mut RemoteQueryablePeer<P>,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {

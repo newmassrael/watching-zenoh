@@ -154,7 +154,7 @@ fn native_querier(endpoint: String, replies_tx: mpsc::Sender<Vec<String>>) {
         let timeouts = SessionTimeouts::spec_defaults();
         let dispatch_session = session.clone();
         let mut dispatch =
-            |event: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(event);
+            |event: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(event);
 
         // Query UNTIL a reply arrives, bounded — the convergence pattern the
         // sibling `pubsub_roundtrip.rs` uses and documents ("the acceptor

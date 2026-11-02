@@ -21,15 +21,58 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `payload` of `StreamEnvelope`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct StreamEnvelope<'a> {
+pub struct StreamEnvelopePayloadField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<StreamEnvelopePayloadField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<65535>;
+}
+
+/// What `StreamEnvelopeIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait StreamEnvelopeStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<StreamEnvelopePayloadField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<StreamEnvelopePayloadField>> StreamEnvelopeStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside StreamEnvelopeStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait StreamEnvelopeFrom<'f>: StreamEnvelopeStorage + ::sce_forge_runtime::codec::StoresBytes<'f, StreamEnvelopePayloadField> {}
+
+impl<'f, S: StreamEnvelopeStorage + ::sce_forge_runtime::codec::StoresBytes<'f, StreamEnvelopePayloadField>> StreamEnvelopeFrom<'f> for S {}
+
+// `StreamEnvelopeIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `StreamEnvelope<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `StreamEnvelopeOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamEnvelopeIn<S: StreamEnvelopeStorage> {
     pub payload_len: u16,
-    pub payload: &'a [u8],
+    pub payload: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<StreamEnvelopePayloadField>>::Bytes, 65535>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type StreamEnvelope<'a> = StreamEnvelopeIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type StreamEnvelopeOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = StreamEnvelopeIn<S>;
+
+impl<S: StreamEnvelopeStorage> Default for StreamEnvelopeIn<S> {
+    fn default() -> Self {
+        Self {
+            payload_len: Default::default(),
+            payload: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> StreamEnvelope<'a> {
+impl<S: StreamEnvelopeStorage> StreamEnvelopeIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -45,7 +88,22 @@ impl<'a> StreamEnvelope<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: StreamEnvelopeFrom<'f> {
+        // Judged as [`Self::decode_into`] judges a frame past a capacity
+        // (docs/adr/0077 §7).
+        let mut _frame = *cursor;
+        match Self::stored(cursor) {
+            Err(CodecError::CapacityExceeded) => {
+                StreamEnvelope::stored(&mut _frame)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode`], which stops where a field is past its
+    /// capacity.
+    fn stored<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: StreamEnvelopeFrom<'f> {
         // Variable-length codec. RFC §synth-5-B B3 stream-correct shape:
         // a codec without `<sce:field sce:bit-size="tail">` consumes
         // only `min_bytes + length_value` rather than the entire
@@ -63,6 +121,8 @@ impl<'a> StreamEnvelope<'a> {
         let raw = cursor.peek_slice(_frame_len)?;
         let payload_len = raw[0] as u16 | ((raw[1] as u16) << 8);
         let payload = raw.get(2..2 + payload_len as usize).ok_or(CodecError::NeedMoreBytes)?;
+        let payload = ::sce_forge_runtime::codec::Bounded::new(payload).ok_or(CodecError::LengthOutOfRange)?;
+        let payload = payload.store::<S, StreamEnvelopePayloadField>()?;
         let value = Self {
             payload_len,
             payload,
@@ -74,7 +134,7 @@ impl<'a> StreamEnvelope<'a> {
         // lower bound.
         let mut _consumed: usize = 2;
         {
-            let _end = 2usize + value.payload.len();
+            let _end = 2usize + value.payload.as_bytes().len();
             if _end > _consumed { _consumed = _end; }
         }
         if _consumed > _frame_len {
@@ -88,7 +148,7 @@ impl<'a> StreamEnvelope<'a> {
     /// embeds or dispatches to this one decodes it where it will live (see
     /// `decode_into` on a codec that holds a bounded list). This body has no
     /// list of its own to build in place, so it decodes and stores.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: StreamEnvelopeFrom<'f> {
         *_out = Self::decode(cursor)?;
         Ok(())
     }
@@ -99,35 +159,32 @@ impl<'a> StreamEnvelope<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 65537;
 
-    /// Encode `self` into the caller-owned sink. Returns the value's refusal
-    /// when the encoding cannot carry it (a length past its type, a list past
-    /// its bound, a gate that disagrees with a presence; the document declares
-    /// `sce:encode-may-fail`), or the sink's own error:
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
-    /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w)
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        StreamEnvelope::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
-    /// `encode` refuses a value with: one the encoding cannot carry (a
-    /// length past its type, a list past its bound) or one a gate
-    /// disagrees with. Callers targeting zero-alloc hot paths should call
-    /// `encode` directly against a caller-owned sink.
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -137,11 +194,11 @@ impl<'a> StreamEnvelope<'a> {
 /// computes those from what is ([`StreamEnvelope::encode_source`]).
 pub trait StreamEnvelopeSource {
     /// The `payload` field.
-    fn payload(&self) -> &[u8];
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65535>;
 }
 
 impl<T: StreamEnvelopeSource + ?Sized> StreamEnvelopeSource for &T {
-    fn payload(&self) -> &[u8] {
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65535> {
         (**self).payload()
     }
 }
@@ -153,24 +210,18 @@ impl<T: StreamEnvelopeSource + ?Sized> StreamEnvelopeSource for &T {
 #[derive(Debug, Clone, Copy)]
 pub struct StreamEnvelopeParts<'a> {
     /// The `payload` field.
-    pub payload: &'a [u8],
+    pub payload: ::sce_forge_runtime::codec::Bytes<'a, 65535>,
 }
 
 impl<'a> StreamEnvelopeSource for StreamEnvelopeParts<'a> {
-    fn payload(&self) -> &[u8] {
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65535> {
         self.payload
     }
 }
 
-impl<'a> StreamEnvelopeSource for StreamEnvelope<'a> {
-    fn payload(&self) -> &[u8] {
-        self.payload
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> StreamEnvelopeSource for StreamEnvelopeOwned<S> {
-    fn payload(&self) -> &[u8] {
-        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload)
+impl<S: StreamEnvelopeStorage> StreamEnvelopeSource for StreamEnvelopeOwned<S> {
+    fn payload(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 65535> {
+        self.payload.as_bytes()
     }
 }
 
@@ -179,37 +230,37 @@ impl<'a> StreamEnvelope<'a> {
     /// Encode what `src` says into the caller-owned sink: the bytes
     /// [`Self::encode`] writes for the value it holds, read through
     /// [`StreamEnvelopeSource`]. A length, a count or a gate flag is computed from what
-    /// `src` presents, and a value the encoding cannot carry is refused
-    /// before the first byte is written.
-    pub fn encode_source<S: StreamEnvelopeSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: StreamEnvelopeSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source(src, w)
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: StreamEnvelopeSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: StreamEnvelopeSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _n_d_payload_len_0: usize = src.payload().len();
-        let _d_payload_len: u16 = u16::try_from(_n_d_payload_len_0).map_err(|_| CodecError::LengthOutOfRange)?;
+        let _d_payload_len: u16 = _n_d_payload_len_0 as u16;
         w.write_u8((_d_payload_len & 0xFF) as u8)?;
         w.write_u8((_d_payload_len >> 8 & 0xFF) as u8)?;
-        w.write_bytes(src.payload())?;
+        w.write_bytes(src.payload().into_inner())?;
         Ok(())
     }
 
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: StreamEnvelopeSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+    pub fn count_source<S: StreamEnvelopeSource + ?Sized>(src: &S) -> usize {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c)?;
-        Ok(_c.len())
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
     }
 }
 
 impl<'a, S: StreamEnvelopeSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for StreamEnvelope<'a> {
-    type Error<E> = CodecError;
+    type Error<E> = E;
 
-    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
         Self::write_source(src, w)
     }
 }
@@ -217,10 +268,12 @@ impl<'a, S: StreamEnvelopeSource + ?Sized> ::sce_forge_runtime::codec::SourceWri
 #[allow(dead_code)]
 impl<'a> StreamEnvelope<'a> {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
-    /// with nothing written, or the refusal that encode would give. The result
-    /// writes the frame into a window of exactly that size and cannot fail.
-    pub fn measure<S: StreamEnvelopeSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
-        ::sce_forge_runtime::codec::measure(src)
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: StreamEnvelopeSource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
     }
 
     /// Write `src` into `window` in one pass and return the bytes it is, for a
@@ -287,17 +340,9 @@ impl<'a> StreamEnvelope<'a> {
 // `let v: StreamEnvelopeOwned = StreamEnvelopeOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct StreamEnvelopeOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub payload_len: u16,
-    pub payload: S::Bytes<65535>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> StreamEnvelope<'a> {
@@ -307,15 +352,16 @@ impl<'a> StreamEnvelope<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<StreamEnvelopeOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: StreamEnvelopeFrom<'a>>(self) -> Result<StreamEnvelopeOwned<S>, CodecError> {
         Ok(StreamEnvelopeOwned {
             payload_len: self.payload_len,
-            payload: <S::Bytes<65535> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.payload)?,
+            payload: self.payload.store::<S, StreamEnvelopePayloadField>()?,
         })
     }
 
@@ -327,7 +373,7 @@ impl<'a> StreamEnvelope<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> StreamEnvelopeOwned<S> {
+impl<S: StreamEnvelopeStorage> StreamEnvelopeOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -351,7 +397,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> StreamEnvelopeOwned<S> {
     /// and is not to be read.
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut StreamEnvelope<'o>) {
         _out.payload_len = self.payload_len;
-        _out.payload = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload);
+        _out.payload = self.payload.as_bytes();
         
     }
 
@@ -363,37 +409,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> StreamEnvelopeOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<StreamEnvelopeOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> StreamEnvelopeFrom<'x>>(&self) -> Result<StreamEnvelopeOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> StreamEnvelopeOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`StreamEnvelope::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        StreamEnvelope::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(StreamEnvelope::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
     }
 }
 
@@ -410,10 +427,10 @@ impl<'a> StreamEnvelope<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<StreamEnvelopeOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: StreamEnvelopeStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<StreamEnvelopeOwned<S>, CodecError> {
         Ok(StreamEnvelopeOwned {
             payload_len: self.payload_len,
-            payload: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<65535>(origin, self.payload)?,
+            payload: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<StreamEnvelopePayloadField>(origin, self.payload.into_inner()))?,
         })
     }
 }

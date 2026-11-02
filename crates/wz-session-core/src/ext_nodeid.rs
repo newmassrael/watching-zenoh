@@ -24,10 +24,9 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::CodecStorage;
-use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(feature = "alloc")]
 use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryStorage};
 #[cfg(feature = "alloc")]
 use wz_codecs::ext_zint::ExtZint;
 
@@ -82,7 +81,7 @@ pub fn sync_header_z(header: &mut u8, chain_present: bool) {
 /// Set the chain-continuation `Z` bit on every entry except the last (which
 /// terminates the chain) — zenoh's per-entry `FLAG_Z` invariant. The single
 /// owner of this normalisation for every owned ext chain.
-pub fn apply_chain_z_bits<S: CodecStorage>(entries: &mut [ExtEntryOwned<S>]) {
+pub fn apply_chain_z_bits<S: ExtEntryStorage>(entries: &mut [ExtEntryOwned<S>]) {
     if entries.is_empty() {
         return;
     }
@@ -107,7 +106,7 @@ pub fn apply_chain_z_bits<S: CodecStorage>(entries: &mut [ExtEntryOwned<S>]) {
 ///
 /// Heap profile only: it reads the owned chain, a `Vec`.
 #[cfg(feature = "alloc")]
-pub fn read_z64_ext<S: CodecStorage>(
+pub fn read_z64_ext<S: ExtEntryStorage>(
     exts: Option<&Vec<ExtEntryOwned<S>>>,
     header: u8,
 ) -> Option<u64> {
@@ -178,7 +177,7 @@ pub fn read_two_z64_of<E: crate::ext_view::ExtEntryView>(
 ///
 /// Heap profile only: it edits the owned chain, a `Vec`.
 #[cfg(feature = "alloc")]
-pub fn set_z64_ext<S: CodecStorage>(
+pub fn set_z64_ext<S: ExtEntryStorage>(
     exts: &mut Option<Vec<ExtEntryOwned<S>>>,
     header: u8,
     value: Option<u64>,
@@ -237,7 +236,7 @@ pub const NODE_ID_BITS: u32 = NodeId::BITS;
 /// so the constant is held against this function's BEHAVIOUR and not only
 /// against its signature.
 #[cfg(feature = "alloc")]
-pub fn read_source<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> NodeId {
+pub fn read_source<S: ExtEntryStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> NodeId {
     read_z64_ext(exts, NODEID_EXT_HEADER).map_or(0, |v| v as NodeId)
 }
 
@@ -248,7 +247,10 @@ pub fn read_source<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> Nod
 /// `Z` flag. A thin projection of the shared [`set_z64_ext`] over the
 /// `ext_nodeid` id/header, supplying `None` (remove) for the DEFAULT 0.
 #[cfg(feature = "alloc")]
-pub fn set_source<S: CodecStorage>(exts: &mut Option<Vec<ExtEntryOwned<S>>>, node_id: u16) -> bool {
+pub fn set_source<S: ExtEntryStorage>(
+    exts: &mut Option<Vec<ExtEntryOwned<S>>>,
+    node_id: u16,
+) -> bool {
     set_z64_ext(
         exts,
         NODEID_EXT_HEADER,

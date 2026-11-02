@@ -141,9 +141,9 @@ mod tests {
         TempPayload {
             celsius_centi: centi,
             sensor_id_len: sensor_id.len() as u64,
-            sensor_id,
+            sensor_id: sce_forge_runtime::codec::Bounded::new(sensor_id).unwrap(),
             raw_len: raw.len() as u64,
-            raw,
+            raw: sce_forge_runtime::codec::Bounded::new(raw).unwrap(),
         }
         .encode_to_vec()
     }
@@ -429,9 +429,9 @@ mod ap_dynamic_tests {
         TempPayload {
             celsius_centi: centi,
             sensor_id_len: sensor_id.len() as u64,
-            sensor_id,
+            sensor_id: sce_forge_runtime::codec::Bounded::new(sensor_id).unwrap(),
             raw_len: raw.len() as u64,
-            raw,
+            raw: sce_forge_runtime::codec::Bounded::new(raw).unwrap(),
         }
         .encode_to_vec()
     }

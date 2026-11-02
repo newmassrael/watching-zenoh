@@ -6037,8 +6037,7 @@ mod tests {
                 .expect("the production builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec()
-                .expect("the built declaration is encodable");
+                .encode_to_vec();
             let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
             w.extend_from_slice(&d);
             w
@@ -6079,8 +6078,7 @@ mod tests {
             .expect("the production interest builder")
             .try_as_borrowed()
             .expect("re-borrow")
-            .encode_to_vec()
-            .expect("the built interest is encodable"),
+            .encode_to_vec(),
         );
         d.push_packet(
             crate::link::LINKTYPE_ETHERNET,
@@ -6224,8 +6222,7 @@ mod tests {
                     .expect("the production interest builder")
                     .try_as_borrowed()
                     .expect("re-borrow")
-                    .encode_to_vec()
-                    .expect("the built interest is encodable"),
+                    .encode_to_vec(),
                 ),
             ),
         );
@@ -6245,8 +6242,7 @@ mod tests {
                     .expect("the production reply builder")
                     .try_as_borrowed()
                     .expect("re-borrow")
-                    .encode_to_vec()
-                    .expect("the built reply is encodable"),
+                    .encode_to_vec(),
                 ),
             ),
         );
@@ -6262,8 +6258,7 @@ mod tests {
                     wz_session_core::declare_build::build_declare_final_reply(4)
                         .try_as_borrowed()
                         .expect("re-borrow")
-                        .encode_to_vec()
-                        .expect("the built reply is encodable"),
+                        .encode_to_vec(),
                 ),
             ),
         );
@@ -8425,7 +8420,7 @@ mod tests {
                     .try_as_borrowed()
                     .expect("re-borrow")
                     .encode_to_vec()
-                    .expect("the built declaration is encodable");
+                    ;
             // One length-prefixed transport frame carrying it, which is what a
             // declaration looks like on a stream link.
             let mut unit = alloc::vec![
@@ -8548,8 +8543,7 @@ mod tests {
                     .expect("the production builder")
                     .try_as_borrowed()
                     .expect("re-borrow")
-                    .encode_to_vec()
-                    .expect("the built declaration is encodable");
+                    .encode_to_vec();
             let mut unit = alloc::vec![
                 wz_session_core::wire_const::T_MID_FRAME
                     | wz_session_core::wire_const::FLAG_T_FRAME_R,
@@ -8635,8 +8629,7 @@ mod tests {
             .expect("the production builder")
             .try_as_borrowed()
             .expect("re-borrow")
-            .encode_to_vec()
-            .expect("the built declaration is encodable");
+            .encode_to_vec();
         let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         unit.extend_from_slice(&wire);
         unit
@@ -9900,8 +9893,7 @@ mod tests {
             .expect("the production builder")
             .try_as_borrowed()
             .expect("re-borrow")
-            .encode_to_vec()
-            .expect("the built declaration is encodable");
+            .encode_to_vec();
         let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         w.extend_from_slice(&declare);
 
@@ -9965,8 +9957,7 @@ mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec()
-            .expect("a fixture Hello is encodable");
+            .encode_to_vec();
         let mut wire = alloc::vec![
             wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L
         ];

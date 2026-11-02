@@ -62,13 +62,15 @@
 use alloc::string::{String, ToString as _};
 
 use hashbrown::{HashMap, HashSet};
-use sce_forge_runtime::codec::{CodecError, CodecStorage, SceStr};
+use sce_forge_runtime::codec::{Bounded, CodecError};
 
 use crate::driver_loop::DriverLoopOutcome;
 use crate::interest_build::{interest_body, interest_body_mut};
 use crate::keyexpr_prefix::{strip_nonwild_prefix, OwnedNonWildKeyExpr};
 use crate::network_message::NetworkMessage;
-use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+use wz_codecs::wireexpr::{WireexprFrom, WireexprOwned, WireexprOwnedVariant, WireexprStorage};
+use wz_codecs::wireexpr_local::WireexprLocalSuffixField;
+use wz_codecs::wireexpr_nonlocal::WireexprNonlocalSuffixField;
 
 /// The Interest outer-header `C` (Current) / `F` (Future) mode bits
 /// (`interest_build.rs:43-44`). `Final` is `C == 0 && F == 0` — no enum exists,
@@ -93,16 +95,20 @@ const INTEREST_BODY_M: u8 = 0x40;
 /// Generic over the storage profile (R3011): a namespace decorates messages of
 /// both planes, and a `Declare`'s key expression is on the default profile while
 /// a `Push`'s is on [`WireStorage`](crate::wire::WireStorage).
-fn id_suffix<S: CodecStorage>(we: &WireexprOwned<S>) -> (u64, Option<&str>) {
+fn id_suffix<S: WireexprStorage>(we: &WireexprOwned<S>) -> (u64, Option<&str>) {
     match &we.body {
-        WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_ref().map(SceStr::as_str)),
-        WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_ref().map(SceStr::as_str)),
+        WireexprOwnedVariant::WireexprLocal(a) => {
+            (a.id, a.suffix.as_ref().map(|s| s.as_text().into_inner()))
+        }
+        WireexprOwnedVariant::WireexprNonlocal(a) => {
+            (a.id, a.suffix.as_ref().map(|s| s.as_text().into_inner()))
+        }
     }
 }
 
 /// `true` iff the wireexpr is Sender-mapped (Local arm, M=1). Receiver-mapped
 /// (Nonlocal, M=0) references the receiver's own already-relative table.
-fn is_sender_mapped<S: CodecStorage>(we: &WireexprOwned<S>) -> bool {
+fn is_sender_mapped<S: WireexprStorage>(we: &WireexprOwned<S>) -> bool {
     matches!(&we.body, WireexprOwnedVariant::WireexprLocal(_))
 }
 
@@ -110,22 +116,26 @@ fn is_sender_mapped<S: CodecStorage>(we: &WireexprOwned<S>) -> bool {
 /// Local/Nonlocal arm. The keyexpr's suffix was already PRESENT (we only ever
 /// rewrite a keyexpr that carried a literal suffix), so no owning-message
 /// suffix-presence flag needs touching.
-fn set_literal_suffix<S: CodecStorage>(
+///
+/// `LengthOutOfRange` for a suffix past the `u16` length the protocol bounds a
+/// key expression's suffix at, and `CapacityExceeded` past what the message's
+/// storage profile holds of one.
+fn set_literal_suffix<S: for<'x> WireexprFrom<'x>>(
     we: &mut WireexprOwned<S>,
     suffix: String,
 ) -> Result<(), CodecError> {
-    let sce = <S::Str<128> as SceStr>::from_view(&suffix)?;
+    let text = Bounded::new(suffix.as_str()).ok_or(CodecError::LengthOutOfRange)?;
     let len = suffix.len() as u64;
     match &mut we.body {
         WireexprOwnedVariant::WireexprLocal(a) => {
+            a.suffix = Some(text.store::<S, WireexprLocalSuffixField>()?);
             a.id = 0;
             a.suffix_len = Some(len);
-            a.suffix = Some(sce);
         }
         WireexprOwnedVariant::WireexprNonlocal(a) => {
+            a.suffix = Some(text.store::<S, WireexprNonlocalSuffixField>()?);
             a.id = 0;
             a.suffix_len = Some(len);
-            a.suffix = Some(sce);
         }
     }
     Ok(())
@@ -239,7 +249,7 @@ pub fn apply_egress_interest(
 /// The literal-prefix egress rule: `Some(<ns>/<suffix>)` when the keyexpr is a
 /// literal (`id == 0`), else `None` (an aliased use already carries the
 /// namespace from its declaration). zenoh `handle_namespace_egress(.., false)`.
-fn literal_prefix<S: CodecStorage>(
+fn literal_prefix<S: WireexprStorage>(
     ns: &OwnedNonWildKeyExpr,
     we: &WireexprOwned<S>,
 ) -> Option<String> {
@@ -499,7 +509,11 @@ impl NamespaceIngress {
     /// namespace from one keyexpr in place, returning whether the message is
     /// kept. `decl_id` is `Some` only for a `DeclareKeyExpr` DEFINITION (so a
     /// non-matching definition is parked in `incomplete` by that id).
-    fn strip<S: CodecStorage>(&mut self, we: &mut WireexprOwned<S>, decl_id: Option<u64>) -> bool {
+    fn strip<S: for<'x> WireexprFrom<'x>>(
+        &mut self,
+        we: &mut WireexprOwned<S>,
+        decl_id: Option<u64>,
+    ) -> bool {
         let sender = is_sender_mapped(we);
         self.strip_mapped(we, decl_id, sender)
     }
@@ -524,7 +538,7 @@ impl NamespaceIngress {
     /// `wireexpr_nonlocal.rs`), so the mis-tagged variant corrupts no value — it
     /// only forgets which table the id belongs to. Reading `M` here recovers
     /// exactly that, with no change to the pinned codegen.
-    fn strip_mapped<S: CodecStorage>(
+    fn strip_mapped<S: for<'x> WireexprFrom<'x>>(
         &mut self,
         we: &mut WireexprOwned<S>,
         decl_id: Option<u64>,
@@ -723,7 +737,7 @@ mod tests {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id,
                 suffix_len: suffix.map(|s| s.len() as u64),
-                suffix: suffix.map(|s| crate::codec_owned::owned_string::<128>(s).unwrap()),
+                suffix: suffix.map(|s| crate::codec_owned::owned_string(s).unwrap()),
             }),
         }
     }
@@ -734,12 +748,12 @@ mod tests {
             body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                 id,
                 suffix_len: suffix.map(|s| s.len() as u64),
-                suffix: suffix.map(|s| crate::codec_owned::owned_string::<128>(s).unwrap()),
+                suffix: suffix.map(|s| crate::codec_owned::owned_string(s).unwrap()),
             }),
         }
     }
 
-    fn suffix_of<S: CodecStorage>(we: &WireexprOwned<S>) -> Option<String> {
+    fn suffix_of<S: WireexprStorage>(we: &WireexprOwned<S>) -> Option<String> {
         id_suffix(we).1.map(str::to_string)
     }
 

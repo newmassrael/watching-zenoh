@@ -418,7 +418,7 @@ mod placing_on_the_heap {
 struct End {
     actions: Handle,
     pump: Pump,
-    on_event: Box<dyn FnMut(IterationEvent<'_>)>,
+    on_event: Box<dyn FnMut(IterationEvent<'_, '_>)>,
     seen: Arc<Seen>,
 }
 
@@ -433,7 +433,7 @@ impl End {
 }
 
 /// The `on_event` an end's pump is driven with.
-type OnEvent = Box<dyn FnMut(IterationEvent<'_>)>;
+type OnEvent = Box<dyn FnMut(IterationEvent<'_, '_>)>;
 
 /// The application layer of an end: an observer with one subscriber on
 /// [`KEY`] that counts what it is handed.

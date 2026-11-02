@@ -171,25 +171,25 @@ fn every_control_writer_costs_the_heap_nothing_and_its_builder_costs_it_somethin
     pair!(
         wrong,
         "declare_kexpr",
-        lent::declare_kexpr(5, key),
+        lent::declare_kexpr(5, key).unwrap(),
         owned::build_declare_kexpr(5, key).unwrap()
     );
     pair!(
         wrong,
         "declare_subscriber",
-        lent::declare_subscriber(1, 0, Some(key)),
+        lent::declare_subscriber(1, 0, Some(key)).unwrap(),
         owned::build_declare_subscriber(1, 0, Some(key)).unwrap()
     );
     pair!(
         wrong,
         "declare_subscriber on an alias",
-        lent::declare_subscriber(1, 7, None),
+        lent::declare_subscriber(1, 7, None).unwrap(),
         owned::build_declare_subscriber(1, 7, None).unwrap()
     );
     pair!(
         wrong,
         "declare_queryable with info",
-        lent::declare_queryable(2, 0, Some(key), info),
+        lent::declare_queryable(2, 0, Some(key), info).unwrap(),
         {
             let mut built = owned::build_declare_queryable(2, 0, Some(key)).unwrap();
             owned::set_declare_queryable_info(&mut built, info).expect("within the bound");
@@ -199,13 +199,13 @@ fn every_control_writer_costs_the_heap_nothing_and_its_builder_costs_it_somethin
     pair!(
         wrong,
         "declare_token",
-        lent::declare_token(3, 0, Some(key)),
+        lent::declare_token(3, 0, Some(key)).unwrap(),
         owned::build_declare_token(3, 0, Some(key)).unwrap()
     );
     pair!(
         wrong,
         "declare_token_nonlocal",
-        lent::declare_token_nonlocal(3, 4, Some(key)),
+        lent::declare_token_nonlocal(3, 4, Some(key)).unwrap(),
         owned::build_declare_token_nonlocal(3, 4, Some(key)).unwrap()
     );
     pair!(
@@ -260,7 +260,7 @@ fn every_control_writer_costs_the_heap_nothing_and_its_builder_costs_it_somethin
     pair!(
         wrong,
         "declare_token_reply",
-        lent::declare_token_reply(9, key),
+        lent::declare_token_reply(9, key).unwrap(),
         owned::build_declare_token_reply(9, key).unwrap()
     );
     pair!(
@@ -280,21 +280,25 @@ fn every_control_writer_costs_the_heap_nothing_and_its_builder_costs_it_somethin
             false,
             0,
             Some(key)
-        ),
+        )
+        .unwrap(),
         owned_interest::build_interest_subscribers(11, true, true, 0, Some(key)).unwrap()
     );
     pair!(
         wrong,
         "interest propagated",
-        lent::interest_propagated(lent::interest(
-            11,
-            InterestKinds::QUERYABLES,
-            true,
-            false,
-            true,
-            0,
-            Some(key)
-        )),
+        lent::interest_propagated(
+            lent::interest(
+                11,
+                InterestKinds::QUERYABLES,
+                true,
+                false,
+                true,
+                0,
+                Some(key)
+            )
+            .unwrap()
+        ),
         owned_interest::build_interest_propagated(
             11,
             InterestKinds::QUERYABLES,

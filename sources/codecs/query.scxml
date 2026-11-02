@@ -33,7 +33,7 @@
          byte 1 : consolidation (uint8 0..3)
        Q_P-gated:
          bytes  : parameters_len (VLE u64) + parameters (UTF-8 bytes,
-                                                          max 256)
+                                                          max 4294967295)
        Z-gated:
          chain  : codec_zenoh_query_ext_entry tlv-chain (entry-flag
                   termination on Z; max-depth=8 covers query's 3 ext
@@ -89,9 +89,11 @@
      dispatch header — the wire byte 0 here IS the request body's
      dispatch header from the request envelope's perspective.
 
-     stripped-down scope: parameters max-size=256 (full upstream is
-     unbounded zbuf — caller-supplied length-prefix). All other
-     fields match upstream wire 1:1.
+     parameters max-size=4294967295: upstream reads a `String` with the
+     default codec, a usize length (`commons/zenoh-codec/src/zenoh/query.rs`
+     @ `parameters = self.codec.read(&mut *reader)?;`). 4294967295 stands
+     in for usize: it is usize on a 32-bit target and no zenoh frame
+     passes 4 GiB. All other fields match upstream wire 1:1.
 
      Deliberate divergence from SCE upstream codec_zenoh_query
      (R88 variant-default-uniformity closure): wz bakes
@@ -127,10 +129,10 @@
     <sce:field id="parameters_len" sce:type="uint64" sce:byte="2" sce:bit-size="vle"
                sce:present-if="header.P"/>
     <sce:field id="parameters" sce:type="bytes" sce:byte="3" sce:bit-size="length-ref"
-               sce:length-field="parameters_len" sce:max-size="256"
+               sce:length-field="parameters_len" sce:max-size="4294967295"
                sce:present-if="header.P"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_query_ext_entry" sce:byte="4"
-                   max-depth="8" on-overflow="reject"
+                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"
                    entry-id="header" entry-id-except="header.Z">

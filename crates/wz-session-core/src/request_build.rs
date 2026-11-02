@@ -330,7 +330,7 @@ pub fn attach_query_value_shm(
     }
 
     let descriptor_bytes = crate::extshm::encode_shm_descriptor(descriptor);
-    let encoding_codec = encoding.to_codec();
+    let encoding_codec = encoding.to_codec()?;
     let declared = encoding_codec.encode_to_vec().len() as u64 + 1 + u64::from(descriptor.data_len);
     let marker = QueryExtEntryOwned {
         header: body_ext_id::QUERY_SHM,
@@ -341,7 +341,7 @@ pub fn attach_query_value_shm(
         body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
             after_shm: QueryValueZbufAfterShm::AfterShm {
                 encoding: encoding_codec.try_into_owned_in::<crate::wire::WireStorage>()?,
-                slices: crate::put_payload::shm_slices::<crate::wire::WireStorage>(
+                slices: crate::put_payload::shm_slices::<crate::wire::WireStorage, _>(
                     &descriptor_bytes,
                 )?,
                 value_len: declared,
@@ -520,7 +520,7 @@ pub fn relay_query_value_shm(
 fn query_chain(
     entries: Vec<crate::wire::parts::QueryExtEntryOwned>,
 ) -> Result<
-    sce_forge_runtime::codec::Bounded<Vec<crate::wire::parts::QueryExtEntryOwned>, 8>,
+    sce_forge_runtime::codec::Bounded<Vec<crate::wire::parts::QueryExtEntryOwned>, 8, 1>,
     crate::put_payload::RelayFault,
 > {
     crate::held_list::held(entries).map_err(|_| crate::put_payload::RelayFault::Unrepresentable)
@@ -1422,7 +1422,10 @@ mod tests {
         match &composite.keyexpr.body {
             WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
-                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(
+                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                    Some("tail")
+                );
                 assert_eq!(w.suffix_len, Some(4));
             }
             _ => panic!(),
@@ -1437,7 +1440,10 @@ mod tests {
         match &literal.keyexpr.body {
             WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 0, "literal sentinel id=0");
-                assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                assert_eq!(
+                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                    Some("demo/test")
+                );
             }
             _ => panic!(),
         }
@@ -1654,7 +1660,10 @@ mod tests {
             RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header, 0x43, "Query.header MID | Q_P");
                 assert_eq!(q.parameters_len, Some(3));
-                assert_eq!(q.parameters.as_deref(), Some(b"k=v".as_slice()));
+                assert_eq!(
+                    q.parameters.as_ref().map(|p| p.as_bytes().into_inner()),
+                    Some(b"k=v".as_slice())
+                );
                 assert!(
                     q.consolidation.is_none() && q.extensions.is_none(),
                     "parameters-only helper must not set consolidation or exts",
@@ -2973,14 +2982,18 @@ mod shm_value_build_tests {
             packed_id: 0x0B, // id 5, schema flag set
             schema: Some("json".into()),
         };
-        let encoding_len = encoding.to_codec().encode_to_vec().len();
+        let encoded = encoding
+            .to_codec()
+            .expect("the schema is within its bound")
+            .encode_to_vec();
+        let encoding_len = encoded.len();
         let mut request = build_request_query(1, 0, Some("k")).unwrap();
         attach_query_value_shm(query_of(&mut request), &encoding, &DESCRIPTOR).unwrap();
         let wire = request.wire();
         let declared = (encoding_len + 1 + 1024) as u64;
         let mut expected = alloc::vec![0x84u8, 0x43];
         crate::vle::encode_vle_u64_into(&mut expected, declared);
-        expected.extend_from_slice(&encoding.to_codec().encode_to_vec());
+        expected.extend_from_slice(&encoded);
         expected.extend_from_slice(&UPSTREAMS_VALUE[5..]);
         assert!(wire.ends_with(&expected), "{wire:02x?}");
     }

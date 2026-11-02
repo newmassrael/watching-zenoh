@@ -869,7 +869,7 @@ mod tests {
                     }) => {
                         assert_eq!(w.id, 0, "literal-keyexpr → wireexpr.id=0 sentinel");
                         assert_eq!(
-                            w.suffix.as_deref(),
+                            w.suffix.as_ref().map(|s| s.as_text().into_inner()),
                             Some("liveliness/dev"),
                             "literal suffix must round-trip",
                         );

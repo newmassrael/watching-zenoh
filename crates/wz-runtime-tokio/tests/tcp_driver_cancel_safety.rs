@@ -79,11 +79,10 @@ async fn loopback_pair() -> (TcpStream, TcpDriver) {
 fn envelope_bytes(payload: &[u8]) -> Vec<u8> {
     let envelope = StreamEnvelope {
         payload_len: payload.len() as u16,
-        payload,
+        payload: wz_codecs::Bounded::new(payload)
+            .expect("a test payload fits the u16 stream envelope"),
     };
-    envelope
-        .encode_to_vec()
-        .expect("a test payload fits the u16 stream envelope")
+    envelope.encode_to_vec()
 }
 
 /// Sanity decode helper — confirms a `LinkEvent::Rx` carries the

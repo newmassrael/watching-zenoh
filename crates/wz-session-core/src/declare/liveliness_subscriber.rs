@@ -497,7 +497,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         self.table
@@ -509,7 +509,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
@@ -794,10 +794,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         feature = "storage-profile",
         feature = "session-slot"
     ))]
-    pub fn dispatch_declare_view_historical<'a>(
+    pub fn dispatch_declare_view_historical<'a, 'f>(
         &mut self,
         peer: &mut PeerTokens<P>,
-        body: &DeclareVariant<'a>,
+        body: &DeclareVariant<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
     ) {
@@ -1377,7 +1377,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         peer: &mut PeerTokens<P>,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         self.dispatch_iteration_event_unclaimed(peer, event, peer_keyexpr_table, &|_| false);
@@ -1389,7 +1389,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
         peer: &mut PeerTokens<P>,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
@@ -2637,7 +2637,7 @@ mod tests {
                         body: WireexprVariant::WireexprLocal(WireexprLocal {
                             id: 0,
                             suffix_len: Some(1),
-                            suffix: Some("x"),
+                            suffix: Some(wz_codecs::Bounded::new("x").unwrap()),
                         }),
                     }),
                 },

@@ -65,7 +65,7 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
+use sce_forge_runtime::codec::{Bounded, CodecError, SceSink, VecSink};
 use wz_codecs::close::Close;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_unit::ExtUnit;
@@ -134,6 +134,16 @@ pub enum ComposeError {
         /// The body's length in bytes.
         len: usize,
         /// The largest length the prefix holds.
+        max: u64,
+    },
+    /// A cookie longer than the length the message reads it with: upstream's
+    /// u16 on an InitAck (`commons/zenoh-codec/src/transport/init.rs` @
+    /// `let zodec = Zenoh080Bounded::<BatchSize>::new();`) and its usize on an
+    /// OpenSyn, which no frame passes.
+    CookieLength {
+        /// The cookie's length in bytes.
+        len: usize,
+        /// The longest cookie the message holds.
         max: u64,
     },
 }
@@ -402,6 +412,14 @@ pub fn vle_range(width: usize) -> Option<(u64, u64)> {
     Some((min, largest(width)))
 }
 
+/// `cookie` as the cookie field of the message whose bound `MAX` is, refused past it.
+fn held_cookie<const MAX: usize>(cookie: &[u8]) -> Result<Bounded<&[u8], MAX>, ComposeError> {
+    Bounded::new(cookie).ok_or(ComposeError::CookieLength {
+        len: cookie.len(),
+        max: MAX as u64,
+    })
+}
+
 fn check_zid(zid: &[u8]) -> Result<(), ComposeError> {
     if (1..=16).contains(&zid.len()) {
         Ok(())
@@ -491,18 +509,18 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
     let body = InitBody {
         version: spec.version,
         cbyte: cbyte(spec.whatami, spec.zid.len()),
-        zid: spec.zid,
+        zid: Bounded::new(spec.zid).ok_or(ComposeError::ZidLength(spec.zid.len()))?,
         s: spec.size.map(|s| InitBodyS {
             sn_res: pack_sn_res(s.frame_sn_code, s.request_id_code),
             batch_size: s.batch_size,
         }),
         cookie_len: cookie.map(|c| c.len() as u64),
-        cookie,
+        cookie: cookie.map(held_cookie).transpose()?,
     };
     if body.s.is_some() {
         flags |= wire_const::FLAG_T_INIT_S;
     }
-    let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + chain.len());
+    let mut wire = Vec::with_capacity(1 + InitBody::measure(&body).len() + chain.len());
     wire.push(flags | wire_const::T_MID_INIT);
     {
         let mut sink = VecSink::new(&mut wire);
@@ -547,9 +565,9 @@ pub fn compose_open(spec: &OpenSpec<'_>) -> Result<Vec<u8>, ComposeError> {
         lease: wire_lease,
         initial_sn: spec.initial_sn,
         cookie_len: cookie.map(|c| c.len() as u64),
-        cookie,
+        cookie: cookie.map(held_cookie).transpose()?,
     };
-    let mut wire = Vec::with_capacity(1 + OpenBody::MAX_ENCODED_BYTES + chain.len());
+    let mut wire = Vec::with_capacity(1 + OpenBody::measure(&body).len() + chain.len());
     wire.push(flags | wire_const::T_MID_OPEN);
     {
         let mut sink = VecSink::new(&mut wire);
@@ -631,11 +649,13 @@ pub fn frame_unit(framing: Framing, body: &[u8]) -> Result<Vec<u8>, ComposeError
         Framing::Datagram => body.to_vec(),
         Framing::TcpStream => StreamEnvelope {
             payload_len: body.len() as u16,
-            payload: body,
+            // The length check above is the prefix's own bound.
+            payload: Bounded::new(body).ok_or(ComposeError::UnitTooLong {
+                len: body.len(),
+                max: framing.max_body(),
+            })?,
         }
-        // The length check above is the prefix's own bound, so the codec has nothing to refuse.
-        .encode_to_vec()
-        .expect("a body within the framing's length prefix encodes"),
+        .encode_to_vec(),
         Framing::LowLatencyStream => {
             let mut wire = Vec::with_capacity(4 + body.len());
             wire.extend_from_slice(&(body.len() as u32).to_le_bytes());

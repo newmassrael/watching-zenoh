@@ -1807,7 +1807,7 @@ where
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
 {
-    fn event(&mut self, event: IterationEvent<'_>) {
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
         match event {
             IterationEvent::Poll(outcome) => {
                 let on_event = &mut *self.on_event;
@@ -1816,14 +1816,14 @@ where
                     self.reasm,
                     self.actions,
                     self.now_ms,
-                    &mut |event: IterationEvent<'_>| on_event.event(event),
+                    &mut |event: IterationEvent<'_, '_>| on_event.event(event),
                 )
             }
             other => self.on_event.event(other),
         }
     }
 
-    fn record(&mut self, record: crate::driver_loop::InPlaceRecord<'_>) {
+    fn record(&mut self, record: crate::driver_loop::InPlaceRecord<'_, '_>) {
         self.on_event.record(record);
     }
 }
@@ -3273,7 +3273,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>) + ?Sized,
+    F: FnMut(IterationEvent<'_, '_>) + ?Sized,
 {
     report_outcome_reassembling_with(outcome, reasm, actions, now_ms, &mut |_| {}, on_event);
 }
@@ -3301,7 +3301,7 @@ pub fn report_outcome_reassembling_with<R, T, const SLOTS: usize, const CAP: usi
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>) + ?Sized,
+    F: FnMut(IterationEvent<'_, '_>) + ?Sized,
     H: FnMut(&mut DriverLoopOutcome) + ?Sized,
 {
     on_event(IterationEvent::Poll(outcome));
@@ -3341,7 +3341,7 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>) + ?Sized,
+    F: FnMut(IterationEvent<'_, '_>) + ?Sized,
     H: FnMut(&mut DriverLoopOutcome) + ?Sized,
 {
     let DriverLoopOutcome::Fragment {
@@ -3526,7 +3526,7 @@ mod lifecycle_key_tests {
 #[cfg(all(test, feature = "codec-frame", feature = "codec-push"))]
 mod mandatory_extension_seam_tests {
     use super::*;
-    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant};
     use wz_codecs::ext_unit::ExtUnit;
     use wz_codecs_test_support::TestWire as _;
 
@@ -3535,11 +3535,15 @@ mod mandatory_extension_seam_tests {
         let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
         match &mut push.body {
             crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
-                put.extensions = Some(crate::held_list::one_entry(ExtEntryOwned {
-                    header,
-                    body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-                }));
-                put.header |= 0x80;
+                // The chain's `Z` flag on the Put header follows the chain.
+                crate::put_payload::set_chain(
+                    put,
+                    [ExtEntryOwned {
+                        header,
+                        body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+                    }],
+                )
+                .unwrap();
             }
             other => panic!("a literal push carries a Put, got {other:?}"),
         }

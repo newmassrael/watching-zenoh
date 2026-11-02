@@ -71,7 +71,7 @@ type RxLog = Arc<StdMutex<Vec<RxDelivery>>>;
 /// inbound `FramePayload` that carries at least one Push (a real data delivery on
 /// THIS physical link), so the test can assert which link carried each Put and
 /// that the reliable SN sequence is continuous across a link switch.
-fn push_recorder(link_id: usize, log: RxLog) -> impl FnMut(IterationEvent<'_>) {
+fn push_recorder(link_id: usize, log: RxLog) -> impl FnMut(IterationEvent<'_, '_>) {
     move |event| {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             reliable,

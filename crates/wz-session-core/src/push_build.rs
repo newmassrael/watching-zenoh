@@ -56,7 +56,7 @@ use crate::wire::parts::ExtEntryOwnedVariant;
 use wz_codecs::ext_zint::ExtZint;
 
 /// A Push's extension chain, or its body's, within the bound the codec declares.
-type ExtChain = Bounded<Vec<ExtEntryOwned>, 8>;
+type ExtChain = Bounded<Vec<ExtEntryOwned>, 8, 1>;
 
 /// R121e — build a `Push` network-message with a literal keyexpr
 /// (id=0 + inline suffix) and a `Put` body carrying `value` as
@@ -504,7 +504,10 @@ fn gated_timestamp_field(
     #[cfg(feature = "pubsub-timestamp")]
     {
         timestamp
-            .map(|t| t.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .map(|t| {
+                t.to_codec()
+                    .and_then(|t| t.try_into_owned_in::<crate::wire::WireStorage>())
+            })
             .transpose()
     }
     #[cfg(not(feature = "pubsub-timestamp"))]
@@ -529,7 +532,10 @@ fn gated_encoding_field(
     #[cfg(feature = "pubsub-encoding")]
     {
         encoding
-            .map(|e| e.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .map(|e| {
+                e.to_codec()
+                    .and_then(|e| e.try_into_owned_in::<crate::wire::WireStorage>())
+            })
             .transpose()
     }
     #[cfg(not(feature = "pubsub-encoding"))]
@@ -660,21 +666,22 @@ fn build_msg_put_with_meta(
     let mut put = MsgPutOwned {
         timestamp: gated_timestamp_field(timestamp)?,
         encoding: gated_encoding_field(encoding)?,
-        extensions,
         ..crate::put_payload::inline(payload)?
     };
+    // The chain goes in through the one setter, which keeps it and the payload
+    // layout together and syncs the header's `Z` bit (0x80).
+    if let Some(chain) = extensions {
+        crate::put_payload::set_chain(&mut put, chain.into_inner())?;
+    }
     // `MsgPutOwned` is read-only (no `set_*` write accessors —
     // those live on the borrowed view per the owned-encode-omitted
     // SCE policy), so the header flag bits are OR'd directly. Bit
-    // masks match `MsgPut::set_t/set_e/set_z` (0x20/0x40/0x80).
+    // masks match `MsgPut::set_t/set_e` (0x20/0x40).
     if put.timestamp.is_some() {
         put.header |= 0x20;
     }
     if put.encoding.is_some() {
         put.header |= 0x40;
-    }
-    if put.extensions.is_some() {
-        put.header |= 0x80;
     }
     Ok(put)
 }
@@ -769,14 +776,14 @@ pub(crate) fn build_msg_put_shm(
     crate::ext_nodeid::apply_chain_z_bits(&mut exts);
     // The marker in the chain is what makes the payload SLICED: the descriptor
     // goes out as one slice of kind SHM_PTR, which is what upstream's receiver
-    // reads (the inline pair is absent, and the encoder refuses a chain and a
-    // payload that disagree).
+    // reads. A sliced Put holds the chain with the marker and the slices
+    // together, so the chain goes in through the setter that keeps them so.
     let mut put = MsgPutOwned {
         timestamp: gated_timestamp_field(timestamp)?,
         encoding: gated_encoding_field(encoding)?,
-        extensions: Some(crate::held_list::held(exts)?),
         ..crate::put_payload::shm(&descriptor_bytes)?
     };
+    crate::put_payload::set_chain(&mut put, exts)?;
     if put.timestamp.is_some() {
         put.header |= 0x20;
     }
@@ -1033,9 +1040,7 @@ mod tests {
                     crate::put_payload::SLICE_KIND_SHM_PTR
                 );
                 assert_eq!(
-                    crate::extshm::decode_shm_descriptor(
-                        sce_forge_runtime::codec::SceByteBuf::as_slice(&slices[0].bytes)
-                    ),
+                    crate::extshm::decode_shm_descriptor(slices[0].bytes.as_bytes().into_inner()),
                     Some(descriptor),
                     "the slice is the SHM descriptor, not data bytes"
                 );
@@ -1045,9 +1050,8 @@ mod tests {
             }
         }
         assert_eq!(put.payload_len, None, "the inline pair is absent");
-        let exts = crate::held_list::HeldList::entries(&put.extensions).unwrap_or(&[]);
         assert!(
-            crate::extshm::body_has_shm_marker(exts),
+            crate::put_payload::is_sliced(put),
             "the Put body carries the ext_shm 0x2 marker"
         );
     }
@@ -1098,7 +1102,7 @@ mod tests {
                     assert_eq!(slices.len(), 1);
                     assert_eq!(
                         crate::extshm::decode_shm_descriptor(
-                            sce_forge_runtime::codec::SceByteBuf::as_slice(&slices[0].bytes)
+                            slices[0].bytes.as_bytes().into_inner()
                         ),
                         Some(descriptor),
                         "the slice is the descriptor"
@@ -1109,9 +1113,7 @@ mod tests {
                 }
             }
             assert!(
-                crate::extshm::body_has_shm_marker(
-                    crate::held_list::HeldList::entries(&put.extensions).unwrap_or(&[])
-                ),
+                crate::put_payload::is_sliced(put),
                 "the body carries the ext_shm 0x2 marker"
             );
         }
@@ -1147,7 +1149,12 @@ mod tests {
         assert!(put.encoding.is_some());
         assert_eq!(put.encoding.as_ref().unwrap().packed_id, 13);
         assert_eq!(
-            put.encoding.as_ref().unwrap().schema.as_deref(),
+            put.encoding
+                .as_ref()
+                .unwrap()
+                .schema
+                .as_ref()
+                .map(|s| s.as_text().into_inner()),
             Some("application/json")
         );
         // schema_len round-trips from the original schema's byte length.
@@ -1167,8 +1174,8 @@ mod tests {
     fn build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag() {
         let si = SourceInfo::new(&[0x11, 0x22, 0x33, 0x44], 7, 42);
         let put = build_msg_put_with_meta(b"payload", None, None, Some(&si), None).unwrap();
-        let exts = put.extensions.as_deref().expect("body ext chain populated");
-        assert_eq!(exts.len(), 1);
+        let exts = crate::put_payload::chain(&put);
+        assert_eq!(exts.len(), 1, "body ext chain populated");
         // source_info ext: ENC_ZBUF(0x40) | ext_id(0x01) — M and Z bits
         // are NOT pre-set; Z bit application happens at codec emit time.
         assert_eq!(exts[0].header & 0x4F, 0x41);
@@ -1199,12 +1206,12 @@ mod tests {
         let put =
             build_msg_put_with_meta(b"payload", None, None, Some(&si), Some(b"attach-payload"))
                 .unwrap();
-        let exts = put.extensions.as_deref().expect("body ext chain populated");
+        let exts = crate::put_payload::chain(&put);
         assert_eq!(exts.len(), 2, "source_info + attachment = 2 entries");
         assert_eq!(exts[0].header & 0x4F, 0x41, "source_info first");
         assert_eq!(exts[1].header & 0x4F, 0x43, "attachment second");
         if let wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[1].body {
-            assert_eq!(z.value, b"attach-payload");
+            assert_eq!(z.value.as_bytes().into_inner(), b"attach-payload");
         } else {
             panic!("attachment must use ExtZbuf body");
         }
@@ -1213,7 +1220,7 @@ mod tests {
     #[test]
     fn build_msg_put_with_meta_leaves_extensions_none_on_empty_inputs() {
         let put = build_msg_put_with_meta(b"payload", None, None, None, None).unwrap();
-        assert!(put.extensions.is_none());
+        assert!(crate::put_payload::chain(&put).is_empty());
         assert!(!put.z(), "Z flag must remain clear with no extensions");
         assert!(!put.t(), "T flag clear with no timestamp");
         assert!(!put.e(), "E flag clear with no encoding");
@@ -1320,7 +1327,7 @@ mod tests {
              this witnesses nothing"
         );
         let put = build_msg_put_with_meta(b"payload", None, None, None, Some(&big)).unwrap();
-        let exts = put.extensions.as_deref().expect("body ext chain populated");
+        let exts = crate::put_payload::chain(&put);
         assert_eq!(exts.len(), 1, "attachment alone = 1 entry");
         assert_eq!(
             exts[0].header & 0x4F,
@@ -1481,7 +1488,7 @@ mod tests {
             WireexprOwnedVariant::WireexprLocal(arm) => {
                 assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
                 assert_eq!(
-                    arm.suffix.as_deref(),
+                    arm.suffix.as_ref().map(|s| s.as_text().into_inner()),
                     Some("demo/test"),
                     "suffix must carry the literal keyexpr string"
                 );
@@ -1511,7 +1518,7 @@ mod tests {
                 assert!(put.timestamp.is_none(), "no timestamp flag on the MVP path");
                 assert!(put.encoding.is_none(), "no encoding flag on the MVP path");
                 assert!(
-                    put.extensions.is_none(),
+                    crate::put_payload::chain(put).is_empty(),
                     "no MsgPut-level extensions on the MVP path"
                 );
             }
@@ -1558,7 +1565,10 @@ mod tests {
         match &composite.keyexpr.body {
             WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
-                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(
+                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                    Some("tail")
+                );
                 assert_eq!(w.suffix_len, Some(4));
             }
             _ => panic!("composite aliased Push must produce a WireexprLocal arm"),
@@ -1589,7 +1599,7 @@ mod tests {
             WireexprOwnedVariant::WireexprLocal(arm) => {
                 assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
                 assert_eq!(
-                    arm.suffix.as_deref(),
+                    arm.suffix.as_ref().map(|s| s.as_text().into_inner()),
                     Some("demo/test"),
                     "suffix must carry the literal keyexpr string"
                 );
@@ -1667,7 +1677,10 @@ mod tests {
         match &composite.keyexpr.body {
             WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
-                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(
+                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                    Some("tail")
+                );
                 assert_eq!(w.suffix_len, Some(4));
             }
             _ => panic!("composite aliased Push must produce a WireexprLocal arm"),
@@ -1766,7 +1779,7 @@ mod tests {
         assert!(push.extensions.is_some());
         // No body metadata → MsgPut.extensions stays None.
         if let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body {
-            assert!(put.extensions.is_none());
+            assert!(crate::put_payload::chain(put).is_empty());
             assert!(!put.z(), "MsgPut Z stays clear without body extensions");
         } else {
             panic!("CodecZenohMsgPut variant expected");
@@ -1832,8 +1845,11 @@ mod tests {
             assert_eq!(ts.zid.as_slice(), &[0xAA, 0xBB, 0xCC]);
             let enc = put.encoding.as_ref().expect("encoding round-trips");
             assert_eq!(enc.packed_id, 5);
-            assert_eq!(enc.schema.as_deref(), Some("text/plain"));
-            let body_exts = put.extensions.as_deref().expect("body ext chain present");
+            assert_eq!(
+                enc.schema.as_ref().map(|s| s.as_text().into_inner()),
+                Some("text/plain")
+            );
+            let body_exts = crate::put_payload::chain(put);
             assert_eq!(body_exts.len(), 2, "source_info + attachment");
             // Use the runtime's dispatcher projection to validate the
             // bytes resolve back to the original metadata.
@@ -1945,7 +1961,10 @@ mod tests {
         match &fwd.keyexpr.body {
             WireexprOwnedVariant::WireexprLocal(arm) => {
                 assert_eq!(arm.id, 0, "re-literalized to the id=0 sentinel");
-                assert_eq!(arm.suffix.as_deref(), Some("home/temp"));
+                assert_eq!(
+                    arm.suffix.as_ref().map(|s| s.as_text().into_inner()),
+                    Some("home/temp")
+                );
                 assert_eq!(arm.suffix_len, Some(9));
             }
             WireexprOwnedVariant::WireexprNonlocal(_) => {

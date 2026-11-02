@@ -76,8 +76,8 @@ use std::num::NonZeroU16;
 use petgraph::dot::Dot;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableUnGraph;
-use sce_forge_runtime::codec::{Bounded, CodecError, SceBytes, SceStr, SceString};
-use wz_codecs::linkstate::LinkstateOwned;
+use sce_forge_runtime::codec::{Aligned, Bounded, CodecError};
+use wz_codecs::linkstate::{LinkstateOptionsH, LinkstateOwned};
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::linkstate_weight::LinkstateWeight;
@@ -183,10 +183,10 @@ fn within_bound<T, const MAX: usize>(list: Vec<T>) -> Result<Bounded<Vec<T>, MAX
 /// arbitrary host string (a deploy listen address, or a peer's wire bytes) with
 /// no upstream length/count guarantee, so the obligation to keep the wire within
 /// what a no-alloc receiver can decode is discharged HERE — the producer-side
-/// analog of the ingest's oversized-zid drop. Both bounds are sourced from the
-/// codec ([`MAX_LOCATOR_LEN`] = the `SceString<N>` width, [`MAX_LOCATORS_PER_NODE`]
-/// = the list `max-count`), so this never hand-copies a literal that could
-/// silently drift from the generated type.
+/// analog of the ingest's oversized-zid drop. Both bounds are sourced from
+/// `wz-codecs` ([`MAX_LOCATOR_LEN`] = what a wz node stores of one locator,
+/// [`MAX_LOCATORS_PER_NODE`] = the list `max-count`), so this never hand-copies
+/// a literal that could silently drift from them.
 fn locators_to_wire(
     locators: &[String],
 ) -> Option<Bounded<Vec<LocatorOwned>, MAX_LOCATORS_PER_NODE>> {
@@ -201,13 +201,12 @@ fn locators_to_wire(
                 );
                 return None;
             }
-            // On the alloc (AP) backing this crate targets, `from_view` is
-            // infallible (the `> MAX_LOCATOR_LEN` guard above is what enforces
-            // the wire bound); on a no-alloc backing it would reject past `N`,
-            // so the `?` keeps that path correct too.
+            // `from_text` refuses only text past the codec's bound, which the
+            // `> MAX_LOCATOR_LEN` guard above has already kept out; the `?`
+            // drops the locator rather than panic if the two ever disagree.
             Some(LocatorOwned {
                 locator_len: loc.len() as u64,
-                locator: SceString::from_view(loc).ok()?,
+                locator: Bounded::from_text(loc).ok()?,
             })
         })
         .take(MAX_LOCATORS_PER_NODE)
@@ -234,7 +233,7 @@ fn locators_to_wire(
 fn locators_from_wire(locators: Option<Vec<LocatorOwned>>) -> Option<Vec<String>> {
     let strings: Vec<String> = locators?
         .into_iter()
-        .map(|loc| loc.locator.as_str().to_string())
+        .map(|loc| loc.locator.as_text().into_inner().to_string())
         .collect();
     (!strings.is_empty()).then_some(strings)
 }
@@ -1641,7 +1640,7 @@ impl LinkstateNetwork {
             // ingest drops an oversized wire zid; the handshake supplies a
             // valid self/neighbour zid), so this never exceeds capacity.
             zid: want_zid.then(|| {
-                SceBytes::from_slice(node.zid.as_slice()).expect("graph zid is <= ZENOHID_MAX_SIZE")
+                Bounded::from_slice(node.zid.as_slice()).expect("graph zid is <= ZENOHID_MAX_SIZE")
             }),
             // the wire carries the raw API-form role byte; the node holds the
             // typed role, so project it back to the byte here at the codec edge.
@@ -1649,8 +1648,18 @@ impl LinkstateNetwork {
             num_locators: locators.as_ref().map(|l| l.len() as u64),
             locators,
             links_len: links.len() as u64,
-            links: within_bound(links)?,
-            weights: has_weight.then(|| within_bound(weights)).transpose()?,
+            // H, and with it the weights block, rides only when a weight is set;
+            // the encode derives the flag from the arm.
+            options_h: if has_weight {
+                LinkstateOptionsH::H {
+                    links_weights: Aligned::new(within_bound(links)?, within_bound(weights)?)
+                        .expect("one weight is pushed per link"),
+                }
+            } else {
+                LinkstateOptionsH::NotH {
+                    links: within_bound(links)?,
+                }
+            },
         })
     }
 
@@ -1969,13 +1978,20 @@ impl LinkstateNetwork {
                         }
                     },
                 };
+                let (links, weights) = match entry.options_h {
+                    LinkstateOptionsH::H { links_weights } => {
+                        let (links, weights) = links_weights.into_parts();
+                        (links.into_inner(), Some(weights.into_inner()))
+                    }
+                    LinkstateOptionsH::NotH { links } => (links.into_inner(), None),
+                };
                 resolved.push(ResolvedEntry {
                     zid,
                     whatami,
                     is_gateway,
                     sn: entry.sn,
-                    links: entry.links.into_inner(),
-                    weights: entry.weights.map(Bounded::into_inner),
+                    links,
+                    weights,
                     // a `None`/empty `L` field projects to `None`, which the
                     // apply step reads as "keep the node's existing locators".
                     locators: locators_from_wire(entry.locators.map(Bounded::into_inner)),
@@ -2996,7 +3012,7 @@ mod tests {
 
     // ── c2b ingest ──────────────────────────────────────────────────
 
-    use sce_forge_runtime::codec::{SceBytes, SceCursor};
+    use sce_forge_runtime::codec::SceCursor;
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::linkstate_list::LinkstateList;
@@ -3016,19 +3032,36 @@ mod tests {
             psid,
             sn,
             zid_len: zid.map(|z| z.len() as u64),
-            zid: zid.map(|z| SceBytes::from_slice(z.as_slice()).unwrap()),
+            zid: zid.map(|z| Bounded::from_slice(z.as_slice()).unwrap()),
             whatami,
             num_locators: None,
             locators: None,
             links_len: links.len() as u64,
-            links: Bounded::new(
-                links
-                    .iter()
-                    .map(|&p| LinkstateLink { psid: p })
-                    .collect::<Vec<_>>(),
-            )
-            .expect("a fixture's links are within the bound"),
-            weights: None,
+            options_h: LinkstateOptionsH::NotH {
+                links: Bounded::new(
+                    links
+                        .iter()
+                        .map(|&p| LinkstateLink { psid: p })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("a fixture's links are within the bound"),
+            },
+        }
+    }
+
+    /// The links `e` carries, in whichever arm of the weights flag it holds.
+    fn entry_links(e: &LinkstateOwned) -> &[LinkstateLink] {
+        match &e.options_h {
+            LinkstateOptionsH::H { links_weights } => links_weights.first().as_slice(),
+            LinkstateOptionsH::NotH { links } => links.as_slice(),
+        }
+    }
+
+    /// The weights `e` carries, `None` where its weights flag is clear.
+    fn entry_weights(e: &LinkstateOwned) -> Option<&[LinkstateWeight]> {
+        match &e.options_h {
+            LinkstateOptionsH::H { links_weights } => Some(links_weights.second().as_slice()),
+            LinkstateOptionsH::NotH { .. } => None,
         }
     }
 
@@ -3072,7 +3105,7 @@ mod tests {
                     .iter()
                     .map(|s| LocatorOwned {
                         locator_len: s.len() as u64,
-                        locator: SceString::from_view(s).unwrap(),
+                        locator: Bounded::from_text(s).unwrap(),
                     })
                     .collect::<Vec<_>>(),
             )
@@ -3269,17 +3302,22 @@ mod tests {
         weights: &[u16],
     ) -> LinkstateOwned {
         let mut e = entry(psid, sn, zid, whatami, links);
-        e.weights = Some(
-            Bounded::new(
-                weights
-                    .iter()
-                    .map(|&w| LinkstateWeight {
-                        weight: u64::from(w),
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .expect("a fixture's weights are within the bound"),
-        );
+        let LinkstateOptionsH::NotH { links } = e.options_h else {
+            unreachable!("`entry` builds the arm with no weights");
+        };
+        let weights = Bounded::new(
+            weights
+                .iter()
+                .map(|&w| LinkstateWeight {
+                    weight: u64::from(w),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("a fixture's weights are within the bound");
+        e.options_h = LinkstateOptionsH::H {
+            links_weights: Aligned::new(links, weights)
+                .expect("a fixture gives one weight per link"),
+        };
         e
     }
 
@@ -3384,12 +3422,11 @@ mod tests {
         let delta = net.build_self_links_delta().expect("within the bound");
         let entry = &delta.link_states[0];
         let psid = net.local_psid_of(&zid(peer)).expect("peer indexed");
-        let slot = entry
-            .links
+        let slot = entry_links(entry)
             .iter()
             .position(|l| l.psid == psid)
             .expect("self advertises the link");
-        entry.weights.as_ref().map(|w| w[slot].weight)
+        entry_weights(entry).map(|w| w[slot].weight)
     }
 
     /// Rows become weights keyed by destination, and a destination named twice
@@ -3540,7 +3577,7 @@ mod tests {
         assert_eq!(bootstrap.link_states.len(), 1, "announced neighbours only");
         let entry = &bootstrap.link_states[0];
         assert_ne!(entry.psid, 0, "self is not in the bootstrap");
-        assert!(entry.zid.is_some() && entry.links.is_empty() && entry.locators.is_none());
+        assert!(entry.zid.is_some() && entry_links(entry).is_empty() && entry.locators.is_none());
         assert!(network
             .build_link_added_delta_for_existing(&near, true)
             .expect("within the bound")
@@ -3666,7 +3703,7 @@ mod tests {
         let links_of = |list: &LinkstateListOwned| -> Vec<(u64, usize)> {
             list.link_states
                 .iter()
-                .map(|e| (e.psid, e.links.len()))
+                .map(|e| (e.psid, entry_links(e).len()))
                 .collect()
         };
         let to_gateway = links_of(
@@ -3899,8 +3936,14 @@ mod tests {
         let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // A->B advertises 65736, which every peer reads as 65736 & 0xFFFF = 200.
-        let mut a = entry_weighted(1, 1, Some(&zid(0xAA)), Some(2), &[2], &[0]);
-        a.weights = Some(alloc_weights(&[65_736]));
+        let mut a = entry(1, 1, Some(&zid(0xAA)), Some(2), &[2]);
+        let LinkstateOptionsH::NotH { links } = a.options_h else {
+            unreachable!("`entry` builds the arm with no weights");
+        };
+        a.options_h = LinkstateOptionsH::H {
+            links_weights: Aligned::new(links, alloc_weights(&[65_736]))
+                .expect("one weight for the one link"),
+        };
         net.ingest_linkstate_list(
             link,
             list(vec![
@@ -4669,7 +4712,7 @@ mod tests {
             "the gossip entry carries the locators — without them it is not a dial candidate"
         );
         assert!(
-            list.link_states[0].links.is_empty(),
+            entry_links(&list.link_states[0]).is_empty(),
             "the gossip entry carries NO links; a gossip mesh advertises WHERE, not how-wired"
         );
 
@@ -4828,8 +4871,9 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: 0,
-            links: Bounded::default(),
-            weights: None,
+            options_h: LinkstateOptionsH::NotH {
+                links: Bounded::default(),
+            },
         };
         let changes = net.ingest_linkstate_list(l, list(vec![links_only_unmapped]));
         assert!(
@@ -5270,8 +5314,8 @@ mod tests {
 
     #[test]
     fn an_over_long_locator_is_dropped_at_the_tx_boundary() {
-        // A locator past the codec's SceString<128> width cannot round-trip a
-        // no-alloc peer's decoder, so the TX projection drops it (the same
+        // A locator past what a wz node stores of one (MAX_LOCATOR_LEN) is refused
+        // by a no-alloc wz peer's decode, so the TX projection drops it (the same
         // host-validation obligation as the oversized-zid drop) while the
         // valid sibling still rides.
         let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
@@ -5310,10 +5354,7 @@ mod tests {
         let wire = a
             .build_linkstate_list()
             .expect("within the bound")
-            .try_as_borrowed()
-            .expect("re-borrow A's list for encode")
-            .encode_to_vec()
-            .expect("A's list is encodable");
+            .encode_to_vec();
 
         // RX: decode the bytes back (the real peer path), then ingest on B.
         let mut cursor = SceCursor::new(&wire);
@@ -5367,10 +5408,7 @@ mod tests {
         let wire = a
             .build_linkstate_list()
             .expect("within the bound")
-            .try_as_borrowed()
-            .expect("borrow built list")
-            .encode_to_vec()
-            .expect("the built list is encodable");
+            .encode_to_vec();
         let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
             .expect("decode list wire")
             .try_into_owned()
@@ -5645,34 +5683,29 @@ mod tests {
     }
 
     #[test]
-    fn ingest_drops_entry_with_oversized_zid() {
-        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
-        let link = net.add_link(zid(0x07), WhatAmI::Peer);
-        // a 17-byte WIRE zid exceeds ZENOHID_MAX_SIZE -> the entry is dropped (the
-        // host-validation obligation zenoh enforces at decode), so it never
-        // reaches the graph and the later build re-encode stays infallible. The
-        // entry is built directly with the oversized SceBytes since `Zid` itself
-        // truncates to 16 (the `entry` helper can no longer carry the raw form).
+    fn an_oversized_zid_never_reaches_the_ingest() {
+        // A 17-byte zid exceeds ZENOHID_MAX_SIZE, which is the bound of the
+        // codec's `zid` field: an entry cannot hold one (`from_slice` refuses it
+        // as `LengthOutOfRange`), and a frame that carries one is refused by its
+        // decode the same way, so the zenoh decode-time check holds before the
+        // ingest and the later build re-encode stays infallible.
         let big = vec![0xAB_u8; ZENOHID_MAX_SIZE + 1];
-        let oversized = LinkstateOwned {
-            options: 0,
-            psid: 11,
-            sn: 5,
-            zid_len: Some(big.len() as u64),
-            zid: Some(SceBytes::from_slice(&big).unwrap()),
-            whatami: Some(2),
-            num_locators: None,
-            locators: None,
-            links_len: 0,
-            links: Bounded::default(),
-            weights: None,
-        };
-        let changes = net.ingest_linkstate_list(link, list(vec![oversized]));
-        assert!(changes.updated.is_empty(), "oversized-zid entry dropped");
-        assert!(changes.new.is_empty());
-        assert!(
-            net.get_node(&Zid::from_slice(&big)).is_none(),
-            "the oversized zid (even truncated) was not admitted"
+        let held: Result<Bounded<sce_forge_runtime::codec::GrowBytes, ZENOHID_MAX_SIZE>, _> =
+            Bounded::from_slice(&big);
+        assert_eq!(
+            held.err(),
+            Some(CodecError::LengthOutOfRange),
+            "an entry cannot hold an oversized zid"
+        );
+
+        // options P, psid 11, sn 5, zid_len 17 and its bytes, links_len 0.
+        let mut wire = vec![OPT_P, 11, 5, big.len() as u8];
+        wire.extend_from_slice(&big);
+        wire.push(0);
+        assert_eq!(
+            wz_codecs::linkstate::Linkstate::decode(&mut SceCursor::new(&wire)).err(),
+            Some(CodecError::LengthOutOfRange),
+            "a frame carrying an oversized zid is refused at decode"
         );
     }
 
@@ -5691,13 +5724,14 @@ mod tests {
             psid: 11,
             sn: 5,
             zid_len: Some(zeros.len() as u64),
-            zid: Some(SceBytes::from_slice(&zeros).unwrap()),
+            zid: Some(Bounded::from_slice(&zeros).unwrap()),
             whatami: Some(2),
             num_locators: None,
             locators: None,
             links_len: 0,
-            links: Bounded::default(),
-            weights: None,
+            options_h: LinkstateOptionsH::NotH {
+                links: Bounded::default(),
+            },
         };
         let changes = net.ingest_linkstate_list(link, list(vec![zero_zid]));
         assert!(changes.updated.is_empty(), "all-zero-zid entry dropped");
@@ -5733,10 +5767,7 @@ mod tests {
         let wire = a
             .build_linkstate_list()
             .expect("within the bound")
-            .try_as_borrowed()
-            .expect("borrow built list")
-            .encode_to_vec()
-            .expect("the built list is encodable");
+            .encode_to_vec();
 
         let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
             .expect("decode list wire")
@@ -5855,7 +5886,7 @@ mod tests {
         }
         assert_eq!(
             net.build_self_links_delta()
-                .map(|list| list.link_states[0].links.len()),
+                .map(|list| entry_links(&list.link_states[0]).len()),
             Ok(64),
             "an entry at the bound is built"
         );

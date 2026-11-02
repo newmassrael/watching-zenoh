@@ -510,7 +510,9 @@ where
         #[cfg(all(feature = "codec-push", feature = "codec-request"))]
         MulticastTxItem::Request { request } => push_frame(
             meta,
-            wz_codecs::request::Request::MAX_ENCODED_BYTES,
+            // A Request the encode refuses is refused by the body as well; the reservation for it
+            // is moot.
+            wz_codecs::request::Request::measure(&*request).map_or(0, |measured| measured.len()),
             crate::frame_encode::request_body(&request),
             tx_sn,
             params,
@@ -525,7 +527,7 @@ where
         MulticastTxItem::Response { response } => push_frame(
             // `meta.reliable` is pinned true for a reply (`frame_meta`).
             meta,
-            wz_codecs::response::Response::MAX_ENCODED_BYTES,
+            wz_codecs::response::Response::measure(&*response).len(),
             crate::frame_encode::response_body(&response),
             tx_sn,
             params,
@@ -545,7 +547,7 @@ where
             let response_final = crate::response_final_build::build_response_final(request_id, qos);
             push_frame(
                 meta,
-                wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+                wz_codecs::response_final::ResponseFinal::measure(&response_final).len(),
                 crate::frame_encode::response_final_body(&response_final),
                 tx_sn,
                 params,
@@ -562,7 +564,7 @@ where
         // the frame `encode_frame_with_declare` writes.
         MulticastTxItem::DeclareReply { declare } => push_frame(
             meta,
-            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            wz_codecs::declare::Declare::measure(&*declare).len(),
             crate::frame_encode::declare_body(&declare),
             tx_sn,
             params,
@@ -572,7 +574,7 @@ where
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => push_frame(
             meta,
-            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            wz_codecs::declare::Declare::measure(&*declare).len(),
             crate::frame_encode::declare_body(&declare),
             tx_sn,
             params,
@@ -582,7 +584,7 @@ where
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Interest { interest } => push_frame(
             meta,
-            wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
+            wz_codecs::interest::Interest::measure(&*interest).len(),
             crate::frame_encode::interest_body(&interest),
             tx_sn,
             params,
@@ -1261,7 +1263,8 @@ pub enum MulticastTxRefused {
     /// chunk are at most the batch, so the buffer is smaller than the group's batch
     /// budget allows for. Nothing is truncated.
     DatagramTooSmall,
-    /// The message does not encode (a keyexpr longer than the codec's text bound).
+    /// The message does not encode (a keyexpr past the protocol's `u16` length, or a
+    /// payload past its `u32` length).
     Unencodable,
 }
 
@@ -1287,13 +1290,16 @@ pub fn multicast_tx_emit_lent(
 ) -> Result<usize, MulticastTxRefused> {
     use crate::tx_buf::{CappedTxBuf, SliceTxBuf, TxBuf};
 
+    // Composed before the SN is minted, so a Put past its protocol bounds leaves the
+    // conduit's ring as it was.
+    let push = crate::lent_push::literal_put(put.keyexpr, put.payload)
+        .map_err(|_| MulticastTxRefused::Unencodable)?;
     let priority = effective_mcast_priority(put.priority, params.is_qos);
     let ext_qos = frame_ext_qos(priority);
     let reliable = put.reliable;
     let sn = tx_sn.mint(priority, reliable);
     let mtu = core::cmp::min(params.batch_size as usize, datagram.len());
     let flags = crate::frame_encode::frame_flags(reliable);
-    let push = crate::lent_push::literal_put(put.keyexpr, put.payload);
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| push.encode(sink);
 
     // The frame whole, when it fits the batch: the cap makes a refusal mean "past it".

@@ -117,13 +117,16 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
 impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for MulticastReplySink<Q> {
     #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        let declare =
+        // A keyexpr past the protocol's bound is not answered, as the subscriber reply
+        // below skips one: the chain's `DeclFinal` still terminates the interest.
+        if let Ok(declare) =
             crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id)
-                .try_into_owned()
-                .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES");
-        self.queue.enqueue(MulticastTxItem::DeclareReply {
-            declare: Box::new(declare),
-        });
+                .and_then(|reply| reply.try_into_owned())
+        {
+            self.queue.enqueue(MulticastTxItem::DeclareReply {
+                declare: Box::new(declare),
+            });
+        }
     }
     fn send_declare_final_reply(&self, interest_id: u64) {
         // Same UNGATED builder as the unicast sink, for the same reason: the

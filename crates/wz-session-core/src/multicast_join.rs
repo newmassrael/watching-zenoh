@@ -147,7 +147,8 @@ where
     join.set_whatami(params.whatami.to_wire());
     if !zid.is_empty() {
         join.set_zid_len_m1((zid.len() - 1) as u8);
-        join.zid = zid.as_slice();
+        join.zid = sce_forge_runtime::codec::Bounded::new(zid.as_slice())
+            .ok_or(CodecError::LengthOutOfRange)?;
     }
     if params.join_advertises_caps() {
         join.s = Some(JoinS {
@@ -889,7 +890,7 @@ mod tests {
         join.version = wz_codecs::wire_const::PROTOCOL_VERSION;
         join.set_whatami(p.whatami.to_wire());
         join.set_zid_len_m1(3);
-        join.zid = &[0x05, 0x06, 0x07, 0x08];
+        join.zid = wz_codecs::Bounded::new(&[0x05u8, 0x06, 0x07, 0x08] as &[u8]).unwrap();
         join.s = Some(JoinS {
             sn_res: pack_res_cbyte(0x02, 0x01), // seq ok, req off
             batch_size: p.batch_size,
@@ -910,7 +911,7 @@ mod tests {
             join.version = version;
             join.set_whatami(p.whatami.to_wire());
             join.set_zid_len_m1(3);
-            join.zid = &zid;
+            join.zid = wz_codecs::Bounded::new(&zid[..]).unwrap();
             join.s = Some(JoinS {
                 sn_res: pack_res_cbyte(p.seq_num_res, p.req_id_res),
                 batch_size: p.batch_size,
@@ -1061,14 +1062,14 @@ mod tests {
         join.version = 0x09;
         join.set_whatami(WhatAmI::Peer.to_wire());
         join.set_zid_len_m1((zid.len() - 1) as u8);
-        join.zid = &zid;
+        join.zid = wz_codecs::Bounded::new(&zid[..]).unwrap();
         // The group makes the encode write sn_res + batch_size.
         join.s = Some(JoinS {
             sn_res: 0x00,
             batch_size: 0xFFFF,
         });
         join.lease = 5_000;
-        let body = join.encode_to_vec().expect("a fixture join is encodable");
+        let body = join.encode_to_vec();
         let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
         dgram.extend_from_slice(&body);
         assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));

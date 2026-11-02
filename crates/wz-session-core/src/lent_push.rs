@@ -19,18 +19,37 @@
 //! is the bare Put header, no optional field, then the payload.
 
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
+use sce_forge_runtime::codec::Bounded;
+use sce_forge_runtime::codec::CodecError;
+#[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::msg_put::MsgPut;
+use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 
 /// The `N` flag of the Push header: a keyexpr suffix rides inline.
 const FLAG_PUSH_N: u8 = 0x20;
+
+use crate::codec_owned::sent_suffix as suffix_field;
+
+/// The inline-layout Put that carries `value`, with no timestamp, no encoding and no
+/// extension: `LengthOutOfRange` for a payload past the protocol's `u32` length.
+fn plain_put(value: &[u8]) -> Result<MsgPut<'_>, CodecError> {
+    Ok(MsgPut {
+        header: PUT_HEADER,
+        payload_len: Some(value.len() as u64),
+        extensions_has_0x12: MsgPutExtensionsHas0x12::NotHas0x12 {
+            extensions: None,
+            payload: crate::codec_owned::sent(value)?,
+        },
+        ..MsgPut::default()
+    })
+}
 
 /// The `M` flag of the Push header: the id is in the sender's mapping.
 #[cfg(feature = "storage-profile")]
@@ -41,25 +60,65 @@ const FLAG_PUSH_M: u8 = 0x40;
 const PUT_HEADER: u8 = 0x01;
 
 /// The `Push` that carries `value` to the literal keyexpr `keyexpr_suffix`,
-/// borrowing both for `'a`.
-pub fn literal_put<'a>(keyexpr_suffix: &'a str, value: &'a [u8]) -> Push<'a> {
-    Push {
+/// borrowing both for `'a`. `LengthOutOfRange` for a key past the protocol's `u16`
+/// length or a payload past its `u32` length, which is not sent.
+pub fn literal_put<'a>(keyexpr_suffix: &'a str, value: &'a [u8]) -> Result<Push<'a>, CodecError> {
+    Ok(Push {
         header: wz_codecs::wire_const::N_MID_PUSH | FLAG_PUSH_N,
         keyexpr: Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(keyexpr_suffix),
+                suffix: Some(suffix_field(keyexpr_suffix)?),
             }),
         },
         extensions: None,
-        body: PushVariant::CodecZenohMsgPut(MsgPut {
-            header: PUT_HEADER,
-            payload_len: Some(value.len() as u64),
-            payload: Some(value),
-            ..MsgPut::default()
+        body: PushVariant::CodecZenohMsgPut(plain_put(value)?),
+    })
+}
+
+/// The `Push` that deletes the literal keyexpr `keyexpr_suffix`, borrowing it for `'a`: the
+/// `Push` and `MsgDel` headers [`crate::push_build::build_push_del_literal`] writes, with no
+/// owned mirror, for a session with no allocator. Refused as [`literal_put`] refuses a key.
+#[cfg(not(feature = "alloc"))]
+pub fn literal_del(keyexpr_suffix: &str) -> Result<Push<'_>, CodecError> {
+    Ok(Push {
+        header: wz_codecs::wire_const::N_MID_PUSH | FLAG_PUSH_N,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(keyexpr_suffix.len() as u64),
+                suffix: Some(suffix_field(keyexpr_suffix)?),
+            }),
+        },
+        extensions: None,
+        body: PushVariant::CodecZenohMsgDel(wz_codecs::msg_del::MsgDel {
+            // The Del's MID, with no timestamp and no extension.
+            header: 0x02,
+            ..wz_codecs::msg_del::MsgDel::default()
         }),
-    }
+    })
+}
+
+/// The bytes [`literal_del`] encodes to, for the reason [`literal_put_len`] gives, and zero
+/// for a Del it refuses, as [`literal_put_len`] counts a refused Put.
+#[cfg(not(feature = "alloc"))]
+#[inline(never)]
+pub fn literal_del_len(keyexpr_suffix: &str) -> usize {
+    literal_del(keyexpr_suffix).map_or(0, |push| Push::measure(&push).len())
+}
+
+/// The bytes [`literal_put`] encodes to for the same arguments: what a sender asks a link to
+/// lend for it, since a `Push` has no size constant (its payload's bound is upstream's u32
+/// length). Its own frame, not inlined, so the `Push` it counts is on the stack only while it
+/// counts and the sender's frame does not carry it beside the one its encoder builds.
+///
+/// A Put [`literal_put`] refuses counts as zero: the encoder that follows refuses it with the
+/// same error, and the dispatch reports that refusal.
+#[cfg(feature = "tx-lend-only")]
+#[inline(never)]
+pub fn literal_put_len(keyexpr_suffix: &str, value: &[u8]) -> usize {
+    literal_put(keyexpr_suffix, value).map_or(0, |push| Push::measure(&push).len())
 }
 
 /// [`literal_put`] carrying `qos` on the Push's outer extension chain, exactly where
@@ -80,7 +139,7 @@ pub fn literal_put_with_qos<'a>(
     keyexpr_suffix: &'a str,
     value: &'a [u8],
     qos: crate::sample::QosLevel,
-) -> Push<'a> {
+) -> Result<Push<'a>, CodecError> {
     put_with_qos(0, Some(keyexpr_suffix), value, qos)
 }
 
@@ -97,20 +156,21 @@ pub fn aliased_put_with_qos<'a>(
     suffix: Option<&'a str>,
     value: &'a [u8],
     qos: crate::sample::QosLevel,
-) -> Push<'a> {
+) -> Result<Push<'a>, CodecError> {
     debug_assert!(mapping_id != 0, "id 0 is the literal key, not an alias");
     put_with_qos(mapping_id, suffix, value, qos)
 }
 
 /// The one composition behind [`literal_put_with_qos`] and [`aliased_put_with_qos`]: a Put on
-/// `(mapping_id, suffix)`, the `N` flag set exactly when a suffix rides.
+/// `(mapping_id, suffix)`, the `N` flag set exactly when a suffix rides. Refused as
+/// [`literal_put`] is.
 #[cfg(feature = "storage-profile")]
 pub fn put_with_qos<'a>(
     mapping_id: u64,
     suffix: Option<&'a str>,
     value: &'a [u8],
     qos: crate::sample::QosLevel,
-) -> Push<'a> {
+) -> Result<Push<'a>, CodecError> {
     // Mutated only when the QoS extension can ride (`pubsub-qos`).
     #[allow(unused_mut)]
     let mut push = Push {
@@ -119,16 +179,11 @@ pub fn put_with_qos<'a>(
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: mapping_id,
                 suffix_len: suffix.map(|text| text.len() as u64),
-                suffix,
+                suffix: suffix.map(suffix_field).transpose()?,
             }),
         },
         extensions: None,
-        body: PushVariant::CodecZenohMsgPut(MsgPut {
-            header: PUT_HEADER,
-            payload_len: Some(value.len() as u64),
-            payload: Some(value),
-            ..MsgPut::default()
-        }),
+        body: PushVariant::CodecZenohMsgPut(plain_put(value)?),
     };
     #[cfg(feature = "pubsub-qos")]
     if qos != crate::sample::QosLevel::DEFAULT {
@@ -141,13 +196,14 @@ pub fn put_with_qos<'a>(
                 value: u64::from(qos.raw),
             }),
         });
-        push.extensions = Some(chain);
+        push.extensions =
+            Some(Bounded::new(chain).expect("one entry is within the chain's bounds"));
         // The Push header says an outer chain follows.
         push.header |= 0x80;
     }
     #[cfg(not(feature = "pubsub-qos"))]
     let _ = qos;
-    push
+    Ok(push)
 }
 
 /// The bytes of [`put_with_qos`] written straight into `sink`, without composing the codec's
@@ -156,7 +212,8 @@ pub fn put_with_qos<'a>(
 /// the payload. A stream of equal messages sends this one shape, and the generic encoder's
 /// walk over a message of any shape was most of what encoding it cost. The two are the same
 /// bytes for every input (see the equality test), so the shape stays the codec's and this is
-/// only a faster way to write it.
+/// only a faster way to write it, and it refuses what [`put_with_qos`] refuses, with the same
+/// `LengthOutOfRange` and before a byte is written.
 #[cfg(feature = "storage-profile")]
 pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
@@ -164,7 +221,15 @@ pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     suffix: Option<&str>,
     value: &[u8],
     qos: crate::sample::QosLevel,
-) -> Result<(), S::Error> {
+) -> Result<(), CodecError>
+where
+    CodecError: From<S::Error>,
+{
+    if suffix.is_some_and(|text| text.len() > usize::from(u16::MAX))
+        || u32::try_from(value.len()).is_err()
+    {
+        return Err(CodecError::LengthOutOfRange);
+    }
     // The QoS extension rides when `pubsub-qos` is built and the byte is not the default one.
     #[cfg(feature = "pubsub-qos")]
     let with_qos = qos != crate::sample::QosLevel::DEFAULT;
@@ -207,7 +272,8 @@ pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     used += 1;
     used = put_vle(&mut head, used, value.len() as u64);
     sink.write_bytes(&head[..used])?;
-    sink.write_bytes(value)
+    sink.write_bytes(value)?;
+    Ok(())
 }
 
 /// Write `value` as the codec's `vle_u64` at `buf[at..]` and return where it ends: seven data
@@ -271,6 +337,7 @@ mod tests {
                     ] {
                         let mut want = alloc::vec::Vec::new();
                         put_with_qos(id, suffix, payload, qos)
+                            .expect("within the bounds")
                             .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut want))
                             .expect("a Vec grows");
                         let mut got = alloc::vec::Vec::new();
@@ -318,6 +385,7 @@ mod tests {
                     .expect("a Vec grows");
                 let mut got = alloc::vec::Vec::new();
                 literal_put(keyexpr, payload)
+                    .expect("within the bounds")
                     .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut got))
                     .expect("a Vec grows");
                 assert_eq!(
@@ -364,6 +432,7 @@ mod tests {
                     .expect("a Vec grows");
                 let mut got = alloc::vec::Vec::new();
                 literal_put_with_qos("demo/qos/key", payload, qos)
+                    .expect("within the bounds")
                     .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut got))
                     .expect("a Vec grows");
                 assert_eq!(
@@ -419,6 +488,7 @@ mod tests {
                             .expect("a Vec grows");
                         let mut got = alloc::vec::Vec::new();
                         aliased_put_with_qos(id, suffix, payload, qos)
+                            .expect("within the bounds")
                             .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut got))
                             .expect("a Vec grows");
                         assert_eq!(
@@ -433,5 +503,45 @@ mod tests {
             }
         }
         assert_eq!(compared, 6 * 3 * 3 * 3);
+    }
+
+    /// A key past the protocol's `u16` length is refused with `LengthOutOfRange` by every
+    /// composer and by the direct writer, which writes nothing of it; a key at the bound is
+    /// written.
+    #[test]
+    fn a_key_past_its_protocol_bound_is_refused_and_one_at_the_bound_is_not() {
+        let qos = crate::sample::QosLevel::DEFAULT;
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let at = "k".repeat(usize::from(u16::MAX));
+        let refused = Some(CodecError::LengthOutOfRange);
+        assert_eq!(literal_put(&past, b"x").err(), refused);
+        assert_eq!(literal_put_with_qos(&past, b"x", qos).err(), refused);
+        assert_eq!(
+            aliased_put_with_qos(3, Some(&past), b"x", qos).err(),
+            refused
+        );
+        let mut got = alloc::vec::Vec::new();
+        assert_eq!(
+            write_plain_put(
+                &mut sce_forge_runtime::codec::VecSink::new(&mut got),
+                3,
+                Some(&past),
+                b"x",
+                qos,
+            )
+            .err(),
+            refused
+        );
+        assert!(got.is_empty(), "nothing of a refused Put is written");
+        assert!(literal_put(&at, b"x").is_ok());
+        write_plain_put(
+            &mut sce_forge_runtime::codec::VecSink::new(&mut got),
+            3,
+            Some(&at),
+            b"x",
+            qos,
+        )
+        .expect("a key at the bound is written");
+        assert!(!got.is_empty());
     }
 }

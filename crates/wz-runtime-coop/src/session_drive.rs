@@ -550,7 +550,7 @@ pub fn run_session<C, L, F>(
 where
     C: ClockSource,
     L: SessionDatagramLink,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     let mut pump = SessionPump::new(
         runtime.clone(),
@@ -1158,7 +1158,7 @@ pub async fn session_task<C, L, F>(
 where
     C: ClockSource,
     L: SessionDatagramLink,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     let mut pump = SessionPump::new(runtime, link, actions, clock, config);
     loop {
@@ -1196,7 +1196,7 @@ pub fn spawn_session<C, L, F>(
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
 {
     local.spawn_local(session_task(
         local.runtime().clone(),
@@ -1710,7 +1710,7 @@ mod wake_budget_tests {
             max_iters: None,
         };
         let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
-        let _ = pump.step(&mut |_event: IterationEvent<'_>| {});
+        let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
         let waited = *link.budgets.borrow().last().expect("the link was serviced");
         waited
     }
@@ -1732,7 +1732,7 @@ mod wake_budget_tests {
         };
         let mut pump = SessionPump::new(runtime, link, actions.clone(), clock, config);
         let mut wakes = 0;
-        let _ = pump.step(&mut |event: IterationEvent<'_>| {
+        let _ = pump.step(&mut |event: IterationEvent<'_, '_>| {
             if matches!(event, IterationEvent::AppWake) {
                 wakes += 1;
             }
@@ -1771,7 +1771,7 @@ mod wake_budget_tests {
         };
         let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
         let mut lost = Vec::new();
-        let mut record = |event: IterationEvent<'_>| {
+        let mut record = |event: IterationEvent<'_, '_>| {
             if let IterationEvent::Poll(DriverLoopOutcome::LinkLost(cause)) = event {
                 lost.push(*cause);
             }

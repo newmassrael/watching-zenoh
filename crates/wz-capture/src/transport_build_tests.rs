@@ -1400,20 +1400,27 @@ fn an_inits_resolution_is_a_field_and_not_a_ring() {
 // ------------------------------------------------ 6. the table is held
 
 /// The generated codecs' field names, read out of the generated sources.
+///
+/// A codec that takes a storage profile declares its fields on its one storing
+/// type, `{strukt}In<S>` (`{strukt}<'a>` is an alias of it), and a codec that
+/// takes none on `{strukt}` itself, so the first of the two that is declared is
+/// the one read.
 fn codec_fields(source: &str, strukt: &str) -> Vec<String> {
-    let head = format!("pub struct {strukt}");
     // The struct itself, not a type that merely starts with its name: the generator also
-    // writes `ExtEntryUnknownTag(u8)` ahead of `ExtEntry<'a> {`, and `ExtEntryOwned` after it.
-    let start = source
-        .match_indices(&head)
-        .map(|(at, _)| at)
-        .find(|at| {
+    // writes `ExtEntryUnknownTag(u8)` ahead of the entry, and `ExtEntryOwned` after it.
+    let declared = |head: &str| {
+        source.match_indices(head).map(|(at, _)| at).find(|at| {
             matches!(
                 source[at + head.len()..].chars().next(),
                 Some(' ') | Some('<')
             )
         })
-        .unwrap_or_else(|| panic!("no `{head}`"));
+    };
+    let storing = format!("pub struct {strukt}In");
+    let bare = format!("pub struct {strukt}");
+    let start = declared(&storing)
+        .or_else(|| declared(&bare))
+        .unwrap_or_else(|| panic!("neither `{storing}` nor `{bare}`"));
     let open = source[start..].find('{').expect("a body") + start;
     let close = source[open..].find("\n}").expect("an end") + open;
     source[open..close]

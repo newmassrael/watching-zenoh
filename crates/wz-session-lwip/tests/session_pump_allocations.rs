@@ -325,7 +325,7 @@ struct Seen {
 
 /// The application layer of an end: an observer with one subscriber on [`KEY`]
 /// that counts what it is handed, and the `on_event` the end's task is run with.
-fn application(actions: &Handle) -> (impl FnMut(IterationEvent<'_>) + 'static, Arc<Seen>) {
+fn application(actions: &Handle) -> (impl FnMut(IterationEvent<'_, '_>) + 'static, Arc<Seen>) {
     let seen = Arc::new(Seen::default());
     let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
     let counted = seen.clone();
@@ -432,7 +432,7 @@ mod placing_in_slot {
     pub fn spawn(
         local: &CoopLocalSet<Clk>,
         pump: Pump,
-        on_event: impl FnMut(IterationEvent<'_>) + 'static,
+        on_event: impl FnMut(IterationEvent<'_, '_>) + 'static,
     ) -> CoopLocalJoinHandle<DriverOutcome> {
         let Ok(handle) = wz_runtime_coop::session_drive::spawn_pump(local, pump, on_event) else {
             panic!("a task cell is free");
@@ -535,7 +535,7 @@ mod placing_on_the_heap {
     /// by value inside a boxed future.
     async fn pump_task(
         mut pump: Pump,
-        mut on_event: impl FnMut(IterationEvent<'_>),
+        mut on_event: impl FnMut(IterationEvent<'_, '_>),
     ) -> DriverOutcome {
         loop {
             if let Some(outcome) = pump.step(&mut on_event) {
@@ -548,7 +548,7 @@ mod placing_on_the_heap {
     pub fn spawn(
         local: &CoopLocalSet<Clk>,
         pump: Pump,
-        on_event: impl FnMut(IterationEvent<'_>) + 'static,
+        on_event: impl FnMut(IterationEvent<'_, '_>) + 'static,
     ) -> CoopLocalJoinHandle<DriverOutcome> {
         local.spawn_local(pump_task(pump, on_event))
     }

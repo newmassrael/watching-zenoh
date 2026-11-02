@@ -25,7 +25,7 @@
 use super::*;
 use crate::runtime_impl::TokioRuntime;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
-use sce_forge_runtime::codec::{Bounded, SceBytes};
+use sce_forge_runtime::codec::Bounded;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wz_codecs::linkstate::LinkstateOwned;
@@ -557,7 +557,7 @@ pub(super) fn decode(frame: &[u8]) -> Vec<(Seen, Option<u64>)> {
 }
 
 /// The literal keyexpr of a wire expression the scenes built.
-fn literal<S: sce_forge_runtime::codec::CodecStorage>(
+fn literal<S: wz_codecs::wireexpr::WireexprStorage>(
     body: &wz_codecs::wireexpr::WireexprOwnedVariant<S>,
 ) -> String {
     let (id, suffix) = id_and_suffix(body);
@@ -683,8 +683,13 @@ fn link_state_by_zid(entries: &[LinkstateOwned]) -> Vec<(Vec<u8>, Vec<Vec<u8>>)>
         .iter()
         .filter_map(|e| {
             let me = e.zid.as_ref()?.as_slice().to_vec();
-            let mut links: Vec<Vec<u8>> = e
-                .links
+            let entry_links = match &e.options_h {
+                wz_codecs::linkstate::LinkstateOptionsH::H { links_weights } => {
+                    links_weights.first().as_slice()
+                }
+                wz_codecs::linkstate::LinkstateOptionsH::NotH { links } => links.as_slice(),
+            };
+            let mut links: Vec<Vec<u8>> = entry_links
                 .iter()
                 .filter_map(|l| zid_of.get(&l.psid).cloned())
                 .collect();
@@ -704,19 +709,20 @@ fn entry(psid: u64, sn: u64, node: u8, links: &[u64]) -> LinkstateOwned {
         psid,
         sn,
         zid_len: Some(4),
-        zid: Some(SceBytes::from_slice(zid(node).as_slice()).unwrap()),
+        zid: Some(wz_session_core::codec_owned::owned_bytes(zid(node).as_slice()).unwrap()),
         whatami: Some(2),
         num_locators: None,
         locators: None,
         links_len: links.len() as u64,
-        links: Bounded::new(
-            links
-                .iter()
-                .map(|&psid| LinkstateLink { psid })
-                .collect::<Vec<_>>(),
-        )
-        .expect("a fixture's links are within the bound"),
-        weights: None,
+        options_h: wz_codecs::linkstate::LinkstateOptionsH::NotH {
+            links: Bounded::new(
+                links
+                    .iter()
+                    .map(|&psid| LinkstateLink { psid })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("a fixture's links are within the bound"),
+        },
     }
 }
 

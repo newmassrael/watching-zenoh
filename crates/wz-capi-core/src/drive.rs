@@ -1986,11 +1986,11 @@ async fn drive_face(
     let mut driver = inbound;
     let timeouts = SessionTimeouts::spec_defaults();
     let dispatch_shared = shared.clone();
-    // The `IterationEvent<'_>` annotation is load-bearing: `drive_session_until_terminal`
-    // needs a HIGHER-RANKED `FnMut(IterationEvent<'_>)`, and without it inference
+    // The `IterationEvent<'_, '_>` annotation is load-bearing: `drive_session_until_terminal`
+    // needs a HIGHER-RANKED `FnMut(IterationEvent<'_, '_>)`, and without it inference
     // pins the closure to one specific lifetime ("implementation of `FnMut` is not
     // general enough").
-    let mut dispatch = |event: IterationEvent<'_>| dispatch_shared.dispatch(face, event);
+    let mut dispatch = |event: IterationEvent<'_, '_>| dispatch_shared.dispatch(face, event);
     // R311y296 — the dial role does NOT go through `accept_loop`, so the
     // `FaceForwarder::next_extra_deadline_ms` hook that arms the accepted
     // faces' wakes cannot reach it; this closure is the dial role's equivalent,
@@ -3940,7 +3940,7 @@ async fn serve_group<D, B, Fut>(
         },
         bind,
         GroupFaceSeams {
-            on_event: |event: IterationEvent<'_>| {
+            on_event: |event: IterationEvent<'_, '_>| {
                 crate::faces::dispatch_mcast_event(&session, event)
             },
             on_members: |_: &[Vec<u8>]| {},

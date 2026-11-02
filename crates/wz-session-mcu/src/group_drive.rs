@@ -510,7 +510,7 @@ pub fn run_multicast_session<'g, C, T, F, G, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     T: GroupTransport,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
 {
     run_multicast_session_inner(dispatcher, cfg, runtime, transport, on_event, next_tx, None)
@@ -549,7 +549,7 @@ pub fn run_multicast_session_with_shutdown<'g, C, T, F, G, H, const MAX_PEERS: u
 where
     C: ClockSource,
     T: GroupTransport,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
@@ -658,7 +658,7 @@ pub fn run_multicast_session_rejoining<'g, C, T, F, G, H, B, D, const MAX_PEERS:
 where
     C: ClockSource,
     T: GroupTransport,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
     B: FnMut() -> Option<T>,
@@ -739,7 +739,7 @@ fn run_multicast_session_inner<'g, C, T, F, G, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     T: GroupTransport,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
 {
     let mut pump =
@@ -948,7 +948,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
     ) -> Option<MulticastOutcome>
     where
-        F: FnMut(IterationEvent<'_>),
+        F: FnMut(IterationEvent<'_, '_>),
         G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
         if core::mem::take(&mut self.lost_at_open) {
@@ -1216,7 +1216,7 @@ pub async fn multicast_session_task<'g, C, T, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     T: GroupTransport,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
@@ -1259,7 +1259,7 @@ async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     T: GroupTransport,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
@@ -1363,7 +1363,7 @@ pub async fn multicast_session_task_seeded<'g, C, T, F, G, H, const MAX_PEERS: u
 where
     C: ClockSource,
     T: GroupTransport,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
@@ -1412,7 +1412,7 @@ pub fn spawn_multicast_session<C, T, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     T: GroupTransport + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
     G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {
@@ -1439,7 +1439,7 @@ pub fn spawn_multicast_session_seeded<C, T, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     T: GroupTransport + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
     G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {
@@ -1713,7 +1713,7 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
     ) -> Option<MulticastOutcome>
     where
-        F: FnMut(IterationEvent<'_>),
+        F: FnMut(IterationEvent<'_, '_>),
         G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
         let outcome = self.pump().step(on_event, next_tx, should_stop);
@@ -1754,7 +1754,7 @@ pub async fn multicast_pump_task<'g, C, T, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     T: GroupTransport + 'static,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
@@ -1784,7 +1784,7 @@ pub fn spawn_multicast_pump<C, T, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     T: GroupTransport + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
     G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {

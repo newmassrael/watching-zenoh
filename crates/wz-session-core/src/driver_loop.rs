@@ -9,7 +9,7 @@
 //! KeepAlive side-effect, R74 `FramePayload` with the decoded
 //! `NetworkMessage` batch, parse error, or link-lost event.
 //!
-//! `IterationEvent<'a>` wraps either a borrowed `&DriverLoopOutcome`
+//! `IterationEvent<'a, 'f>` wraps either a borrowed `&DriverLoopOutcome`
 //! (the poll arm fired) or a `LeaseCheckOutcome` (the lease-deadline
 //! arm fired), and is the observer callback's parameter inside
 //! `drive_session_until_terminal`.
@@ -384,6 +384,11 @@ pub enum DriverLoopOutcome {
 /// the relevant fields (e.g. `FramePayload.messages.clone()`) into
 /// owned storage; the reference does not outlive the callback.
 ///
+/// `'f` is the inbound frame's, the bytes an [`IterationEvent::InPlace`]
+/// record lies in: the codec's lent messages are invariant in it, so it is
+/// named apart from `'a`, the shorter borrow of the record itself. An event
+/// that lends no record leaves `'f` free.
+///
 /// Synchronous contract. The callback runs inside the
 /// `tokio::select!` arm, so heavy work blocks the loop. Callers
 /// with expensive consumers should buffer (`Vec`, `mpsc::Sender`)
@@ -398,7 +403,7 @@ pub enum DriverLoopOutcome {
 /// registries) without having to manually re-construct the variant
 /// or split the dispatch into separate iterations.
 #[derive(Clone, Copy, Debug)]
-pub enum IterationEvent<'a> {
+pub enum IterationEvent<'a, 'f> {
     /// `poll_and_dispatch_one` returned. The borrowed outcome
     /// covers all five `DriverLoopOutcome` variants.
     Poll(&'a DriverLoopOutcome),
@@ -523,7 +528,7 @@ pub enum IterationEvent<'a> {
     /// reply registry and the switchboard do, through the observer fan. Ungated
     /// like the other variants, so every consumer's match stays
     /// feature-independent; only the producer is gated. `Copy`.
-    InPlace(InPlaceRecord<'a>),
+    InPlace(InPlaceRecord<'a, 'f>),
     /// ARCHITECTURE section 9.3 — one inbound `Fragment` read where its unit
     /// lies, its payload staged into its reassembly slot straight from there:
     /// what the reassembling in-place receive path
@@ -657,8 +662,12 @@ impl<'a> InPlaceFragment<'a> {
 /// into the one record buffer of every pump and refuse a keyexpr past the codec's
 /// own text bound, which the decode where the frame lies reads whole. Exactly one
 /// accessor answers `Some`.
+///
+/// `'a` is the borrow of the decoded record, lent for the call; `'f` is the
+/// frame's, the bytes its keys, payloads and text lie in, in which the codec's
+/// lent messages are invariant.
 #[derive(Clone, Copy, Debug)]
-pub struct InPlaceRecord<'a> {
+pub struct InPlaceRecord<'a, 'f> {
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
@@ -668,8 +677,8 @@ pub struct InPlaceRecord<'a> {
         feature = "codec-response",
         all(feature = "session-slot", feature = "codec-frame")
     ))]
-    record: LentRecord<'a>,
-    _frame: core::marker::PhantomData<&'a [u8]>,
+    record: LentRecord<'a, 'f>,
+    _frame: core::marker::PhantomData<(&'a (), &'f [u8])>,
 }
 
 /// The record an [`InPlaceRecord`] lends, by kind.
@@ -692,41 +701,44 @@ pub struct InPlaceRecord<'a> {
     allow(dead_code)
 )]
 #[derive(Clone, Copy, Debug)]
-enum LentRecord<'a> {
-    /// Never made: it holds the lifetime in a build that reads no kind of record.
+enum LentRecord<'a, 'f> {
+    /// Never made: it holds the lifetimes in a build that reads no kind of record.
     #[allow(dead_code)]
-    Never(core::convert::Infallible, core::marker::PhantomData<&'a ()>),
+    Never(
+        core::convert::Infallible,
+        core::marker::PhantomData<(&'a (), &'f ())>,
+    ),
     #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
-    Push(&'a wz_codecs::push::Push<'a>),
+    Push(&'a wz_codecs::push::Push<'f>),
     #[cfg(feature = "codec-request")]
-    Request(&'a wz_codecs::request::RequestView<'a>),
+    Request(&'a wz_codecs::request::RequestView<'f>),
     #[cfg(all(
         feature = "codec-response",
         any(feature = "alloc", feature = "rx-response")
     ))]
-    Response(&'a wz_codecs::response::Response<'a>),
+    Response(&'a wz_codecs::response::Response<'f>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-declare",
         feature = "rx-control"
     ))]
-    Declare(&'a wz_codecs::declare::Declare<'a>),
+    Declare(&'a wz_codecs::declare::Declare<'f>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-frame",
         feature = "codec-response-final",
         feature = "rx-response"
     ))]
-    ResponseFinal(&'a wz_codecs::response_final::ResponseFinal<'a>),
+    ResponseFinal(&'a wz_codecs::response_final::ResponseFinal<'f>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-frame",
         feature = "rx-control"
     ))]
-    Interest(&'a wz_codecs::interest::Interest<'a>),
+    Interest(&'a wz_codecs::interest::Interest<'f>),
 }
 
-impl<'a> InPlaceRecord<'a> {
+impl<'a, 'f> InPlaceRecord<'a, 'f> {
     /// The record of a frame at `sn` on the `reliable` channel and `priority`
     /// band. Built by the unicast receive path alone (and the tests that stand
     /// in for it).
@@ -753,7 +765,7 @@ impl<'a> InPlaceRecord<'a> {
     // Unused in a slot build that reads no kind of record (no `rx-*`, no request codec).
     #[allow(dead_code)]
     fn of_frame(
-        record: LentRecord<'a>,
+        record: LentRecord<'a, 'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -785,7 +797,7 @@ impl<'a> InPlaceRecord<'a> {
         allow(dead_code)
     )]
     pub(crate) fn push_of_frame(
-        push: &'a wz_codecs::push::Push<'a>,
+        push: &'a wz_codecs::push::Push<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -810,7 +822,7 @@ impl<'a> InPlaceRecord<'a> {
         allow(dead_code)
     )]
     pub(crate) fn request_of_frame(
-        request: &'a wz_codecs::request::RequestView<'a>,
+        request: &'a wz_codecs::request::RequestView<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -836,7 +848,7 @@ impl<'a> InPlaceRecord<'a> {
         allow(dead_code)
     )]
     pub(crate) fn response_of_frame(
-        response: &'a wz_codecs::response::Response<'a>,
+        response: &'a wz_codecs::response::Response<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -863,7 +875,7 @@ impl<'a> InPlaceRecord<'a> {
         allow(dead_code)
     )]
     pub(crate) fn declare_of_frame(
-        declare: &'a wz_codecs::declare::Declare<'a>,
+        declare: &'a wz_codecs::declare::Declare<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -891,7 +903,7 @@ impl<'a> InPlaceRecord<'a> {
         allow(dead_code)
     )]
     pub(crate) fn response_final_of_frame(
-        response_final: &'a wz_codecs::response_final::ResponseFinal<'a>,
+        response_final: &'a wz_codecs::response_final::ResponseFinal<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -923,7 +935,7 @@ impl<'a> InPlaceRecord<'a> {
         allow(dead_code)
     )]
     pub(crate) fn interest_of_frame(
-        interest: &'a wz_codecs::interest::Interest<'a>,
+        interest: &'a wz_codecs::interest::Interest<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -951,7 +963,7 @@ impl<'a> InPlaceRecord<'a> {
     ///
     /// Always `None` in a build that reads no Push off the wire (`rx-push`).
     #[cfg(feature = "codec-push")]
-    pub fn push(&self) -> Option<&'a wz_codecs::push::Push<'a>> {
+    pub fn push(&self) -> Option<&'a wz_codecs::push::Push<'f>> {
         match self.record {
             #[cfg(any(feature = "alloc", feature = "rx-push"))]
             LentRecord::Push(push) => Some(push),
@@ -964,7 +976,7 @@ impl<'a> InPlaceRecord<'a> {
     /// the bytes they occupy, walked where they lie (a chain is not held, so a Request is a few words
     /// however many extensions it may carry). `None` when the record is of another kind.
     #[cfg(feature = "codec-request")]
-    pub fn request(&self) -> Option<&'a wz_codecs::request::RequestView<'a>> {
+    pub fn request(&self) -> Option<&'a wz_codecs::request::RequestView<'f>> {
         match self.record {
             LentRecord::Request(request) => Some(request),
             #[allow(unreachable_patterns)]
@@ -977,7 +989,7 @@ impl<'a> InPlaceRecord<'a> {
     ///
     /// Always `None` in a build that reads no Response off the wire (`rx-response`).
     #[cfg(feature = "codec-response")]
-    pub fn response(&self) -> Option<&'a wz_codecs::response::Response<'a>> {
+    pub fn response(&self) -> Option<&'a wz_codecs::response::Response<'f>> {
         match self.record {
             #[cfg(any(feature = "alloc", feature = "rx-response"))]
             LentRecord::Response(response) => Some(response),
@@ -992,7 +1004,7 @@ impl<'a> InPlaceRecord<'a> {
     #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
     ///
     /// Always `None` in a build that reads no control record off the wire (`rx-control`).
-    pub fn declare(&self) -> Option<&'a wz_codecs::declare::Declare<'a>> {
+    pub fn declare(&self) -> Option<&'a wz_codecs::declare::Declare<'f>> {
         match self.record {
             #[cfg(feature = "rx-control")]
             LentRecord::Declare(declare) => Some(declare),
@@ -1008,7 +1020,7 @@ impl<'a> InPlaceRecord<'a> {
         feature = "codec-frame",
         feature = "codec-response-final"
     ))]
-    pub fn response_final(&self) -> Option<&'a wz_codecs::response_final::ResponseFinal<'a>> {
+    pub fn response_final(&self) -> Option<&'a wz_codecs::response_final::ResponseFinal<'f>> {
         match self.record {
             #[cfg(feature = "rx-response")]
             LentRecord::ResponseFinal(response_final) => Some(response_final),
@@ -1022,7 +1034,7 @@ impl<'a> InPlaceRecord<'a> {
     #[cfg(all(feature = "session-slot", feature = "codec-frame"))]
     ///
     /// Always `None` in a build that reads no control record off the wire (`rx-control`).
-    pub fn interest(&self) -> Option<&'a wz_codecs::interest::Interest<'a>> {
+    pub fn interest(&self) -> Option<&'a wz_codecs::interest::Interest<'f>> {
         match self.record {
             #[cfg(feature = "rx-control")]
             LentRecord::Interest(interest) => Some(interest),
@@ -1032,7 +1044,7 @@ impl<'a> InPlaceRecord<'a> {
     }
 }
 
-impl IterationEvent<'_> {
+impl IterationEvent<'_, '_> {
     /// Whether the event hands the application a `Push`: a record lent where its
     /// frame lies ([`IterationEvent::InPlace`]), or, on the heap profile, an owned
     /// batch with a Push in it ([`IterationEvent::Poll`] of a `FramePayload`).
@@ -1069,17 +1081,17 @@ impl IterationEvent<'_> {
 /// what the heap profile and the tests pass.
 pub trait EventSink {
     /// One event of the session's drive loop.
-    fn event(&mut self, event: IterationEvent<'_>);
+    fn event(&mut self, event: IterationEvent<'_, '_>);
 
     /// One record of an inbound frame, lent for the call. Defaults to the event that
     /// carries it ([`IterationEvent::InPlace`]).
-    fn record(&mut self, record: InPlaceRecord<'_>) {
+    fn record(&mut self, record: InPlaceRecord<'_, '_>) {
         self.event(IterationEvent::InPlace(record));
     }
 }
 
-impl<F: FnMut(IterationEvent<'_>) + ?Sized> EventSink for F {
-    fn event(&mut self, event: IterationEvent<'_>) {
+impl<F: FnMut(IterationEvent<'_, '_>) + ?Sized> EventSink for F {
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
         self(event)
     }
 }
@@ -1114,7 +1126,7 @@ impl<F: FnMut(IterationEvent<'_>) + ?Sized> EventSink for F {
 // Its arguments are read by the arm of a kind the build reads; a slot build that reads none has no arm.
 #[allow(unused_variables)]
 pub(crate) fn report_lent_record(
-    one: crate::network_message::WalkedRecord<'_>,
+    one: crate::network_message::WalkedRecord<'_, '_>,
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
@@ -1436,7 +1448,7 @@ pub enum DriverOutcome {
 #[cfg(all(test, feature = "reassembly", feature = "codec-push"))]
 mod reassembled_batch_tests {
     use super::*;
-    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant};
     use wz_codecs::ext_unit::ExtUnit;
     use wz_codecs_test_support::TestWire as _;
 
@@ -1444,11 +1456,15 @@ mod reassembled_batch_tests {
         let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
         match &mut push.body {
             crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
-                put.extensions = Some(crate::held_list::one_entry(ExtEntryOwned {
-                    header,
-                    body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-                }));
-                put.header |= 0x80;
+                // The chain's `Z` flag on the Put header follows the chain.
+                crate::put_payload::set_chain(
+                    put,
+                    [ExtEntryOwned {
+                        header,
+                        body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+                    }],
+                )
+                .unwrap();
             }
             other => panic!("a literal push carries a Put, got {other:?}"),
         }

@@ -1,4 +1,4 @@
-// SCE-MAP: zbuf_slice:45 :: _forge_body
+// SCE-MAP: zbuf_slice:50 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -21,16 +21,60 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `bytes` of `ZbufSlice`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct ZbufSlice<'a> {
+pub struct ZbufSliceBytesField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<ZbufSliceBytesField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<4294967295>;
+}
+
+/// What `ZbufSliceIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait ZbufSliceStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<ZbufSliceBytesField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<ZbufSliceBytesField>> ZbufSliceStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside ZbufSliceStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait ZbufSliceFrom<'f>: ZbufSliceStorage + ::sce_forge_runtime::codec::StoresBytes<'f, ZbufSliceBytesField> {}
+
+impl<'f, S: ZbufSliceStorage + ::sce_forge_runtime::codec::StoresBytes<'f, ZbufSliceBytesField>> ZbufSliceFrom<'f> for S {}
+
+// `ZbufSliceIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `ZbufSlice<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `ZbufSliceOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZbufSliceIn<S: ZbufSliceStorage> {
     pub kind: u32,
     pub len: u64,
-    pub bytes: &'a [u8],
+    pub bytes: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<ZbufSliceBytesField>>::Bytes, 4294967295>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type ZbufSlice<'a> = ZbufSliceIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type ZbufSliceOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = ZbufSliceIn<S>;
+
+impl<S: ZbufSliceStorage> Default for ZbufSliceIn<S> {
+    fn default() -> Self {
+        Self {
+            kind: Default::default(),
+            len: Default::default(),
+            bytes: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> ZbufSlice<'a> {
+impl<S: ZbufSliceStorage> ZbufSliceIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -46,7 +90,7 @@ impl<'a> ZbufSlice<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: ZbufSliceFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -62,7 +106,24 @@ impl<'a> ZbufSlice<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ZbufSliceFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                ZbufSlice::store_into(&mut _frame, &mut ZbufSlice::default())?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ZbufSliceFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -78,36 +139,37 @@ impl<'a> ZbufSlice<'a> {
         let kind = cursor.read_vle_u32()?;
         let len = cursor.read_vle_u64()?;
         let bytes = {
-            let _n = len as usize;
+            let _len = len;
+            if _len > 4294967295 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes)?;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
             _v
         };
+        let bytes = ::sce_forge_runtime::codec::Bounded::new(bytes).ok_or(CodecError::LengthOutOfRange)?;
+        let bytes = bytes.store::<S, ZbufSliceBytesField>()?;
         _out.kind = kind;
         _out.len = len;
         _out.bytes = bytes;
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 270;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        ZbufSlice::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
     /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
     /// no value and the vector cannot run out of room. Callers targeting
     /// zero-alloc hot paths should call `encode` directly against a
@@ -119,7 +181,7 @@ impl<'a> ZbufSlice<'a> {
     /// primary `encode`.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -133,14 +195,14 @@ pub trait ZbufSliceSource {
     /// The `kind` field.
     fn kind(&self) -> u32;
     /// The `bytes` field.
-    fn bytes(&self) -> &[u8];
+    fn bytes(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 4294967295>;
 }
 
 impl<T: ZbufSliceSource + ?Sized> ZbufSliceSource for &T {
     fn kind(&self) -> u32 {
         (**self).kind()
     }
-    fn bytes(&self) -> &[u8] {
+    fn bytes(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 4294967295> {
         (**self).bytes()
     }
 }
@@ -154,33 +216,24 @@ pub struct ZbufSliceParts<'a> {
     /// The `kind` field.
     pub kind: u32,
     /// The `bytes` field.
-    pub bytes: &'a [u8],
+    pub bytes: ::sce_forge_runtime::codec::Bytes<'a, 4294967295>,
 }
 
 impl<'a> ZbufSliceSource for ZbufSliceParts<'a> {
     fn kind(&self) -> u32 {
         self.kind
     }
-    fn bytes(&self) -> &[u8] {
+    fn bytes(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 4294967295> {
         self.bytes
     }
 }
 
-impl<'a> ZbufSliceSource for ZbufSlice<'a> {
+impl<S: ZbufSliceStorage> ZbufSliceSource for ZbufSliceOwned<S> {
     fn kind(&self) -> u32 {
         self.kind
     }
-    fn bytes(&self) -> &[u8] {
-        self.bytes
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ZbufSliceSource for ZbufSliceOwned<S> {
-    fn kind(&self) -> u32 {
-        self.kind
-    }
-    fn bytes(&self) -> &[u8] {
-        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.bytes)
+    fn bytes(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 4294967295> {
+        self.bytes.as_bytes()
     }
 }
 
@@ -202,7 +255,7 @@ impl<'a> ZbufSlice<'a> {
         let _d_len: u64 = ::sce_forge_runtime::codec::widen_usize(_n_d_len_0);
         w.write_vle_u32(src.kind())?;
         w.write_vle_u64(_d_len)?;
-        w.write_bytes(src.bytes())?;
+        w.write_bytes(src.bytes().into_inner())?;
         Ok(())
     }
 
@@ -299,18 +352,9 @@ impl<'a> ZbufSlice<'a> {
 // `let v: ZbufSliceOwned = ZbufSliceOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct ZbufSliceOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub kind: u32,
-    pub len: u64,
-    pub bytes: S::Bytes<256>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> ZbufSlice<'a> {
@@ -320,16 +364,17 @@ impl<'a> ZbufSlice<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<ZbufSliceOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: ZbufSliceFrom<'a>>(self) -> Result<ZbufSliceOwned<S>, CodecError> {
         Ok(ZbufSliceOwned {
             kind: self.kind,
             len: self.len,
-            bytes: <S::Bytes<256> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.bytes)?,
+            bytes: self.bytes.store::<S, ZbufSliceBytesField>()?,
         })
     }
 
@@ -341,7 +386,7 @@ impl<'a> ZbufSlice<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ZbufSliceOwned<S> {
+impl<S: ZbufSliceStorage> ZbufSliceOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -366,7 +411,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ZbufSliceOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut ZbufSlice<'o>) {
         _out.kind = self.kind;
         _out.len = self.len;
-        _out.bytes = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.bytes);
+        _out.bytes = self.bytes.as_bytes();
         
     }
 
@@ -378,33 +423,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ZbufSliceOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<ZbufSliceOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> ZbufSliceFrom<'x>>(&self) -> Result<ZbufSliceOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ZbufSliceOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`ZbufSlice::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        ZbufSlice::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(ZbufSlice::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -421,11 +441,11 @@ impl<'a> ZbufSlice<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ZbufSliceOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: ZbufSliceStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ZbufSliceOwned<S>, CodecError> {
         Ok(ZbufSliceOwned {
             kind: self.kind,
             len: self.len,
-            bytes: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<256>(origin, self.bytes)?,
+            bytes: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<ZbufSliceBytesField>(origin, self.bytes.into_inner()))?,
         })
     }
 }

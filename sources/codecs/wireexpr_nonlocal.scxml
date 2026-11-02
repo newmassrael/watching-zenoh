@@ -63,8 +63,14 @@
        parent.N  : suffix_len  (VLE u64, present iff upstream
                                  header.N = 1)
                    suffix      (UTF-8 string; length=`suffix_len`,
-                                 max 128 bytes per RFC §5.B Y0a; both
-                                 fields gated by the same parent.N)
+                                 max 65535 bytes; both fields gated by
+                                 the same parent.N)
+
+     The suffix's bound is the u16 length upstream reads it with
+     (`commons/zenoh-codec/src/core/wire_expr.rs` @
+     `let zodec = Zenoh080Bounded::<ExprLen>::new();`, with
+     `commons/zenoh-protocol/src/core/wire_expr.rs` @
+     `pub type ExprLen = u16;`).
 
      Composition: B1-α VLE (id, suffix_len) + B5-γ parent-scope
      present-if (parent.N, no negation) + B2-β present-if + length-ref
@@ -103,7 +109,7 @@
     <sce:field id="suffix_len" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
                sce:present-if="N"/>
     <sce:field id="suffix" sce:type="string" sce:byte="2" sce:bit-size="length-ref"
-               sce:length-field="suffix_len" sce:max-size="128"
+               sce:length-field="suffix_len" sce:max-size="65535"
                sce:present-if="N"/>
   </datamodel>
 </scxml>

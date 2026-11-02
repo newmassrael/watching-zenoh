@@ -52,13 +52,20 @@ use wz_codecs::undecl_token::{UndeclToken, UndeclTokenOwned};
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+use wz_codecs::Bounded;
+
+/// `suffix` as a wire expression's suffix field, which the protocol bounds at a
+/// `u16` length. A fixture's key expression is far shorter.
+fn suffix_text<const MAX: usize>(suffix: &str) -> Bounded<&str, MAX> {
+    Bounded::new(suffix).expect("test: a fixture's key expression fits the suffix bound")
+}
 
 pub fn decl_kexpr(id: u64, keyexpr: &str) -> DeclKexprOwned {
     let keyexpr_wire = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: 0,
             suffix_len: Some(keyexpr.len() as u64),
-            suffix: Some(keyexpr),
+            suffix: Some(suffix_text(keyexpr)),
         }),
     };
     DeclKexpr {
@@ -76,7 +83,7 @@ pub fn decl_subscriber(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclSu
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: mapping_id,
             suffix_len,
-            suffix,
+            suffix: suffix.map(suffix_text),
         }),
     };
     DeclSubscriber {
@@ -114,7 +121,7 @@ pub fn interest_subscriber(
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: 0,
             suffix_len: Some(keyexpr.len() as u64),
-            suffix: Some(keyexpr),
+            suffix: Some(suffix_text(keyexpr)),
         }),
     });
     let mut interest = Interest::new();
@@ -140,7 +147,7 @@ pub fn decl_subscriber_nonlocal(
         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
             id: mapping_id,
             suffix_len,
-            suffix,
+            suffix: suffix.map(suffix_text),
         }),
     };
     DeclSubscriber {
@@ -176,7 +183,7 @@ pub fn decl_queryable(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclQue
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: mapping_id,
             suffix_len,
-            suffix,
+            suffix: suffix.map(suffix_text),
         }),
     };
     DeclQueryable {
@@ -204,7 +211,7 @@ pub fn decl_queryable_nonlocal(
         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
             id: mapping_id,
             suffix_len,
-            suffix,
+            suffix: suffix.map(suffix_text),
         }),
     };
     DeclQueryable {
@@ -231,7 +238,7 @@ pub fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOw
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: mapping_id,
             suffix_len,
-            suffix,
+            suffix: suffix.map(suffix_text),
         }),
     };
     DeclToken {
@@ -253,7 +260,7 @@ pub fn decl_token_nonlocal(id: u64, mapping_id: u64, suffix: Option<&str>) -> De
         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
             id: mapping_id,
             suffix_len,
-            suffix,
+            suffix: suffix.map(suffix_text),
         }),
     };
     DeclToken {

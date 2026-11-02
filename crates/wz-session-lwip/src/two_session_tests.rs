@@ -142,7 +142,7 @@ const MEMBER_ZID: &[u8] = &[0x01, 0x02, 0x03, 0x04];
 /// `IterationEvent::InPlace` a session that reads its units in place reports
 /// for each Push, under `rx-in-place`). A log that read only the first would
 /// miss every Put on that path.
-fn put_payloads(event: &IterationEvent<'_>) -> Vec<Vec<u8>> {
+fn put_payloads(event: &IterationEvent<'_, '_>) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     match event {
         IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
@@ -162,8 +162,9 @@ fn put_payloads(event: &IterationEvent<'_>) -> Vec<Vec<u8>> {
                 PushVariant::CodecZenohMsgPut(put) | PushVariant::Default { body: put, .. },
             ) = record.push().map(|push| &push.body)
             {
-                assert!(put.slices.is_none(), "an inline payload");
-                out.push(put.payload.unwrap_or(&[]).to_vec());
+                let bytes =
+                    wz_session_core::put_payload::inline_bytes(put).expect("an inline payload");
+                out.push(bytes.to_vec());
             }
         }
         _ => {}
@@ -319,7 +320,7 @@ impl TwoSessions {
         let log = group_log.clone();
         let group_stop = Rc::new(Cell::new(false));
         let stop = group_stop.clone();
-        let on_event = move |event: IterationEvent<'_>| {
+        let on_event = move |event: IterationEvent<'_, '_>| {
             log.puts.borrow_mut().extend(put_payloads(&event));
             if let IterationEvent::MulticastPeerLost(_) = event {
                 log.peers_lost.set(log.peers_lost.get() + 1);

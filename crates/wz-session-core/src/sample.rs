@@ -73,13 +73,12 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use crate::link::RxBytes;
 use crate::vle::read_vle_u64;
-use sce_forge_runtime::codec::CodecStorage;
 #[cfg(feature = "alloc")]
-use sce_forge_runtime::codec::{SceByteBuf, SceStr};
+use sce_forge_runtime::codec::{Bounded, CodecError};
 
-use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(test)]
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryStorage};
 
 /// Application-level mirror of [`wz_codecs::timestamp::Timestamp`].
 ///
@@ -110,16 +109,18 @@ pub struct TimestampHint {
 impl TimestampHint {
     /// Project a decoded codec [`wz_codecs::timestamp::Timestamp`]
     /// into a wz-owned [`TimestampHint`].
-    pub fn from_codec<S: CodecStorage>(ts: &wz_codecs::timestamp::TimestampOwned<S>) -> Self {
+    pub fn from_codec<S: wz_codecs::timestamp::TimestampStorage>(
+        ts: &wz_codecs::timestamp::TimestampOwned<S>,
+    ) -> Self {
         Self {
             time: ts.time,
-            // SCE pin 7a94d084a (W3) stores the codec owned mirror as a
-            // no-alloc bounded `heapless::Vec<u8, 16>`; this AP-side hint
-            // retains an alloc `Vec<u8>` (Decision 2: AP retention is
-            // alloc), so copy out of the bounded buffer at the boundary.
-            // (Generic over the storage profile since R3011: both a received
-            // message's timestamp and a transport one's are projected here.)
-            zid: SceByteBuf::as_slice(&ts.zid).to_vec(),
+            // The codec holds the zid in its profile's container within the
+            // zid's bound; this AP-side hint retains an alloc `Vec<u8>`
+            // (Decision 2: AP retention is alloc), so copy it out at the
+            // boundary. (Generic over the storage profile since R3011: both a
+            // received message's timestamp and a transport one's are
+            // projected here.)
+            zid: ts.zid.as_bytes().into_inner().to_vec(),
         }
     }
 
@@ -138,12 +139,16 @@ impl TimestampHint {
     /// the publish wire branch can attach a caller-set timestamp to
     /// an outbound `MsgPut`/`MsgDel`. Mirrors the same byte-level
     /// shape (NTP64 `time` word + variable-length `zid` prefix).
-    pub fn to_codec(&self) -> wz_codecs::timestamp::Timestamp<'_> {
-        wz_codecs::timestamp::Timestamp {
+    ///
+    /// `LengthOutOfRange` for a zid past the 16 bytes a zenoh id has: the
+    /// codec holds the zid within that bound, so such a timestamp has no
+    /// frame.
+    pub fn to_codec(&self) -> Result<wz_codecs::timestamp::Timestamp<'_>, CodecError> {
+        Ok(wz_codecs::timestamp::Timestamp {
             time: self.time,
             zid_len: self.zid.len() as u64,
-            zid: &self.zid,
-        }
+            zid: Bounded::new(self.zid.as_slice()).ok_or(CodecError::LengthOutOfRange)?,
+        })
     }
 }
 
@@ -212,16 +217,18 @@ pub struct EncodingHint {
 impl EncodingHint {
     /// Project a decoded codec [`wz_codecs::encoding::Encoding`] into
     /// a wz-owned [`EncodingHint`].
-    pub fn from_codec<S: CodecStorage>(encoding: &wz_codecs::encoding::EncodingOwned<S>) -> Self {
+    pub fn from_codec<S: wz_codecs::encoding::EncodingStorage>(
+        encoding: &wz_codecs::encoding::EncodingOwned<S>,
+    ) -> Self {
         Self {
             packed_id: encoding.packed_id,
-            // W3 (SCE 7a94d084a): the codec owned mirror's schema is a
-            // bounded `heapless::String<128>`; copy it into this AP hint's
-            // alloc `Option<String>` at the projection boundary.
+            // The codec holds the schema in its profile's text container
+            // within the schema's bound; copy it into this AP hint's alloc
+            // `Option<String>` at the projection boundary.
             schema: encoding
                 .schema
                 .as_ref()
-                .map(|s| String::from(SceStr::as_str(s))),
+                .map(|s| String::from(s.as_text().into_inner())),
         }
     }
 
@@ -231,7 +238,7 @@ impl EncodingHint {
     pub fn from_view(encoding: &wz_codecs::encoding::Encoding<'_>) -> Self {
         Self {
             packed_id: encoding.packed_id,
-            schema: encoding.schema.map(String::from),
+            schema: encoding.schema.map(|s| String::from(s.into_inner())),
         }
     }
 
@@ -241,13 +248,22 @@ impl EncodingHint {
     /// outbound `MsgPut`. The codec `Encoding` decides whether to
     /// emit a schema string based on `packed_id & 0x1` and a
     /// non-empty `schema`; the hint preserves both fields verbatim.
-    pub fn to_codec(&self) -> wz_codecs::encoding::Encoding<'_> {
+    ///
+    /// `LengthOutOfRange` for a schema past the `u8` length the protocol
+    /// reads it with: the codec holds the schema within that bound, so such
+    /// an encoding has no frame.
+    pub fn to_codec(&self) -> Result<wz_codecs::encoding::Encoding<'_>, CodecError> {
         let schema_len = self.schema.as_ref().map(|s| s.len() as u64);
-        wz_codecs::encoding::Encoding {
+        let schema = self
+            .schema
+            .as_deref()
+            .map(|s| Bounded::new(s).ok_or(CodecError::LengthOutOfRange))
+            .transpose()?;
+        Ok(wz_codecs::encoding::Encoding {
             packed_id: self.packed_id,
             schema_len,
-            schema: self.schema.as_deref(),
-        }
+            schema,
+        })
     }
 }
 
@@ -905,7 +921,7 @@ impl Sample {
 /// Returns `None` when no extension in the chain has that identity, or when the
 /// matching extension's body variant is unexpectedly not `ExtZint` (which the
 /// wire decoder would only produce if the upstream catalog drifted).
-pub fn extract_qos<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<QosLevel> {
+pub fn extract_qos<S: ExtEntryStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<QosLevel> {
     extract_qos_in(extensions)
 }
 
@@ -1462,7 +1478,7 @@ mod tests {
             ext.header = header;
             ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
                 value_len: payload.len() as u64,
-                value: &payload,
+                value: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
             });
             ext.try_into_owned().unwrap()
         };
@@ -1502,7 +1518,7 @@ mod tests {
         ext.set_enc(0x02);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: payload.len() as u64,
-            value: &payload,
+            value: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
         });
         let si = extract_source_info(&[ext.try_into_owned().unwrap()]).unwrap();
         let mut expected_zid = [0u8; 16];
@@ -1523,7 +1539,7 @@ mod tests {
         // header says zidlen 16, but payload only has 1 byte.
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: 1,
-            value: &[0xF0u8],
+            value: wz_codecs::Bounded::new(&[0xF0u8] as &[u8]).unwrap(),
         });
         assert!(extract_source_info(&[ext.try_into_owned().unwrap()]).is_none());
     }
@@ -1535,7 +1551,7 @@ mod tests {
         ext.set_enc(0x02);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: 0,
-            value: &[],
+            value: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
         });
         assert!(extract_source_info(&[ext.try_into_owned().unwrap()]).is_none());
     }
@@ -1555,7 +1571,7 @@ mod tests {
         ext.set_enc(0x02);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: payload.len() as u64,
-            value: &payload,
+            value: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
         });
         let si = extract_source_info(&[ext.try_into_owned().unwrap()]).unwrap();
         let mut expected_zid = [0u8; 16];

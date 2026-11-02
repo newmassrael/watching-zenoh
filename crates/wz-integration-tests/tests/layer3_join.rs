@@ -119,14 +119,13 @@ fn layer3_join_s0_basic() {
     let wz = Join {
         version: input.version,
         cbyte,
-        zid: input.zid,
+        zid: wz_codecs::Bounded::new(input.zid).unwrap(),
         s: None,
         lease: input.lease,
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec()
-    .expect("the Join encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
 }
@@ -151,7 +150,7 @@ fn layer3_join_s1_with_size_negotiation() {
     let wz = Join {
         version: input.version,
         cbyte,
-        zid: input.zid,
+        zid: wz_codecs::Bounded::new(input.zid).unwrap(),
         s: Some(JoinS {
             sn_res,
             batch_size: input.batch_size,
@@ -160,8 +159,7 @@ fn layer3_join_s1_with_size_negotiation() {
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec()
-    .expect("the Join encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
 }
@@ -191,7 +189,7 @@ fn layer3_join_t_flag_lease_in_seconds() {
     let wz = Join {
         version: input.version,
         cbyte,
-        zid: input.zid,
+        zid: wz_codecs::Bounded::new(input.zid).unwrap(),
         s: None,
         // The glue's encode-side projection (multicast_glue::encode_join):
         // whole-second lease -> seconds on the wire.
@@ -199,8 +197,7 @@ fn layer3_join_t_flag_lease_in_seconds() {
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec()
-    .expect("the Join encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
 }
@@ -236,14 +233,13 @@ fn layer3_join_vle_boundaries_on_sn() {
         let wz = Join {
             version: input.version,
             cbyte,
-            zid: input.zid,
+            zid: wz_codecs::Bounded::new(input.zid).unwrap(),
             s: None,
             lease,
             next_sn_reliable: sn_r,
             next_sn_best_effort: sn_be,
         }
-        .encode_to_vec()
-        .expect("the Join encodes");
+        .encode_to_vec();
         let pico = zenoh_pico_encode_join(&input);
         assert_eq!(
             wz, pico,

@@ -29,7 +29,7 @@
 //! at the end of a chain and `0x92` before another entry.
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::msg_put::MsgPut;
+use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
 
 /// A one-slice sliced payload: count 1, kind RAW, length 1, one byte.
 const SLICED: [u8; 4] = [0x01, 0x00, 0x01, 0xAB];
@@ -43,18 +43,29 @@ fn decode(wire: &[u8]) -> (MsgPut<'_>, bool) {
     let mut cursor = SceCursor::new(wire);
     let put = MsgPut::decode(&mut cursor).expect("the Put decodes");
     assert_eq!(cursor.remaining(), 0, "the Put consumed every byte");
-    let sliced = put.slices.is_some();
+    let sliced = matches!(
+        put.extensions_has_0x12,
+        MsgPutExtensionsHas0x12::Has0x12 { .. }
+    );
     assert_eq!(
         sliced,
         put.slice_count.is_some(),
-        "the sliced pair is present or absent together"
+        "the slice count is read exactly in the sliced layout"
     );
     assert_eq!(
         !sliced,
-        put.payload.is_some() && put.payload_len.is_some(),
-        "exactly one layout's fields are present"
+        put.payload_len.is_some(),
+        "the payload length is read exactly in the plain layout"
     );
     (put, sliced)
+}
+
+/// The plain payload of a Put read in the plain layout.
+fn plain_payload<'p>(put: &'p MsgPut<'_>) -> &'p [u8] {
+    match &put.extensions_has_0x12 {
+        MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } => payload.into_inner(),
+        MsgPutExtensionsHas0x12::Has0x12 { .. } => panic!("the Put was read in the plain layout"),
+    }
 }
 
 fn put(chain: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -70,7 +81,10 @@ fn the_marker_last_in_the_chain_selects_the_sliced_layout() {
     let (decoded, sliced) = decode(&wire);
     assert!(sliced, "0x12 is the marker");
     assert_eq!(decoded.slice_count, Some(1));
-    assert_eq!(decoded.slices.as_ref().expect("slices")[0].bytes, [0xAB]);
+    let MsgPutExtensionsHas0x12::Has0x12 { slices, .. } = &decoded.extensions_has_0x12 else {
+        panic!("0x12 selects the sliced layout");
+    };
+    assert_eq!(slices[0].bytes, [0xAB]);
 }
 
 #[test]
@@ -104,7 +118,7 @@ fn an_extension_of_the_markers_id_but_not_its_identity_leaves_the_plain_layout()
             !sliced,
             "{name}: shares only the 4-bit id, so it is not the marker"
         );
-        assert_eq!(decoded.payload, Some(&[0xAB][..]), "{name}");
+        assert_eq!(plain_payload(&decoded), [0xAB], "{name}");
     }
 }
 
@@ -117,9 +131,9 @@ fn a_chain_without_the_marker_leaves_the_plain_layout() {
 
 #[test]
 fn both_layouts_re_encode_to_the_bytes_they_were_read_from() {
-    // The encoder evaluates the same identity over the entries it was given, so
-    // a Put read in either layout writes back byte for byte, and one that the
-    // decoder read in the plain layout is not refused as a mismatch.
+    // A decoded Put holds the layout it was read in, with the marker at the
+    // place it stood, and the encoder writes the layout the value holds, so a
+    // Put read in either layout writes back byte for byte.
     for (chain, payload) in [
         (&[0x12][..], &SLICED[..]),
         (&[0x92, 0x05][..], &SLICED[..]),
@@ -129,9 +143,7 @@ fn both_layouts_re_encode_to_the_bytes_they_were_read_from() {
     ] {
         let wire = put(chain, payload);
         let (decoded, _) = decode(&wire);
-        let again = decoded
-            .encode_to_vec()
-            .unwrap_or_else(|e| panic!("chain {chain:02x?} re-encodes: {e:?}"));
+        let again = decoded.encode_to_vec();
         assert_eq!(again, wire, "chain {chain:02x?} round-trips");
     }
 }

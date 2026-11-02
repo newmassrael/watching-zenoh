@@ -29,7 +29,7 @@
 //! primitive class (timestamp embed, encoding embed, ext_entry
 //! variant + tlv-chain).
 
-use wz_codecs::msg_put::MsgPut;
+use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
 use zenoh_pico_sys::{
     _z_bytes_from_buf, _z_msg_put_t, _z_put_encode, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf,
     _z_zbuf_clear,
@@ -91,14 +91,14 @@ fn layer3_msg_put_no_flags_payload_variants() {
             header: MID_Z_PUT,
             timestamp: None,
             encoding: None,
-            extensions: None,
+            extensions_has_0x12: MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
+            },
             payload_len: Some(payload.len() as u64),
-            payload: Some(&payload),
             slice_count: None,
-            slices: None,
         }
-        .encode_to_vec()
-        .expect("a Put in the inline layout encodes");
+        .encode_to_vec();
         let pico_bytes = zenoh_pico_encode_put_no_flags(&payload);
         assert_eq!(
             wz_bytes,
@@ -117,14 +117,14 @@ fn layer3_msg_put_empty_payload_yields_header_and_zero_vle() {
         header: MID_Z_PUT,
         timestamp: None,
         encoding: None,
-        extensions: None,
+        extensions_has_0x12: MsgPutExtensionsHas0x12::NotHas0x12 {
+            extensions: None,
+            payload: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
+        },
         payload_len: Some(0),
-        payload: Some(&[]),
         slice_count: None,
-        slices: None,
     }
-    .encode_to_vec()
-    .expect("a Put in the inline layout encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_put_no_flags(&[]);
     assert_eq!(wz, pico);
     assert_eq!(wz, vec![MID_Z_PUT, 0x00], "empty-PUT canonical form");

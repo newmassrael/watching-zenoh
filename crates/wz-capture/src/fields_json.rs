@@ -6279,8 +6279,7 @@ mod tests {
             ),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture Declare is encodable");
+        .encode_to_vec();
 
         // A REAL capture file, because this document renders a row only by
         // RE-READING the bytes a message was framed out of: handed an empty
@@ -12641,7 +12640,6 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// The table id of an encoding NAME, so a fixture asks for the encoding it
@@ -12981,11 +12979,13 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture Declare is encodable")
         };
         let empty_put = || wz_codecs::msg_put::MsgPut {
             payload_len: Some(0),
-            payload: Some(&[]),
+            extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
+            },
             ..Default::default()
         };
         let request = |body: RequestVariant<'static>| {
@@ -13008,7 +13008,6 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture Response is encodable")
         };
         let reply = |body: ReplyVariant<'static>| {
             ResponseVariant::CodecZenohReply(Reply {
@@ -13144,7 +13143,7 @@ mod tests {
                 Some("err"),
                 response(ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
                     payload_len: 2,
-                    payload: b"no",
+                    payload: wz_codecs::Bounded::new(b"no" as &[u8]).unwrap(),
                     ..Default::default()
                 })),
             ),
@@ -13165,8 +13164,7 @@ mod tests {
                     header_c_or_f: None,
                     ..Default::default()
                 }
-                .encode_to_vec()
-                .expect("a fixture Interest is encodable"),
+                .encode_to_vec(),
             ),
             (
                 "Interest",
@@ -13181,8 +13179,7 @@ mod tests {
                 .expect("the production interest builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec()
-                .expect("a built interest is encodable"),
+                .encode_to_vec(),
             ),
             ("Oam", None, wz_codecs::oam::Oam::default().encode_to_vec()),
         ]
@@ -13308,7 +13305,7 @@ mod tests {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id,
                     suffix_len: suffix.map(|s| s.len() as u64),
-                    suffix,
+                    suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
                 }),
             }
         }
@@ -13329,7 +13326,6 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture Declare is encodable")
         }
 
         /// One datagram: `from_low` says which end of the flow sent it.

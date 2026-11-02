@@ -58,7 +58,7 @@
 //! ([`crate::frame_encode`]); this module is the SSOT the emit and the
 //! interpretation now share, plus the `Drop` half neither side had.
 
-use wz_codecs::ext_entry::ExtEntryOwned;
+use crate::transport_profile::ExtEntryOwned;
 
 use crate::unit_ext::encode_unit_ext;
 
@@ -141,7 +141,7 @@ impl FragmentMarkers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    use crate::transport_profile::ExtEntryOwnedVariant;
     use wz_codecs::ext_zint::ExtZint;
 
     /// Locks the on-the-wire header bytes against the zenoh declarations:

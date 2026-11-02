@@ -501,7 +501,7 @@ impl ApplicationLayerObserver {
     /// `event` is `Copy` (set up in R121j-5c-e2e-demo to support
     /// multi-consumer dispatch); the same reference fans into each
     /// registry at zero cost.
-    pub fn dispatch_event(&mut self, event: IterationEvent<'_>) {
+    pub fn dispatch_event(&mut self, event: IterationEvent<'_, '_>) {
         // Subscribers FIRST — absorb DeclKexpr / UndeclKexpr into the
         // peer_keyexpr_table so downstream consumers see a fresh
         // mapping snapshot on the same iteration.
@@ -786,7 +786,7 @@ impl ApplicationLayerObserver {
     #[cfg(feature = "switchboard")]
     pub fn dispatch_switchboard(
         &self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         injector: &mut dyn EventInjector,
     ) -> usize {
         self.switchboard.dispatch_iteration_event(
@@ -1084,7 +1084,7 @@ impl ApplicationLayerObserver {
     /// inside the `drive_session_until_terminal` observer closure.
     /// Equivalent to `dispatch_event(event)` followed by
     /// `flush_pending(actions)`.
-    pub fn dispatch<S>(&mut self, event: IterationEvent<'_>, actions: &S)
+    pub fn dispatch<S>(&mut self, event: IterationEvent<'_, '_>, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
@@ -1225,17 +1225,20 @@ mod tests {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id: 0,
                     suffix_len: Some(suffix.len() as u64),
-                    suffix: Some(suffix),
+                    suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
                 }),
             };
             let mut push = Push {
                 keyexpr,
                 ..Push::default()
             };
-            // Set the inner MsgPut body's payload to the test bytes.
+            // Set the inner MsgPut body's payload to the test bytes, inline.
             if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
                 put.payload_len = Some(payload.len() as u64);
-                put.payload = Some(payload);
+                put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                };
             }
             push.try_into_owned_in::<crate::wire::WireStorage>()
                 .unwrap()
@@ -1258,7 +1261,7 @@ mod tests {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id: 0,
                     suffix_len: Some(suffix.len() as u64),
-                    suffix: Some(suffix),
+                    suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
                 }),
             };
             let decl = DeclSubscriber {
@@ -1411,7 +1414,7 @@ mod tests {
                         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                             id: 0,
                             suffix_len: Some(1),
-                            suffix: Some("y"),
+                            suffix: Some(wz_codecs::Bounded::new("y").unwrap()),
                         }),
                     };
                     Declare {
@@ -1432,7 +1435,7 @@ mod tests {
                         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                             id: 0,
                             suffix_len: Some(1),
-                            suffix: Some("z"),
+                            suffix: Some(wz_codecs::Bounded::new("z").unwrap()),
                         }),
                     };
                     Declare {
@@ -1668,7 +1671,7 @@ mod tests {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id: 0,
                     suffix_len: Some(suffix.len() as u64),
-                    suffix: Some(suffix),
+                    suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
                 }),
             };
             let request = Request {

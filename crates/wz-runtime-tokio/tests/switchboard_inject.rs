@@ -43,7 +43,7 @@ fn put_push(keyexpr: &str, payload: &[u8]) -> PushOwned {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(keyexpr.len() as u64),
-                suffix: Some(keyexpr),
+                suffix: Some(wz_codecs::Bounded::new(keyexpr).unwrap()),
             }),
         },
         ..Push::default()

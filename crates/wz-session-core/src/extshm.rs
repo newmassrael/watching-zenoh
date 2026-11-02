@@ -36,14 +36,13 @@
 //! init/open ext space, not this body ext space) are R3b.
 
 use alloc::vec::Vec;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryStorage};
 use wz_codecs::ext_unit::ExtUnit;
 
 use crate::ext_header::EXT_FLAG_M;
 use crate::vle::{encode_vle_u64_into, read_vle_u64};
 #[cfg(feature = "session-extshm")]
 use sce_forge_runtime::codec::CodecError;
-use sce_forge_runtime::codec::CodecStorage;
 #[cfg(feature = "session-extshm")]
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -122,7 +121,7 @@ pub fn decode_shm_descriptor(bytes: &[u8]) -> Option<ShmDescriptor> {
 /// MANDATORY bit, `put.rs:73 zextunit!(0x2, true)`, so a peer that does not
 /// understand SHM rejects the Put rather than reading the descriptor as payload).
 /// The surrounding body-ext codec applies the chain-continuation `Z` bit.
-pub fn encode_shm_marker_ext<S: CodecStorage>() -> ExtEntryOwned<S> {
+pub fn encode_shm_marker_ext<S: ExtEntryStorage>() -> ExtEntryOwned<S> {
     ExtEntryOwned {
         header: SHM_BODY_EXT_ID | EXT_FLAG_M,
         body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),

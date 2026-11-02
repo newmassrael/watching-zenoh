@@ -72,7 +72,7 @@
      msg_put / msg_del under request. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="reply">
+       sce:kind="codec" sce:default-endian="big" name="reply">
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <sce:import src="msg_put.scxml" kind="codec" as="codec_zenoh_msg_put"/>
   <sce:import src="msg_del.scxml" kind="codec" as="codec_zenoh_msg_del"/>
@@ -85,7 +85,7 @@
     <sce:field id="consolidation" sce:type="uint8" sce:byte="1" sce:bit-size="8"
                sce:present-if="header.C"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
-                   max-depth="8" on-overflow="reject"
+                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
     <sce:variant tag="peek.mid">

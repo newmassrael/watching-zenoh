@@ -138,10 +138,7 @@ impl KeyexprTables {
     /// Resolve one wire expression seen travelling in `direction`.
     pub fn resolve(&self, direction: Direction, expr: &WireexprOwned) -> Resolved {
         let owner = Self::owner_of(direction, &expr.body);
-        let (id, suffix) = match &expr.body {
-            WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref()),
-            WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
-        };
+        let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(&expr.body);
         if id == 0 {
             return match suffix {
                 Some(s) if !s.is_empty() => Resolved::Literal(s.to_string()),
@@ -208,14 +205,13 @@ impl KeyexprTables {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sce_forge_runtime::codec::SceStr;
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 
-    fn sfx(suffix: Option<&str>) -> Option<sce_forge_runtime::codec::HeapStr<128>> {
-        suffix.map(|s| {
-            sce_forge_runtime::codec::SceString::from_view(s).expect("fixture suffix fits")
-        })
+    fn sfx<T: sce_forge_runtime::codec::SceStr, const MAX: usize>(
+        suffix: Option<&str>,
+    ) -> Option<sce_forge_runtime::codec::Bounded<T, MAX>> {
+        suffix.map(|s| crate::codec_owned::owned_string(s).expect("fixture suffix fits"))
     }
 
     fn local(id: u64, suffix: Option<&str>) -> WireexprOwned {

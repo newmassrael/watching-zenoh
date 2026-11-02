@@ -508,7 +508,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         &mut self,
         peers: &mut PeerTables,
         requesters: &mut Requesters<R, G>,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
     ) {
         self.dispatch_event_among(peers, requesters, event, &NoOtherPeers);
     }
@@ -520,7 +520,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         &mut self,
         peers: &mut PeerTables,
         requesters: &mut Requesters<R, G>,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         others: &O,
     ) {
         self.subscribers
@@ -683,7 +683,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         &mut self,
         peers: &mut PeerTables,
         requesters: &mut Requesters<R, G>,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -698,7 +698,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     pub fn dispatch_switchboard(
         &self,
         peers: &PeerTables,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         injector: &mut dyn EventInjector,
     ) -> usize {
         self.switchboard.dispatch_iteration_event(

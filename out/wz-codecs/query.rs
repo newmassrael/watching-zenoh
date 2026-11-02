@@ -1,4 +1,4 @@
-// SCE-MAP: query:114 :: _forge_body
+// SCE-MAP: query:116 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -15,12 +15,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-// RFC §synth-5-B B2/B3: bounded inline list storage for repeat / tlv-chain
-// fields — heap-free `heapless::Vec<T, N>` (re-exported by the runtime),
-// the Rust mirror of the C11 `T elems[MAX]; len` representation. Always
-// available (no `alloc` gate) so list-bearing codecs compile on the
-// pure no_std no-alloc MCU tier.
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::query_ext_entry::QueryExtEntry;
 
@@ -31,24 +25,61 @@ use super::query_ext_entry::QueryExtEntryView;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+use super::query_ext_entry::QueryExtEntryOwned;
+/// The field `parameters` of `Query`, which a storage profile
+/// answers for by this type.
+#[allow(dead_code)]
+pub struct QueryParametersField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<QueryParametersField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<4294967295>;
+}
+
+/// The field `extensions` of `Query`, which a storage profile
+/// answers for by this type.
+#[allow(dead_code)]
+pub struct QueryExtensionsField;
+
+impl ::sce_forge_runtime::codec::HoldsList<QueryExtensionsField> for ::sce_forge_runtime::codec::Inline {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+/// What `QueryIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait QueryStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<QueryParametersField> + ::sce_forge_runtime::codec::HoldsList<QueryExtensionsField> + super::query_ext_entry::QueryExtEntryStorage {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<QueryParametersField> + ::sce_forge_runtime::codec::HoldsList<QueryExtensionsField> + super::query_ext_entry::QueryExtEntryStorage> QueryStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside QueryStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait QueryFrom<'f>: QueryStorage + ::sce_forge_runtime::codec::StoresBytes<'f, QueryParametersField> + super::query_ext_entry::QueryExtEntryFrom<'f> {}
+
+impl<'f, S: QueryStorage + ::sce_forge_runtime::codec::StoresBytes<'f, QueryParametersField> + super::query_ext_entry::QueryExtEntryFrom<'f>> QueryFrom<'f> for S {}
+
+// `QueryIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `Query<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `QueryOwned<S>` names it
+// at a profile that holds them.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub struct Query<'a> {
+pub struct QueryIn<S: QueryStorage> {
     pub header: u8,
     pub consolidation: Option<u8>,
     pub parameters_len: Option<u64>,
-    pub parameters: Option<&'a [u8]>,
-    pub extensions: Option<HeaplessVec<QueryExtEntry<'a>, 8>>,
+    pub parameters: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<QueryParametersField>>::Bytes, 4294967295>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<QueryExtensionsField>>::List<QueryExtEntryOwned<S>>, 8, 1>>,
 }
 
-// RFC variant-default-uniformity: at least one field's
-// `<sce:flags>` carrier declares a wire-MID constant via
-// `<sce:flag value="N"/>`. Manual `impl Default` bakes the OR of
-// every declared `(value & mask) << bit` into that carrier so a
-// freshly-constructed instance carries the wire-MID for its own
-// dispatch tag. Fields without declared values fall through to
-// `Default::default()` (preserving derive(Default) semantics).
-impl<'a> Default for Query<'a> {
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type Query<'a> = QueryIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type QueryOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = QueryIn<S>;
+
+impl<S: QueryStorage> Default for QueryIn<S> {
     fn default() -> Self {
         Self {
             header: 0x03u8,
@@ -61,7 +92,7 @@ impl<'a> Default for Query<'a> {
 }
 
 #[allow(dead_code)]
-impl<'a> Query<'a> {
+impl<S: QueryStorage> QueryIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -77,7 +108,7 @@ impl<'a> Query<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: QueryFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -93,7 +124,24 @@ impl<'a> Query<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: QueryFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                QueryView::decode(&mut _frame)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: QueryFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -127,7 +175,11 @@ impl<'a> Query<'a> {
             None
         };
         let parameters = if (header & 0x40u8) != 0 {
-            let _n = parameters_len.unwrap() as usize;
+            let _len = parameters_len.unwrap();
+            if _len > 4294967295 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes)?;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
@@ -135,26 +187,30 @@ impl<'a> Query<'a> {
         } else {
             None
         };
+        let parameters = parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
+        let parameters = parameters.map(|_v| _v.store::<S, QueryParametersField>()).transpose()?;
         if (header & 0x80u8) != 0 {
-            let _vec = _out.extensions.insert(HeaplessVec::<QueryExtEntry<'a>, 8>::new());
-            let mut _prev_extensions_after_shm: u8 = 0;
-            let mut _more = false;
-            for _ in 0..8u32 {
-                let _entry = QueryExtEntry::decode(cursor, _prev_extensions_after_shm)?;
-                _more = _entry.z();
-                _prev_extensions_after_shm = u8::from((u64::from(_entry.header) & 127u64) == 4u64);
-                // Bounded by max-depth on both sides — loop count and `_vec`
-                // capacity are the same literal — so this push cannot fail. An
-                // over-long chain is refused by the guard after the loop.
-                _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
-                if !_more { break; }
-            }
-            if _more && cursor.remaining() == 0 {
-                return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TlvChainOverflow);
-            }
+            _out.extensions.insert(Default::default()).refill(|_vec| {
+                let mut _prev_extensions_after_shm: u8 = 0;
+                let mut _more = false;
+                for _ in 0..8u32 {
+                    let _entry = QueryExtEntryOwned::<S>::decode(cursor, _prev_extensions_after_shm)?;
+                    _more = _entry.z();
+                    _prev_extensions_after_shm = u8::from((u64::from(_entry.header) & 127u64) == 4u64);
+                    // The loop walks the chain's depth and `_vec` holds the capacity, so
+                // this push fails only where the deployment holds fewer entries than
+                // the frame says. An over-long chain is refused after the loop.
+                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    if !_more { break; }
+                }
+                if _more && cursor.remaining() == 0 {
+                    return Err(CodecError::NeedMoreBytes);
+                }
+                if _more {
+                    return Err(CodecError::TooManyElements);
+                }
+                Ok(())
+            })?;
         } else {
             _out.extensions = None;
         }
@@ -215,11 +271,6 @@ impl<'a> Query<'a> {
         }
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 11331;
 
     /// Encode `self` into the caller-owned sink. Returns the value's refusal
     /// when the encoding cannot carry it (a length past its type, a list past
@@ -227,13 +278,13 @@ impl<'a> Query<'a> {
     /// `sce:encode-may-fail`), or the sink's own error:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Query::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
     /// `VecSink`. Returns the freshly-encoded byte vector, or the error
     /// `encode` refuses a value with: one the encoding cannot carry (a
     /// length past its type, a list past its bound) or one a gate
@@ -246,7 +297,7 @@ impl<'a> Query<'a> {
     /// primary `encode`.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let mut _sce_sink = VecSink::new(&mut _sce_v);
         self.encode(&mut _sce_sink)?;
         Ok(_sce_v)
@@ -263,9 +314,9 @@ pub trait QuerySource {
     /// The `consolidation` field.
     fn consolidation(&self) -> Option<u8>;
     /// The `parameters` field.
-    fn parameters(&self) -> Option<&[u8]>;
+    fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>>;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8, 1>>;
 }
 
 impl<T: QuerySource + ?Sized> QuerySource for &T {
@@ -275,10 +326,10 @@ impl<T: QuerySource + ?Sized> QuerySource for &T {
     fn consolidation(&self) -> Option<u8> {
         (**self).consolidation()
     }
-    fn parameters(&self) -> Option<&[u8]> {
+    fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         (**self).parameters()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8, 1>> {
         (**self).extensions()
     }
 }
@@ -294,9 +345,9 @@ pub struct QueryParts<'a> {
     /// The `consolidation` field.
     pub consolidation: Option<u8>,
     /// The `parameters` field.
-    pub parameters: Option<&'a [u8]>,
+    pub parameters: Option<::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::query_ext_entry::QueryExtEntryParts<'a>], 8>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::query_ext_entry::QueryExtEntryParts<'a>], 8, 1>>,
 }
 
 impl<'a> QuerySource for QueryParts<'a> {
@@ -306,26 +357,26 @@ impl<'a> QuerySource for QueryParts<'a> {
     fn consolidation(&self) -> Option<u8> {
         self.consolidation
     }
-    fn parameters(&self) -> Option<&[u8]> {
+    fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         self.parameters
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
-impl<'a> QuerySource for Query<'a> {
+impl<S: QueryStorage> QuerySource for QueryOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
     fn consolidation(&self) -> Option<u8> {
         self.consolidation
     }
-    fn parameters(&self) -> Option<&[u8]> {
-        self.parameters
+    fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+        self.parameters.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes)
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
-        self.extensions.as_ref().map(::sce_forge_runtime::codec::BoundedIter::from)
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8, 1>> {
+        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -336,26 +387,11 @@ impl<'a> QuerySource for QueryView<'a> {
     fn consolidation(&self) -> Option<u8> {
         self.consolidation
     }
-    fn parameters(&self) -> Option<&[u8]> {
+    fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         self.parameters
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> QuerySource for QueryOwned<S> {
-    fn header(&self) -> u8 {
-        self.header
-    }
-    fn consolidation(&self) -> Option<u8> {
-        self.consolidation
-    }
-    fn parameters(&self) -> Option<&[u8]> {
-        self.parameters.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice)
-    }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::query_ext_entry::QueryExtEntrySource> + Clone, 8>> {
-        self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
 
@@ -367,7 +403,6 @@ impl<'a> Query<'a> {
     /// `src` presents, and a value the encoding cannot carry is refused
     /// before the first byte is written.
     pub fn encode_source<S: QuerySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::count_source(src)?;
         Self::write_source(src, w)
     }
 
@@ -385,6 +420,15 @@ impl<'a> Query<'a> {
         let _f_d_parameters_len: Option<usize> = if src.parameters().is_some() { Some(_n_d_parameters_len_0) } else { None };
         let _d_parameters_len: u64 = ::sce_forge_runtime::codec::widen_usize(_f_d_parameters_len.unwrap_or(0));
         let _c_header: u8 = (((((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x40) | (u8::from(_p_header_p_0) << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        {
+            let mut _prev: bool = false;
+            for _e in src.extensions().into_iter().flatten() {
+                if QueryExtEntry::input_after_shm(&_e).is_some_and(|_s| _s != _prev) {
+                    return Err(CodecError::PresentIfMismatch);
+                }
+                _prev = (u64::from(super::query_ext_entry::QueryExtEntrySource::header(&_e)) & 0x7F) == 4u64;
+            }
+        }
         w.write_u8(_c_header)?;
         if let Some(_v) = src.consolidation() {
             w.write_u8(_v)?;
@@ -393,13 +437,11 @@ impl<'a> Query<'a> {
             w.write_vle_u64(_d_parameters_len)?;
         }
         if let Some(_v) = src.parameters() {
-            w.write_bytes(_v)?;
+            w.write_bytes(_v.into_inner())?;
         }
         if let Some(_v) = src.extensions() {
-            let mut _prev_after_shm: u8 = 0;
             for (_i, _e) in _v.enumerate() {
-                QueryExtEntry::write_source_in(&_e, w, _prev_after_shm, &super::query_ext_entry::QueryExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
-                _prev_after_shm = u8::from((u64::from(super::query_ext_entry::QueryExtEntrySource::header(&_e)) & 0x7F) == 4u64);
+                QueryExtEntry::write_source_in(&_e, w, &super::query_ext_entry::QueryExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
             }
         }
         Ok(())
@@ -472,8 +514,8 @@ pub struct QueryView<'a> {
     pub header: u8,
     pub consolidation: Option<u8>,
     pub parameters_len: Option<u64>,
-    pub parameters: Option<&'a [u8]>,
-    pub extensions: Option<Bounded<ListView<'a, QueryExtensionsWalk, 1>, 8>>,
+    pub parameters: Option<::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub extensions: Option<Bounded<ListView<'a, QueryExtensionsWalk, 1>, 8, 1>>,
 }
 
 impl<'a> Default for QueryView<'a> {
@@ -542,7 +584,11 @@ impl<'a> QueryView<'a> {
             None
         };
         let parameters = if (header & 0x40u8) != 0 {
-            let _n = parameters_len.unwrap() as usize;
+            let _len = parameters_len.unwrap();
+            if _len > 4294967295 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes)?;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
@@ -550,6 +596,7 @@ impl<'a> QueryView<'a> {
         } else {
             None
         };
+        let parameters = parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
@@ -566,9 +613,9 @@ impl<'a> QueryView<'a> {
                 return Err(CodecError::NeedMoreBytes);
             }
             if _more {
-                return Err(CodecError::TlvChainOverflow);
+                return Err(CodecError::TooManyElements);
             }
-            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [0])).ok_or(CodecError::TlvChainOverflow)?);
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [0])).ok_or(CodecError::TooManyElements)?);
         } else {
             _out.extensions = None;
         }
@@ -595,24 +642,20 @@ impl<'a> QueryView<'a> {
         _out.parameters_len = self.parameters_len;
         _out.parameters = self.parameters;
         match &self.extensions {
-            Some(_l) => {
-                let _vec = _out.extensions.insert(HeaplessVec::new());
-                _vec.clear();
-                for _e in _l.iter() {
-                    _vec.push(QueryExtEntry::default()).map_err(|_| CodecError::TooManyElements)?;
-                    if let Some(_slot) = _vec.last_mut() {
-                        _e.into_builder(_slot)?;
+            Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
+                    for _e in _l.iter() {
+                        _vec.push(QueryExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
+                        if let Some(_slot) = _vec.last_mut() {
+                            _e.into_builder(_slot)?;
+                        }
                     }
-                }
-            }
+                    Ok(())
+                })?,
             None => _out.extensions = None,
         }
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec, as
-    /// [`Query::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 11331;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`Query::encode`] writes for the value [`Self::into_builder`]
@@ -628,7 +671,7 @@ impl<'a> QueryView<'a> {
     /// value it cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let mut _sce_sink = VecSink::new(&mut _sce_v);
         self.encode(&mut _sce_sink)?;
         Ok(_sce_v)
@@ -681,46 +724,9 @@ impl<'a> QueryView<'a> {
 // `let v: QueryOwned = QueryOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::query_ext_entry::QueryExtEntryOwned;
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct QueryOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub header: u8,
-    pub consolidation: Option<u8>,
-    pub parameters_len: Option<u64>,
-    pub parameters: Option<S::Bytes<256>>,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<S::List<QueryExtEntryOwned<S>, 8>, 8>>,
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryOwned<S> {
-    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
-    // bit getters over the copied carrier (rkyv Archived↔native getter
-    // parity), so owned consumers read `{Codec}Owned` with the same API as
-    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
-    // Read-only — write accessors belong with an owned-encode path, which
-    // does not exist yet.
-    pub fn mid(&self) -> u8 {
-        self.header & 0x1F
-    }
-
-    pub fn c(&self) -> bool {
-        (self.header & 0x20) != 0
-    }
-
-    pub fn p(&self) -> bool {
-        (self.header & 0x40) != 0
-    }
-
-    pub fn z(&self) -> bool {
-        (self.header & 0x80) != 0
-    }
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> Query<'a> {
@@ -730,17 +736,18 @@ impl<'a> Query<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<QueryOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: QueryFrom<'a>>(self) -> Result<QueryOwned<S>, CodecError> {
         Ok(QueryOwned {
             header: self.header,
             consolidation: self.consolidation,
             parameters_len: self.parameters_len,
-            parameters: self.parameters.map(<S::Bytes<256> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
+            parameters: self.parameters.map(|_v| _v.store::<S, QueryParametersField>()).transpose()?,
             extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
@@ -753,7 +760,7 @@ impl<'a> Query<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryOwned<S> {
+impl<S: QueryStorage> QueryOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -783,9 +790,9 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryOwned<S> {
         _out.header = self.header;
         _out.consolidation = self.consolidation;
         _out.parameters_len = self.parameters_len;
-        _out.parameters = self.parameters.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice);
+        _out.parameters = self.parameters.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes);
         match &self.extensions {
-            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l.inner(), |_e| _e.try_as_borrowed())?,
+            Some(_l) => _out.extensions.insert(Default::default()).refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, _l.inner(), |_e| _e.try_as_borrowed()))?,
             None => _out.extensions = None,
         }
         Ok(())
@@ -799,37 +806,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<QueryOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> QueryFrom<'x>>(&self) -> Result<QueryOwned<D>, CodecError> {
         self.try_as_borrowed()?.try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `try_as_borrowed` followed by
-    /// [`Query::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Query::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Query::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
     }
 }
 
@@ -846,12 +824,12 @@ impl<'a> Query<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: QueryStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryOwned<S>, CodecError> {
         Ok(QueryOwned {
             header: self.header,
             consolidation: self.consolidation,
             parameters_len: self.parameters_len,
-            parameters: self.parameters.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<256>(origin, _v)).transpose()?,
+            parameters: self.parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<QueryParametersField>(origin, _v.into_inner()))).transpose()?,
             extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }

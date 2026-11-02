@@ -606,7 +606,7 @@ pub enum LocalDeliveryDrain {
     feature = "codec-push",
     any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
-fn asks_for_declarations(event: &wz_session_core::driver_loop::IterationEvent<'_>) -> bool {
+fn asks_for_declarations(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bool {
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::network_message::NetworkMessage;
     match event {
@@ -684,7 +684,7 @@ impl GroupKeyexprs {
     }
 
     /// Note each interest in `event` that asks for keyexprs now.
-    fn asked(&self, event: &wz_session_core::driver_loop::IterationEvent<'_>) {
+    fn asked(&self, event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) {
         use wz_codecs::wireexpr::WireexprOwnedVariant;
         use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
         use wz_session_core::network_message::NetworkMessage;
@@ -3609,7 +3609,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// the host's to flush, and a deferred handler had no route at all.
     pub fn dispatch_multicast_iteration_event(
         &self,
-        event: wz_session_core::driver_loop::IterationEvent<'_>,
+        event: wz_session_core::driver_loop::IterationEvent<'_, '_>,
     ) {
         // Open-debt item 913 — a member's interest is answered on the group: the session's
         // subscribers, queryables and tokens that match it, then its final, staged by the
@@ -4429,7 +4429,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// is now:
     ///
     /// ```text
-    /// |event: IterationEvent<'_>| session.dispatch_iteration_event(event)
+    /// |event: IterationEvent<'_, '_>| session.dispatch_iteration_event(event)
     /// ```
     ///
     /// Uses the session's own actions handle as the flush sink (the
@@ -4441,7 +4441,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// both and locks the observer directly retains the documented
     /// obligation to pair every dispatch with
     /// [`Self::drain_deferred_fires`].
-    pub fn dispatch_iteration_event(&self, event: crate::session_glue::IterationEvent<'_>)
+    pub fn dispatch_iteration_event(&self, event: crate::session_glue::IterationEvent<'_, '_>)
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
@@ -4518,7 +4518,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
 
     pub fn dispatch_iteration_event_with(
         &self,
-        event: crate::session_glue::IterationEvent<'_>,
+        event: crate::session_glue::IterationEvent<'_, '_>,
         under_lock: impl FnOnce(&mut ApplicationLayerObserver),
     ) where
         SessionLinkActions<R, T>: Send + Sync + 'static,

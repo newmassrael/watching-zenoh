@@ -52,7 +52,8 @@
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::{
-    subrange_of, CodecError, CodecStorage, HeapStr, OriginStorage, SceByteBuf, SceStr,
+    subrange_of, CodecError, Copying, Fewest, GrowStr, HoldsBytes, HoldsList, HoldsStr,
+    OriginStorage, SceByteBuf, SceStr,
 };
 
 use crate::link::RxBytes;
@@ -68,14 +69,12 @@ pub struct RxShared;
 /// A byte field of a message decoded into [`RxShared`]: a range of the frame,
 /// or a copy when the bytes did not come from one.
 ///
-/// `N` is the field's declared `sce:max-size`. It is advisory here exactly as it
-/// is for the heap container: the on-wire protocol puts no ceiling on a
-/// payload, and the type carries `N` only so a hand-assembled value infers the
-/// capacity from the field it is assigned to.
+/// It grows to whatever the field's bound admits, as the heap container does:
+/// the profile answers for every field with this one type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RxSharedBytes<const N: usize>(RxBytes);
+pub struct RxSharedBytes(RxBytes);
 
-impl<const N: usize> RxSharedBytes<N> {
+impl RxSharedBytes {
     /// The field as a frame-sized handle: cloning it shares the storage, and
     /// handing it up to a subscriber is how a sample comes to hold the frame.
     pub fn as_rx_bytes(&self) -> &RxBytes {
@@ -99,7 +98,7 @@ impl<const N: usize> RxSharedBytes<N> {
     }
 }
 
-impl<const N: usize> SceByteBuf for RxSharedBytes<N> {
+impl SceByteBuf for RxSharedBytes {
     /// A copy: this is the constructor a field built WITHOUT a frame uses (a
     /// builder's payload, a default), and a slice with no origin has nothing to
     /// share.
@@ -112,7 +111,14 @@ impl<const N: usize> SceByteBuf for RxSharedBytes<N> {
     }
 }
 
-impl<const N: usize> core::ops::Deref for RxSharedBytes<N> {
+impl Fewest for RxSharedBytes {
+    /// `MIN` zero bytes, owned: a default field has no frame to share.
+    fn fewest<const MIN: usize>() -> Self {
+        Self(RxBytes::from(alloc::vec![0u8; MIN]))
+    }
+}
+
+impl core::ops::Deref for RxSharedBytes {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
@@ -120,34 +126,47 @@ impl<const N: usize> core::ops::Deref for RxSharedBytes<N> {
     }
 }
 
-impl<const N: usize> PartialEq<&[u8]> for RxSharedBytes<N> {
+impl PartialEq<&[u8]> for RxSharedBytes {
     fn eq(&self, other: &&[u8]) -> bool {
         self.0.as_slice() == *other
     }
 }
 
-impl<const N: usize, const M: usize> PartialEq<&[u8; M]> for RxSharedBytes<N> {
+impl<const M: usize> PartialEq<&[u8; M]> for RxSharedBytes {
     fn eq(&self, other: &&[u8; M]) -> bool {
         self.0.as_slice() == other.as_slice()
     }
 }
 
-impl CodecStorage for RxShared {
-    type List<T, const N: usize>
+// The tag is unused: every field of this profile grows, as on the heap, and only
+// a byte field's container differs from the heap's.
+impl<Tag> HoldsList<Tag> for RxShared {
+    type List<T>
         = Vec<T>
     where
-        T: core::fmt::Debug + Clone + PartialEq;
-    type Str<const N: usize> = HeapStr<N>;
-    type Bytes<const N: usize> = RxSharedBytes<N>;
+        T: Default + core::fmt::Debug + Clone + PartialEq;
 }
+
+impl<Tag> HoldsStr<Tag> for RxShared {
+    type Str = GrowStr;
+}
+
+impl<Tag> HoldsBytes<Tag> for RxShared {
+    type Bytes = RxSharedBytes;
+}
+
+/// A decode that is not handed the frame (`decode`, `try_into_owned_in`) copies
+/// each byte field out of it, as the heap does; only the origin projection
+/// below shares.
+impl Copying for RxShared {}
 
 impl OriginStorage for RxShared {
     type Origin = RxBytes;
 
-    fn bytes_from<const N: usize>(
+    fn bytes_from<Tag>(
         origin: &RxBytes,
         view: &[u8],
-    ) -> Result<RxSharedBytes<N>, CodecError> {
+    ) -> Result<<Self as HoldsBytes<Tag>>::Bytes, CodecError> {
         // An empty view first. `subrange_of` compares addresses, and the empty
         // slice a default field holds has a dangling one that can happen to
         // equal a position in the frame; an empty field shares nothing worth
@@ -158,12 +177,15 @@ impl OriginStorage for RxShared {
         match subrange_of(origin.as_slice(), view).and_then(|range| origin.subslice(range)) {
             Some(shared) => Ok(RxSharedBytes(shared)),
             // Not part of the frame (see the module doc): copy.
-            None => <RxSharedBytes<N> as SceByteBuf>::from_slice(view),
+            None => <RxSharedBytes as SceByteBuf>::from_slice(view),
         }
     }
 
-    fn str_from<const N: usize>(_origin: &RxBytes, view: &str) -> Result<HeapStr<N>, CodecError> {
-        <HeapStr<N> as SceStr>::from_view(view)
+    fn str_from<Tag>(
+        _origin: &RxBytes,
+        view: &str,
+    ) -> Result<<Self as HoldsStr<Tag>>::Str, CodecError> {
+        <GrowStr as SceStr>::from_view(view)
     }
 }
 
@@ -174,7 +196,8 @@ mod tests {
     use alloc::sync::Arc;
     use alloc::vec;
     use sce_forge_runtime::codec::{Heap, SceCursor};
-    use wz_codecs::push::{Push, PushOwnedVariant};
+    use wz_codecs::msg_put::{MsgPutExtensionsHas0x12, MsgPutPayloadField};
+    use wz_codecs::push::{Push, PushOwnedVariant, PushStorage};
 
     use crate::link::RxStorage;
 
@@ -183,11 +206,7 @@ mod tests {
     /// would show.
     fn framed(payload: &[u8]) -> (Arc<dyn RxStorage>, RxBytes, core::ops::Range<usize>) {
         let push = crate::push_build::build_push_literal("demo/rx", payload).expect("a push");
-        let wire = push
-            .try_as_borrowed()
-            .expect("the push borrows")
-            .encode_to_vec()
-            .expect("a fixture push is encodable");
+        let wire = push.encode_to_vec();
         let mut storage = vec![0xEEu8; 7];
         let start = storage.len();
         storage.extend_from_slice(&wire);
@@ -198,7 +217,7 @@ mod tests {
         (storage, frame, start..end)
     }
 
-    fn payload_of<S: CodecStorage>(push: &wz_codecs::push::PushOwned<S>) -> &[u8] {
+    fn payload_of<S: PushStorage>(push: &wz_codecs::push::PushOwned<S>) -> &[u8] {
         match &push.body {
             PushOwnedVariant::CodecZenohMsgPut(put) => {
                 inline_bytes(put).expect("an inline Put carries a payload")
@@ -279,8 +298,8 @@ mod tests {
         let base = Arc::strong_count(&storage);
 
         let elsewhere = b"not in the frame at all";
-        let field: RxSharedBytes<256> =
-            RxShared::bytes_from(&frame, elsewhere).expect("a foreign view is accepted");
+        let field: RxSharedBytes = RxShared::bytes_from::<MsgPutPayloadField>(&frame, elsewhere)
+            .expect("a foreign view is accepted");
 
         assert_eq!(field.as_slice(), elsewhere);
         assert!(!field.is_shared(), "it is owned bytes, not a range");
@@ -295,8 +314,9 @@ mod tests {
         let base = Arc::strong_count(&storage);
         let inside_the_frame = &frame.as_slice()[3..3];
 
-        let field: RxSharedBytes<256> =
-            RxShared::bytes_from(&frame, inside_the_frame).expect("empty is accepted");
+        let field: RxSharedBytes =
+            RxShared::bytes_from::<MsgPutPayloadField>(&frame, inside_the_frame)
+                .expect("empty is accepted");
 
         assert!(field.as_slice().is_empty());
         assert!(!field.is_shared());
@@ -310,12 +330,7 @@ mod tests {
     fn an_owned_frame_yields_a_copy_with_the_same_bytes() {
         let payload = b"payload in an owned frame";
         let push = crate::push_build::build_push_literal("demo/own", payload).expect("a push");
-        let wire = push
-            .try_as_borrowed()
-            .expect("borrows")
-            .encode_to_vec()
-            .expect("a fixture push is encodable");
-        let frame = RxBytes::from(wire);
+        let frame = RxBytes::from(push.encode_to_vec());
 
         let borrowed = Push::decode(&mut SceCursor::new(frame.as_slice())).expect("decodes");
         let owned = borrowed
@@ -325,7 +340,11 @@ mod tests {
         assert_eq!(payload_of(&owned), payload);
         match &owned.body {
             PushOwnedVariant::CodecZenohMsgPut(put) => {
-                let field = put.payload.as_ref().expect("an inline payload");
+                let MsgPutExtensionsHas0x12::NotHas0x12 { payload: field, .. } =
+                    &put.extensions_has_0x12
+                else {
+                    panic!("an inline payload");
+                };
                 assert!(!field.is_shared(), "an owned frame has nothing to share");
             }
             other => panic!("expected a Put body, got {other:?}"),

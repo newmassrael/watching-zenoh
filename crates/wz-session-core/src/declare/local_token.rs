@@ -375,9 +375,9 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// answered with the terminating `Final` alone, as the subscriber side
     /// answers it.
     #[cfg(all(feature = "storage-profile", feature = "session-slot"))]
-    pub fn respond_to_interest_view<'a>(
+    pub fn respond_to_interest_view<'a, 'f>(
         &self,
-        interest: &wz_codecs::interest::Interest<'a>,
+        interest: &wz_codecs::interest::Interest<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> Result<(), CapacityFull<()>> {
@@ -456,7 +456,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> usize {
@@ -506,6 +506,18 @@ fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
     keyexpr_intersect_patterns(&token_chunks, &pattern_chunks)
 }
 
+/// The bytes [`build_token_reply`] encodes to for the same arguments: what a sender with no
+/// allocator asks a link to lend for it, since a `Declare` has no size constant (its keyexpr
+/// suffix's bound is upstream's u16 length). Its own frame, not inlined, so the `Declare` it
+/// counts is on the stack only while it counts. A reply [`build_token_reply`] refuses counts as
+/// zero: the encoder that follows refuses it with the same error.
+#[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
+#[inline(never)]
+pub fn token_reply_len(token_id: u64, keyexpr: &str, interest_id: u64) -> usize {
+    build_token_reply(token_id, keyexpr, interest_id)
+        .map_or(0, |declare| Declare::measure(&declare).len())
+}
+
 /// R311ho — build the borrowed `Declare(DeclToken)` interest-response for
 /// one matching held token: the `I`-flagged outer `Declare` carrying the
 /// peer's `interest_id`, wrapping a `DeclToken` whose keyexpr is inline
@@ -516,9 +528,14 @@ fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
 /// profiles funnel through it: the AP sink derives its owned form via
 /// `Declare::into_owned`; an MCU sink encodes this borrowed value
 /// directly through a `SliceSink` (`encode<S: SceSink>`, no heap). The
-/// returned `Declare` borrows `keyexpr` for its lifetime.
-pub fn build_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> Declare<'_> {
-    Declare {
+/// returned `Declare` borrows `keyexpr` for its lifetime. `LengthOutOfRange`
+/// for a keyexpr past the protocol's `u16` length, which is not answered.
+pub fn build_token_reply(
+    token_id: u64,
+    keyexpr: &str,
+    interest_id: u64,
+) -> Result<Declare<'_>, sce_forge_runtime::codec::CodecError> {
+    Ok(Declare {
         header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
         interest_id: Some(interest_id),
         extensions: None,
@@ -529,14 +546,14 @@ pub fn build_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> Decl
                 body: WireexprVariant::WireexprLocal(WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
-                    suffix: Some(keyexpr),
+                    suffix: Some(crate::codec_owned::sent_suffix(keyexpr)?),
                 }),
             },
             // R311y804: Z=0 — the reply's bytes are unchanged; the body's ext
             // chain exists so an INBOUND Z-flagged DeclToken is consumed.
             extensions: None,
         }),
-    }
+    })
 }
 
 /// R311ho — build the borrowed `Declare(DeclFinal)` that terminates the
@@ -1090,5 +1107,18 @@ mod tests {
             "with no own space an M=0 alias must refuse -- never fall back to \
              the peer's table (which would have replayed `theirs/tok`)",
         );
+    }
+
+    /// A token reply whose keyexpr is past the protocol's `u16` length is refused
+    /// with `LengthOutOfRange`, and one at the bound is built.
+    #[test]
+    fn a_token_reply_past_the_keyexpr_bound_is_refused() {
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let at = "k".repeat(usize::from(u16::MAX));
+        assert_eq!(
+            build_token_reply(1, &past, 2).err(),
+            Some(sce_forge_runtime::codec::CodecError::LengthOutOfRange)
+        );
+        assert!(build_token_reply(1, &at, 2).is_ok());
     }
 }

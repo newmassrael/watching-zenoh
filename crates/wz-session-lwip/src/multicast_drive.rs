@@ -188,7 +188,7 @@ pub fn run_multicast_session<'g, C, F, G, const MAX_PEERS: usize>(
 ) -> MulticastOutcome
 where
     C: ClockSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
 {
     group::run_multicast_session(
@@ -216,7 +216,7 @@ pub fn run_multicast_session_with_shutdown<'g, C, F, G, H, const MAX_PEERS: usiz
 ) -> MulticastOutcome
 where
     C: ClockSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
@@ -252,7 +252,7 @@ pub fn run_multicast_session_rejoining<'g, C, F, G, H, B, D, const MAX_PEERS: us
 ) -> MulticastOutcome
 where
     C: ClockSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
     B: FnMut() -> Option<LwipMulticastDriver>,
@@ -337,7 +337,7 @@ pub async fn multicast_session_task<'g, C, L, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     L: Deref<Target = LwipLink>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
@@ -372,7 +372,7 @@ pub fn spawn_multicast_session<C, L, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     L: Deref<Target = LwipLink> + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
     G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {
@@ -451,7 +451,7 @@ pub fn spawn_multicast_session_seeded<C, L, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     L: Deref<Target = LwipLink> + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
     G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {

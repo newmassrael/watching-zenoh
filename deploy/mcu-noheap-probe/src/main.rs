@@ -91,11 +91,6 @@ use wz_session_core::declare::local_token::{
     build_final_reply, build_token_reply, DeclResponseItem, LocalTokenRegistry,
 };
 
-// The full `Declare` envelope is the real emitted unit; the probe encodes
-// it (not just the inner leaf) so the no-heap proof covers the outer
-// header + interest_id routing exactly as the AP sink emits.
-use wz_codecs::declare::Declare;
-
 use sce_forge_runtime::codec::SliceSink;
 
 // ── (ⓓ) generated switchboard value path ────────────────────────────────
@@ -451,8 +446,21 @@ fn main() -> ! {
             .respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending)
             .ok();
         require("local-token stage", staged == Some(1));
+        // The stack buffer one reply is encoded into: the longest interest
+        // reply this probe writes, read off the wire layout of the borrowed
+        // builders, which put no extension on it. A `Declare` has no size
+        // constant to size it by, since its suffix's bound is upstream's u16
+        // length: the outer header, the interest id (a VLE of at most ten
+        // bytes), the token's header and id, the keyexpr's scope id, the
+        // suffix length (a VLE of a u16, at most three bytes), and a suffix of
+        // the longest keyexpr this node keeps. A reply that did not fit would
+        // be refused by the sink, and the `require` below says so.
+        const REPLY_BUF: usize = 1 + 10 + 1 + 10 + 10 + 3 + caps::MAX_KEYEXPR_BYTES;
         let mut emitted: u32 = 0;
         for item in pending {
+            // The full `Declare` envelope is the real emitted unit, so the
+            // no-heap proof covers the outer header and the interest id
+            // exactly as the AP sink emits them, not just the inner leaf.
             // Build the full borrowed `Declare` envelope through the
             // single-source reply builders and encode it into a stack
             // `SliceSink` — the exact wire the MCU `ResponseSink` emits,
@@ -468,18 +476,19 @@ fn main() -> ! {
                         Some(ke) => ke,
                         None => continue,
                     };
-                    let decl = build_token_reply(token_id, keyexpr, interest_id);
-                    let mut buf = [0u8; Declare::MAX_ENCODED_BYTES];
+                    let mut buf = [0u8; REPLY_BUF];
                     let mut sink = SliceSink::new(&mut buf);
                     require(
                         "local-token emit token",
-                        decl.encode(&mut sink).is_ok() && sink.position() > 0,
+                        build_token_reply(token_id, keyexpr, interest_id)
+                            .is_ok_and(|decl| decl.encode(&mut sink).is_ok())
+                            && sink.position() > 0,
                     );
                     emitted += 1;
                 }
                 DeclResponseItem::Final { interest_id } => {
                     let decl = build_final_reply(interest_id);
-                    let mut buf = [0u8; Declare::MAX_ENCODED_BYTES];
+                    let mut buf = [0u8; REPLY_BUF];
                     let mut sink = SliceSink::new(&mut buf);
                     require(
                         "local-token emit final",

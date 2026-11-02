@@ -24,13 +24,13 @@ fn inject_temp_update(
 ) -> bool {
     let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);
     if let Ok(decoded) = temp_payload::TempPayload::decode(&mut cursor) {
-        let raw = match ::sce_rust_runtime::SceBytes::from_slice(decoded.raw) {
+        let raw = match ::sce_rust_runtime::SceBytes::from_slice(decoded.raw.into_inner()) {
             Ok(_v) => _v,
             Err(_) => return false,
         };
         engine.raise_temp_update(sensor_monitor::SensorMonitorTempUpdatePayload {
             celsius_centi: decoded.celsius_centi,
-            sensor_id: decoded.sensor_id.into(),
+            sensor_id: decoded.sensor_id.into_inner().into(),
             raw,
         });
         true

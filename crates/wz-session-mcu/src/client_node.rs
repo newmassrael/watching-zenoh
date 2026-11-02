@@ -268,7 +268,7 @@ mod tests {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id: 0,
                     suffix_len: Some(key.len() as u64),
-                    suffix: Some(key),
+                    suffix: Some(wz_codecs::Bounded::new(key).unwrap()),
                 }),
             },
             body: RequestVariant::CodecZenohQuery(Query::default()),

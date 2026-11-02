@@ -21,16 +21,60 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `zid` of `Timestamp`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct Timestamp<'a> {
+pub struct TimestampZidField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<TimestampZidField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<16>;
+}
+
+/// What `TimestampIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait TimestampStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<TimestampZidField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<TimestampZidField>> TimestampStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside TimestampStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait TimestampFrom<'f>: TimestampStorage + ::sce_forge_runtime::codec::StoresBytes<'f, TimestampZidField> {}
+
+impl<'f, S: TimestampStorage + ::sce_forge_runtime::codec::StoresBytes<'f, TimestampZidField>> TimestampFrom<'f> for S {}
+
+// `TimestampIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `Timestamp<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `TimestampOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimestampIn<S: TimestampStorage> {
     pub time: u64,
     pub zid_len: u64,
-    pub zid: &'a [u8],
+    pub zid: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<TimestampZidField>>::Bytes, 16>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type Timestamp<'a> = TimestampIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type TimestampOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = TimestampIn<S>;
+
+impl<S: TimestampStorage> Default for TimestampIn<S> {
+    fn default() -> Self {
+        Self {
+            time: Default::default(),
+            zid_len: Default::default(),
+            zid: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> Timestamp<'a> {
+impl<S: TimestampStorage> TimestampIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -46,7 +90,7 @@ impl<'a> Timestamp<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: TimestampFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -62,7 +106,24 @@ impl<'a> Timestamp<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: TimestampFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                Timestamp::store_into(&mut _frame, &mut Timestamp::default())?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: TimestampFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -78,12 +139,18 @@ impl<'a> Timestamp<'a> {
         let time = cursor.read_vle_u64()?;
         let zid_len = cursor.read_vle_u64()?;
         let zid = {
-            let _n = zid_len as usize;
+            let _len = zid_len;
+            if _len > 16 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
             _v
         };
+        let zid = ::sce_forge_runtime::codec::Bounded::new(zid).ok_or(CodecError::LengthOutOfRange)?;
+        let zid = zid.store::<S, TimestampZidField>()?;
         _out.time = time;
         _out.zid_len = zid_len;
         _out.zid = zid;
@@ -101,8 +168,8 @@ impl<'a> Timestamp<'a> {
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        Timestamp::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -133,14 +200,14 @@ pub trait TimestampSource {
     /// The `time` field.
     fn time(&self) -> u64;
     /// The `zid` field.
-    fn zid(&self) -> &[u8];
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16>;
 }
 
 impl<T: TimestampSource + ?Sized> TimestampSource for &T {
     fn time(&self) -> u64 {
         (**self).time()
     }
-    fn zid(&self) -> &[u8] {
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16> {
         (**self).zid()
     }
 }
@@ -154,33 +221,24 @@ pub struct TimestampParts<'a> {
     /// The `time` field.
     pub time: u64,
     /// The `zid` field.
-    pub zid: &'a [u8],
+    pub zid: ::sce_forge_runtime::codec::Bytes<'a, 16>,
 }
 
 impl<'a> TimestampSource for TimestampParts<'a> {
     fn time(&self) -> u64 {
         self.time
     }
-    fn zid(&self) -> &[u8] {
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16> {
         self.zid
     }
 }
 
-impl<'a> TimestampSource for Timestamp<'a> {
+impl<S: TimestampStorage> TimestampSource for TimestampOwned<S> {
     fn time(&self) -> u64 {
         self.time
     }
-    fn zid(&self) -> &[u8] {
-        self.zid
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> TimestampSource for TimestampOwned<S> {
-    fn time(&self) -> u64 {
-        self.time
-    }
-    fn zid(&self) -> &[u8] {
-        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid)
+    fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16> {
+        self.zid.as_bytes()
     }
 }
 
@@ -202,7 +260,7 @@ impl<'a> Timestamp<'a> {
         let _d_zid_len: u64 = ::sce_forge_runtime::codec::widen_usize(_n_d_zid_len_0);
         w.write_vle_u64(src.time())?;
         w.write_vle_u64(_d_zid_len)?;
-        w.write_bytes(src.zid())?;
+        w.write_bytes(src.zid().into_inner())?;
         Ok(())
     }
 
@@ -299,18 +357,9 @@ impl<'a> Timestamp<'a> {
 // `let v: TimestampOwned = TimestampOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct TimestampOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub time: u64,
-    pub zid_len: u64,
-    pub zid: S::Bytes<16>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> Timestamp<'a> {
@@ -320,16 +369,17 @@ impl<'a> Timestamp<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<TimestampOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: TimestampFrom<'a>>(self) -> Result<TimestampOwned<S>, CodecError> {
         Ok(TimestampOwned {
             time: self.time,
             zid_len: self.zid_len,
-            zid: <S::Bytes<16> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.zid)?,
+            zid: self.zid.store::<S, TimestampZidField>()?,
         })
     }
 
@@ -341,7 +391,7 @@ impl<'a> Timestamp<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> TimestampOwned<S> {
+impl<S: TimestampStorage> TimestampOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -366,7 +416,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> TimestampOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut Timestamp<'o>) {
         _out.time = self.time;
         _out.zid_len = self.zid_len;
-        _out.zid = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid);
+        _out.zid = self.zid.as_bytes();
         
     }
 
@@ -378,33 +428,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> TimestampOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<TimestampOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> TimestampFrom<'x>>(&self) -> Result<TimestampOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> TimestampOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`Timestamp::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Timestamp::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Timestamp::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -421,11 +446,11 @@ impl<'a> Timestamp<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<TimestampOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: TimestampStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<TimestampOwned<S>, CodecError> {
         Ok(TimestampOwned {
             time: self.time,
             zid_len: self.zid_len,
-            zid: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<16>(origin, self.zid)?,
+            zid: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<TimestampZidField>(origin, self.zid.into_inner()))?,
         })
     }
 }

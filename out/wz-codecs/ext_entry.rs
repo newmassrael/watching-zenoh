@@ -63,23 +63,83 @@ impl ::sce_forge_runtime::codec::UnknownTag for ExtEntryUnknownTag {
     }
 }
 
+// pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
+// §6 codec). The kind-agnostic conformance harness only references a
+// subset of fixtures, so unused-but-pub fields/methods would otherwise
+// trigger dead_code on every codec build.
+use super::ext_zbuf::ExtZbufOwned;
+/// What `ExtEntryIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait ExtEntryStorage: ::core::fmt::Debug + Clone + PartialEq + super::ext_zbuf::ExtZbufStorage {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + super::ext_zbuf::ExtZbufStorage> ExtEntryStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside ExtEntryStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait ExtEntryFrom<'f>: ExtEntryStorage + super::ext_zbuf::ExtZbufFrom<'f> {}
+
+impl<'f, S: ExtEntryStorage + super::ext_zbuf::ExtZbufFrom<'f>> ExtEntryFrom<'f> for S {}
+
+// `ExtEntryIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `ExtEntry<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `ExtEntryOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtEntryIn<S: ExtEntryStorage> {
+    pub header: u8,
+    pub body: ExtEntryVariantIn<S>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type ExtEntry<'a> = ExtEntryIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type ExtEntryOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = ExtEntryIn<S>;
+
+impl<S: ExtEntryStorage> Default for ExtEntryIn<S> {
+    fn default() -> Self {
+        Self {
+            header: Default::default(),
+            body: Default::default(),
+        }
+    }
+}
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
 // alongside its catch-all body.
+//
+// Variant arms wrap distinct body codecs whose stored forms differ in
+// field count and size, so the tagged union is inherently size-disparate.
+// The lint's only remedy is boxing the large arm, which adds an
+// indirection (and allocation) the generated decode path does not need —
+// and which the non-allocating storage profile could not take at all.
+// The size spread is the deliberate tagged-union trade-off.
+#[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub enum ExtEntryVariant<'a> {
+pub enum ExtEntryVariantIn<S: ExtEntryStorage> {
     CodecZenohExtUnit(ExtUnit),
     CodecZenohExtZint(ExtZint),
-    CodecZenohExtZbuf(ExtZbuf<'a>),
+    CodecZenohExtZbuf(ExtZbufOwned<S>),
     Default {
         tag: ExtEntryUnknownTag,
         body: ExtUnit,
     },
 }
 
-impl<'a> Default for ExtEntryVariant<'a> {
+#[allow(dead_code)]
+pub type ExtEntryVariant<'a> = ExtEntryVariantIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+#[allow(dead_code)]
+pub type ExtEntryOwnedVariant<S = ::sce_forge_runtime::codec::DefaultStorage> = ExtEntryVariantIn<S>;
+
+impl<S: ExtEntryStorage> Default for ExtEntryVariantIn<S> {
     fn default() -> Self {
         // RFC variant-default-uniformity: pick the declared default
         // arm (`<sce:arm default="true"/>`) so a freshly-constructed
@@ -90,19 +150,8 @@ impl<'a> Default for ExtEntryVariant<'a> {
     }
 }
 
-// pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
-// §6 codec). The kind-agnostic conformance harness only references a
-// subset of fixtures, so unused-but-pub fields/methods would otherwise
-// trigger dead_code on every codec build.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct ExtEntry<'a> {
-    pub header: u8,
-    pub body: ExtEntryVariant<'a>,
-}
-
-#[allow(dead_code)]
-impl<'a> ExtEntry<'a> {
+impl<S: ExtEntryStorage> ExtEntryIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -118,7 +167,7 @@ impl<'a> ExtEntry<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: ExtEntryFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -134,7 +183,24 @@ impl<'a> ExtEntry<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ExtEntryFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                ExtEntryView::decode(&mut _frame)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ExtEntryFrom<'f> {
         // Decode fixed prefix (RFC §synth-5-B variant primitive: fields
         // sit before the variant suffix on the wire).
         let raw = cursor.peek_slice(1)?;
@@ -149,29 +215,29 @@ impl<'a> ExtEntry<'a> {
         // through the variant wrapper.
         match (header >> 5) & 0x03 {
             0u8 => {
-                _out.body = ExtEntryVariant::CodecZenohExtUnit(ExtUnit::default());
-                if let ExtEntryVariant::CodecZenohExtUnit(_b) = &mut _out.body {
+                _out.body = ExtEntryVariantIn::CodecZenohExtUnit(ExtUnit::default());
+                if let ExtEntryVariantIn::CodecZenohExtUnit(_b) = &mut _out.body {
                     ExtUnit::decode_into(cursor, _b)?;
                 }
             }
             1u8 => {
-                _out.body = ExtEntryVariant::CodecZenohExtZint(ExtZint::default());
-                if let ExtEntryVariant::CodecZenohExtZint(_b) = &mut _out.body {
+                _out.body = ExtEntryVariantIn::CodecZenohExtZint(ExtZint::default());
+                if let ExtEntryVariantIn::CodecZenohExtZint(_b) = &mut _out.body {
                     ExtZint::decode_into(cursor, _b)?;
                 }
             }
             2u8 => {
-                _out.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf::default());
-                if let ExtEntryVariant::CodecZenohExtZbuf(_b) = &mut _out.body {
-                    ExtZbuf::decode_into(cursor, _b)?;
+                _out.body = ExtEntryVariantIn::CodecZenohExtZbuf(ExtZbufOwned::<S>::default());
+                if let ExtEntryVariantIn::CodecZenohExtZbuf(_b) = &mut _out.body {
+                    ExtZbufOwned::<S>::decode_into(cursor, _b)?;
                 }
             }
             other => {
-                _out.body = ExtEntryVariant::Default {
+                _out.body = ExtEntryVariantIn::Default {
                     tag: ExtEntryUnknownTag(other),
                     body: ExtUnit::default(),
                 };
-                if let ExtEntryVariant::Default { body: _b, .. } = &mut _out.body {
+                if let ExtEntryVariantIn::Default { body: _b, .. } = &mut _out.body {
                     ExtUnit::decode_into(cursor, _b)?;
                 }
             }
@@ -226,24 +292,19 @@ impl<'a> ExtEntry<'a> {
         }
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 42;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        ExtEntry::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
     /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
     /// no value and the vector cannot run out of room. Callers targeting
     /// zero-alloc hot paths should call `encode` directly against a
@@ -255,7 +316,7 @@ impl<'a> ExtEntry<'a> {
     /// primary `encode`.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -374,16 +435,16 @@ impl<'a> ExtEntrySource for ExtEntryParts<'a> {
     }
 }
 
-impl<'a> ExtEntrySource for ExtEntry<'a> {
+impl<S: ExtEntryStorage> ExtEntrySource for ExtEntryOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
     fn body(&self) -> ExtEntryVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource> {
         match &self.body {
-            ExtEntryVariant::CodecZenohExtUnit(_b) => ExtEntryVariantSource::CodecZenohExtUnit(_b),
-            ExtEntryVariant::CodecZenohExtZint(_b) => ExtEntryVariantSource::CodecZenohExtZint(_b),
-            ExtEntryVariant::CodecZenohExtZbuf(_b) => ExtEntryVariantSource::CodecZenohExtZbuf(_b),
-            ExtEntryVariant::Default { tag, body } => ExtEntryVariantSource::Default { tag: *tag, body },
+            ExtEntryOwnedVariant::CodecZenohExtUnit(_b) => ExtEntryVariantSource::CodecZenohExtUnit(_b),
+            ExtEntryOwnedVariant::CodecZenohExtZint(_b) => ExtEntryVariantSource::CodecZenohExtZint(_b),
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(_b) => ExtEntryVariantSource::CodecZenohExtZbuf(_b),
+            ExtEntryOwnedVariant::Default { tag, body } => ExtEntryVariantSource::Default { tag: *tag, body },
         }
     }
 }
@@ -398,20 +459,6 @@ impl<'a> ExtEntrySource for ExtEntryView<'a> {
             ExtEntryViewVariant::CodecZenohExtZint(_b) => ExtEntryVariantSource::CodecZenohExtZint(_b),
             ExtEntryViewVariant::CodecZenohExtZbuf(_b) => ExtEntryVariantSource::CodecZenohExtZbuf(_b),
             ExtEntryViewVariant::Default { tag, body } => ExtEntryVariantSource::Default { tag: *tag, body },
-        }
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntrySource for ExtEntryOwned<S> {
-    fn header(&self) -> u8 {
-        self.header
-    }
-    fn body(&self) -> ExtEntryVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource> {
-        match &self.body {
-            ExtEntryOwnedVariant::CodecZenohExtUnit(_b) => ExtEntryVariantSource::CodecZenohExtUnit(_b),
-            ExtEntryOwnedVariant::CodecZenohExtZint(_b) => ExtEntryVariantSource::CodecZenohExtZint(_b),
-            ExtEntryOwnedVariant::CodecZenohExtZbuf(_b) => ExtEntryVariantSource::CodecZenohExtZbuf(_b),
-            ExtEntryOwnedVariant::Default { tag, body } => ExtEntryVariantSource::Default { tag: *tag, body },
         }
     }
 }
@@ -645,9 +692,6 @@ impl<'a> ExtEntryView<'a> {
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec, as
-    /// [`ExtEntry::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 42;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`ExtEntry::encode`] writes for the value [`Self::into_builder`]
@@ -663,7 +707,7 @@ impl<'a> ExtEntryView<'a> {
     /// value (docs/adr/0065).
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -715,62 +759,9 @@ impl<'a> ExtEntryView<'a> {
 // `let v: ExtEntryOwned = ExtEntryOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::ext_zbuf::ExtZbufOwned;
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExtEntryOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub header: u8,
-    pub body: ExtEntryOwnedVariant<S>,
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwned<S> {
-    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
-    // bit getters over the copied carrier (rkyv Archived↔native getter
-    // parity), so owned consumers read `{Codec}Owned` with the same API as
-    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
-    // Read-only — write accessors belong with an owned-encode path, which
-    // does not exist yet.
-    pub fn ext_id(&self) -> u8 {
-        self.header & 0x0F
-    }
-
-    pub fn m(&self) -> bool {
-        (self.header & 0x10) != 0
-    }
-
-    pub fn enc(&self) -> u8 {
-        (self.header >> 5) & 0x03
-    }
-
-    pub fn z(&self) -> bool {
-        (self.header & 0x80) != 0
-    }
-}
-
-// Variant arms wrap distinct body codecs whose owned mirrors differ in
-// field count and size, so the tagged union is inherently size-disparate.
-// The lint's only remedy is boxing the large arm, which adds an
-// indirection (and allocation) the generated decode path does not need —
-// and which the non-allocating storage profile could not take at all.
-// The size spread is the deliberate tagged-union trade-off.
-#[allow(clippy::large_enum_variant)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExtEntryOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    CodecZenohExtUnit(ExtUnit),
-    CodecZenohExtZint(ExtZint),
-    CodecZenohExtZbuf(ExtZbufOwned<S>),
-    Default {
-        tag: ExtEntryUnknownTag,
-        body: ExtUnit,
-    },
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> ExtEntryVariant<'a> {
@@ -778,7 +769,7 @@ impl<'a> ExtEntryVariant<'a> {
     /// given storage profile. Fallible because a borrowed arm body's own
     /// projection re-checks its declared capacities (the same bounds decode
     /// enforces) — on the growable profile no check can fire.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<ExtEntryOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in<S: ExtEntryFrom<'a>>(self) -> Result<ExtEntryOwnedVariant<S>, CodecError> {
         Ok(match self {
             ExtEntryVariant::CodecZenohExtUnit(_b) => ExtEntryOwnedVariant::CodecZenohExtUnit(_b),
             ExtEntryVariant::CodecZenohExtZint(_b) => ExtEntryOwnedVariant::CodecZenohExtZint(_b),
@@ -794,7 +785,7 @@ impl<'a> ExtEntryVariant<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwnedVariant<S> {
+impl<S: ExtEntryStorage> ExtEntryOwnedVariant<S> {
     /// Re-borrow this owned variant body back into its borrowed mirror —
     /// the inverse of the projection above. Reuses the borrowed view's
     /// single `encode`; the owned form deliberately carries no encode of
@@ -853,12 +844,13 @@ impl<'a> ExtEntry<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<ExtEntryOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: ExtEntryFrom<'a>>(self) -> Result<ExtEntryOwned<S>, CodecError> {
         Ok(ExtEntryOwned {
             header: self.header,
             body: self.body.try_into_owned_in::<S>()?,
@@ -873,7 +865,7 @@ impl<'a> ExtEntry<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwned<S> {
+impl<S: ExtEntryStorage> ExtEntryOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -909,33 +901,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<ExtEntryOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> ExtEntryFrom<'x>>(&self) -> Result<ExtEntryOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`ExtEntry::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        ExtEntry::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(ExtEntry::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -943,7 +910,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwned<S> {
 impl<'a> ExtEntryVariant<'a> {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ExtEntryOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: ExtEntryStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ExtEntryOwnedVariant<S>, CodecError> {
         Ok(match self {
             ExtEntryVariant::CodecZenohExtUnit(_b) => ExtEntryOwnedVariant::CodecZenohExtUnit(_b),
             ExtEntryVariant::CodecZenohExtZint(_b) => ExtEntryOwnedVariant::CodecZenohExtZint(_b),
@@ -966,7 +933,7 @@ impl<'a> ExtEntry<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ExtEntryOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: ExtEntryStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ExtEntryOwned<S>, CodecError> {
         Ok(ExtEntryOwned {
             header: self.header,
             body: self.body.try_into_owned_in_origin::<S>(origin)?,

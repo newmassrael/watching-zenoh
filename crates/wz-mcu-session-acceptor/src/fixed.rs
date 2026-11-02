@@ -243,7 +243,7 @@ where
                         max_iters: Some(MAX_ITERS),
                     },
                     |_handle| {
-                        move |event: IterationEvent<'_>| {
+                        move |event: IterationEvent<'_, '_>| {
                             run.borrow_mut().event(event, &mut hook);
                         }
                     },

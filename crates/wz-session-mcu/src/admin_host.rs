@@ -438,14 +438,17 @@ mod tests {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id: 0,
                     suffix_len: Some(key.len() as u64),
-                    suffix: Some(key),
+                    suffix: Some(wz_codecs::Bounded::new(key).unwrap()),
                 }),
             },
             ..Push::default()
         };
         if let PushVariant::CodecZenohMsgPut(ref mut msg) = push.body {
             msg.payload_len = Some(payload.len() as u64);
-            msg.payload = Some(payload);
+            msg.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(payload).unwrap(),
+            };
         }
         NetworkMessage::Push(Box::new(push.try_into_owned().unwrap()))
     }

@@ -332,7 +332,7 @@ fn drive_on_own_task<F>(
     on_event: F,
 ) -> tokio::task::JoinHandle<DriverOutcome>
 where
-    F: for<'e> FnMut(IterationEvent<'e>) + Send + 'static,
+    F: for<'e, 'f> FnMut(IterationEvent<'e, 'f>) + Send + 'static,
 {
     let timeouts = SessionTimeouts::spec_defaults();
     tokio::spawn(async move {
@@ -360,7 +360,7 @@ struct PollTrace(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
 impl PollTrace {
     const DEPTH: usize = 8;
 
-    fn note(&self, event: &IterationEvent<'_>) {
+    fn note(&self, event: &IterationEvent<'_, '_>) {
         if let IterationEvent::Poll(outcome) = event {
             let mut tail = self.0.lock().expect("poll trace");
             if tail.len() == Self::DEPTH {

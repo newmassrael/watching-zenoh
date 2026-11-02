@@ -23,9 +23,9 @@
 use alloc::vec::Vec;
 
 use crate::vle::encode_vle_u64_into;
-use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
+use sce_forge_runtime::codec::{Bounded, CodecError};
+use wz_codecs::ext_entry::{ExtEntryFrom, ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
 
 /// R121j-4b — encode the value bytes of a `source_info` extension per
 /// zenoh-pico's `_z_source_info_encode`.
@@ -77,18 +77,22 @@ pub const SOURCE_INFO_EXT_ID: u8 = 0x01;
 /// The surrounding codec applies the chain-continuation `Z` bit
 /// (`crate::ext_nodeid::apply_chain_z_bits` for body chains, the per-builder
 /// finalize loop for Query / Err); this helper emits the entry with `Z` clear.
-/// Fallible (the owned ext-zbuf copy; unbounded under `alloc`).
-pub fn encode_source_info_ext_entry<S: CodecStorage>(
+/// Fallible where the profile stores the ext-zbuf body inline at a capacity
+/// below it (`CapacityExceeded`); a growable profile holds any body.
+pub fn encode_source_info_ext_entry<S: for<'x> ExtEntryFrom<'x>>(
     zid: &[u8],
     eid: u32,
     sn: u32,
 ) -> Result<ExtEntryOwned<S>, CodecError> {
     let value = encode_source_info_ext_body(zid, eid, sn);
+    let held = Bounded::new(value.as_slice())
+        .ok_or(CodecError::LengthOutOfRange)?
+        .store::<S, ExtZbufValueField>()?;
     Ok(ExtEntryOwned {
         header: SOURCE_INFO_EXT_HEADER_ENC_ZBUF | SOURCE_INFO_EXT_ID,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: value.len() as u64,
-            value: <S::Bytes<32> as SceByteBuf>::from_slice(&value)?,
+            value: held,
         }),
     })
 }

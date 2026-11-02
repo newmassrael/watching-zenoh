@@ -52,9 +52,8 @@
 //! reader matching named constants, and a `grep` found a complete reader with
 //! no emit.
 
+use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned};
 use sce_forge_runtime::codec::{CodecError, SceString};
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
 
 /// `init::ext::RegionName`'s id in the establishment (Init / Open) ext space.
 pub const REGION_NAME_EXT_ID: u8 = crate::ext_header::establishment_ext_id::REGION_NAME;
@@ -123,7 +122,7 @@ impl RegionName {
         // own capacity check below can only fire on a name this function has
         // already admitted — it cannot. Mapped to `TooLong` rather than
         // unwrapped so a future capacity change is a refusal and not a panic.
-        crate::codec_owned::owned_string(s)
+        <SceString<MAX_REGION_NAME_LEN> as sce_forge_runtime::codec::SceStr>::from_view(s)
             .map(Self)
             .map_err(|_| RegionNameError::TooLong)
     }

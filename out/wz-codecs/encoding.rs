@@ -1,4 +1,4 @@
-// SCE-MAP: encoding:56 :: _forge_body
+// SCE-MAP: encoding:60 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -21,16 +21,60 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `schema` of `Encoding`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct Encoding<'a> {
+pub struct EncodingSchemaField;
+
+impl ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField> for ::sce_forge_runtime::codec::Inline {
+    type Str = ::sce_forge_runtime::codec::InlineStr<255>;
+}
+
+/// What `EncodingIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait EncodingStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField>> EncodingStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside EncodingStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait EncodingFrom<'f>: EncodingStorage + ::sce_forge_runtime::codec::StoresStr<'f, EncodingSchemaField> {}
+
+impl<'f, S: EncodingStorage + ::sce_forge_runtime::codec::StoresStr<'f, EncodingSchemaField>> EncodingFrom<'f> for S {}
+
+// `EncodingIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `Encoding<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `EncodingOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncodingIn<S: EncodingStorage> {
     pub packed_id: u32,
     pub schema_len: Option<u64>,
-    pub schema: Option<&'a str>,
+    pub schema: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField>>::Str, 255>>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type Encoding<'a> = EncodingIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type EncodingOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = EncodingIn<S>;
+
+impl<S: EncodingStorage> Default for EncodingIn<S> {
+    fn default() -> Self {
+        Self {
+            packed_id: Default::default(),
+            schema_len: Default::default(),
+            schema: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> Encoding<'a> {
+impl<S: EncodingStorage> EncodingIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -46,7 +90,7 @@ impl<'a> Encoding<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: EncodingFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -62,7 +106,24 @@ impl<'a> Encoding<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: EncodingFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                Encoding::store_into(&mut _frame, &mut Encoding::default())?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: EncodingFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -83,7 +144,11 @@ impl<'a> Encoding<'a> {
             None
         };
         let schema = if (packed_id & 0x00000001u32) != 0 {
-            let _n = schema_len.unwrap() as usize;
+            let _len = schema_len.unwrap();
+            if _len > 255 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = core::str::from_utf8(raw)
                 .map_err(|_| CodecError::InvalidUtf8)?;
@@ -92,6 +157,8 @@ impl<'a> Encoding<'a> {
         } else {
             None
         };
+        let schema = schema.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
+        let schema = schema.map(|_v| _v.store::<S, EncodingSchemaField>()).transpose()?;
         _out.packed_id = packed_id;
         _out.schema_len = schema_len;
         _out.schema = schema;
@@ -120,15 +187,15 @@ impl<'a> Encoding<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 142;
+    pub const MAX_ENCODED_BYTES: usize = 269;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        Encoding::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -159,14 +226,14 @@ pub trait EncodingSource {
     /// The `packed_id` field.
     fn packed_id(&self) -> u32;
     /// The `schema` field.
-    fn schema(&self) -> Option<&str>;
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>>;
 }
 
 impl<T: EncodingSource + ?Sized> EncodingSource for &T {
     fn packed_id(&self) -> u32 {
         (**self).packed_id()
     }
-    fn schema(&self) -> Option<&str> {
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>> {
         (**self).schema()
     }
 }
@@ -180,33 +247,24 @@ pub struct EncodingParts<'a> {
     /// The `packed_id` field.
     pub packed_id: u32,
     /// The `schema` field.
-    pub schema: Option<&'a str>,
+    pub schema: Option<::sce_forge_runtime::codec::Text<'a, 255>>,
 }
 
 impl<'a> EncodingSource for EncodingParts<'a> {
     fn packed_id(&self) -> u32 {
         self.packed_id
     }
-    fn schema(&self) -> Option<&str> {
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>> {
         self.schema
     }
 }
 
-impl<'a> EncodingSource for Encoding<'a> {
+impl<S: EncodingStorage> EncodingSource for EncodingOwned<S> {
     fn packed_id(&self) -> u32 {
         self.packed_id
     }
-    fn schema(&self) -> Option<&str> {
-        self.schema
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingSource for EncodingOwned<S> {
-    fn packed_id(&self) -> u32 {
-        self.packed_id
-    }
-    fn schema(&self) -> Option<&str> {
-        self.schema.as_ref().map(::sce_forge_runtime::codec::SceStr::as_str)
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>> {
+        self.schema.as_ref().map(::sce_forge_runtime::codec::Bounded::as_text)
     }
 }
 
@@ -237,7 +295,7 @@ impl<'a> Encoding<'a> {
             w.write_vle_u64(_d_schema_len)?;
         }
         if let Some(_v) = src.schema() {
-            w.write_bytes(_v.as_bytes())?;
+            w.write_bytes(_v.into_inner().as_bytes())?;
         }
         Ok(())
     }
@@ -335,31 +393,9 @@ impl<'a> Encoding<'a> {
 // `let v: EncodingOwned = EncodingOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct EncodingOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub packed_id: u32,
-    pub schema_len: Option<u64>,
-    pub schema: Option<S::Str<128>>,
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingOwned<S> {
-    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
-    // bit getters over the copied carrier (rkyv Archived↔native getter
-    // parity), so owned consumers read `{Codec}Owned` with the same API as
-    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
-    // Read-only — write accessors belong with an owned-encode path, which
-    // does not exist yet.
-    pub fn has_schema(&self) -> bool {
-        (self.packed_id & 0x00000001) != 0
-    }
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> Encoding<'a> {
@@ -369,16 +405,17 @@ impl<'a> Encoding<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<EncodingOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: EncodingFrom<'a>>(self) -> Result<EncodingOwned<S>, CodecError> {
         Ok(EncodingOwned {
             packed_id: self.packed_id,
             schema_len: self.schema_len,
-            schema: self.schema.map(<S::Str<128> as ::sce_forge_runtime::codec::SceStr>::from_view).transpose()?,
+            schema: self.schema.map(|_v| _v.store::<S, EncodingSchemaField>()).transpose()?,
         })
     }
 
@@ -390,7 +427,7 @@ impl<'a> Encoding<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingOwned<S> {
+impl<S: EncodingStorage> EncodingOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -415,7 +452,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut Encoding<'o>) {
         _out.packed_id = self.packed_id;
         _out.schema_len = self.schema_len;
-        _out.schema = self.schema.as_ref().map(::sce_forge_runtime::codec::SceStr::as_str);
+        _out.schema = self.schema.as_ref().map(::sce_forge_runtime::codec::Bounded::as_text);
         
     }
 
@@ -427,33 +464,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<EncodingOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> EncodingFrom<'x>>(&self) -> Result<EncodingOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`Encoding::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Encoding::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Encoding::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }
 
@@ -470,11 +482,11 @@ impl<'a> Encoding<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<EncodingOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: EncodingStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<EncodingOwned<S>, CodecError> {
         Ok(EncodingOwned {
             packed_id: self.packed_id,
             schema_len: self.schema_len,
-            schema: self.schema.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<128>(origin, _v)).transpose()?,
+            schema: self.schema.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<EncodingSchemaField>(origin, _v.into_inner()))).transpose()?,
         })
     }
 }

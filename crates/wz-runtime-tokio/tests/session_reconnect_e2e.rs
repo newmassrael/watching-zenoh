@@ -343,7 +343,7 @@ async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
         .send_declare_token(21, 0, Some(KEYEXPR))
         .expect("acceptor declares a liveliness token");
     let dispatch_session = session.clone();
-    let mut dispatch = |e: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(e);
+    let mut dispatch = |e: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(e);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_killer = stop.clone();
     let captured_for_killer = captured.clone();
@@ -504,7 +504,7 @@ async fn a_dying_link_takes_its_tokens_out_of_the_admin_introspection_answer() {
         .send_declare_token(31, 0, Some(KEYEXPR))
         .expect("acceptor declares a liveliness token");
     let dispatch_session = session.clone();
-    let mut dispatch = |e: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(e);
+    let mut dispatch = |e: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(e);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_killer = stop.clone();
     let probe_session = session.clone();
@@ -649,7 +649,7 @@ async fn a_dying_link_flips_the_dialers_matching_listener_to_false() {
         .send_declare_subscriber(31, 0, Some(KEYEXPR))
         .expect("acceptor declares a matching subscriber");
     let dispatch_session = session.clone();
-    let mut dispatch = |e: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(e);
+    let mut dispatch = |e: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(e);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_killer = stop.clone();
     let verdicts_for_killer = verdicts.clone();

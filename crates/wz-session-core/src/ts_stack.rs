@@ -21,9 +21,9 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{Bounded, CodecStorage, SceByteBuf};
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
+use sce_forge_runtime::codec::{Bounded, CodecError};
+use wz_codecs::ext_entry::{ExtEntryFrom, ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
 
 use crate::ext_header::{ext_eid, EXT_ENC_ZBUF};
 use crate::ext_nodeid::apply_chain_z_bits;
@@ -158,7 +158,7 @@ pub fn read_ts_stack<E: ExtEntryView>(extensions: impl IntoIterator<Item = E>) -
 
 /// Put `stack` in a chain of extensions, in place of the one it carries, and say whether the chain
 /// now holds an extension. `None` takes the stack out. The `Z` bits of the chain are made right.
-pub fn set_ts_stack<S: CodecStorage>(
+pub fn set_ts_stack<S: for<'x> ExtEntryFrom<'x>>(
     extensions: &mut Option<Vec<ExtEntryOwned<S>>>,
     stack: Option<&TsStack>,
 ) -> bool {
@@ -168,9 +168,13 @@ pub fn set_ts_stack<S: CodecStorage>(
     }
     if let Some(stack) = stack {
         let bytes = stack.encode();
-        // Under `alloc` the container is unbounded and this cannot fail; the `32` is only the
-        // capacity of a profile with no allocator, which has no timestamp stack.
-        if let Ok(value) = <S::Bytes<32> as SceByteBuf>::from_slice(&bytes) {
+        // A profile with an allocator holds any stack; one that stores the body inline at a
+        // capacity below the stack's bytes (a node with no allocator, which keeps no timestamp
+        // stack) refuses it, and the chain is left without one.
+        let value = Bounded::new(bytes.as_slice())
+            .ok_or(CodecError::LengthOutOfRange)
+            .and_then(|bytes| bytes.store::<S, ExtZbufValueField>());
+        if let Ok(value) = value {
             let entry = ExtEntryOwned {
                 header: TS_STACK_EXT_HEADER,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
@@ -209,7 +213,7 @@ pub fn timestamp_bytes(time: u64, zid: &[u8]) -> Vec<u8> {
 /// point the stack does not instrument, a timestamp that is not given (or is empty) and a stack at
 /// its limit leave the chain as it is, and `timestamp` is not asked for unless the point is
 /// instrumented (upstream's `push_ts_interception`).
-pub fn record_interception<S: CodecStorage>(
+pub fn record_interception<S: for<'x> ExtEntryFrom<'x>>(
     extensions: &mut Option<Vec<ExtEntryOwned<S>>>,
     at: u8,
     timestamp: impl FnOnce() -> Option<Vec<u8>>,
@@ -220,7 +224,7 @@ pub fn record_interception<S: CodecStorage>(
 /// [`record_interception`] for a clock that says whether its timestamp is the application's own:
 /// `timestamp` gives the bytes and whether the record is flagged as a custom one
 /// ([`point::IS_CUSTOM_TS`]), as a session opened with a timestamp callback records.
-pub fn record_interception_stamped<S: CodecStorage>(
+pub fn record_interception_stamped<S: for<'x> ExtEntryFrom<'x>>(
     extensions: &mut Option<Vec<ExtEntryOwned<S>>>,
     at: u8,
     timestamp: impl FnOnce() -> Option<(Vec<u8>, bool)>,
@@ -246,8 +250,8 @@ pub fn record_interception_stamped<S: CodecStorage>(
 
 /// [`record_interception`] on the chain a message holds. The stack replaces the entry that held
 /// it, so the chain does not grow and stays within its bound.
-pub fn record_on_chain<S: CodecStorage, const MAX: usize>(
-    chain: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX>>,
+pub fn record_on_chain<S: for<'x> ExtEntryFrom<'x>, const MAX: usize, const MIN: usize>(
+    chain: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX, MIN>>,
     at: u8,
     timestamp: impl FnOnce() -> Option<Vec<u8>>,
 ) -> bool {
@@ -256,8 +260,8 @@ pub fn record_on_chain<S: CodecStorage, const MAX: usize>(
 
 /// [`record_on_chain`] for a clock that says whether its timestamp is the application's own
 /// ([`record_interception_stamped`]).
-pub fn record_on_chain_stamped<S: CodecStorage, const MAX: usize>(
-    chain: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX>>,
+pub fn record_on_chain_stamped<S: for<'x> ExtEntryFrom<'x>, const MAX: usize, const MIN: usize>(
+    chain: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX, MIN>>,
     at: u8,
     timestamp: impl FnOnce() -> Option<(Vec<u8>, bool)>,
 ) -> bool {

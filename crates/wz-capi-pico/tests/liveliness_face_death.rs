@@ -174,7 +174,7 @@ fn native_peer(endpoint: String, ready_tx: mpsc::Sender<()>, die: Arc<tokio::syn
         let timeouts = SessionTimeouts::spec_defaults();
         let dispatch_session = session.clone();
         let mut dispatch =
-            |event: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(event);
+            |event: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(event);
 
         let _ = ready_tx.send(());
 

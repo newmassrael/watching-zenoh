@@ -35,11 +35,11 @@
 //!   - Trust-class gating, io_uring path, pool-slot zero-copy
 //!     borrows (all deferred per docs/runtime-crate-tokio.md).
 
-use sce_forge_runtime::codec::{SceByteBuf, SceCursor};
+use sce_forge_runtime::codec::{Bounded, SceCursor};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use wz_codecs::msg_put::MsgPut;
+use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame};
 
 const MID_Z_PUT: u8 = 0x01;
@@ -96,15 +96,14 @@ async fn echo_demo_msg_put_round_trip() {
             header: MID_Z_PUT,
             timestamp: None,
             encoding: None,
-            extensions: None,
+            extensions_has_0x12: MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: Bounded::new(PAYLOAD).unwrap(),
+            },
             payload_len: Some(5),
-            payload: Some(&[0xCA, 0xFE, 0xBA, 0xBE, 0x42]),
             slice_count: None,
-            slices: None,
         };
-        let bytes = original
-            .encode_to_vec()
-            .expect("a Put in the inline layout encodes");
+        let bytes = original.encode_to_vec();
         driver
             .send(&TxFrame { bytes: &bytes }, Reliability::Reliable)
             .await
@@ -121,19 +120,19 @@ async fn echo_demo_msg_put_round_trip() {
     assert_eq!(received.payload_len, original.payload_len, "payload_len");
     // Read off the field directly: this lane builds the handshake-only subset, in
     // which `wz_session_core::put_payload` (gated on a data codec) does not exist.
+    let MsgPutExtensionsHas0x12::NotHas0x12 {
+        extensions,
+        payload,
+    } = &received.extensions_has_0x12
+    else {
+        panic!("the inline layout, not a sliced one");
+    };
+    assert_eq!(payload.as_bytes().into_inner(), PAYLOAD, "payload bytes");
     assert!(
-        received.slices.is_none(),
-        "the inline layout, not a sliced one"
-    );
-    assert_eq!(
-        received.payload.as_ref().map(SceByteBuf::as_slice),
-        original.payload,
-        "payload bytes"
-    );
-    assert!(
-        received.timestamp.is_none()
-            && received.encoding.is_none()
-            && received.extensions.is_none(),
+        received.timestamp.is_none() && received.encoding.is_none() && extensions.is_none(),
         "no flags decoded"
     );
 }
+
+/// The payload the publisher puts and the subscriber must read back.
+const PAYLOAD: &[u8] = &[0xCA, 0xFE, 0xBA, 0xBE, 0x42];

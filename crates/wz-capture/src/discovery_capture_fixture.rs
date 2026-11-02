@@ -137,9 +137,9 @@ fn scout_datagram(zid: &[u8]) -> Vec<u8> {
     if !zid.is_empty() {
         scout.set_i(true);
         scout.set_zid_len_m1((zid.len() - 1) as u8);
-        scout.zid = Some(zid);
+        scout.zid = Some(wz_codecs::Bounded::new(zid).unwrap());
     }
-    let body = scout.encode_to_vec().expect("a fixture Scout is encodable");
+    let body = scout.encode_to_vec();
     let mut datagram = Vec::with_capacity(1 + body.len());
     datagram.push(S_MID_SCOUT);
     datagram.extend_from_slice(&body);

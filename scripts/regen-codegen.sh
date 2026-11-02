@@ -32,7 +32,30 @@ sce_codegen_ensure "regen-codegen" || {
 }
 
 echo "regen-codegen: regenerating out/** via xtask (codegen SSOT)"
-cargo run --manifest-path xtask/Cargo.toml --quiet -- regen
+# Two stages, in this order. Stage 1 (codecs, the codec deployment, statecharts,
+# pools) builds without the switchboard generator, which compiles wz-session-core
+# and so the codec tree stage 1 writes; built first, it would compile the OLD
+# tree against a moved SCE runtime and never get to regenerate it. Stage 2
+# (switchboards) is built once the tree it compiles is the new one.
+#
+# `--stage1` or `--stage2` runs one stage; no argument runs both, which is what
+# the bx action `regen-codegen` and the hosted regen-diff lane do. A pin move
+# needs them apart: the codec tree changes shape, wz-session-core does not
+# compile until its callers follow, and stage 2 cannot be built until they do.
+stage="${1:-both}"
+case "$stage" in
+    --stage1 | --stage2 | both) ;;
+    *)
+        echo "regen-codegen: unknown argument '$stage' (expected --stage1, --stage2 or none)" >&2
+        exit 2
+        ;;
+esac
+if [ "$stage" != "--stage2" ]; then
+    cargo run --manifest-path xtask/Cargo.toml --quiet --no-default-features -- stage1
+fi
+if [ "$stage" != "--stage1" ]; then
+    cargo run --manifest-path xtask/Cargo.toml --quiet -- switchboards
+fi
 
 echo "regen-codegen: done. Review + commit any out/** changes:"
 git status --porcelain -- out/ || true

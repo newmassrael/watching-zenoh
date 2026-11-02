@@ -59,7 +59,7 @@
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="1"
-                   max-depth="8" on-overflow="reject"
+                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>

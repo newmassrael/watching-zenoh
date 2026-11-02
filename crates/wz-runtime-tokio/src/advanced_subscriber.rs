@@ -2294,7 +2294,7 @@ mod tests {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(ke.len() as u64),
-                suffix: Some(ke),
+                suffix: Some(wz_codecs::Bounded::new(ke).unwrap()),
             }),
         };
         wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {

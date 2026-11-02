@@ -77,7 +77,7 @@ impl FaceForwarder for AdmittingNode {
 
     fn deregister(&self, _id: FaceId) {}
 
-    fn forward(&self, _id: FaceId, _event: IterationEvent<'_>) {}
+    fn forward(&self, _id: FaceId, _event: IterationEvent<'_, '_>) {}
 
     fn dedups_faces_by_zid(&self) -> bool {
         true

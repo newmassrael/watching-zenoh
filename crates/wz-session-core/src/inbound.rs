@@ -69,7 +69,7 @@ use sce_forge_runtime::codec::CodecError;
 use sce_forge_runtime::codec::SceCursor;
 // Named by the heap variants.
 #[cfg(feature = "alloc")]
-use wz_codecs::ext_entry::ExtEntryOwned;
+use crate::transport_profile::ExtEntryOwned;
 // The MID and flag constants: named by the heap `Oam` arm (`alloc`), by each
 // handshake arm of `ext_admission`, by `is_init_syn` and by the frame-head readers of the
 // in-place receive path.
@@ -101,19 +101,10 @@ use wz_codecs::keep_alive::KeepAlive;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::{OpenBody, OpenBodyOwned};
 
-/// The storage profile a handshake body (an INIT or an OPEN) is decoded into: the
-/// SCE default (the heap) on every profile but `session-slot`, and under it the
-/// inline profile, whose zid and cookie are arrays of the capacities the
-/// generated codec declares, so reading a handshake allocates nothing
-/// (fixed-memory step S5). The accessors a reader uses (`as_slice`) are the same
-/// on both.
+/// The storage profile a handshake body is decoded into, chosen with the rest of
+/// the transport profile ([`crate::transport_profile::HandshakeStorage`]).
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-#[cfg(not(feature = "session-slot"))]
-pub type HandshakeStorage = sce_forge_runtime::storage::DefaultStorage;
-/// See the default form of this alias.
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-#[cfg(feature = "session-slot")]
-pub type HandshakeStorage = sce_forge_runtime::storage::Inline;
+pub use crate::transport_profile::HandshakeStorage;
 
 /// A decoded inbound transport-message frame.
 ///
@@ -1793,7 +1784,7 @@ mod join_tests {
     /// string, so a decode that disagrees with the codec fails here.
     fn join_wire(flags: u8, join: &wz_codecs::join::Join<'_>) -> Vec<u8> {
         let mut wire = alloc::vec![wire_const::T_MID_JOIN | flags];
-        wire.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+        wire.extend_from_slice(&join.encode_to_vec());
         wire
     }
 
@@ -1802,7 +1793,7 @@ mod join_tests {
             version: 0x09,
             // whatami = peer (0x01), zid_len-1 = 3.
             cbyte: (3 << 4) | 0x01,
-            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
             s: Some(wz_codecs::join::JoinS {
                 sn_res: 0x00,
                 batch_size: 0x1000,
@@ -2017,7 +2008,7 @@ mod kind_name_tests {
             let join = wz_codecs::join::Join {
                 version: 0x09,
                 cbyte: (3 << 4) | 0x01,
-                zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+                zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
                 s: Some(wz_codecs::join::JoinS {
                     sn_res: 0x00,
                     batch_size: 0x1000,
@@ -2027,7 +2018,7 @@ mod kind_name_tests {
                 next_sn_best_effort: 9,
             };
             let mut wire = alloc::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
-            wire.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+            wire.extend_from_slice(&join.encode_to_vec());
             cases.push((wire, "Join"));
         }
 
@@ -2207,7 +2198,7 @@ mod kind_name_tests {
 mod frame_qos_identity_tests {
     use super::*;
     use crate::ext_header::{lookalike_headers, network_eid, EXT_FLAG_Z};
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    use crate::transport_profile::ExtEntryOwnedVariant;
     use wz_codecs::ext_zint::ExtZint;
 
     fn zint(header: u8, value: u64) -> ExtEntryOwned {

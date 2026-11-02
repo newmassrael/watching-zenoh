@@ -46,7 +46,10 @@ use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBoun
 
 /// The reply a Response read in place is delivered as: every field a range of
 /// the frame or a value read off it, valid for the delivery call.
-struct LentReply<'r> {
+///
+/// `'r` is the delivery's borrow of the decoded record; `'f` is the frame's, in
+/// which the codec's lent timestamp is invariant.
+struct LentReply<'r, 'f> {
     rid: u64,
     keyexpr: &'r str,
     kind: ReplyKind,
@@ -55,7 +58,7 @@ struct LentReply<'r> {
     put_encoding: Option<(u32, Option<&'r str>)>,
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
-    timestamp: Option<&'r Timestamp<'r>>,
+    timestamp: Option<&'r Timestamp<'f>>,
     // The node and the entity the Response names as its responder, and the quality of
     // service it was sent at, both read off the Response's own chain.
     responder: Option<(&'r [u8], u32)>,
@@ -66,7 +69,7 @@ struct LentReply<'r> {
     timestamp_hint: OnceCell<TimestampHint>,
 }
 
-impl ReplyView for LentReply<'_> {
+impl ReplyView for LentReply<'_, '_> {
     fn rid(&self) -> u64 {
         self.rid
     }
@@ -102,7 +105,7 @@ impl ReplyView for LentReply<'_> {
     fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
         self.timestamp.map(|ts| crate::reply_stage::TimestampParts {
             time: ts.time,
-            zid: ts.zid,
+            zid: ts.zid.into_inner(),
         })
     }
     fn responder(&self) -> Option<(&[u8], u32)> {
@@ -122,15 +125,16 @@ impl ReplyView for LentReply<'_> {
 }
 
 /// The body-level fields of a reply read in place, before the keyexpr is known:
-/// what `dispatch_response`'s body match projects, on the lent form.
-struct LentBody<'r> {
+/// what `dispatch_response`'s body match projects, on the lent form. The
+/// lifetimes are [`LentReply`]'s.
+struct LentBody<'r, 'f> {
     kind: ReplyKind,
     payload: &'r [u8],
     err_encoding: Option<(u32, Option<&'r str>)>,
     put_encoding: Option<(u32, Option<&'r str>)>,
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
-    timestamp: Option<&'r Timestamp<'r>>,
+    timestamp: Option<&'r Timestamp<'f>>,
 }
 
 /// Why a Response read in place is delivered through its owned projection
@@ -188,7 +192,7 @@ enum AttachmentOf {
     feature = "query-reply"
 ))]
 fn lent_attachment<'r>(
-    exts: &'r [wz_codecs::ext_entry::ExtEntry<'r>],
+    exts: &'r [wz_codecs::ext_entry::ExtEntry<'_>],
     of: AttachmentOf,
 ) -> Option<&'r [u8]> {
     #[cfg(feature = "pubsub-attachment")]
@@ -215,7 +219,7 @@ fn lent_attachment<'r>(
     feature = "pubsub-delete",
     feature = "query-reply"
 ))]
-fn lent_timestamp<'r>(ts: Option<&'r Timestamp<'r>>) -> Option<&'r Timestamp<'r>> {
+fn lent_timestamp<'r, 'f>(ts: Option<&'r Timestamp<'f>>) -> Option<&'r Timestamp<'f>> {
     #[cfg(feature = "pubsub-timestamp")]
     {
         ts
@@ -227,27 +231,35 @@ fn lent_timestamp<'r>(ts: Option<&'r Timestamp<'r>>) -> Option<&'r Timestamp<'r>
     }
 }
 
+/// An encoding read where its frame lies, as the id word and the schema text a lent reply
+/// carries.
+fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Option<&'r str>) {
+    (
+        encoding.packed_id,
+        encoding.schema.map(|schema| schema.into_inner()),
+    )
+}
+
 /// The body of `response` as a lent reply delivers it, `Ok(None)` for a body
 /// the owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
-fn lent_body<'r>(response: &'r Response<'r>) -> Result<Option<LentBody<'r>>, Fallback> {
+fn lent_body<'r, 'f>(response: &'r Response<'f>) -> Result<Option<LentBody<'r, 'f>>, Fallback> {
     match &response.body {
         ResponseVariant::CodecZenohReply(reply) => match &reply.body {
             #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
             wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put) => {
-                if put.slices.is_some() {
+                let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
+                    &put.extensions_has_0x12
+                else {
                     return Err(Fallback::Sliced);
-                }
-                let exts: &[wz_codecs::ext_entry::ExtEntry<'r>] =
-                    put.extensions.as_deref().unwrap_or(&[]);
+                };
+                let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = crate::put_payload::chain(put);
                 Ok(Some(LentBody {
                     kind: ReplyKind::Put,
-                    // A Put with neither layout populated is an empty inline
-                    // payload, as `put_payload::layout` reads it.
-                    payload: put.payload.unwrap_or(&[]),
+                    payload: payload.into_inner(),
                     err_encoding: None,
                     #[cfg(feature = "pubsub-encoding")]
-                    put_encoding: put.encoding.as_ref().map(|e| (e.packed_id, e.schema)),
+                    put_encoding: put.encoding.as_ref().map(encoding_parts),
                     #[cfg(not(feature = "pubsub-encoding"))]
                     put_encoding: None,
                     attachment: lent_attachment(exts, AttachmentOf::Put),
@@ -257,8 +269,10 @@ fn lent_body<'r>(response: &'r Response<'r>) -> Result<Option<LentBody<'r>>, Fal
             }
             #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
             wz_codecs::reply::ReplyVariant::CodecZenohMsgDel(del) => {
-                let exts: &[wz_codecs::ext_entry::ExtEntry<'r>] =
-                    del.extensions.as_deref().unwrap_or(&[]);
+                let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = del
+                    .extensions
+                    .as_ref()
+                    .map_or(&[][..], |chain| chain.as_slice());
                 Ok(Some(LentBody {
                     kind: ReplyKind::Del,
                     payload: &[],
@@ -275,8 +289,8 @@ fn lent_body<'r>(response: &'r Response<'r>) -> Result<Option<LentBody<'r>>, Fal
         },
         ResponseVariant::CodecZenohErr(err) => Ok(Some(LentBody {
             kind: ReplyKind::Err,
-            payload: err.payload,
-            err_encoding: err.encoding.as_ref().map(|e| (e.packed_id, e.schema)),
+            payload: err.payload.into_inner(),
+            err_encoding: err.encoding.as_ref().map(encoding_parts),
             put_encoding: None,
             attachment: None,
             source_info: None,
@@ -327,8 +341,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         let Some(body) = lent_body(response)? else {
             return Ok(());
         };
-        let extensions: &[wz_codecs::ext_entry::ExtEntry<'_>] =
-            response.extensions.as_deref().unwrap_or(&[]);
+        let extensions: &[wz_codecs::ext_entry::ExtEntry<'_>] = response
+            .extensions
+            .as_ref()
+            .map_or(&[][..], |chain| chain.as_slice());
         // A Response the nodes record on is delivered with a stack of its own to add to.
         #[cfg(feature = "pubsub-ts-stack")]
         if crate::ext_view::find_by_eid(
@@ -483,8 +499,7 @@ mod tests {
         let wire = response
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec()
-            .expect("a fixture response is encodable");
+            .encode_to_vec();
         let peer = peer();
         let (mut owned, owned_log) = recording();
         let messages = parse_frame_payload(&wire).expect("the record decodes");

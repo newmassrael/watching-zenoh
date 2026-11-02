@@ -57,7 +57,7 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::SceCursor;
+use sce_forge_runtime::codec::{Bounded, SceCursor};
 use wz_codecs::cobs_decode::cobs_decode;
 use wz_codecs::cobs_encode::cobs_encode;
 use wz_codecs::crc32::crc32;
@@ -161,7 +161,7 @@ pub fn encode_frame_into(
     let env = SerialEnvelope {
         header,
         payload_len: payload.len() as u16,
-        payload,
+        payload: Bounded::new(payload).ok_or(SerialFrameError::TooLarge)?,
         crc32: crc32(payload),
     };
     let mut pre_cobs = [0u8; SERIAL_MFS];
@@ -213,7 +213,7 @@ pub fn decode_frame(wire: &[u8]) -> Result<DecodedFrame, SerialFrameError> {
     if cursor.remaining() != 0 {
         return Err(SerialFrameError::Malformed);
     }
-    if env.crc32 != crc32(env.payload) {
+    if env.crc32 != crc32(env.payload.into_inner()) {
         return Err(SerialFrameError::CrcMismatch);
     }
     Ok(DecodedFrame {
@@ -630,12 +630,10 @@ mod tests {
         let env = SerialEnvelope {
             header: 0x00,
             payload_len: 3,
-            payload: &[0xAB, 0xCD, 0xEF],
+            payload: wz_codecs::Bounded::new(&[0xABu8, 0xCD, 0xEF] as &[u8]).unwrap(),
             crc32: crc32(&[0xAB, 0xCD, 0xEF]),
         };
-        let mut pre_cobs = env
-            .encode_to_vec()
-            .expect("a fixture envelope is encodable");
+        let mut pre_cobs = env.encode_to_vec();
         pre_cobs.push(0x99); // trailing garbage after crc32
         let cobs = cobs_encode(&pre_cobs).expect("cobs");
         let mut wire = cobs.as_slice().to_vec();

@@ -38,10 +38,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned};
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_unit::ExtUnit;
-use wz_codecs::ext_zbuf::ExtZbufOwned;
 use wz_codecs::ext_zint::ExtZint;
 
 use crate::codec_owned::owned_bytes;

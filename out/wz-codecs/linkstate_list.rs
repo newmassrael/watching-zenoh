@@ -15,12 +15,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-// RFC §synth-5-B B2/B3: bounded inline list storage for repeat / tlv-chain
-// fields — heap-free `heapless::Vec<T, N>` (re-exported by the runtime),
-// the Rust mirror of the C11 `T elems[MAX]; len` representation. Always
-// available (no `alloc` gate) so list-bearing codecs compile on the
-// pure no_std no-alloc MCU tier.
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::linkstate::Linkstate;
 
@@ -31,15 +25,59 @@ use super::linkstate::LinkstateView;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+use super::linkstate::LinkstateOwned;
+/// The field `link_states` of `LinkstateList`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct LinkstateList<'a> {
+pub struct LinkstateListLinkStatesField;
+
+impl ::sce_forge_runtime::codec::HoldsList<LinkstateListLinkStatesField> for ::sce_forge_runtime::codec::Inline {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 64> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+/// What `LinkstateListIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait LinkstateListStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<LinkstateListLinkStatesField> + super::linkstate::LinkstateStorage {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<LinkstateListLinkStatesField> + super::linkstate::LinkstateStorage> LinkstateListStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside LinkstateListStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait LinkstateListFrom<'f>: LinkstateListStorage + super::linkstate::LinkstateFrom<'f> {}
+
+impl<'f, S: LinkstateListStorage + super::linkstate::LinkstateFrom<'f>> LinkstateListFrom<'f> for S {}
+
+// `LinkstateListIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `LinkstateList<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `LinkstateListOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkstateListIn<S: LinkstateListStorage> {
     pub num_link_states: u64,
-    pub link_states: HeaplessVec<Linkstate<'a>, 64>,
+    pub link_states: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateListLinkStatesField>>::List<LinkstateOwned<S>>, 64>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type LinkstateList<'a> = LinkstateListIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type LinkstateListOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = LinkstateListIn<S>;
+
+impl<S: LinkstateListStorage> Default for LinkstateListIn<S> {
+    fn default() -> Self {
+        Self {
+            num_link_states: Default::default(),
+            link_states: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> LinkstateList<'a> {
+impl<S: LinkstateListStorage> LinkstateListIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -55,7 +93,7 @@ impl<'a> LinkstateList<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: LinkstateListFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -71,7 +109,24 @@ impl<'a> LinkstateList<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LinkstateListFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                LinkstateListView::decode(&mut _frame)?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LinkstateListFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -85,14 +140,15 @@ impl<'a> LinkstateList<'a> {
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let num_link_states = cursor.read_vle_u64()?;
-        {
-            let _vec = &mut _out.link_states;
-            _vec.clear();
-            for _ in 0..num_link_states {
-                _vec.push(Linkstate::decode(cursor)?)
-                    .map_err(|_| CodecError::TooManyElements)?;
+        if num_link_states > 64 {
+                return Err(CodecError::TooManyElements);
             }
-        }
+            _out.link_states.refill(|_vec| {
+            for _ in 0..num_link_states {
+                ::sce_forge_runtime::codec::SceList::try_push(_vec, LinkstateOwned::<S>::decode(cursor)?)?;
+            }
+            Ok(())
+        })?;
         _out.num_link_states = num_link_states;
         Ok(())
     }
@@ -101,37 +157,34 @@ impl<'a> LinkstateList<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 639177;
+    pub const MAX_ENCODED_BYTES: usize = 1159369;
 
-    /// Encode `self` into the caller-owned sink. Returns the value's refusal
-    /// when the encoding cannot carry it (a length past its type, a list past
-    /// its bound, a gate that disagrees with a presence; the document declares
-    /// `sce:encode-may-fail`), or the sink's own error:
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
-    /// has insufficient remaining capacity.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
-        Self::encode_source(self, w)
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        LinkstateList::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
-    /// `encode` refuses a value with: one the encoding cannot carry (a
-    /// length past its type, a list past its bound) or one a gate
-    /// disagrees with. Callers targeting zero-alloc hot paths should call
-    /// `encode` directly against a caller-owned sink.
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -166,9 +219,9 @@ impl<'a> LinkstateListSource for LinkstateListParts<'a> {
     }
 }
 
-impl<'a> LinkstateListSource for LinkstateList<'a> {
+impl<S: LinkstateListStorage> LinkstateListSource for LinkstateListOwned<S> {
     fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64> {
-        ::sce_forge_runtime::codec::BoundedIter::from(&self.link_states)
+        self.link_states.list_iter()
     }
 }
 
@@ -178,27 +231,20 @@ impl<'a> LinkstateListSource for LinkstateListView<'a> {
     }
 }
 
-impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListSource for LinkstateListOwned<S> {
-    fn link_states(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate::LinkstateSource> + Clone, 64> {
-        self.link_states.list_iter()
-    }
-}
-
 #[allow(dead_code)]
 impl<'a> LinkstateList<'a> {
     /// Encode what `src` says into the caller-owned sink: the bytes
     /// [`Self::encode`] writes for the value it holds, read through
     /// [`LinkstateListSource`]. A length, a count or a gate flag is computed from what
-    /// `src` presents, and a value the encoding cannot carry is refused
-    /// before the first byte is written.
-    pub fn encode_source<S: LinkstateListSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        Self::count_source(src)?;
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: LinkstateListSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         Self::write_source(src, w)
     }
 
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
-    pub fn write_source<S: LinkstateListSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    pub fn write_source<S: LinkstateListSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _k_link_states: usize = src.link_states().len();
         let _d_num_link_states: u64 = ::sce_forge_runtime::codec::widen_usize(_k_link_states);
         w.write_vle_u64(_d_num_link_states)?;
@@ -211,17 +257,17 @@ impl<'a> LinkstateList<'a> {
     /// The bytes [`Self::write_source`] writes for `src`, counted with
     /// nothing written.
     #[doc(hidden)]
-    pub fn count_source<S: LinkstateListSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+    pub fn count_source<S: LinkstateListSource + ?Sized>(src: &S) -> usize {
         let mut _c = ::sce_forge_runtime::codec::CountSink::new();
-        Self::write_source(src, &mut _c)?;
-        Ok(_c.len())
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
     }
 }
 
 impl<'a, S: LinkstateListSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for LinkstateList<'a> {
-    type Error<E> = CodecError;
+    type Error<E> = E;
 
-    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
         Self::write_source(src, w)
     }
 }
@@ -229,10 +275,12 @@ impl<'a, S: LinkstateListSource + ?Sized> ::sce_forge_runtime::codec::SourceWrit
 #[allow(dead_code)]
 impl<'a> LinkstateList<'a> {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
-    /// with nothing written, or the refusal that encode would give. The result
-    /// writes the frame into a window of exactly that size and cannot fail.
-    pub fn measure<S: LinkstateListSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
-        ::sce_forge_runtime::codec::measure(src)
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: LinkstateListSource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
     }
 
     /// Write `src` into `window` in one pass and return the bytes it is, for a
@@ -311,13 +359,16 @@ impl<'a> LinkstateListView<'a> {
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let num_link_states = cursor.read_vle_u64()?;
         {
+            if num_link_states > 64 {
+                return Err(CodecError::TooManyElements);
+            }
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             for _ in 0..num_link_states {
-                LinkstateView::decode(cursor)?;
                 if _count == 64 {
                     return Err(CodecError::TooManyElements);
                 }
+                LinkstateView::decode(cursor)?;
                 _count += 1;
             }
             _out.link_states = Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?;
@@ -338,19 +389,21 @@ impl<'a> LinkstateListView<'a> {
     #[allow(clippy::wrong_self_convention)]
     pub fn into_builder(&self, _out: &mut LinkstateList<'a>) -> Result<(), CodecError> {
         _out.num_link_states = self.num_link_states;
-        _out.link_states.clear();
-        for _e in self.link_states.iter() {
-            _out.link_states.push(Linkstate::default()).map_err(|_| CodecError::TooManyElements)?;
-            if let Some(_slot) = _out.link_states.last_mut() {
-                _e.into_builder(_slot)?;
+        _out.link_states.refill(|_vec| {
+            for _e in self.link_states.iter() {
+                _vec.push(Linkstate::default()).map_err(|_| CodecError::CapacityExceeded)?;
+                if let Some(_slot) = _vec.last_mut() {
+                    _e.into_builder(_slot)?;
+                }
             }
-        }
+            Ok(())
+        })?;
         Ok(())
     }
 
     /// Worst-case encoded byte count for this codec, as
     /// [`LinkstateList::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 639177;
+    pub const MAX_ENCODED_BYTES: usize = 1159369;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`LinkstateList::encode`] writes for the value [`Self::into_builder`]
@@ -358,18 +411,17 @@ impl<'a> LinkstateListView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
         LinkstateList::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
-    /// value it cannot carry.
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
+    /// value (docs/adr/0065).
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+    pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
+        _sce_v
     }
 }
 
@@ -402,18 +454,9 @@ impl<'a> LinkstateListView<'a> {
 // `let v: LinkstateListOwned = LinkstateListOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::linkstate::LinkstateOwned;
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct LinkstateListOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub num_link_states: u64,
-    pub link_states: ::sce_forge_runtime::codec::Bounded<S::List<LinkstateOwned<S>, 64>, 64>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> LinkstateList<'a> {
@@ -423,12 +466,13 @@ impl<'a> LinkstateList<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<LinkstateListOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: LinkstateListFrom<'a>>(self) -> Result<LinkstateListOwned<S>, CodecError> {
         Ok(LinkstateListOwned {
             num_link_states: self.num_link_states,
             link_states: ::sce_forge_runtime::codec::try_collect_bounded(self.link_states, |_e| _e.try_into_owned_in::<S>())?,
@@ -443,7 +487,7 @@ impl<'a> LinkstateList<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListOwned<S> {
+impl<S: LinkstateListStorage> LinkstateListOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -471,7 +515,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListOwned<S> {
     /// and is not to be read.
     pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut LinkstateList<'o>) -> Result<(), CodecError> {
         _out.num_link_states = self.num_link_states;
-        ::sce_forge_runtime::codec::try_project_bounded_into(&mut _out.link_states, self.link_states.inner(), |_e| _e.try_as_borrowed())?;
+        _out.link_states.refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, self.link_states.inner(), |_e| _e.try_as_borrowed()))?;
         Ok(())
     }
 
@@ -483,37 +527,8 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<LinkstateListOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> LinkstateListFrom<'x>>(&self) -> Result<LinkstateListOwned<D>, CodecError> {
         self.try_as_borrowed()?.try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `try_as_borrowed` followed by
-    /// [`LinkstateList::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// The same refusals as the projection's: a list longer than the borrowed
-    /// view declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
-        LinkstateList::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, as is any value
-    /// the encoding cannot carry.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(LinkstateList::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)?;
-        Ok(_sce_v)
     }
 }
 
@@ -530,7 +545,7 @@ impl<'a> LinkstateList<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<LinkstateListOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: LinkstateListStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<LinkstateListOwned<S>, CodecError> {
         Ok(LinkstateListOwned {
             num_link_states: self.num_link_states,
             link_states: ::sce_forge_runtime::codec::try_collect_bounded(self.link_states, |_e| _e.try_into_owned_in_origin::<S>(origin))?,

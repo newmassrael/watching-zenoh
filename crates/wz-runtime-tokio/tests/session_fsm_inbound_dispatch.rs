@@ -588,9 +588,7 @@ fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
         header: 0x1D,
         ..Push::default()
     };
-    let bytes = wz_codecs_test_support::with_empty_inline_put(push)
-        .encode_to_vec()
-        .expect("a fixture Push encodes");
+    let bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
 
     let parsed = parse_frame_payload(&bytes).expect("Push envelope parses");
     assert_eq!(
@@ -621,9 +619,7 @@ fn parse_frame_payload_decodes_push_then_request_chain() {
         header: 0x1C,
         ..Request::default()
     };
-    let mut bytes = wz_codecs_test_support::with_empty_inline_put(push)
-        .encode_to_vec()
-        .expect("a fixture Push encodes");
+    let mut bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
     bytes.extend_from_slice(
         &req.encode_to_vec()
             .expect("a default-armed Request encodes"),
@@ -708,9 +704,7 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
         header: 0x19,
         ..Interest::default()
     };
-    let bytes = interest
-        .encode_to_vec()
-        .expect("a fixture Interest encodes");
+    let bytes = interest.encode_to_vec();
     assert_eq!(
         bytes.len(),
         2,
@@ -750,9 +744,7 @@ fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
     };
     // The Put inside the default Reply names no payload layout (R3008), and an
     // encoder refuses that, so it carries the empty inline payload explicitly.
-    let bytes = wz_codecs_test_support::with_empty_inline_put_reply(resp)
-        .encode_to_vec()
-        .expect("a fixture Response encodes");
+    let bytes = wz_codecs_test_support::with_empty_inline_put_reply(resp).encode_to_vec();
     let parsed = parse_frame_payload(&bytes).expect("Response envelope parses");
     assert_eq!(
         parsed.len(),
@@ -787,9 +779,7 @@ fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
         }),
         ..Interest::default()
     };
-    let bytes = interest
-        .encode_to_vec()
-        .expect("a fixture Interest encodes");
+    let bytes = interest.encode_to_vec();
     assert_eq!(
         bytes.len(),
         3,

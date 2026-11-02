@@ -77,7 +77,7 @@ fn layer3_open_body_syn_cookie_present() {
         lease,
         initial_sn,
         cookie_len: Some(cookie.len() as u64),
-        cookie: Some(&cookie),
+        cookie: Some(wz_codecs::Bounded::new(cookie.as_slice()).unwrap()),
     }
     .encode_to_vec();
 
@@ -135,7 +135,7 @@ fn layer3_open_body_vle_boundaries() {
             lease,
             initial_sn,
             cookie_len: Some(cookie.len() as u64),
-            cookie: Some(&cookie),
+            cookie: Some(wz_codecs::Bounded::new(cookie.as_slice()).unwrap()),
         }
         .encode_to_vec();
         let pico_a0 = zenoh_pico_encode_open(0, lease, initial_sn, &cookie);

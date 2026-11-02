@@ -133,7 +133,7 @@ impl FaceForwarder for CapturingForwarder {
             .push((joined_id.0, primary_id.0));
     }
 
-    fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
+    fn forward(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             reliable,
             sn,

@@ -694,7 +694,7 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
     actions: Rc<McuActions<C>>,
     plane: Arc<QueryPlane>,
     generation: u64,
-) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_>) + 'static {
+) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     move |event| {
         let mut registry = registry.borrow_mut();
         // The queries this frame carries arrive on this face's link, whichever was dialled last.
@@ -716,7 +716,7 @@ fn dispatch_all<C: ClockSource + 'static>(
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
     actions: Rc<McuActions<C>>,
-) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_>) + 'static {
+) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     move |event| registry.borrow_mut().dispatch(face, event, &*actions)
 }
 

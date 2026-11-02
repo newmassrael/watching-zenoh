@@ -285,9 +285,10 @@ pub(crate) fn frame_wire_reliability(bytes: &[u8]) -> crate::reliability::Reliab
 /// payload into one growable `Vec`, eliminating the prior
 /// `payload.encode_to_vec()` + `Frame.encode_to_vec()` +
 /// `wire.extend_from_slice(&body_bytes)` chain (3 allocations per
-/// hot-path emit). For typical 1–2 KB payloads the reserved capacity
-/// is also dramatically smaller than the 64 KB `Frame::MAX_ENCODED_BYTES`
-/// ceiling, since the inner codec's worst-case bound is used directly.
+/// hot-path emit). `worst_case_payload` is the network message's own
+/// size, which each caller measures off the value (`{Codec}::measure`),
+/// so the one reservation is what the frame needs and not a codec-wide
+/// ceiling.
 /// R311jq lifts the prefix write into [`begin_frame`] so the batching
 /// open-frame writer shares the same bytes-producing code.
 #[cfg(feature = "alloc")]
@@ -365,17 +366,15 @@ pub(crate) fn push_body(
     }
 }
 
-/// The most bytes `push` can encode to, read off its own fields: what a frame buffer for it needs to
-/// reserve, in place of [`Push::MAX_ENCODED_BYTES`], which is the generated codec's reserve hint for a
-/// message of any shape and is 2 456 bytes for an eighteen-byte Put (measured: it was 2.4 of the 2.8 KiB
-/// a delivered copy cost the router, and the whole of the difference between a Put to one subscriber and
-/// to sixteen).
+/// The bytes `push` encodes to: what a frame buffer for it needs to reserve. It is the generated
+/// codec's own count (`Push::measure`), so it is exact and cannot drift from what [`push_body`]
+/// writes. A Push has no size constant to reserve instead: its payload's bound is upstream's u32
+/// length, so its largest frame passes what a target can address (SCE ADR 0077 section 7), and the
+/// constant it had before sized an eighteen-byte Put's buffer at 2 456 bytes (measured: 2.4 of the
+/// 2.8 KiB a delivered copy cost the router).
 ///
-/// An UPPER bound and not an estimate, because the lend path asks a link for a slot of this size
-/// (`send_lent`) and a slot too small is a refused send: every variable-width integer is counted at its
-/// widest, every text and byte field at its length, and every extension entry at the widest body its
-/// kind can carry. It is allowed to be too large by tens of bytes; the test beside it asserts it never
-/// falls under what [`push_body`] writes, for the shapes a message takes.
+/// Exact matters, because the lend path asks a link for a slot of this size (`send_lent`) and a slot
+/// too small is a refused send.
 ///
 /// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`) and the
 /// multicast group send (`multicast_tx_push`, behind `session-multicast`). Inside this crate alone only
@@ -387,79 +386,7 @@ pub(crate) fn push_body(
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 #[cfg_attr(not(feature = "session-multicast"), allow(dead_code))]
 pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
-    use crate::wire::{parts::ExtEntryOwned, PushOwnedVariant};
-    use sce_forge_runtime::codec::{SceByteBuf, SceList, SceStr};
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
-
-    // A variable-width integer is at most ten bytes on the wire.
-    const VLE: usize = 10;
-    // Header, and a margin for the part of the layout this function does not read field by field.
-    const FIXED: usize = 16;
-
-    fn ext_chain<'a>(entries: impl Iterator<Item = &'a ExtEntryOwned>) -> usize {
-        entries
-            .map(|entry| {
-                1 + match &entry.body {
-                    ExtEntryOwnedVariant::CodecZenohExtUnit(_)
-                    | ExtEntryOwnedVariant::Default { .. } => 0,
-                    ExtEntryOwnedVariant::CodecZenohExtZint(_) => VLE,
-                    ExtEntryOwnedVariant::CodecZenohExtZbuf(zbuf) => {
-                        VLE + SceByteBuf::as_slice(&zbuf.value).len()
-                    }
-                }
-            })
-            .sum()
-    }
-
-    let (_id, suffix) = crate::wireexpr_resolve::id_and_suffix(&push.keyexpr.body);
-    let mut bytes = FIXED + VLE + VLE + suffix.map_or(0, str::len);
-    if let Some(entries) = &push.extensions {
-        bytes += ext_chain(SceList::as_slice(entries.inner()).iter());
-    }
-    // A timestamp is a time, a zid length and a zid of at most sixteen bytes.
-    const TIMESTAMP: usize = VLE + VLE + 16;
-    bytes += match &push.body {
-        PushOwnedVariant::CodecZenohMsgPut(put) | PushOwnedVariant::Default { body: put, .. } => {
-            let mut put_bytes = FIXED;
-            if put.timestamp.is_some() {
-                put_bytes += TIMESTAMP;
-            }
-            if let Some(encoding) = &put.encoding {
-                put_bytes += VLE
-                    + VLE
-                    + encoding
-                        .schema
-                        .as_ref()
-                        .map_or(0, |schema| SceStr::as_str(schema).len());
-            }
-            if let Some(entries) = &put.extensions {
-                put_bytes += ext_chain(SceList::as_slice(entries.inner()).iter());
-            }
-            put_bytes += VLE;
-            if let Some(payload) = &put.payload {
-                put_bytes += SceByteBuf::as_slice(payload).len();
-            }
-            if let Some(slices) = &put.slices {
-                put_bytes += VLE
-                    + SceList::as_slice(slices.inner())
-                        .iter()
-                        .map(|slice| VLE + VLE + SceByteBuf::as_slice(&slice.bytes).len())
-                        .sum::<usize>();
-            }
-            put_bytes
-        }
-        PushOwnedVariant::CodecZenohMsgDel(del) => {
-            let mut del_bytes = FIXED;
-            if del.timestamp.is_some() {
-                del_bytes += TIMESTAMP;
-            }
-            if let Some(entries) = &del.extensions {
-                del_bytes += ext_chain(SceList::as_slice(entries.inner()).iter());
-            }
-            del_bytes
-        }
-    };
-    bytes
+    Push::measure(push).len()
 }
 
 /// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
@@ -621,7 +548,7 @@ pub fn encode_frame_with_response_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Response::MAX_ENCODED_BYTES,
+        Response::measure(&response).len(),
         ext_qos,
         response_body(&response),
     )
@@ -661,7 +588,7 @@ pub fn encode_frame_with_response_final_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        ResponseFinal::MAX_ENCODED_BYTES,
+        ResponseFinal::measure(&response_final).len(),
         ext_qos,
         response_final_body(&response_final),
     )
@@ -683,7 +610,9 @@ pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool)
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Request::MAX_ENCODED_BYTES,
+        // A Request the encode refuses is refused by the body below as well; the
+        // reservation for it is moot.
+        Request::measure(&request).map_or(0, |measured| measured.len()),
         None,
         request_body(&request),
     )
@@ -709,7 +638,7 @@ pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool)
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Declare::MAX_ENCODED_BYTES,
+        Declare::measure(&declare).len(),
         None,
         declare_body(&declare),
     )
@@ -737,7 +666,7 @@ pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bo
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Interest::MAX_ENCODED_BYTES,
+        Interest::measure(&interest).len(),
         None,
         interest_body(&interest),
     )
@@ -800,7 +729,7 @@ pub fn encode_frame_with_push_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Push::MAX_ENCODED_BYTES,
+        Push::measure(&push).len(),
         ext_qos,
         push_body(&push),
     )
@@ -1537,7 +1466,11 @@ pub fn write_fragment_head(
     // the payload after that.
     {
         let mut sink = TxSink::new(buf);
-        wz_codecs::fragment::Fragment { sn, payload: &[] }.encode(&mut sink)?;
+        wz_codecs::fragment::Fragment {
+            sn,
+            payload: Default::default(),
+        }
+        .encode(&mut sink)?;
     }
     #[cfg(feature = "transport-qos")]
     if let Some(priority) = ext_qos {
@@ -1605,9 +1538,12 @@ pub fn build_frame_wire(
         // wire has (`commons/zenoh-codec/src/transport/frame.rs` @
         // `// FrameHeader`, the header write).
         let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
-        wz_codecs::frame::Frame { sn, payload: &[] }
-            .encode(&mut sink)
-            .expect("VecSink is infallible");
+        wz_codecs::frame::Frame {
+            sn,
+            payload: Default::default(),
+        }
+        .encode(&mut sink)
+        .expect("VecSink is infallible");
     }
     if let Some(priority) = ext_qos {
         write_qos_ext(&mut wire, priority, false).expect("a Vec grows, so its sink is infallible");
@@ -1729,29 +1665,29 @@ mod tests {
     /// the FLAG_T_FRAME_R bit appears in the header byte.
     /// A `Push::default()` whose Put carries an explicit, empty payload.
     ///
-    /// A bare default is no longer an encodable Put: the payload is gated on the
-    /// extension chain (`msg_put.scxml`), so `payload_len` and `payload` are
-    /// `None` until a caller says which layout the Put uses, and the encoder
-    /// refuses a Put that names neither. An empty inline payload is what the
-    /// default used to mean, so these tests say it.
+    /// The payload's layout is the extension chain's (`msg_put.scxml`), so these
+    /// tests name it: an empty inline payload, which is what the default used to
+    /// mean.
     #[cfg(feature = "codec-push")]
     fn empty_payload_push() -> crate::wire::PushOwned {
         let mut push = Push::default();
         if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
             put.payload_len = Some(0);
-            put.payload = Some(&[]);
+            put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
+            };
         }
         push.try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap()
     }
 
-    /// The capacity hint of a Push is an UPPER bound on what [`push_body`] writes, for the shapes a
-    /// Push takes, and not the codec's 2 456 byte constant: the lend path asks a link for a slot of
-    /// this size, and a slot a byte too small is a refused send, while a hint far above is the buffer
-    /// an eighteen-byte Put paid 2.4 KiB for.
+    /// The capacity hint of a Push is exactly what [`push_body`] writes, for the shapes a Push
+    /// takes: the lend path asks a link for a slot of this size, and a slot a byte too small is a
+    /// refused send, while a hint far above is a buffer the message pays for and does not use.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
     #[test]
-    fn the_push_capacity_hint_is_never_under_what_the_body_writes_and_is_far_under_the_constant() {
+    fn the_push_capacity_hint_is_what_the_body_writes() {
         use crate::metadata::PushMetadata;
         use crate::push_build::{
             build_push_aliased, build_push_del_literal, build_push_del_literal_with_meta,
@@ -1810,17 +1746,12 @@ mod tests {
                 push_body(&push)(&mut sink).expect("a Vec grows");
             }
             let hint = push_capacity_hint(&push);
-            assert!(
-                hint >= wire.len(),
-                "{shape}: the hint {hint} is under the {} bytes the body writes",
+            assert_eq!(
+                hint,
+                wire.len(),
+                "{shape}: the hint is not the {} bytes the body writes",
                 wire.len()
             );
-            if matches!(shape, "literal" | "empty" | "delete" | "aliased") {
-                assert!(
-                    hint < Push::MAX_ENCODED_BYTES / 10,
-                    "{shape}: the hint {hint} is not far under the constant it replaces"
-                );
-            }
         }
     }
 

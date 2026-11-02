@@ -1201,15 +1201,23 @@ fn normalize_adv_key(key: &str) -> String {
 ///
 /// Generic over the storage profile: a Declare's key expression is on the
 /// default one and a Push's is on the wire one, and this reads both.
-fn wire<S: wz_codecs::CodecStorage>(names: &mut Names, expr: &WireexprOwned<S>) -> String {
-    use sce_forge_runtime::codec::SceStr;
+fn wire<S: wz_codecs::wireexpr::WireexprStorage>(
+    names: &mut Names,
+    expr: &WireexprOwned<S>,
+) -> String {
     let (id, suffix) = match &expr.body {
-        WireexprOwnedVariant::WireexprNonlocal(w) => {
-            (w.id, w.suffix.as_ref().map(|s| s.as_str().to_string()))
-        }
-        WireexprOwnedVariant::WireexprLocal(w) => {
-            (w.id, w.suffix.as_ref().map(|s| s.as_str().to_string()))
-        }
+        WireexprOwnedVariant::WireexprNonlocal(w) => (
+            w.id,
+            w.suffix
+                .as_ref()
+                .map(|s| s.as_text().into_inner().to_string()),
+        ),
+        WireexprOwnedVariant::WireexprLocal(w) => (
+            w.id,
+            w.suffix
+                .as_ref()
+                .map(|s| s.as_text().into_inner().to_string()),
+        ),
     };
     let scope = if id == 0 {
         String::from("literal")
@@ -1228,7 +1236,7 @@ fn wire<S: wz_codecs::CodecStorage>(names: &mut Names, expr: &WireexprOwned<S>) 
 /// (pico's `_z_make_undecl_token(id, &wireexpr)`). Its bytes hold an id, whose
 /// value cannot agree between the arms, so the length is rendered instead: it
 /// still tells a literal suffix from an aliased one.
-fn extensions<S: wz_codecs::CodecStorage>(
+fn extensions<S: wz_codecs::ext_entry::ExtEntryStorage>(
     chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned<S>]>,
 ) -> String {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant;
@@ -1257,11 +1265,10 @@ fn extensions<S: wz_codecs::CodecStorage>(
 /// neither of which can agree between two libraries' sessions, so it is rendered
 /// as present and no more; the attachment is the caller's own bytes, and every
 /// other extension is named by its header.
-fn body_extensions<S: wz_codecs::CodecStorage>(
+fn body_extensions<S: wz_codecs::ext_entry::ExtEntryStorage>(
     chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned<S>]>,
 ) -> String {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant;
-    use wz_codecs::SceByteBuf;
     const SOURCE_INFO: u8 = 0x01;
     let Some(chain) = chain else {
         return String::from(" ext()");
@@ -1276,7 +1283,7 @@ fn body_extensions<S: wz_codecs::CodecStorage>(
             ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => format!(
                 "{:#04x}:{:?}",
                 e.header,
-                String::from_utf8_lossy(z.value.as_slice())
+                String::from_utf8_lossy(z.value.as_bytes().into_inner())
             ),
             _ => format!("{:#04x}", e.header),
         })
@@ -1288,7 +1295,7 @@ fn body_extensions<S: wz_codecs::CodecStorage>(
 /// extension after its header: the QoS byte of a data message's envelope is one
 /// (`0x01` for the id, `0x20` for the integer form; bits 0-2 the priority, bit 3
 /// the no-drop flag that BLOCK sets, bit 4 the express flag).
-fn valued_extensions<S: wz_codecs::CodecStorage>(
+fn valued_extensions<S: wz_codecs::ext_entry::ExtEntryStorage>(
     chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned<S>]>,
 ) -> String {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant;
@@ -1337,7 +1344,9 @@ fn push_whole(p: &wz_session_core::wire::PushOwned, valued: bool) -> String {
                     e.schema.as_ref().map(|s| s.to_string())
                 )
             ),
-            body_extensions(put.extensions.entries()),
+            // The chain other than the shared-memory marker, which the layout
+            // below already shows.
+            body_extensions(Some(wz_session_core::put_payload::chain(put))),
             // Both layouts a Put can carry its payload in, rendered so that two
             // sessions that agree on the wire render the same line: the inline
             // bytes, or each slice as its kind and bytes.

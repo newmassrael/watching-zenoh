@@ -13,9 +13,9 @@
 //! that needs only one half does not drag the other in (and never trips
 //! dead-code under `-D warnings`).
 
+use crate::transport_profile::ExtEntryOwned;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use wz_codecs::ext_entry::ExtEntryOwned;
 
 /// How many extension entries a session can have staged on ONE of its four
 /// handshake chains at once, derived from what this build can stage.
@@ -318,7 +318,9 @@ pub(crate) fn decode_handshake_ext_chain_into(
             }
             // An extension this build does not read is judged by its header and not kept.
             if reads_received_ext(entry.ext_id()) {
-                let owned = entry.try_into_owned().map_err(InboundParseError::Codec)?;
+                let owned = entry
+                    .try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                    .map_err(InboundParseError::Codec)?;
                 // One entry for each extension a build reads: a peer that repeats one fills
                 // the chain and is refused, as a chain past the bound is.
                 if entries.entries.push(owned).is_err() {
@@ -431,6 +433,21 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
 /// buffer that cannot hold the chain refuses with `BufferOverflow`; the bytes
 /// already written stay, so the caller rolls back with
 /// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
+/// The bytes [`encode_ext_chain_into`] writes for `entries`, as each entry's codec
+/// counts it. The continuation bit that encode sets or clears on each header
+/// changes no length.
+#[cfg(all(
+    feature = "tx-lend-only",
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
+    entries
+        .iter()
+        .map(|entry| wz_codecs::ext_entry::ExtEntry::measure(entry).len())
+        .sum()
+}
+
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -479,7 +496,11 @@ pub(crate) fn decode_ext_chain(
         let z = entry.z();
         // Deep-copy the borrowed decode view into the lifetime-free owned mirror
         // so the parsed chain can outlive the input buffer.
-        entries.push(entry.try_into_owned().map_err(InboundParseError::Codec)?);
+        entries.push(
+            entry
+                .try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                .map_err(InboundParseError::Codec)?,
+        );
         if !z {
             return Ok(entries);
         }
@@ -502,7 +523,7 @@ mod tests {
     /// Three entries with distinct headers and bodies, the first two with Z set
     /// by the encoder and the last with it cleared.
     fn chain() -> Vec<ExtEntryOwned> {
-        use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+        use crate::transport_profile::ExtEntryOwnedVariant;
         let unit = |id: u8| ExtEntryOwned {
             header: id,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(wz_codecs::ext_unit::ExtUnit {}),

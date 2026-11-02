@@ -141,13 +141,12 @@ fn layer3_init_body_s0_a0() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid,
+        zid: wz_codecs::Bounded::new(input.zid).unwrap(),
         s: None,
         cookie_len: None,
         cookie: None,
     }
-    .encode_to_vec()
-    .expect("the InitBody encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }
@@ -171,7 +170,7 @@ fn layer3_init_body_s1_a0() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid,
+        zid: wz_codecs::Bounded::new(input.zid).unwrap(),
         s: Some(InitBodyS {
             sn_res,
             batch_size: input.batch_size,
@@ -179,8 +178,7 @@ fn layer3_init_body_s1_a0() {
         cookie_len: None,
         cookie: None,
     }
-    .encode_to_vec()
-    .expect("the InitBody encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }
@@ -204,13 +202,12 @@ fn layer3_init_body_s0_a1() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid,
+        zid: wz_codecs::Bounded::new(input.zid).unwrap(),
         s: None,
         cookie_len: Some(cookie.len() as u64),
-        cookie: Some(&cookie),
+        cookie: Some(wz_codecs::Bounded::new(cookie.as_slice()).unwrap()),
     }
-    .encode_to_vec()
-    .expect("the InitBody encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }
@@ -235,16 +232,15 @@ fn layer3_init_body_s1_a1() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid,
+        zid: wz_codecs::Bounded::new(input.zid).unwrap(),
         s: Some(InitBodyS {
             sn_res,
             batch_size: input.batch_size,
         }),
         cookie_len: Some(cookie.len() as u64),
-        cookie: Some(&cookie),
+        cookie: Some(wz_codecs::Bounded::new(cookie.as_slice()).unwrap()),
     }
-    .encode_to_vec()
-    .expect("the InitBody encodes");
+    .encode_to_vec();
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }

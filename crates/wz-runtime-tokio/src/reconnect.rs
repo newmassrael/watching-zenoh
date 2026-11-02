@@ -348,7 +348,7 @@ impl ReconnectingSession {
         on_event: &mut F,
     ) -> Result<DriverOutcome, ReplayDeclarationsError>
     where
-        F: FnMut(IterationEvent<'_>),
+        F: FnMut(IterationEvent<'_, '_>),
     {
         let clock = self.opened.clock;
         let actions = self.actions.clone();
@@ -559,7 +559,7 @@ impl ReconnectingSession {
         mut on_event: F,
     ) -> ReconnectDriveOutcome
     where
-        F: FnMut(IterationEvent<'_>),
+        F: FnMut(IterationEvent<'_, '_>),
     {
         loop {
             let clock = self.opened.clock;

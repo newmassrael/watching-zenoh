@@ -45,10 +45,14 @@
 
      Wire shape:
        byte 0+     : value_len    (VLE u64, declared; read in both layouts)
-       !after_shm  : value        (length=value_len, max 32)
+       !after_shm  : value        (length=value_len, max 4294967295)
        after_shm   : encoding     (the encoding codec),
                      slice_count  (VLE u32),
-                     slices       (that many `zbuf_slice` elements) -->
+                     slices       (that many `zbuf_slice` elements)
+
+     The bound on `value` is the u32 length upstream reads a ZBuf extension
+     body with (`commons/zenoh-codec/src/common/extension.rs` @
+     `let bodec = Zenoh080Bounded::<u32>::new();`). -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="query_value_zbuf">
@@ -60,7 +64,7 @@
   <datamodel>
     <sce:field id="value_len" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
     <sce:field id="value" sce:type="bytes" sce:byte="1" sce:bit-size="length-ref"
-               sce:length-field="value_len" sce:max-size="32"
+               sce:length-field="value_len" sce:max-size="4294967295"
                sce:present-if="!after_shm"/>
     <sce:embed id="encoding" type="codec_zenoh_encoding" sce:byte="2"
                sce:present-if="after_shm"/>

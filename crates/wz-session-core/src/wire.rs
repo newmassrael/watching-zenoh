@@ -18,8 +18,9 @@
 //! The aliases are for code that holds a RECEIVED message, or builds one that a
 //! receive path will hold (a builder whose output is encoded and also dispatched
 //! to a local subscriber, a test fixture handed to a registry). Code that works
-//! on any profile is generic over `S: CodecStorage` instead and takes the
-//! generated types directly; the two do not mix on one function.
+//! on any profile is generic over the codec's own storage bound instead
+//! (`S: wz_codecs::push::PushStorage`) and takes the generated types directly;
+//! the two do not mix on one function.
 //!
 //! # What is not here
 //!
@@ -29,32 +30,32 @@
 //! reader would otherwise rediscover: a helper that took the alias would accept
 //! one plane's value and refuse the other's. Those helpers are generic.
 
-use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf, SceStr};
+use sce_forge_runtime::codec::{Bounded, CodecError, SceByteBuf, SceStr};
 
 pub use crate::network_message::WireStorage;
 
-/// Copy `b` into the byte container of a wire-profile message field of declared
-/// capacity `N`. The counterpart of [`codec_owned::owned_bytes`](crate::codec_owned::owned_bytes)
-/// for fields of the data plane: that one builds the DEFAULT profile's
-/// container, which is the wrong type for a field of a [`PushOwned`] on an AP
-/// build. `N` is inferred from the field the result is assigned to.
+/// Copy `b` into a byte field of a wire-profile message. The same copy as
+/// [`codec_owned::owned_bytes`](crate::codec_owned::owned_bytes), named for the
+/// data plane's builders: the field's container and bounds are inferred from
+/// the field of the [`PushOwned`] (or Request, Response) the result is assigned
+/// to. `LengthOutOfRange` past the field's bound, `CapacityExceeded` past what
+/// the profile stores.
 ///
 /// A COPY on every profile: a builder's bytes are not part of any frame, so
 /// there is nothing here to share.
 #[allow(dead_code)] // used by the codec-gated builders; unused in no-codec subsets
-pub fn wire_bytes<const N: usize>(
+pub fn wire_bytes<B: SceByteBuf, const MAX: usize, const MIN: usize>(
     b: &[u8],
-) -> Result<<WireStorage as CodecStorage>::Bytes<N>, CodecError> {
-    <<WireStorage as CodecStorage>::Bytes<N> as SceByteBuf>::from_slice(b)
+) -> Result<Bounded<B, MAX, MIN>, CodecError> {
+    Bounded::from_slice(b)
 }
 
-/// Copy `s` into the text container of a wire-profile message field of declared
-/// capacity `N`; see [`wire_bytes`].
+/// Copy `s` into a text field of a wire-profile message; see [`wire_bytes`].
 #[allow(dead_code)] // used by the codec-gated builders; unused in no-codec subsets
-pub fn wire_string<const N: usize>(
+pub fn wire_string<T: SceStr, const MAX: usize, const MIN: usize>(
     s: &str,
-) -> Result<<WireStorage as CodecStorage>::Str<N>, CodecError> {
-    <<WireStorage as CodecStorage>::Str<N> as SceStr>::from_view(s)
+) -> Result<Bounded<T, MAX, MIN>, CodecError> {
+    Bounded::from_text(s)
 }
 
 /// A received (or about-to-be-dispatched) `Push`.
@@ -84,8 +85,8 @@ pub type ResponseOwnedVariant = wz_codecs::response::ResponseOwnedVariant<WireSt
 /// (`push_build`, `request_build`, `response_build`), which assemble every
 /// part of a message at the wire profile and name each part's type to do it. A
 /// reader that works on a part from either plane does not import these: it is
-/// generic over the profile (`S: CodecStorage`), as `wireexpr_resolve` and
-/// `attachment` are. The split is the one the module doc above draws, drawn
+/// generic over the profile (`S: WireexprStorage`, the part's own bound), as
+/// `wireexpr_resolve` and `attachment` are. The split is the one the module doc above draws, drawn
 /// again at the leaves.
 pub mod parts {
     use super::WireStorage;

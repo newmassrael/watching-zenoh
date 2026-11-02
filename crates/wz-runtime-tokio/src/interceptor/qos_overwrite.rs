@@ -755,7 +755,7 @@ mod tests {
         let qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
         let mut msg = put_with_units(8);
         assert_eq!(chain_len(&msg), Some(8), "the chain is at its bound");
-        assert_eq!(apply_qos(&mut msg, qos), Err(CodecError::TlvChainOverflow));
+        assert_eq!(apply_qos(&mut msg, qos), Err(CodecError::TooManyElements));
         assert_eq!(chain_len(&msg), None, "the chain is gone from the message");
         assert_ne!(message_qos(&msg), Some(qos), "and the QoS is not on it");
     }

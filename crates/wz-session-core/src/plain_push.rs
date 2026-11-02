@@ -346,12 +346,17 @@ mod tests {
         let (id, suffix, mapping) = match &push.keyexpr.body {
             WireexprVariant::WireexprLocal(local) => (
                 local.id,
-                local.suffix.map(alloc::string::String::from),
+                local
+                    .suffix
+                    .map(|s| alloc::string::String::from(s.into_inner())),
                 true,
             ),
-            WireexprVariant::WireexprNonlocal(non) => {
-                (non.id, non.suffix.map(alloc::string::String::from), false)
-            }
+            WireexprVariant::WireexprNonlocal(non) => (
+                non.id,
+                non.suffix
+                    .map(|s| alloc::string::String::from(s.into_inner())),
+                false,
+            ),
         };
         let PushVariant::CodecZenohMsgPut(put) = &push.body else {
             return None;
@@ -371,7 +376,14 @@ mod tests {
             id,
             mapping,
             suffix,
-            put.payload.map(<[u8]>::to_vec).unwrap_or_default(),
+            match &put.extensions_has_0x12 {
+                wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } => {
+                    payload.into_inner().to_vec()
+                }
+                wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 { .. } => {
+                    alloc::vec::Vec::new()
+                }
+            },
             qos,
             bytes.len() - cursor.remaining(),
         ))
@@ -416,7 +428,8 @@ mod tests {
                                 payload,
                                 crate::sample::QosLevel::DEFAULT,
                             ),
-                        };
+                        }
+                        .expect("within the bounds");
                         let bytes = encode(&push);
                         let (plain, end) = read_plain_put(&bytes, 0)
                             .unwrap_or_else(|| panic!("id {id} suffix {suffix:?} qos {qos:?}"));
@@ -477,12 +490,10 @@ mod tests {
 
         // The Put carries a timestamp (T flag) or an encoding (E flag).
         for flag in [0x20u8, 0x40, 0x80] {
-            let mut put = encode(&crate::lent_push::put_with_qos(
-                3,
-                None,
-                b"abc",
-                crate::sample::QosLevel::DEFAULT,
-            ));
+            let mut put = encode(
+                &crate::lent_push::put_with_qos(3, None, b"abc", crate::sample::QosLevel::DEFAULT)
+                    .expect("within the bounds"),
+            );
             let at = put.iter().position(|b| *b == PLAIN_PUT_HEADER).unwrap();
             put[at] |= flag;
             assert!(read_plain_put(&put, 0).is_none(), "put flag {flag:#04x}");
@@ -504,12 +515,10 @@ mod tests {
         chained[ext] |= 0x80;
         assert!(read_plain_put(&chained, 0).is_none());
         // A suffix that is not UTF-8, and a length that runs past the buffer.
-        let mut bad = encode(&crate::lent_push::put_with_qos(
-            0,
-            Some("ab"),
-            b"x",
-            crate::sample::QosLevel::DEFAULT,
-        ));
+        let mut bad = encode(
+            &crate::lent_push::put_with_qos(0, Some("ab"), b"x", crate::sample::QosLevel::DEFAULT)
+                .expect("within the bounds"),
+        );
         bad[2] = 0xff;
         assert!(read_plain_put(&bad, 0).is_none());
         let truncated = &plain[..plain.len() - 1];
@@ -524,24 +533,33 @@ mod tests {
     #[test]
     fn a_damaged_record_is_never_read_differently() {
         let seeds = [
-            encode(&crate::lent_push::put_with_qos(
-                5,
-                None,
-                b"payload!",
-                crate::sample::QosLevel::from_raw(0x1a),
-            )),
-            encode(&crate::lent_push::put_with_qos(
-                0,
-                Some("test/thr"),
-                b"12345678",
-                crate::sample::QosLevel::DEFAULT,
-            )),
-            encode(&crate::lent_push::put_with_qos(
-                300,
-                Some("tail"),
-                &[1u8; 200],
-                crate::sample::QosLevel::from_raw(0x11),
-            )),
+            encode(
+                &crate::lent_push::put_with_qos(
+                    5,
+                    None,
+                    b"payload!",
+                    crate::sample::QosLevel::from_raw(0x1a),
+                )
+                .expect("within the bounds"),
+            ),
+            encode(
+                &crate::lent_push::put_with_qos(
+                    0,
+                    Some("test/thr"),
+                    b"12345678",
+                    crate::sample::QosLevel::DEFAULT,
+                )
+                .expect("within the bounds"),
+            ),
+            encode(
+                &crate::lent_push::put_with_qos(
+                    300,
+                    Some("tail"),
+                    &[1u8; 200],
+                    crate::sample::QosLevel::from_raw(0x11),
+                )
+                .expect("within the bounds"),
+            ),
         ];
         let mut agreed = 0usize;
         for seed in &seeds {
@@ -685,7 +703,9 @@ mod tests {
         let qos = |raw: u8| crate::sample::QosLevel::from_raw(raw);
         let none = crate::sample::QosLevel::DEFAULT;
         let one = |id: u64, suffix: Option<&str>, payload: &[u8], q| {
-            encode(&crate::lent_push::put_with_qos(id, suffix, payload, q))
+            encode(
+                &crate::lent_push::put_with_qos(id, suffix, payload, q).expect("within the bounds"),
+            )
         };
         let runs: alloc::vec::Vec<alloc::vec::Vec<alloc::vec::Vec<u8>>> = alloc::vec![
             // A stream of one literal key with a QoS, then the same key with another QoS.

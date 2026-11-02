@@ -683,7 +683,7 @@ where
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     // §5.21 router-multicast-faces (I3b) — the base drive with NO membership
     // relay (the common case: egress-only loops, peer loops, every test). Only
@@ -739,7 +739,7 @@ where
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     drive_multicast_session_inner(
         dispatcher,
@@ -864,7 +864,7 @@ where
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
     R: MulticastStatsRecorder + Sync + ?Sized,
@@ -931,7 +931,7 @@ where
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
     R: MulticastStatsRecorder + Sync + ?Sized,
@@ -1029,7 +1029,7 @@ where
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
     R: MulticastStatsRecorder + Sync + ?Sized,
@@ -1041,7 +1041,7 @@ where
     // teaching each producer to record keeps a later producer from being able
     // to announce a peer the counts never hear of.
     let mut observe = on_event;
-    let mut on_event = move |event: IterationEvent<'_>| {
+    let mut on_event = move |event: IterationEvent<'_, '_>| {
         match event {
             IterationEvent::MulticastPeerArrived(arrived) => stats.peer_arrived(&arrived),
             IterationEvent::MulticastPeerLost(lost) => stats.peer_lost(&lost),
@@ -1457,7 +1457,7 @@ pub fn spawn_router_mcast_egress(
             ))
         },
         // Egress-only: this face consumes no group ingress.
-        |_: IterationEvent<'_>| {},
+        |_: IterationEvent<'_, '_>| {},
         producer.clone(),
         |_: &[Vec<u8>]| {},
         |_: &[String]| {},
@@ -1600,7 +1600,7 @@ fn spawn_group_face<B, F, G, H>(
 ) -> McastFaceStop
 where
     B: for<'a> Fn(&'a crate::McastGroupOptions) -> GroupBind<'a> + Send + Sync + 'static,
-    F: FnMut(IterationEvent<'_>) + Send + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + Send + 'static,
     G: FnMut(&[Vec<u8>]) + Send + 'static,
     H: FnMut(&[String]) + Send + 'static,
 {
@@ -1717,7 +1717,7 @@ where
     D: MulticastLinkDriver,
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
     O: FnOnce(Result<(), &std::io::Error>),
@@ -2502,7 +2502,7 @@ pub fn spawn_router_mcast_group(
         // linkstate machinery, which this plane does not own.
         // Declarations are still not folded: they are handled per peer
         // upstream of here, in the dispatcher.
-        move |event: IterationEvent<'_>| {
+        move |event: IterationEvent<'_, '_>| {
             // Item 751 — the member the next `Poll` is from, named by the RX
             // dispatch just before it. Taken (and so cleared) at the `Poll`, so a
             // frame can never be attributed to the member before it.
@@ -3460,11 +3460,11 @@ mod tests {
     /// drive loop takes the closure by value and the assertions outlive it.
     fn departure_sink() -> (
         std::sync::Arc<std::sync::Mutex<Vec<wz_session_core::driver_loop::MulticastPeerLost>>>,
-        impl FnMut(IterationEvent<'_>),
+        impl FnMut(IterationEvent<'_, '_>),
     ) {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        (seen, move |ev: IterationEvent<'_>| {
+        (seen, move |ev: IterationEvent<'_, '_>| {
             if let IterationEvent::MulticastPeerLost(lost) = ev {
                 sink.lock().expect("no panic in the observer").push(lost);
             }
@@ -4456,13 +4456,13 @@ mod tests {
         join.version = 0x09;
         join.set_whatami(WhatAmI::Peer.to_wire());
         join.set_zid_len_m1((zid.len() - 1) as u8);
-        join.zid = &zid;
+        join.zid = wz_codecs::Bounded::new(&zid[..]).unwrap();
         join.s = Some(JoinS {
             sn_res: 0x01, // 14-bit ring, ours is 0x02 (28-bit)
             batch_size: 0xFFFF,
         });
         join.lease = 5_000;
-        let body = join.encode_to_vec().expect("a fixture Join encodes");
+        let body = join.encode_to_vec();
         let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
         dgram.extend_from_slice(&body);
 
@@ -4966,8 +4966,12 @@ mod tests {
                     for m in &messages {
                         if let NetworkMessage::Response(r) = m {
                             let suffix = match &r.keyexpr.body {
-                                WireexprOwnedVariant::WireexprLocal(a) => a.suffix.as_deref(),
-                                WireexprOwnedVariant::WireexprNonlocal(a) => a.suffix.as_deref(),
+                                WireexprOwnedVariant::WireexprLocal(a) => {
+                                    a.suffix.as_ref().map(|s| s.as_text().into_inner())
+                                }
+                                WireexprOwnedVariant::WireexprNonlocal(a) => {
+                                    a.suffix.as_ref().map(|s| s.as_text().into_inner())
+                                }
                             };
                             assert_eq!(
                                 suffix,
@@ -5287,8 +5291,12 @@ mod tests {
             panic!("payload is a Push")
         };
         let suffix = match &p.keyexpr.body {
-            WireexprOwnedVariant::WireexprLocal(a) => a.suffix.as_deref(),
-            WireexprOwnedVariant::WireexprNonlocal(a) => a.suffix.as_deref(),
+            WireexprOwnedVariant::WireexprLocal(a) => {
+                a.suffix.as_ref().map(|s| s.as_text().into_inner())
+            }
+            WireexprOwnedVariant::WireexprNonlocal(a) => {
+                a.suffix.as_ref().map(|s| s.as_text().into_inner())
+            }
         };
         assert_eq!(
             suffix,

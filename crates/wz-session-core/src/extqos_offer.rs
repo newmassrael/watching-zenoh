@@ -78,7 +78,7 @@
 //! configuration, so a pair of offers that upstream would refuse on those
 //! grounds still reads as QoS here, and such a session never opens.
 
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
 
 use crate::accept_state::QosAcceptState;
 use crate::ext_header::{establishment_ext_id as est_ext, ext_eid, EXT_ENC_Z64};

@@ -46,6 +46,20 @@ wz-codegen-build = { path = "../crates/wz-codegen-build" }
 # generator + the forge-AST fact parsers. serde_yaml_ng parses the sidecar at
 # this I/O boundary (the schema crate pins no backend). Reproduces the
 # sce-codegen --emit-ast + generate() pipeline byte-faithfully.
-wz-switchboard-schema = { path = "../crates/wz-switchboard-schema" }
-wz-switchboard-codegen = { path = "../crates/wz-switchboard-codegen" }
-serde_yaml_ng = "0.9"
+#
+# Optional, behind `switchboards`: the switchboard generator reuses
+# wz-session-core's keyexpr canonicalizer, and wz-session-core compiles
+# wz-codecs, which `include!`s the codec tree this same xtask writes. A
+# generator that compiles its own output cannot regenerate that output after
+# the SCE pin moves: the tree on disk is the old one, built against the new
+# runtime. So the codec and statechart legs are stage 1 and build without
+# these crates, and the switchboard leg is stage 2, built once stage 1 has
+# written the tree it compiles. `scripts/regen-codegen.sh` runs them in that
+# order.
+wz-switchboard-schema = { path = "../crates/wz-switchboard-schema", optional = true }
+wz-switchboard-codegen = { path = "../crates/wz-switchboard-codegen", optional = true }
+serde_yaml_ng = { version = "0.9", optional = true }
+
+[features]
+default = ["switchboards"]
+switchboards = ["dep:wz-switchboard-schema", "dep:wz-switchboard-codegen", "dep:serde_yaml_ng"]

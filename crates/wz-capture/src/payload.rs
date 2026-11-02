@@ -1452,7 +1452,10 @@ impl PayloadCensus {
             return;
         }
         let encoding = match declared {
-            Some(e) => Encoding::from_packed(e.packed_id, e.schema.as_deref()),
+            Some(e) => Encoding::from_packed(
+                e.packed_id,
+                e.schema.as_ref().map(|s| s.as_text().into_inner()),
+            ),
             None => Encoding::Absent,
         };
         // R311y622 (§1.1o) — the marker is read BEFORE the bytes are, because
@@ -1772,13 +1775,15 @@ pub(crate) mod tests_support {
                     schema: None,
                 }),
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// A `Push` under `keyexpr` whose Put carries the encoding the caller
@@ -1804,7 +1809,7 @@ pub(crate) mod tests_support {
                 Some(wz_codecs::encoding::Encoding {
                     packed_id: (u32::from(id) << 1) | u32::from(schema.is_some()),
                     schema_len: schema.map(|s| s.len() as u64),
-                    schema,
+                    schema: schema.map(|s| wz_codecs::Bounded::new(s).unwrap()),
                 }),
             ),
             None => (wz_codecs::msg_put::MsgPut::default().header, None),
@@ -1816,13 +1821,15 @@ pub(crate) mod tests_support {
                 header,
                 encoding,
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// A `Push` whose payload travels as SLICES, every one of them plain bytes.
@@ -1839,13 +1846,6 @@ pub(crate) mod tests_support {
         encoding_id: u16,
         parts: &[&[u8]],
     ) -> Vec<u8> {
-        let marker = wz_codecs::ext_entry::ExtEntry {
-            header: wz_session_core::ext_header::body_ext_id::SHM
-                | wz_session_core::ext_header::EXT_FLAG_M,
-            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(
-                wz_codecs::ext_unit::ExtUnit::default(),
-            ),
-        };
         wz_codecs::push::Push {
             header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
@@ -1858,24 +1858,27 @@ pub(crate) mod tests_support {
                     schema_len: None,
                     schema: None,
                 }),
-                extensions: Some(core::iter::once(marker).collect()),
                 slice_count: Some(parts.len() as u32),
-                slices: Some(
-                    parts
-                        .iter()
-                        .map(|bytes| wz_codecs::zbuf_slice::ZbufSlice {
-                            kind: u32::from(wz_session_core::put_payload::SLICE_KIND_RAW),
-                            len: bytes.len() as u64,
-                            bytes,
-                        })
-                        .collect(),
-                ),
+                // The marker is the chain's whole content, held by its place.
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 {
+                    extensions: Default::default(),
+                    slices: wz_codecs::Bounded::new(
+                        parts
+                            .iter()
+                            .map(|bytes| wz_codecs::zbuf_slice::ZbufSlice {
+                                kind: u32::from(wz_session_core::put_payload::SLICE_KIND_RAW),
+                                len: bytes.len() as u64,
+                                bytes: wz_codecs::Bounded::new(*bytes).unwrap(),
+                            })
+                            .collect(),
+                    )
+                    .unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// R2510 (open-debt item 713) — [`push_declaring`] keyed by an ALIAS rather
@@ -1914,13 +1917,15 @@ pub(crate) mod tests_support {
                     schema: None,
                 }),
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// R311y622 (§1.1s) — a `Response` carrying an `Err` whose payload is
@@ -1948,13 +1953,12 @@ pub(crate) mod tests_support {
                     schema: None,
                 }),
                 payload_len: payload.len() as u64,
-                payload,
+                payload: wz_codecs::Bounded::new(payload).unwrap(),
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Response is encodable")
     }
 
     /// R311y622 (§1.1o) — a `Push` whose payload slot holds an SHM DESCRIPTOR:
@@ -1969,18 +1973,10 @@ pub(crate) mod tests_support {
         encoding_id: u16,
         descriptor: &[u8],
     ) -> Vec<u8> {
-        // Borrowed form directly: the encoder takes `ExtEntry<'_>` and an
-        // owned local would not outlive the struct literal it is placed in.
-        let marker = wz_codecs::ext_entry::ExtEntry {
-            header: wz_session_core::ext_header::body_ext_id::SHM
-                | wz_session_core::ext_header::EXT_FLAG_M,
-            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(
-                wz_codecs::ext_unit::ExtUnit::default(),
-            ),
-        };
         // The marker makes the payload SLICED, which is how a descriptor reaches
-        // the wire: one slice of kind SHM_PTR whose bytes are the descriptor. The
-        // inline pair is absent, and the encoder would refuse a Put that kept it.
+        // the wire: one slice of kind SHM_PTR whose bytes are the descriptor, and
+        // no inline pair. The arm holds the marker by its place, the chain's
+        // whole content here.
         wz_codecs::push::Push {
             header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
@@ -1993,22 +1989,24 @@ pub(crate) mod tests_support {
                     schema_len: None,
                     schema: None,
                 }),
-                extensions: Some(core::iter::once(marker).collect()),
                 slice_count: Some(1),
-                slices: Some(
-                    core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
-                        kind: u32::from(wz_session_core::put_payload::SLICE_KIND_SHM_PTR),
-                        len: descriptor.len() as u64,
-                        bytes: descriptor,
-                    })
-                    .collect(),
-                ),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 {
+                    extensions: Default::default(),
+                    slices: wz_codecs::Bounded::new(
+                        core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
+                            kind: u32::from(wz_session_core::put_payload::SLICE_KIND_SHM_PTR),
+                            len: descriptor.len() as u64,
+                            bytes: wz_codecs::Bounded::new(descriptor).unwrap(),
+                        })
+                        .collect(),
+                    )
+                    .unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// R311y622 (§1.1o) — THE DISCRIMINATOR'S fixture: an `Err` whose body ext
@@ -2037,7 +2035,7 @@ pub(crate) mod tests_support {
             body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
                 wz_codecs::ext_zbuf::ExtZbuf {
                     value_len: 1,
-                    value: &[0xAB],
+                    value: wz_codecs::Bounded::new(&[0xABu8] as &[u8]).unwrap(),
                 },
             ),
         };
@@ -2055,14 +2053,15 @@ pub(crate) mod tests_support {
                     schema_len: None,
                     schema: None,
                 }),
-                extensions: Some(core::iter::once(foreign).collect()),
+                extensions: Some(
+                    wz_codecs::Bounded::new(core::iter::once(foreign).collect()).unwrap(),
+                ),
                 payload_len: payload.len() as u64,
-                payload,
+                payload: wz_codecs::Bounded::new(payload).unwrap(),
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Response is encodable")
     }
 
     /// A dissection carrying one A-to-B `Push` per entry.
@@ -4360,8 +4359,7 @@ mod census_tests {
             ),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture Push is encodable");
+        .encode_to_vec();
         let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = alloc::vec![
             (true, Some(1), push_declaring("t/put", ID_JSON, b"{}")),
             (true, Some(1), del),
@@ -4815,13 +4813,15 @@ mod census_tests {
             keyexpr: fx::sender_space(0, Some(keyexpr)),
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// R311y618 (§1.4j) — an id NOT in this build's table, arriving off the
@@ -5011,13 +5011,15 @@ mod census_tests {
                     schema: None,
                 }),
                 payload_len: Some(2),
-                payload: Some(b"hi"),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(b"hi" as &[u8]).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture Push is encodable");
+        .encode_to_vec();
         let (t, plain) = census_where(&alloc::vec![(true, unnamed)], "key == app/topic");
         assert_eq!(plain.payloads(), 1, "the control: the record decoded");
         assert_eq!(t.payloads(), 0);

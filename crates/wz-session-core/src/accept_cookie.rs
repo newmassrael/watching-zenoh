@@ -41,15 +41,17 @@
 //! optional level — upstream's `StateAccept` shape, arrived at from wz's own
 //! code.
 //!
-//! That matters for size. A raw extension chain would not fit: `ExtEntry`'s
-//! own `MAX_ENCODED_BYTES` is 42 and a wz InitSyn may carry six extensions,
-//! against a cookie field the generated codec caps at
-//! `Option<S::Bytes<128>>` — a cap that is advisory on the Heap storage
-//! profile and HARD on the no-alloc Inline one. The outcome form's width is
-//! summed from its members, and `the_widest_cookie_fits_the_generated_field`
-//! holds the widest one under that cap — the number is measured there rather
-//! than written here, because a number written here went stale the first
-//! time a member widened (R2777).
+//! That matters for size. A raw extension chain would not fit: an extension
+//! entry is as wide as its body, and a wz InitSyn may carry six extensions,
+//! against the 128 bytes of a cookie a wz node stores (the `cookie` capacity
+//! `deploy/codec_node.yaml` gives the `Node` profile). The protocol's bound
+//! on the field is upstream's u16 length, and a growable profile holds any
+//! cookie under it; the node's deployment refuses a longer one as
+//! `CapacityExceeded`. The outcome form's width is summed from its members,
+//! and `the_widest_cookie_fits_the_generated_field` holds the widest one under
+//! that capacity — the number is measured there rather than written here,
+//! because a number written here went stale the first time a member widened
+//! (R2777).
 //!
 //! ## Where it is used (R2769, R2772, R2774)
 //!
@@ -525,19 +527,20 @@ mod tests {
         assert_eq!(back, state());
     }
 
-    /// The cookie fits the wire field that has to carry it.
+    /// The cookie fits what a wz node stores of the field that has to carry it.
     ///
-    /// `InitBody`'s generated `cookie` is `Option<S::Bytes<128>>`, a cap that
-    /// is ADVISORY on the Heap profile and HARD on the no-alloc Inline one —
-    /// so a cookie that fit only on AP would strand an Inline peer. The widest
-    /// zid the protocol admits is the worst case and is what this measures.
+    /// `InitBody`'s `cookie` is bounded by upstream's u16 length, and a wz node
+    /// with no allocator stores 128 bytes of it (the `Node` deployment's
+    /// capacity, `deploy/codec_node.yaml`) — so a cookie that fit only on AP
+    /// would strand such a peer. The widest zid the protocol admits is the
+    /// worst case and is what this measures.
     ///
     /// R2783 — with the multilink member OFF, and that is not a convenience.
     /// Only a peer that offers multilink can be handed a cookie carrying it,
     /// and offering it takes `transport-multilink`, which implies
     /// `session-extauth`, which implies `alloc` (wz-session-core's own
-    /// Cargo.toml) -- the profile on which the carrier is unbounded. So every
-    /// cookie an Inline peer can receive has the one-byte `None`, and that is
+    /// Cargo.toml) -- the profile on which the carrier grows. So every cookie a
+    /// peer with no allocator can receive has the one-byte `None`, and that is
     /// the cookie this bounds. The `Some` arm's size is the round trip's to
     /// check, and it is.
     #[test]
@@ -553,7 +556,7 @@ mod tests {
         );
         assert!(
             wire.len() <= 128,
-            "the widest cookie is {} bytes and the generated field caps at 128",
+            "the widest cookie is {} bytes and a node stores 128 of the field",
             wire.len()
         );
     }

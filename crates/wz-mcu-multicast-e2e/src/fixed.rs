@@ -86,7 +86,7 @@ struct Observed {
 }
 
 impl Observed {
-    fn observe(&mut self, event: IterationEvent<'_>) {
+    fn observe(&mut self, event: IterationEvent<'_, '_>) {
         // A Push is delivered as an owned batch on the heap profile and as a lent
         // record on the slot profile: one question, whichever form arrived.
         if event.delivers_push() {
@@ -261,7 +261,7 @@ where
     let mut seen = Observed::default();
     on_stage(MulticastStage::RoundTrip);
     let outcome: MulticastOutcome = {
-        let mut on_event = |event: IterationEvent<'_>| seen.observe(event);
+        let mut on_event = |event: IterationEvent<'_, '_>| seen.observe(event);
         let mut next_tx = || pending.take();
         loop {
             if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, None) {
@@ -274,7 +274,7 @@ where
     // The departure: the SAME pump asked to stop. The stop is polled before the
     // iteration budget, so it is answered on the step it is first asked on.
     on_stage(MulticastStage::Departure);
-    let mut on_event = |_event: IterationEvent<'_>| {};
+    let mut on_event = |_event: IterationEvent<'_, '_>| {};
     let mut next_tx = || None;
     let mut stop = || true;
     let departure = loop {

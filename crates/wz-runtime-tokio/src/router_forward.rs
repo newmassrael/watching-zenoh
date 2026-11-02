@@ -13094,7 +13094,7 @@ impl RouterForwarder {
     /// that frames of different faces route at once, and a declaration, a topology message or an
     /// interest writes them, alone. The guard of one message is dropped before the next is taken,
     /// so a frame of declarations does not hold the tables against the data between them.
-    fn forward_frame(&self, id: FaceId, event: IterationEvent<'_>) {
+    fn forward_frame(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages,
             reliable,
@@ -13424,7 +13424,7 @@ impl FaceForwarder for RouterForwarder {
         self.on_tables_mut().set_mcast_group_subs(subs)
     }
 
-    fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
+    fn forward(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         self.forward_frame(id, event)
     }
 }
@@ -13516,7 +13516,6 @@ mod tests {
     use super::*;
     use crate::runtime_impl::TokioRuntime;
     use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
-    use sce_forge_runtime::codec::{SceBytes, SceStr};
     use std::cell::Cell;
     #[cfg(feature = "access-acl")]
     use wz_access_control::{
@@ -14009,7 +14008,7 @@ mod tests {
                     .iter()
                     .map(|s| wz_codecs::locator::LocatorOwned {
                         locator_len: s.len() as u64,
-                        locator: sce_forge_runtime::codec::SceString::from_view(s).unwrap(),
+                        locator: wz_session_core::codec_owned::owned_string(s).unwrap(),
                     })
                     .collect::<Vec<_>>(),
             )
@@ -14026,19 +14025,20 @@ mod tests {
             psid,
             sn,
             zid_len: Some(4),
-            zid: Some(SceBytes::from_slice(zid(node).as_slice()).unwrap()),
+            zid: Some(wz_session_core::codec_owned::owned_bytes(zid(node).as_slice()).unwrap()),
             whatami: Some(2),
             num_locators: None,
             locators: None,
             links_len: links.len() as u64,
-            links: wz_session_core::held_list::held(
-                links
-                    .iter()
-                    .map(|&psid| LinkstateLink { psid })
-                    .collect::<Vec<_>>(),
-            )
-            .expect("a fixture's links are within the bound"),
-            weights: None,
+            options_h: wz_codecs::linkstate::LinkstateOptionsH::NotH {
+                links: wz_session_core::held_list::held(
+                    links
+                        .iter()
+                        .map(|&psid| LinkstateLink { psid })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("a fixture's links are within the bound"),
+            },
         }
     }
 
@@ -15113,12 +15113,16 @@ mod tests {
             let states = flooded_link_states(&sink.frame_bytes(0));
             assert_eq!(states.len(), 1, "self's links-only entry alone");
             assert!(states[0].zid.is_none(), "links-only: no zid");
-            let slot = states[0]
-                .links
+            let wz_codecs::linkstate::LinkstateOptionsH::H { links_weights } = &states[0].options_h
+            else {
+                panic!("a set weight rides");
+            };
+            let slot = links_weights
+                .first()
                 .iter()
                 .position(|l| l.psid == psid_a)
                 .expect("the link to A is advertised");
-            let weights = states[0].weights.as_ref().expect("a set weight rides");
+            let weights = links_weights.second();
             assert_eq!(weights[slot].weight, 300, "Router face {name} sees 300");
         }
         assert!(fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get());
@@ -19380,8 +19384,8 @@ mod tests {
                             id: 0,
                             suffix_len: Some(keyexpr.len() as u64),
                             suffix: Some(
-                                sce_forge_runtime::codec::SceString::from_view(keyexpr)
-                                    .expect("interest keyexpr fits the SceString capacity"),
+                                wz_session_core::codec_owned::owned_string(keyexpr)
+                                    .expect("interest keyexpr fits the suffix's bound"),
                             ),
                         }),
                     }),
@@ -19573,7 +19577,7 @@ mod tests {
         match &reply.body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
                 WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
-                    w.suffix.as_deref(),
+                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
                     Some("demo/key"),
                     "aggregate reply is keyed on the interest keyexpr, not demo/**"
                 ),
@@ -19642,7 +19646,7 @@ mod tests {
                 );
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
-                        w.suffix.as_deref(),
+                        w.suffix.as_ref().map(|s| s.as_text().into_inner()),
                         Some("demo/key"),
                         "the aggregate push is keyed on the INTEREST ke, not demo/**"
                     ),
@@ -19716,7 +19720,7 @@ mod tests {
                 assert_ne!(d.id, 0, "a future qabl push carries a non-zero decl id");
                 match &d.keyexpr.body {
                     WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
-                        w.suffix.as_deref(),
+                        w.suffix.as_ref().map(|s| s.as_text().into_inner()),
                         Some("demo/key"),
                         "the aggregate push is keyed on the INTEREST ke, not demo/**"
                     ),
@@ -20367,7 +20371,7 @@ mod tests {
 
     /// The key a wire expression names when it is literal.
     #[cfg(feature = "routing-namespace")]
-    fn literal_key<S: sce_forge_runtime::codec::CodecStorage>(
+    fn literal_key<S: wz_codecs::wireexpr::WireexprStorage>(
         wireexpr: &wz_codecs::wireexpr::WireexprOwned<S>,
     ) -> String {
         resolve_wireexpr(&wireexpr.body, &hashbrown::HashMap::new()).expect("a literal key")
@@ -21176,7 +21180,7 @@ mod tests {
         match &forwarded_declare(&sink_c.frame_bytes(0)).body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
                 WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
-                    w.suffix.as_deref(),
+                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
                     Some("demo/**"),
                     "non-aggregate reply is keyed on the sub's own keyexpr"
                 ),
@@ -22555,9 +22559,9 @@ mod tests {
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
         let echoed: Vec<LinkstateOwned> = received_link_states(&sink_a);
         assert!(
-            echoed
-                .iter()
-                .any(|e| e.zid.as_deref() == Some(zid(0xDD).as_slice())),
+            echoed.iter().any(|e| {
+                e.zid.as_ref().map(|z| z.as_bytes().into_inner()) == Some(zid(0xDD).as_slice())
+            }),
             "the source face is told self's entry for the node it introduced"
         );
     }
@@ -23982,8 +23986,8 @@ mod tests {
                             id: 0,
                             suffix_len: Some(keyexpr.len() as u64),
                             suffix: Some(
-                                sce_forge_runtime::codec::SceString::from_view(keyexpr)
-                                    .expect("interest keyexpr fits the SceString capacity"),
+                                wz_session_core::codec_owned::owned_string(keyexpr)
+                                    .expect("interest keyexpr fits the suffix's bound"),
                             ),
                         }),
                     }),
@@ -24420,7 +24424,7 @@ mod tests {
         match &forwarded_declare(&sink_c.frame_bytes(0)).body {
             DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
                 WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
-                    w.suffix.as_deref(),
+                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
                     Some("demo/**"),
                     "aggregate reply is keyed on the interest keyexpr, not demo/a|demo/b"
                 ),
@@ -28506,12 +28510,18 @@ mod tests {
                 }
             })
             .map(|r| match &r.keyexpr.body {
-                WireexprOwnedVariant::WireexprLocal(a) => {
-                    (a.id, a.suffix.as_deref().map(str::to_owned))
-                }
-                WireexprOwnedVariant::WireexprNonlocal(a) => {
-                    (a.id, a.suffix.as_deref().map(str::to_owned))
-                }
+                WireexprOwnedVariant::WireexprLocal(a) => (
+                    a.id,
+                    a.suffix
+                        .as_ref()
+                        .map(|s| s.as_text().into_inner().to_owned()),
+                ),
+                WireexprOwnedVariant::WireexprNonlocal(a) => (
+                    a.id,
+                    a.suffix
+                        .as_ref()
+                        .map(|s| s.as_text().into_inner().to_owned()),
+                ),
             })
             .collect()
     }
@@ -28778,12 +28788,18 @@ mod tests {
     macro_rules! wire_keyexpr {
         ($keyexpr:expr) => {
             match &$keyexpr.body {
-                WireexprOwnedVariant::WireexprLocal(a) => {
-                    (a.id, a.suffix.as_deref().map(str::to_owned))
-                }
-                WireexprOwnedVariant::WireexprNonlocal(a) => {
-                    (a.id, a.suffix.as_deref().map(str::to_owned))
-                }
+                WireexprOwnedVariant::WireexprLocal(a) => (
+                    a.id,
+                    a.suffix
+                        .as_ref()
+                        .map(|s| s.as_text().into_inner().to_owned()),
+                ),
+                WireexprOwnedVariant::WireexprNonlocal(a) => (
+                    a.id,
+                    a.suffix
+                        .as_ref()
+                        .map(|s| s.as_text().into_inner().to_owned()),
+                ),
             }
         };
     }

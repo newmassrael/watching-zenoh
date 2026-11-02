@@ -165,6 +165,10 @@ fn refuse(e: ComposeError) -> DocError {
             format!("/extensions/{index}"),
             "this build cannot hold an extension body of that size",
         ),
+        ComposeError::CookieLength { len, max } => invalid(
+            "/cookie",
+            format!("the cookie is {len} bytes and the message holds at most {max}"),
+        ),
         // A framing problem, not a description's: `build` reports it apart.
         ComposeError::UnitTooLong { len, max } => invalid(
             "",

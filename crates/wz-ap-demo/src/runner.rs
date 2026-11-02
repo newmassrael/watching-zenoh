@@ -3625,7 +3625,7 @@ pub(crate) async fn run_demo(
     // so the one-shot and reconnect paths share one dispatch body rather than
     // cloning the switchboard fan. The body is unchanged from the pre-fork
     // inline closure (R311ld SSOT dispatch + gc-3 switchboard fan).
-    let mut dispatch = |event: IterationEvent<'_>| {
+    let mut dispatch = |event: IterationEvent<'_, '_>| {
         log::debug!("wz-ap-demo: iteration event = {event:?}");
         // R311ld — the SSOT fans the event into the per-domain
         // registries + flushes staged outbound records, then
@@ -9089,7 +9089,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         #[cfg(feature = "zenoh-config")]
         let dispatch_cfg = admin_cfg.clone();
         let mut dispatch =
-            |event: IterationEvent<'_>| {
+            |event: IterationEvent<'_, '_>| {
                 // Fires the admin GET queryable + config-write subscriber; the config-write
                 // handler stashes any AddStorage/RemoveStorage intent into `pending`. This
                 // call also flushes staged replies + drains the deferred ResponseFinal

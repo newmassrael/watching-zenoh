@@ -2919,7 +2919,7 @@ impl SharedSession {
     /// cadence. Sweeping on EVERY event (not only a deadline wake) is
     /// deliberate: it is idempotent and cheap when nothing is expired, and it
     /// means inbound traffic also clears the table.
-    pub fn dispatch(&self, id: u64, event: IterationEvent<'_>) {
+    pub fn dispatch(&self, id: u64, event: IterationEvent<'_, '_>) {
         // Clone the session out of the lock first: the dispatch fires the C
         // subscriber callback, which may re-enter this session (`z_put` from
         // inside a callback is a supported pico pattern), so holding the lock
@@ -5508,7 +5508,7 @@ impl FaceForwarder for CApiForwarder {
         self.shared.face_down(id.0 + self.base);
     }
 
-    fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
+    fn forward(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         self.shared.dispatch(id.0 + self.base, event);
     }
 

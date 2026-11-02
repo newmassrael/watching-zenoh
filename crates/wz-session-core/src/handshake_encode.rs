@@ -49,6 +49,8 @@ use crate::session_init_params::SessionInitParams;
 // reaches with `append_byte` and a sink over it. `TxBuf` is needed for the
 // method call only when `EncodeBuf` is a concrete type (no lending); on a
 // `dyn TxBuf` the methods resolve without the import.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+use crate::transport_profile::ExtEntryOwned;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -62,8 +64,6 @@ use crate::tx_buf::{TxBuf, TxSink};
     feature = "codec-close"
 ))]
 use sce_forge_runtime::codec::CodecError;
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-use wz_codecs::ext_entry::ExtEntryOwned;
 
 #[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
@@ -104,11 +104,11 @@ pub fn encode_init_with_caps(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Result<Vec<u8>, CodecError> {
-    // The worst case the codec bounds the body by, the header byte and the
-    // chain's own entries (a coarse four bytes each, as the chain encoder
-    // reserves): one allocation for the whole frame, as the body-then-chain
-    // form it replaced made.
-    let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + extensions.len() * 4);
+    // No reservation up front: the body is built inside `encode_init_into`, and
+    // the codec's largest frame is no bound worth reserving, since a cookie may
+    // be as long as upstream's u16 length lets it be. The vector grows to the
+    // frame; a handshake is a few of these per session.
+    let mut wire = Vec::new();
     encode_init_into(&mut wire, params, caps, is_ack, extensions, cookie_override)?;
     Ok(wire)
 }
@@ -171,6 +171,49 @@ pub fn encode_init_into(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Result<(), CodecError> {
+    let (header, body) = init_message(params, caps, is_ack, extensions, cookie_override)?;
+    buf.append_byte(header)?;
+    body.encode(&mut TxSink::new(&mut *buf))?;
+    encode_ext_chain_into(buf, extensions)
+}
+
+/// The bytes [`encode_init_into`] writes for the same arguments: the header, the
+/// body as the codec counts it, and the extension chain. It is what a lent slot
+/// for the message must hold, and it is exact, since an Init body has no size
+/// constant that bounds it (its cookie's length is upstream's u16). A message
+/// `init_message` refuses counts as zero: the encoder that follows refuses it
+/// with the same error.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "codec-init-body",
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+pub(crate) fn init_frame_len(
+    params: &SessionInitParams,
+    caps: InitCaps,
+    is_ack: bool,
+    extensions: &[ExtEntryOwned],
+    cookie_override: Option<&[u8]>,
+) -> usize {
+    match init_message(params, caps, is_ack, extensions, cookie_override) {
+        Ok((_header, body)) => {
+            1 + InitBody::measure(&body).len() + crate::ext_chain::ext_chain_len(extensions)
+        }
+        Err(_) => 0,
+    }
+}
+
+/// The header byte and the body of an Init message, as [`encode_init_into`]
+/// writes them and [`init_frame_len`] counts them. `LengthOutOfRange` for a zid
+/// outside the protocol's 1..=16 bytes or a cookie past its `u16` length.
+#[cfg(feature = "codec-init-body")]
+fn init_message<'p>(
+    params: &'p SessionInitParams,
+    caps: InitCaps,
+    is_ack: bool,
+    extensions: &[ExtEntryOwned],
+    cookie_override: Option<&'p [u8]>,
+) -> Result<(u8, InitBody<'p>), CodecError> {
     let mut parent_flags = 0;
     if is_ack {
         parent_flags |= wire_const::FLAG_T_INIT_A;
@@ -190,27 +233,25 @@ pub fn encode_init_into(
     } else {
         None
     };
+    // zid is the protocol-bounded peer id (1..=16), refused before `init_cbyte`
+    // packs its length, which holds only a length in those bounds.
+    let zid = crate::codec_owned::sent(params.zid.as_slice())?;
     let body = InitBody {
         // The protocol's, not a parameter: see `SessionInitParams`.
         version: wire_const::PROTOCOL_VERSION,
         cbyte: init_cbyte(params.whatami, params.zid.len()),
-        // zid is the protocol-bounded peer id (1..=16); init_cbyte
-        // above already encodes its length.
-        zid: &params.zid,
+        zid,
         s: Some(InitBodyS {
             sn_res: pack_sn_res(caps.seq_num_res, caps.req_id_res),
             batch_size: caps.batch_size,
         }),
         cookie_len: cookie.map(|c| c.len() as u64),
-        cookie,
+        cookie: cookie.map(crate::codec_owned::sent).transpose()?,
     };
     if body.s.is_some() {
         parent_flags |= wire_const::FLAG_T_INIT_S;
     }
-
-    buf.append_byte(parent_flags | wire_const::T_MID_INIT)?;
-    body.encode(&mut TxSink::new(&mut *buf))?;
-    encode_ext_chain_into(buf, extensions)
+    Ok((parent_flags | wire_const::T_MID_INIT, body))
 }
 
 /// Build the wire bytes for an Open frame (OpenSyn / OpenAck). Body
@@ -231,7 +272,9 @@ pub fn encode_open(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<Vec<u8>, CodecError> {
-    let mut wire = Vec::with_capacity(1 + OpenBody::MAX_ENCODED_BYTES + extensions.len() * 4);
+    // No reservation up front, for the reason `encode_init_with_caps` gives: an
+    // Open body has no largest frame at all, its cookie length being a `usize`.
+    let mut wire = Vec::new();
     encode_open_into(
         &mut wire,
         params,
@@ -261,6 +304,47 @@ pub fn encode_open_into(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<(), CodecError> {
+    let (header, body) = open_message(params, initial_sn, is_ack, cookie_override, extensions)?;
+    buf.append_byte(header)?;
+    body.encode(&mut TxSink::new(&mut *buf))?;
+    encode_ext_chain_into(buf, extensions)
+}
+
+/// The bytes [`encode_open_into`] writes for the same arguments, as
+/// [`init_frame_len`] is for Init: exact, since an Open body has no size constant
+/// (its cookie's length is a `u32`), and zero for a message `open_message`
+/// refuses.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "codec-open-body",
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+pub(crate) fn open_frame_len(
+    params: &SessionInitParams,
+    initial_sn: u64,
+    is_ack: bool,
+    cookie_override: Option<&[u8]>,
+    extensions: &[ExtEntryOwned],
+) -> usize {
+    match open_message(params, initial_sn, is_ack, cookie_override, extensions) {
+        Ok((_header, body)) => {
+            1 + OpenBody::measure(&body).len() + crate::ext_chain::ext_chain_len(extensions)
+        }
+        Err(_) => 0,
+    }
+}
+
+/// The header byte and the body of an Open message, as [`encode_open_into`]
+/// writes them and [`open_frame_len`] counts them. `LengthOutOfRange` for a
+/// cookie past the protocol's `u32` length.
+#[cfg(feature = "codec-open-body")]
+fn open_message<'p>(
+    params: &'p SessionInitParams,
+    initial_sn: u64,
+    is_ack: bool,
+    cookie_override: Option<&'p [u8]>,
+    extensions: &[ExtEntryOwned],
+) -> Result<(u8, OpenBody<'p>), CodecError> {
     // R311ku — the T flag is DERIVED, not configured: a whole-second
     // lease compacts to the seconds form, pico `_z_t_msg_make_open_syn`
     // / `_ack` parity (definitions/transport.c:196-214; the pre-ku
@@ -291,12 +375,13 @@ pub fn encode_open_into(
         } else {
             None
         },
-        cookie: if !is_ack { Some(cookie_bytes) } else { None },
+        cookie: if !is_ack {
+            Some(crate::codec_owned::sent(cookie_bytes)?)
+        } else {
+            None
+        },
     };
-
-    buf.append_byte(parent_flags | wire_const::T_MID_OPEN)?;
-    body.encode(&mut TxSink::new(&mut *buf))?;
-    encode_ext_chain_into(buf, extensions)
+    Ok((parent_flags | wire_const::T_MID_OPEN, body))
 }
 
 // R2 (R311ww) — the ext-chain serializer moved to the shared `crate::ext_chain`
@@ -524,6 +609,21 @@ mod tests {
             cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte test key"),
         }
+    }
+
+    /// A zid outside the protocol's 1..=16 bytes is refused with `LengthOutOfRange`
+    /// before a byte of the Init is written, and the zid of the fixture is not.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_init_with_an_empty_zid_is_refused() {
+        let mut params = open_params(10_000);
+        let caps = super::InitCaps::of(&params);
+        assert!(super::init_message(&params, caps, false, &[], None).is_ok());
+        params.zid = crate::session_init_params::zid_bytes(&[]);
+        assert_eq!(
+            super::init_message(&params, caps, false, &[], None).err(),
+            Some(sce_forge_runtime::codec::CodecError::LengthOutOfRange)
+        );
     }
 
     /// R311ku — encode_open derives the `_Z_FLAG_T_OPEN_T` flag from the

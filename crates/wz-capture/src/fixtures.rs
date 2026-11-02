@@ -127,7 +127,7 @@ fn sender_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id,
             suffix_len: suffix.map(|s| s.len() as u64),
-            suffix,
+            suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
         }),
     }
 }
@@ -147,7 +147,6 @@ fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture declaration is encodable")
 }
 
 /// A `Push` under `keyexpr` carrying `payload`.
@@ -168,13 +167,15 @@ fn push(keyexpr: Wireexpr<'static>, payload: &'static [u8]) -> Vec<u8> {
         keyexpr,
         body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
             payload_len: Some(payload.len() as u64),
-            payload: Some(payload),
+            extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(payload).unwrap(),
+            },
             ..Default::default()
         }),
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture push is encodable")
 }
 
 /// A two-sided handshake on one link, which is what makes it a LINK: A names
@@ -568,16 +569,12 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
         let body = wz_codecs::init_body::InitBody {
             version: 0x09,
             cbyte: 0x31,
-            zid: if is_ack { ZID_B } else { ZID_A },
+            zid: wz_codecs::Bounded::new(if is_ack { ZID_B } else { ZID_A }).unwrap(),
             s: None,
             cookie_len: if is_ack { Some(0) } else { None },
-            cookie: if is_ack { Some(&[]) } else { None },
+            cookie: is_ack.then(|| wz_codecs::Bounded::new(&[] as &[u8]).unwrap()),
         };
-        wire.extend_from_slice(
-            &body
-                .encode_to_vec()
-                .expect("a fixture init body is encodable"),
-        );
+        wire.extend_from_slice(&body.encode_to_vec());
         wire
     };
     let open = |is_ack: bool| {
@@ -592,7 +589,7 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
                 lease: 10_000,
                 initial_sn: 0,
                 cookie_len: if is_ack { None } else { Some(0) },
-                cookie: if is_ack { None } else { Some(&[]) },
+                cookie: (!is_ack).then(|| wz_codecs::Bounded::new(&[] as &[u8]).unwrap()),
             }
             .encode_to_vec(),
         );

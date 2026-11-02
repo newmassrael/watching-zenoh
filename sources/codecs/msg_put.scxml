@@ -30,7 +30,7 @@
                               `_z_encoding_encode` codec.c:356-381:
                               VLE u32 packed_id with LSB has_schema
                               flag + has_schema-gated VLE u64
-                              schema_len + UTF-8 schema bytes max=128).
+                              schema_len + UTF-8 schema bytes max=255).
                               Replaces the prior Q1(b) inline VLE u32
                               encoding_id field (atomic 2b-iii-α closure).
        Z-gated:
@@ -45,17 +45,21 @@
        payload, one of two layouts, chosen by the extension chain and by
        nothing in any header:
          no shared-memory marker in the chain (`!extensions.has(0x12)`):
-         bytes  : payload_len (VLE u64) + payload (bytes max=256;
-                              upstream is unbounded zbuf — caller-
-                              supplied length-prefix per
-                              `_z_bytes_encode` convention. R311nq: since
+         bytes  : payload_len (VLE u64) + payload (bytes max=4294967295,
+                              the u32 length upstream reads
+                              (`commons/zenoh-codec/src/zenoh/put.rs` @
+                              `let bodec = Zenoh080Bounded::<u32>::new();`).
+                              R311nq: since
                               SCE pin 5769510d8 the SceBytes<256> owned
                               projection makes `sce:max-size` the no-alloc
                               inline capacity + advisory, NOT an on-wire
                               ceiling — alloc owned is unbounded Vec,
                               matching the unbounded upstream zbuf; no-alloc
                               keeps the 256 heapless cap. Uniform across
-                              every sce:max-size scalar field).
+                              every sce:max-size scalar field. Since ADR
+                              0077 step 1 the attribute is the wire bound
+                              and what a node stores is its deployment's
+                              capacity).
          the marker is in the chain (`extensions.has(0x12)`):
          slices : slice_count (VLE u32) + that many codec_zenoh_zbuf_slice
                   elements, each a kind (RAW or SHM_PTR), a length and
@@ -83,9 +87,11 @@
        end of a chain and 0x92 in the middle of one, and `has(0x12)` is true
        for both; an extension that shares only the 4-bit id (the mandatory
        bit clear, or another encoding) is an unknown extension upstream and
-       here, and the payload is read in the first layout. An encoder refuses
-       a Put whose chain and payload disagree
-       (`CodecError::PresentIfMismatch`).
+       here, and the payload is read in the first layout. The encode is
+       total: the chain and the layout it selects are one group of arms
+       (SCE ADR 0065 section 6 R6), so a value cannot hold a payload its
+       chain disagrees with, and each bounded field is held within its
+       bound as a type (SCE ADR 0077), so no value it is given is refused.
 
        This closes open-debt item 860. Until the attribute existed (SCE's
        `entry-id-except`, which this tree pins from SCE 6d7c7b6f65) the chain
@@ -134,7 +140,7 @@
      name + <sce:import src=> retargeted to wz-side stems. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="msg_put">
+       sce:kind="codec" sce:default-endian="big" name="msg_put">
   <sce:import src="timestamp.scxml" kind="codec" as="codec_zenoh_timestamp"/>
   <sce:import src="encoding.scxml" kind="codec" as="codec_zenoh_encoding"/>
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
@@ -151,14 +157,14 @@
     <sce:embed id="encoding" type="codec_zenoh_encoding" sce:byte="2"
                sce:present-if="header.E"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
-                   max-depth="8" on-overflow="reject"
+                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"
                    entry-id="header" entry-id-except="header.Z"/>
     <sce:field id="payload_len" sce:type="uint64" sce:byte="4" sce:bit-size="vle"
                sce:present-if="!extensions.has(0x12)"/>
     <sce:field id="payload" sce:type="bytes" sce:byte="5" sce:bit-size="length-ref"
-               sce:length-field="payload_len" sce:max-size="256"
+               sce:length-field="payload_len" sce:max-size="4294967295"
                sce:present-if="!extensions.has(0x12)"/>
     <sce:field id="slice_count" sce:type="uint32" sce:byte="6" sce:bit-size="vle"
                sce:present-if="extensions.has(0x12)"/>

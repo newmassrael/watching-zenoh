@@ -34,6 +34,7 @@ use wz_codecs::cobs_decode::cobs_decode;
 use wz_codecs::cobs_encode::cobs_encode;
 use wz_codecs::crc32::crc32;
 use wz_codecs::serial_envelope::SerialEnvelope;
+use wz_codecs::Bounded;
 
 /// CRC32 vectors taken directly from zenoh-pico's `_z_crc32`.
 ///
@@ -105,10 +106,10 @@ fn serial_envelope_matches_pico_pre_cobs_frame() {
         let env = SerialEnvelope {
             header,
             payload_len: payload.len() as u16,
-            payload,
+            payload: Bounded::new(payload).expect("a case payload fits the serial frame"),
             crc32: crc32(payload),
         };
-        let wire = env.encode_to_vec().expect("serial_envelope encode");
+        let wire = env.encode_to_vec();
         assert_eq!(
             &wire[..],
             expected,
@@ -195,10 +196,10 @@ fn serial_frame_full_pipeline_round_trip() {
     let env = SerialEnvelope {
         header: 0x00,
         payload_len: payload.len() as u16,
-        payload,
+        payload: Bounded::new(payload).expect("the payload fits the serial frame"),
         crc32: crc32(payload),
     };
-    let frame = env.encode_to_vec().expect("serial_envelope encode");
+    let frame = env.encode_to_vec();
     assert_eq!(
         &frame[..],
         &[0x00, 0x03, 0x00, 0xAB, 0xCD, 0xEF, 0x77, 0x20, 0xA7, 0xFB]

@@ -167,7 +167,7 @@ mod heap {
 
     /// What a dialled session reports its iterations to — typically
     /// `crate::app_layer::dispatch_to` over the node's observer.
-    pub type EventSink = Box<dyn FnMut(IterationEvent<'_>)>;
+    pub type EventSink = Box<dyn FnMut(IterationEvent<'_, '_>)>;
 
     /// A session this dialer started.
     pub struct UdpSession<C: ClockSource + 'static> {

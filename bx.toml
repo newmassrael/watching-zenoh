@@ -110,6 +110,12 @@ verify = "bash scripts/run-ci.sh"
 # crates they compile, the pinned SCE checkout and the submodules it needs, and a list written by
 # hand is how an input is missed. It is run without `--isolate`, so the whole tracked copy is
 # visible and the declaration is judged only by what the run writes.
+#
+# The action runs both stages of the script. Stage 2 (the switchboards) compiles `wz-session-core`,
+# so in the middle of a pin move, before the callers follow the new codec tree, the action fails and
+# applies nothing. Run stage 1 alone there, in the tree: `bash scripts/regen-codegen.sh --stage1`.
+# It is one action and not two because a second one would read what the first writes, an order
+# between actions bx cannot declare.
 [actions.regen-codegen]
 run = "bash scripts/regen-codegen.sh"
 inputs = ["**"]

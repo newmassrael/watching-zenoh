@@ -24,7 +24,7 @@
 //! distinct establishment UNIT ext in the neighbouring 0x6 id slot), reusing the
 //! same `ExtUnit` codec -- zero new codec work.
 
-use wz_codecs::ext_entry::ExtEntryOwned;
+use crate::transport_profile::ExtEntryOwned;
 
 use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 

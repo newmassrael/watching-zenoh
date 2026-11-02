@@ -482,7 +482,10 @@ fn gated_reply_timestamp(
     #[cfg(feature = "pubsub-timestamp")]
     {
         timestamp
-            .map(|t| t.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .map(|t| {
+                t.to_codec()
+                    .and_then(|t| t.try_into_owned_in::<crate::wire::WireStorage>())
+            })
             .transpose()
     }
     #[cfg(not(feature = "pubsub-timestamp"))]
@@ -507,7 +510,10 @@ fn gated_reply_encoding(
     #[cfg(feature = "pubsub-encoding")]
     {
         encoding
-            .map(|e| e.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .map(|e| {
+                e.to_codec()
+                    .and_then(|e| e.try_into_owned_in::<crate::wire::WireStorage>())
+            })
             .transpose()
     }
     #[cfg(not(feature = "pubsub-encoding"))]
@@ -1100,23 +1106,23 @@ impl ResponseReplyBuilder {
                     // R3062 -- the payload is a buffer of shared memory: the marker closes the
                     // chain, as `build_msg_put_shm` puts it after the same two entries for a
                     // Push, and the payload fields take the sliced layout. The marker is what
-                    // makes the payload sliced; a chain and a payload that disagree are refused
-                    // by the encoder, so the two are set together or not at all.
+                    // makes the payload sliced, and a Put holds its chain and its payload
+                    // layout together, so the layout is set first and the chain, marker and
+                    // all, goes in through the setter that refuses one that disagrees.
                     #[cfg(feature = "transport-shm")]
                     if let Some(descriptor) = self.shm.as_ref() {
                         let sliced = crate::put_payload::shm::<crate::wire::WireStorage>(
                             &crate::extshm::encode_shm_descriptor(descriptor),
                         )?;
+                        put.extensions_has_0x12 = sliced.extensions_has_0x12;
                         put.payload_len = sliced.payload_len;
-                        put.payload = sliced.payload;
                         put.slice_count = sliced.slice_count;
-                        put.slices = sliced.slices;
                         exts.push(crate::extshm::encode_shm_marker_ext());
                     }
                     if !exts.is_empty() {
                         crate::ext_nodeid::apply_chain_z_bits(&mut exts);
-                        put.extensions = Some(crate::held_list::held(exts)?);
-                        put.header |= 0x80; // _Z_FLAG_Z_Z
+                        // Sets the body header's `Z` bit (_Z_FLAG_Z_Z) with the chain.
+                        crate::put_payload::set_chain(put, exts)?;
                     }
                 }
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => {
@@ -2575,7 +2581,10 @@ mod tests {
                     assert_eq!(put.header & 0x40, 0x40, "MsgPut E-flag (0x40) set");
                     let got = put.encoding.as_ref().expect("encoding field present");
                     assert_eq!(got.packed_id, 13);
-                    assert_eq!(got.schema.as_deref(), Some("application/json"));
+                    assert_eq!(
+                        got.schema.as_ref().map(|s| s.as_text().into_inner()),
+                        Some("application/json")
+                    );
                 }
                 _ => panic!("expected CodecZenohMsgPut inner body"),
             },
@@ -2622,7 +2631,7 @@ mod tests {
             ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => {
                     assert_eq!(put.header & 0x80, 0x80, "MsgPut Z-flag (0x80) set");
-                    let exts = put.extensions.as_ref().expect("body ext chain present");
+                    let exts = crate::put_payload::chain(put);
                     let got = crate::attachment::decode_attachment_ext(
                         exts,
                         crate::attachment::ATTACHMENT_EXT_ID_PUSH,
@@ -2685,7 +2694,7 @@ mod tests {
             .unwrap();
         if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
             if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body {
-                let exts = put.extensions.as_ref().expect("body ext chain present");
+                let exts = crate::put_payload::chain(put);
                 let got = crate::attachment::decode_attachment_ext(
                     exts,
                     crate::attachment::ATTACHMENT_EXT_ID_PUSH,
@@ -2733,7 +2742,7 @@ mod tests {
                 assert_eq!(put.header & 0x80, 0x80, "Z-flag set (body ext chain)");
                 assert!(put.encoding.is_some());
                 assert!(put.timestamp.is_some());
-                let exts = put.extensions.as_ref().expect("ext chain present");
+                let exts = crate::put_payload::chain(put);
                 assert_eq!(
                     crate::attachment::decode_attachment_ext(
                         exts,
@@ -2886,7 +2895,7 @@ mod tests {
                         0x80,
                         "MsgPut Z-flag set for the body ext chain"
                     );
-                    let exts = put.extensions.as_ref().expect("body ext chain present");
+                    let exts = crate::put_payload::chain(put);
                     assert_eq!(exts.len(), 2, "source_info + attachment");
                     assert_eq!(
                         exts[0].header, 0xC1,

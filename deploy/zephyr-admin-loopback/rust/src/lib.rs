@@ -511,14 +511,14 @@ where
     C: ClockSource + Default + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
-    fn on_event(&mut self, event: IterationEvent<'_>) {
+    fn on_event(&mut self, event: IterationEvent<'_, '_>) {
         self.inner.on_event(event);
         self.ask_due();
     }
 
     /// Answers the record beside it and asks nothing: the request would be written on top of the
     /// record. A query that is due is left to the next event.
-    fn on_record(&mut self, record: wz_session_core::driver_loop::InPlaceRecord<'_>) {
+    fn on_record(&mut self, record: wz_session_core::driver_loop::InPlaceRecord<'_, '_>) {
         self.inner.on_record(record);
         if self.ask_pending() {
             self.inner.wake_now();

@@ -1281,7 +1281,7 @@ pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, S, F>(
     on_event: &mut F,
 ) where
     S: ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     let timed_out = reasm.sweep(now_ms);
     if timed_out > 0 {

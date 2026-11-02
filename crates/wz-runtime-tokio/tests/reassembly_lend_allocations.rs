@@ -177,14 +177,14 @@ fn complete_one_chain(
     chain: &[DriverLoopOutcome],
 ) -> Completion {
     let (last, head) = chain.split_last().expect("a chain");
-    let mut ignore = |_: IterationEvent<'_>| {};
+    let mut ignore = |_: IterationEvent<'_, '_>| {};
     for fragment in head {
         report_outcome_reassembling(fragment, reasm, actions, 0, &mut ignore);
     }
     let mut seen: Option<(usize, usize, bool)> = None;
     let before = allocations();
     {
-        let mut sink = |event: IterationEvent<'_>| {
+        let mut sink = |event: IterationEvent<'_, '_>| {
             if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
                 let payload = put_payload(messages);
                 seen = Some((payload.as_ptr() as usize, payload.len(), payload == PAYLOAD));
@@ -318,14 +318,14 @@ fn the_slot_stays_out_while_the_delivered_message_is_kept_and_goes_home_after() 
     let mut reasm = TokioReassembly::new(ReassemblyConfig::new(8, 5_000));
     let chain = fragments(&batch, 10);
     let (last, head) = chain.split_last().expect("a chain");
-    let mut ignore = |_: IterationEvent<'_>| {};
+    let mut ignore = |_: IterationEvent<'_, '_>| {};
     for fragment in head {
         report_outcome_reassembling(fragment, &mut reasm, &actions, 0, &mut ignore);
     }
     // What the application keeps: the delivered Put's payload, a range of the
     // reassembled chain.
     let mut kept = None;
-    let mut keep = |event: IterationEvent<'_>| {
+    let mut keep = |event: IterationEvent<'_, '_>| {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             let [NetworkMessage::Push(push)] = messages.as_slice() else {
                 panic!("the batch is one Push");

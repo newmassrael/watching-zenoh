@@ -440,7 +440,7 @@ impl Run {
 
     /// One event of the acceptor's drive loop. `on_fragment` is called for a
     /// dispatched fragment (it only fires under `reassembly`).
-    pub(crate) fn event(&mut self, event: IterationEvent<'_>, on_fragment: &mut dyn FnMut()) {
+    pub(crate) fn event(&mut self, event: IterationEvent<'_, '_>, on_fragment: &mut dyn FnMut()) {
         // The hook only fires under `reassembly` (the Fragment outcome is gated);
         // reference it so the non-reassembly build does not flag an unused param.
         #[cfg(not(feature = "reassembly"))]
@@ -737,7 +737,7 @@ where
     );
     loop {
         pump.runtime().run_until_idle();
-        let finished = pump.step(&mut |event: IterationEvent<'_>| {
+        let finished = pump.step(&mut |event: IterationEvent<'_, '_>| {
             run.event(event, &mut on_fragment);
         });
 

@@ -36,9 +36,9 @@ use alloc::vec::Vec;
 
 use crate::ext_view::ExtEntryView;
 use crate::sample::EncodingHint;
-use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
+use sce_forge_runtime::codec::{Bounded, CodecError};
+use wz_codecs::ext_entry::{ExtEntryFrom, ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
 
 /// Query body VALUE ext id — zenoh-pico `_z_query_encode` emits `0x03`
 /// (`message.c:433`) and `_z_query_decode_extensions` matches it at
@@ -57,31 +57,41 @@ const QUERY_VALUE_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
 /// `encoding_encode || payload`. The `zsize(total_len)` pico writes first is
 /// supplied by the surrounding [`ExtZbufOwned`] `value_len` prefix (which the
 /// ext-zbuf codec emits as the same VLE), so it is NOT re-emitted here.
-pub fn encode_query_value_ext_body(encoding: &EncodingHint, payload: &[u8]) -> Vec<u8> {
+/// `LengthOutOfRange` for an encoding whose schema is past its bound
+/// ([`EncodingHint::to_codec`]).
+pub fn encode_query_value_ext_body(
+    encoding: &EncodingHint,
+    payload: &[u8],
+) -> Result<Vec<u8>, CodecError> {
     // `encode_to_vec` is the generated Encoding codec's byte-parity emit
     // (proven against `_z_encoding_encode` by the Put / Reply E-flag tests);
     // the payload follows raw, exactly as `_z_bytes_encode_val` writes it.
-    let mut out = encoding.to_codec().encode_to_vec();
+    let mut out = encoding.to_codec()?.encode_to_vec();
     out.extend_from_slice(payload);
-    out
+    Ok(out)
 }
 
 /// Build the single Query VALUE `ExtEntry` (header `ENC_ZBUF | 0x03`, body =
 /// `encoding || payload` in an `ExtZbuf`). The surrounding builder applies the
 /// chain-continuation `Z` bit; this helper emits the entry with `Z` clear
 /// (terminator). Mirror of [`crate::attachment::encode_attachment_ext`] /
-/// [`crate::source_info_ext::encode_source_info_ext_entry`]. Fallible only on
-/// the `no_std` profile (the owned ext-zbuf copy is unbounded under `alloc`).
-pub fn encode_query_value_ext<S: CodecStorage>(
+/// [`crate::source_info_ext::encode_source_info_ext_entry`]. Refused past the
+/// ext-zbuf body's bound (`LengthOutOfRange`), and on a profile that stores the
+/// body inline at a capacity below it (`CapacityExceeded`); a growable profile
+/// holds any value under the bound.
+pub fn encode_query_value_ext<S: for<'x> ExtEntryFrom<'x>>(
     encoding: &EncodingHint,
     payload: &[u8],
 ) -> Result<ExtEntryOwned<S>, CodecError> {
-    let value = encode_query_value_ext_body(encoding, payload);
+    let value = encode_query_value_ext_body(encoding, payload)?;
+    let held = Bounded::new(value.as_slice())
+        .ok_or(CodecError::LengthOutOfRange)?
+        .store::<S, ExtZbufValueField>()?;
     Ok(ExtEntryOwned {
         header: QUERY_VALUE_EXT_HEADER_ENC_ZBUF | QUERY_VALUE_EXT_ID,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: value.len() as u64,
-            value: <S::Bytes<32> as SceByteBuf>::from_slice(&value)?,
+            value: held,
         }),
     })
 }
@@ -147,7 +157,8 @@ mod tests {
     /// writes after its `zsize`).
     #[test]
     fn encode_query_value_ext_body_is_encoding_then_payload() {
-        let body = encode_query_value_ext_body(&default_encoding(), b"hi");
+        let body = encode_query_value_ext_body(&default_encoding(), b"hi")
+            .expect("a default encoding has no schema");
         assert_eq!(
             body,
             [0x00, b'h', b'i'],
@@ -166,7 +177,7 @@ mod tests {
             ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => {
                 // value_len covers encoding(1) + payload(2) = 3 = pico total_len.
                 assert_eq!(z.value_len, 3);
-                assert_eq!(z.value.as_slice(), &[0x00, b'h', b'i']);
+                assert_eq!(z.value.as_bytes(), [0x00, b'h', b'i']);
             }
             _ => panic!("expected ExtZbuf body"),
         }

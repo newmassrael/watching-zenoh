@@ -2005,7 +2005,7 @@ fn walk_ext_wireexpr_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecErr
 ///
 /// | loop stopped with the flag set | cursor    | reported as        |
 /// |--------------------------------|-----------|--------------------|
-/// | the depth cap refused an entry | non-empty | `TlvChainOverflow` |
+/// | the depth cap refused an entry | non-empty | `TooManyElements` |
 /// | the peer's frame ended mid-chain | empty   | `NeedMoreBytes`    |
 ///
 /// The second row is a failure R311y582's report did not name and SCE found
@@ -2040,7 +2040,7 @@ fn walk_ext_chain_z(
         return Err(CodecError::NeedMoreBytes);
     }
     if more {
-        return Err(CodecError::TlvChainOverflow);
+        return Err(CodecError::TooManyElements);
     }
     Ok(out)
 }
@@ -2089,7 +2089,7 @@ fn walk_query_ext_chain(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>
         return Err(CodecError::NeedMoreBytes);
     }
     if more {
-        return Err(CodecError::TlvChainOverflow);
+        return Err(CodecError::TooManyElements);
     }
     Ok(out)
 }
@@ -2230,18 +2230,17 @@ pub fn walk_msg_put(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
 }
 
 /// The elements of a sliced payload, `count` of them, as `MsgPut`'s codec
-/// reads them: each element is decoded first and only then pushed, so a
-/// count past the codec's capacity is refused AFTER the element that does not
-/// fit has been read, and a truncated element wins over the capacity error
-/// exactly as it does there (`msg_put.scxml`, `max-count="4"`).
+/// reads them: a count past the list's bound (`msg_put.scxml`, `max-count`)
+/// is refused before any element is read, as the codec's decode refuses it
+/// since the bound is part of the field's type (SCE ADR 0077 step 1), so a
+/// truncated element past the bound is reported as the count it is.
 fn walk_zbuf_slices(c: &mut SpanCursor<'_>, count: u32) -> Result<Vec<Field>, CodecError> {
+    if count as usize > crate::put_payload::MAX_SLICES {
+        return Err(CodecError::TooManyElements);
+    }
     let mut out = Vec::new();
     for _ in 0..count {
-        let element = c.nested("slice_entry", walk_zbuf_slice)?;
-        if out.len() >= crate::put_payload::MAX_SLICES {
-            return Err(CodecError::TooManyElements);
-        }
-        out.push(element);
+        out.push(c.nested("slice_entry", walk_zbuf_slice)?);
     }
     Ok(out)
 }
@@ -2805,7 +2804,6 @@ mod codec_error_serde {
         match e {
             CodecError::NeedMoreBytes => "NeedMoreBytes",
             CodecError::VleWidthOverflow => "VleWidthOverflow",
-            CodecError::TlvChainOverflow => "TlvChainOverflow",
             CodecError::InvalidUtf8 => "InvalidUtf8",
             CodecError::BufferOverflow => "BufferOverflow",
             CodecError::TooManyElements => "TooManyElements",
@@ -2827,10 +2825,12 @@ mod codec_error_serde {
         let s = alloc::string::String::deserialize(d)?;
         Ok(match s.as_str() {
             "VleWidthOverflow" => CodecError::VleWidthOverflow,
-            "TlvChainOverflow" => CodecError::TlvChainOverflow,
             "InvalidUtf8" => CodecError::InvalidUtf8,
             "BufferOverflow" => CodecError::BufferOverflow,
-            "TooManyElements" => CodecError::TooManyElements,
+            // A chain past its depth is refused as a list past its count, so a
+            // dissection written under the name the runtime used for it before
+            // reads back as that refusal.
+            "TooManyElements" | "TlvChainOverflow" => CodecError::TooManyElements,
             _ => CodecError::NeedMoreBytes,
         })
     }
@@ -5135,7 +5135,7 @@ mod tests {
         locators
             .push(Locator {
                 locator_len: 9,
-                locator: "tcp/1.2.3",
+                locator: wz_codecs::Bounded::new("tcp/1.2.3").unwrap(),
             })
             .unwrap();
         let mut links = HeaplessVec::new();
@@ -5154,22 +5154,25 @@ mod tests {
                 psid: 3,
                 sn: 42,
                 zid_len: Some(zid.len() as u64),
-                zid: Some(&zid),
+                zid: Some(wz_codecs::Bounded::new(&zid[..]).unwrap()),
                 whatami: Some(1),
                 num_locators: Some(1),
-                locators: Some(locators),
+                locators: Some(wz_codecs::Bounded::new(locators).unwrap()),
                 links_len: 2,
-                links,
-                weights: Some(weights),
+                options_h: wz_codecs::linkstate::LinkstateOptionsH::H {
+                    links_weights: sce_forge_runtime::codec::Aligned::new(
+                        wz_codecs::Bounded::new(links).unwrap(),
+                        wz_codecs::Bounded::new(weights).unwrap(),
+                    )
+                    .expect("one weight per link"),
+                },
             })
             .unwrap();
         let list = LinkstateList {
             num_link_states: 1,
-            link_states: states,
+            link_states: wz_codecs::Bounded::new(states).unwrap(),
         };
-        let body = list
-            .encode_to_vec()
-            .expect("a one-link advertisement is encodable");
+        let body = list.encode_to_vec();
 
         // Wrap it as the OAM carries it: header (MID 0x1F, ZBuf encoding),
         // VLE id = OAM_LINKSTATE_ID, VLE body length, body.
@@ -5510,7 +5513,13 @@ mod tests {
 
         let mut c = SceCursor::new(&marked);
         let m = wz_codecs::msg_put::MsgPut::decode(&mut c).expect("the codec reads it too");
-        assert_eq!(m.slices.as_ref().map(|s| s.len()), Some(3));
+        let slices = match &m.extensions_has_0x12 {
+            wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 { slices, .. } => {
+                Some(slices.len())
+            }
+            wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { .. } => None,
+        };
+        assert_eq!(slices, Some(3));
         assert_eq!(
             w.remaining(),
             c.remaining(),
@@ -5518,10 +5527,11 @@ mod tests {
         );
     }
 
-    /// The codec holds four slices and refuses a fifth AFTER reading it; a
-    /// truncated element wins over that refusal. The walker answers the same
-    /// on the same bytes (`msg_put.scxml`, `max-count="4"`), four being the
-    /// control that keeps a walker refusing every count from passing.
+    /// The codec holds four slices and refuses a count of five before it reads
+    /// an element, so a truncated fifth element is still a count past the
+    /// bound. The walker answers the same on the same bytes (`msg_put.scxml`,
+    /// `max-count="4"`), four being the control that keeps a walker refusing
+    /// every count from passing.
     #[test]
     fn a_sliced_put_is_refused_past_four_slices_as_the_codec_refuses_it() {
         let marker = [ext_unit(SHM_MARKER_BYTE, false)];
@@ -5545,15 +5555,15 @@ mod tests {
             )
         );
 
-        // A count of five whose fifth element is cut short: the truncation is
-        // what both report, not the capacity.
+        // A count of five whose fifth element is cut short: the count is
+        // refused first, so both report the bound, not the truncation.
         let mut cut = msg_put_sliced(&marker, &slice(5));
         cut.truncate(cut.len() - 1);
         assert_eq!(
             answers(&cut),
             (
-                Some(CodecError::NeedMoreBytes),
-                Some(CodecError::NeedMoreBytes)
+                Some(CodecError::TooManyElements),
+                Some(CodecError::TooManyElements)
             )
         );
     }
@@ -5878,11 +5888,11 @@ mod tests {
             num_locators: None,
             locators: None,
             links_len: 0,
-            links: sce_forge_runtime::heapless::Vec::new(),
-            weights: None,
+            options_h: wz_codecs::linkstate::LinkstateOptionsH::NotH {
+                links: wz_codecs::Bounded::new(sce_forge_runtime::heapless::Vec::new()).unwrap(),
+            },
         }
-        .encode_to_vec()
-        .expect("a linkstate entry with no links is encodable");
+        .encode_to_vec();
         let mut body = vle(N as u64);
         for _ in 0..N {
             body.extend_from_slice(&one);
@@ -5973,10 +5983,12 @@ mod tests {
         // first one.
         let mut c = SceCursor::new(&body);
         let list = LinkstateList::decode(&mut c).expect("upstream decodes this advertisement");
-        let ws = list.link_states[0]
-            .weights
-            .as_ref()
-            .expect("WGT set => weights present");
+        let wz_codecs::linkstate::LinkstateOptionsH::H { links_weights } =
+            &list.link_states[0].options_h
+        else {
+            panic!("WGT set => weights present");
+        };
+        let ws = links_weights.second();
         assert_eq!(ws[0].weight, 65537, "the codec reads the zint whole");
         assert_eq!(
             wz_codecs::wire_const::linkstate_weight_from_wire(ws[0].weight),
@@ -6044,14 +6056,19 @@ mod tests {
                 let mut c = SceCursor::new(b);
                 let m = wz_codecs::msg_put::MsgPut::decode(&mut c).expect("codec rejected fixture");
                 // Cross-check the codec's own view while it is in scope.
-                assert_eq!(
-                    m.payload.expect("an inline put carries a payload").len(),
-                    200
-                );
+                let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
+                    &m.extensions_has_0x12
+                else {
+                    panic!("an inline put carries a payload");
+                };
+                assert_eq!(payload.len(), 200);
                 assert_eq!(m.payload_len, Some(200));
                 assert_eq!(m.timestamp.as_ref().unwrap().time, 0x0123_4567);
                 assert_eq!(m.timestamp.as_ref().unwrap().zid, &zid);
-                assert_eq!(m.encoding.as_ref().unwrap().schema, Some("json"));
+                assert_eq!(
+                    m.encoding.as_ref().unwrap().schema.map(|s| s.into_inner()),
+                    Some("json")
+                );
                 b.len() - c.remaining()
             },
             walk_msg_put,
@@ -6142,16 +6159,41 @@ mod tests {
         use crate::ext_chain::{NETWORK_EXT_CHAIN_DEPTH, QUERY_EXT_CHAIN_DEPTH};
 
         /// Recover the const-generic capacity from the field's own type.
-        fn cap<const N: usize>(
-            _: &Option<sce_forge_runtime::heapless::Vec<wz_codecs::ext_entry::ExtEntry<'_>, N>>,
+        fn cap<const N: usize, const MAX: usize, const MIN: usize>(
+            _: &Option<
+                sce_forge_runtime::codec::Bounded<
+                    sce_forge_runtime::heapless::Vec<wz_codecs::ext_entry::ExtEntry<'_>, N>,
+                    MAX,
+                    MIN,
+                >,
+            >,
+        ) -> usize {
+            N
+        }
+
+        /// The same, for a Put, whose chain is held in the arm of its payload's
+        /// layout.
+        fn cap_put<const N: usize, Slices, Payload>(
+            _: &wz_codecs::msg_put::MsgPutExtensionsHas0x12<
+                sce_forge_runtime::heapless::Vec<wz_codecs::ext_entry::ExtEntry<'_>, N>,
+                Slices,
+                Payload,
+            >,
         ) -> usize {
             N
         }
 
         /// The same, for the Query's chain, whose entry is its own kind (R3044).
-        fn cap_query<const N: usize>(
+        fn cap_query<const N: usize, const MAX: usize, const MIN: usize>(
             _: &Option<
-                sce_forge_runtime::heapless::Vec<wz_codecs::query_ext_entry::QueryExtEntry<'_>, N>,
+                sce_forge_runtime::codec::Bounded<
+                    sce_forge_runtime::heapless::Vec<
+                        wz_codecs::query_ext_entry::QueryExtEntry<'_>,
+                        N,
+                    >,
+                    MAX,
+                    MIN,
+                >,
             >,
         ) -> usize {
             N
@@ -6189,7 +6231,7 @@ mod tests {
 
         // The zenoh-payload layer.
         assert_eq!(
-            cap(&wz_codecs::msg_put::MsgPut::default().extensions),
+            cap_put(&wz_codecs::msg_put::MsgPut::default().extensions_has_0x12),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
@@ -6246,7 +6288,7 @@ mod tests {
     ///
     /// | row | chain ends because | cursor | both must answer |
     /// |-----|--------------------|--------|------------------|
-    /// | 1 | the cap refused an entry the peer sent | non-empty | `TlvChainOverflow` |
+    /// | 1 | the cap refused an entry the peer sent | non-empty | `TooManyElements` |
     /// | 2 | the peer's frame ended mid-chain | empty | `NeedMoreBytes` |
     /// | 3 | the wire's own terminator, AT the cap | empty | `Ok`, real payload |
     ///
@@ -6266,7 +6308,7 @@ mod tests {
         //    the VLE the OLD codec mistook for `payload_len` — that choice is
         //    what made the misread SUCCEED with `[0x03, 0xAA, 0xBB]` instead of
         //    running off the end, and it holds at any cap. The bytes after the
-        //    chain are the reason this row is `TlvChainOverflow` and not row 2's
+        //    chain are the reason this row is `TooManyElements` and not row 2's
         //    `NeedMoreBytes`: the cursor is NOT empty, so the cap is what
         //    refused, not the frame length.
         let mut exts: Vec<Vec<u8>> = (1..=cap).map(|i| ext_unit(i as u8, true)).collect();
@@ -6276,14 +6318,14 @@ mod tests {
         let mut w = SpanCursor::new(&over);
         assert_eq!(
             walk_msg_put(&mut w).err(),
-            Some(CodecError::TlvChainOverflow),
+            Some(CodecError::TooManyElements),
             "the walker accepted a chain that never terminated inside the bound"
         );
         {
             let mut c = SceCursor::new(&over);
             assert_eq!(
                 wz_codecs::msg_put::MsgPut::decode(&mut c).err(),
-                Some(CodecError::TlvChainOverflow),
+                Some(CodecError::TooManyElements),
                 "the codec misread a saturated chain instead of refusing it"
             );
         }
@@ -6381,8 +6423,15 @@ mod tests {
             let mut c = SceCursor::new(&ok);
             let m = wz_codecs::msg_put::MsgPut::decode(&mut c)
                 .expect("a chain terminated at the cap must decode");
-            assert_eq!(m.extensions.as_ref().map_or(0, |e| e.len()), cap);
-            assert_eq!(m.payload, Some(&payload[..]));
+            let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions,
+                payload: got,
+            } = &m.extensions_has_0x12
+            else {
+                panic!("a chain without the marker leaves the payload inline");
+            };
+            assert_eq!(extensions.as_ref().map_or(0, |e| e.inner().len()), cap);
+            assert_eq!(got.into_inner(), &payload[..]);
             assert_eq!(c.remaining(), 0, "the codec left bytes unread");
         }
     }
@@ -7176,7 +7225,7 @@ mod tests {
         let init = wz_codecs::init_body::InitBody {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
-            zid: &[0xB0, 0xB1, 0xB2, 0xB3],
+            zid: wz_codecs::Bounded::new(&[0xB0u8, 0xB1, 0xB2, 0xB3] as &[u8]).unwrap(),
             s: Some(wz_codecs::init_body::InitBodyS {
                 sn_res: 0x09,
                 batch_size: 0x2000,
@@ -7185,7 +7234,7 @@ mod tests {
             cookie: None,
         };
         let mut bytes = alloc::vec![wz_codecs::wire_const::T_MID_INIT | 0x40];
-        bytes.extend_from_slice(&init.encode_to_vec().expect("a fixture init is encodable"));
+        bytes.extend_from_slice(&init.encode_to_vec());
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the init");
         // The raw byte SURVIVES: the children are a reading of it, not a
         // replacement for it.
@@ -7204,7 +7253,7 @@ mod tests {
         let join = wz_codecs::join::Join {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
-            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
             s: Some(wz_codecs::join::JoinS {
                 sn_res: 0x09,
                 batch_size: 0x1000,
@@ -7215,7 +7264,7 @@ mod tests {
         };
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
-        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec());
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the join");
         assert_eq!(uint(&f, "sn_res"), 0x09);
         assert_eq!(label_of(&f, "sn_res_frame_sn"), "16bit");
@@ -7231,7 +7280,7 @@ mod tests {
         };
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
-        bytes.extend_from_slice(&zeroed.encode_to_vec().expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&zeroed.encode_to_vec());
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the zeroed join");
         assert_eq!(uint(&f, "sn_res"), 0x00);
         assert_eq!(label_of(&f, "sn_res_frame_sn"), "8bit");
@@ -7262,7 +7311,7 @@ mod tests {
             version: 0x09,
             // whatami = peer (0x01) in the low bits, zid_len-1 = 3 in the high.
             cbyte: (3 << 4) | 0x01,
-            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
             s: Some(wz_codecs::join::JoinS {
                 sn_res: 0x00,
                 batch_size: 0x1000,
@@ -7273,7 +7322,7 @@ mod tests {
         };
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
-        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec());
         let f = agree_transport("Join", &bytes, |header, body| {
             let s = u8::from(header & wz_codecs::wire_const::FLAG_T_JOIN_S != 0);
             let mut c = SceCursor::new(body);
@@ -7298,11 +7347,7 @@ mod tests {
         // leg above.
         let minimal = wz_codecs::join::Join { s: None, ..join };
         let mut bytes = alloc::vec![wz_codecs::wire_const::T_MID_JOIN];
-        bytes.extend_from_slice(
-            &minimal
-                .encode_to_vec()
-                .expect("a fixture join is encodable"),
-        );
+        bytes.extend_from_slice(&minimal.encode_to_vec());
         let f = agree_transport("Join", &bytes, |header, body| {
             let s = u8::from(header & wz_codecs::wire_const::FLAG_T_JOIN_S != 0);
             let mut c = SceCursor::new(body);
@@ -7323,7 +7368,7 @@ mod tests {
         // of a message that does not begin there.
         let frag = wz_codecs::fragment::Fragment {
             sn: 3,
-            payload: &[0xDE, 0xAD],
+            payload: wz_codecs::Bounded::new(&[0xDEu8, 0xAD] as &[u8]).unwrap(),
         };
         let mut bytes = alloc::vec![
             wz_codecs::wire_const::T_MID_FRAGMENT
@@ -7369,7 +7414,7 @@ mod tests {
         let join = wz_codecs::join::Join {
             version: 0x09,
             cbyte: 0x01,
-            zid: &[0xB0],
+            zid: wz_codecs::Bounded::new(&[0xB0u8] as &[u8]).unwrap(),
             s: None,
             // 10 SECONDS on the wire, which is the pico default beacon's form.
             lease: 10,
@@ -7377,7 +7422,7 @@ mod tests {
             next_sn_best_effort: 0,
         };
         let mut bytes = alloc::vec![T_MID_JOIN | FLAG_T_JOIN_T];
-        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec());
 
         let f = dissect_transport_message(&bytes, 0).expect("join did not dissect");
         assert_eq!(
@@ -7998,7 +8043,7 @@ mod tests {
         let join = wz_codecs::join::Join {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
-            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
             s: None,
             lease: 10_000,
             next_sn_reliable: 0,
@@ -8011,7 +8056,7 @@ mod tests {
         }
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_Z];
-        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec());
         bytes.extend(ext_zbuf(0x01 | crate::ext_header::EXT_FLAG_M, false, &body));
         bytes
     }
@@ -8030,7 +8075,7 @@ mod tests {
         let join = wz_codecs::join::Join {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
-            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
             s: None,
             lease: 10_000,
             next_sn_reliable: 0,
@@ -8043,7 +8088,7 @@ mod tests {
         }
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_Z];
-        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec());
         bytes.extend(ext_zbuf(0x01 | crate::ext_header::EXT_FLAG_M, true, &body));
         bytes.extend(ext_zint(0x07, false, patch));
         bytes
@@ -8279,13 +8324,13 @@ mod tests {
         let join = wz_codecs::join::Join {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
-            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
             s: None,
             lease: 10_000,
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
         };
-        bytes.extend_from_slice(&join.encode_to_vec().expect("a fixture join is encodable"));
+        bytes.extend_from_slice(&join.encode_to_vec());
         bytes.extend(ext_zbuf(
             0x02 | crate::ext_header::EXT_FLAG_M,
             false,

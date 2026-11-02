@@ -110,7 +110,7 @@ impl<
         D: BoxedLinkDriver + ?Sized + 'static,
     > SessionEvents for ActiveEvents<C, P, Q, R, B, D>
 {
-    fn on_event(&mut self, event: IterationEvent<'_>) {
+    fn on_event(&mut self, event: IterationEvent<'_, '_>) {
         self.inner.on_event(event);
         if P == 0 && Q == 0 && R == 0 {
             return;
@@ -186,7 +186,7 @@ impl<
     /// put or a query written now would be on top of it. What is due is left to the next
     /// `AppWake`, raised at the top of the drive loop's next step, which polls and states the
     /// layer's deadlines again.
-    fn on_record(&mut self, record: InPlaceRecord<'_>) {
+    fn on_record(&mut self, record: InPlaceRecord<'_, '_>) {
         self.inner.on_record(record);
         if P != 0 || Q != 0 || R != 0 {
             self.inner.wake_now();

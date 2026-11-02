@@ -113,8 +113,7 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
     let body = owned
         .try_as_borrowed()
         .expect("borrowed projection of owned Hello")
-        .encode_to_vec()
-        .expect("a fixture Hello encodes");
+        .encode_to_vec();
 
     let mut dgram = Vec::with_capacity(1 + body.len());
     dgram.push(wire_const::S_MID_HELLO | wire_const::FLAG_S_HELLO_L);
@@ -139,8 +138,7 @@ fn craft_locator_less_hello(zid: &[u8]) -> Vec<u8> {
     let body = owned
         .try_as_borrowed()
         .expect("borrowed projection of owned Hello")
-        .encode_to_vec()
-        .expect("a fixture Hello encodes");
+        .encode_to_vec();
 
     let mut dgram = Vec::with_capacity(1 + body.len());
     dgram.push(wire_const::S_MID_HELLO);
@@ -161,9 +159,9 @@ fn craft_scout(zid: &[u8]) -> Vec<u8> {
     scout.set_what(0x03);
     scout.set_i(true);
     scout.set_zid_len_m1((zid.len() - 1) as u8);
-    scout.zid = Some(zid);
+    scout.zid = Some(wz_codecs::Bounded::new(zid).unwrap());
     let mut dgram = vec![wire_const::S_MID_SCOUT];
-    dgram.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout encodes"));
+    dgram.extend_from_slice(&scout.encode_to_vec());
     dgram
 }
 

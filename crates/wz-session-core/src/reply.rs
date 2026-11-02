@@ -666,12 +666,10 @@ fn loopback_reply_timestamp(
 fn put_reply_attachment(put: &crate::wire::parts::MsgPutOwned) -> Option<crate::link::RxBytes> {
     #[cfg(feature = "pubsub-attachment")]
     {
-        put.extensions.as_ref().and_then(|exts| {
-            crate::attachment::decode_attachment_ext_shared(
-                exts,
-                crate::attachment::ATTACHMENT_EXT_ID_PUSH,
-            )
-        })
+        crate::attachment::decode_attachment_ext_shared(
+            crate::put_payload::chain(put),
+            crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+        )
     }
     #[cfg(not(feature = "pubsub-attachment"))]
     {
@@ -731,11 +729,11 @@ fn del_reply_attachment(del: &crate::wire::parts::MsgDelOwned) -> Option<crate::
     )
 ))]
 fn reply_body_source_info(
-    exts: Option<&Vec<crate::wire::parts::ExtEntryOwned>>,
+    exts: Option<&[crate::wire::parts::ExtEntryOwned]>,
 ) -> Option<crate::sample::SourceInfo> {
     #[cfg(feature = "reply-source-info")]
     {
-        exts.and_then(|e| crate::sample::extract_source_info(e))
+        exts.and_then(crate::sample::extract_source_info)
     }
     #[cfg(not(feature = "reply-source-info"))]
     {
@@ -1346,7 +1344,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     },
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
-                    source_info: reply_body_source_info(put.extensions.as_deref()),
+                    source_info: reply_body_source_info(Some(crate::put_payload::chain(put))),
                     // R311y321 — the reply RECEIVE leg of `pubsub-timestamp`.
                     // The codec already decodes `MsgPutOwned.timestamp`; this
                     // arm simply never read it, so every inbound reply stamp
@@ -1356,7 +1354,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => InboundReplyBody::Del {
                     attachment: del_reply_attachment(del),
-                    source_info: reply_body_source_info(del.extensions.as_deref()),
+                    source_info: reply_body_source_info(
+                        del.extensions.as_ref().map(|chain| chain.as_slice()),
+                    ),
                     timestamp: reply_body_timestamp(del.timestamp.as_ref()),
                 },
                 // Default arm carries a runtime tag whose MID falls
@@ -1783,7 +1783,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        event: IterationEvent<'_>,
+        event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
@@ -1989,6 +1989,25 @@ mod tests {
     use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
+    /// A fixture's borrowed field at the bounds of the field it fills.
+    fn bounded<L: sce_forge_runtime::codec::Entries, const MAX: usize, const MIN: usize>(
+        value: L,
+    ) -> sce_forge_runtime::codec::Bounded<L, MAX, MIN> {
+        sce_forge_runtime::codec::Bounded::new(value).expect("a fixture is within its bound")
+    }
+
+    /// The inline-layout Put that carries `payload`.
+    fn inline_put(payload: &[u8]) -> MsgPut<'_> {
+        MsgPut {
+            payload_len: Some(payload.len() as u64),
+            extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: bounded(payload),
+            },
+            ..MsgPut::default()
+        }
+    }
+
     fn response_reply_put(
         rid: u64,
         mapping_id: u64,
@@ -2000,15 +2019,11 @@ mod tests {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: mapping_id,
                 suffix_len,
-                suffix,
+                suffix: suffix.map(bounded),
             }),
         };
         let reply = Reply {
-            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
-                payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
-                ..MsgPut::default()
-            }),
+            body: ReplyVariant::CodecZenohMsgPut(inline_put(payload)),
             ..Reply::default()
         };
         Response {
@@ -2026,7 +2041,7 @@ mod tests {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(bounded(suffix)),
             }),
         };
         let reply = Reply {
@@ -2054,19 +2069,19 @@ mod tests {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(bounded(suffix)),
             }),
         };
         let schema_len = schema.map(|s| s.len() as u64);
         let encoding = Encoding {
             packed_id,
             schema_len,
-            schema,
+            schema: schema.map(bounded),
         };
         let err_body = ErrBody {
             encoding: Some(encoding),
             payload_len: payload.len() as u64,
-            payload,
+            payload: bounded(payload),
             ..ErrBody::default()
         };
         Response {
@@ -2101,15 +2116,11 @@ mod tests {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: mapping_id,
                 suffix_len,
-                suffix,
+                suffix: suffix.map(bounded),
             }),
         };
         let reply = Reply {
-            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
-                payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
-                ..MsgPut::default()
-            }),
+            body: ReplyVariant::CodecZenohMsgPut(inline_put(payload)),
             ..Reply::default()
         };
         Response {
@@ -4831,13 +4842,16 @@ mod decode_isolation_tests {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(sce_forge_runtime::codec::Bounded::new(suffix).unwrap()),
             }),
         };
         let reply = Reply {
             body: ReplyVariant::CodecZenohMsgPut(MsgPut {
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: sce_forge_runtime::codec::Bounded::new(payload).unwrap(),
+                },
                 ..MsgPut::default()
             }),
             ..Reply::default()
@@ -4860,7 +4874,7 @@ mod decode_isolation_tests {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(sce_forge_runtime::codec::Bounded::new(suffix).unwrap()),
             }),
         };
         let reply = Reply {
@@ -4885,7 +4899,7 @@ mod decode_isolation_tests {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(sce_forge_runtime::codec::Bounded::new(suffix).unwrap()),
             }),
         };
         let err_body = ErrBody {
@@ -4895,7 +4909,7 @@ mod decode_isolation_tests {
                 schema: None,
             }),
             payload_len: payload.len() as u64,
-            payload,
+            payload: sce_forge_runtime::codec::Bounded::new(payload).unwrap(),
             ..ErrBody::default()
         };
         Response {
@@ -5025,7 +5039,7 @@ mod reply_timestamp_decode_isolation_tests {
             timestamp: Some(wz_codecs::timestamp::Timestamp {
                 time: 0x0102_0304_0506_0708,
                 zid_len: zid.len() as u64,
-                zid: &zid,
+                zid: sce_forge_runtime::codec::Bounded::new(&zid[..]).unwrap(),
             }),
             ..wz_codecs::msg_put::MsgPut::default()
         }

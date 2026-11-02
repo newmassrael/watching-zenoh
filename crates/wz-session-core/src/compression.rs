@@ -189,13 +189,15 @@ mod tests {
             },
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 payload_len: Some(8),
-                payload: Some(&[0u8; 8]),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(&[0u8; 8] as &[u8]).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("the fixture push is encodable");
+        .encode_to_vec();
         // Repeated enough that lz4 has something to shrink: the wrap ships RAW
         // when it cannot, and the header assertion below is what stops this
         // test from quietly becoming the control twice.

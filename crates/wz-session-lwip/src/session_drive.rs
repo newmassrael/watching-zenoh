@@ -150,7 +150,7 @@ pub fn run_session<C, F>(
 ) -> DriverOutcome
 where
     C: ClockSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     coop_drive::run_session(
         runtime,
@@ -182,7 +182,7 @@ pub async fn session_task<C, F>(
 ) -> DriverOutcome
 where
     C: ClockSource,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     coop_drive::session_task(
         runtime,
@@ -210,7 +210,7 @@ pub fn spawn_session<C, F>(
 ) -> CoopLocalJoinHandle<DriverOutcome>
 where
     C: ClockSource + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
 {
     coop_drive::spawn_session(
         local,

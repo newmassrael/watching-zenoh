@@ -129,7 +129,10 @@ impl DeclarationSync {
 /// profile reads its records where the frame lies and has its own host, so only the owned batch of a
 /// delivered frame is read here.
 #[cfg(feature = "codec-declare")]
-pub fn finals_in_event(event: crate::driver_loop::IterationEvent<'_>, mut each: impl FnMut(u64)) {
+pub fn finals_in_event(
+    event: crate::driver_loop::IterationEvent<'_, '_>,
+    mut each: impl FnMut(u64),
+) {
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::network_message::NetworkMessage;
     use wz_codecs::declare::DeclareOwnedVariant;

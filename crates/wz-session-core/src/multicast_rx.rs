@@ -149,7 +149,7 @@ pub fn dispatch_multicast_inbound<F, R, const MAX_PEERS: usize>(
     stats: &R,
 ) -> MulticastRxNext
 where
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     walk_multicast_inbound(
@@ -189,7 +189,7 @@ pub fn dispatch_multicast_inbound_in<F, R, const MAX_PEERS: usize>(
     stats: &R,
 ) -> MulticastRxNext
 where
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     walk_multicast_inbound(
@@ -220,7 +220,7 @@ fn walk_multicast_inbound<F, R, const MAX_PEERS: usize>(
     stats: &R,
 ) -> MulticastRxNext
 where
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     #[cfg(feature = "transport-compression")]
@@ -285,7 +285,7 @@ fn walk_multicast_batch<F, R, const MAX_PEERS: usize>(
     stats: &R,
 ) -> MulticastRxNext
 where
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     let mut pos = 0usize;
@@ -342,7 +342,7 @@ fn dispatch_multicast_message<F, R, const MAX_PEERS: usize>(
     stats: &R,
 ) -> MulticastRxNext
 where
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     match bytes.first().map(|h| h & 0x1f) {
@@ -378,7 +378,7 @@ where
                             // (the ONE refused case): `peer_non_qos || local_qos`.
                             if qos_next_sns.is_none() || params.is_qos {
                                 Some(dispatcher.ingest_join_qos(
-                                    join.zid,
+                                    join.zid.into_inner(),
                                     src,
                                     baseline,
                                     qos_next_sns,
@@ -389,8 +389,12 @@ where
                             }
                         };
                         #[cfg(not(feature = "transport-qos"))]
-                        let admission =
-                            Some(dispatcher.ingest_join(join.zid, src, baseline, now_ms));
+                        let admission = Some(dispatcher.ingest_join(
+                            join.zid.into_inner(),
+                            src,
+                            baseline,
+                            now_ms,
+                        ));
                         // R2728 — announce the ARRIVAL, the half this surface
                         // lacked: the departure event has existed since R311y784
                         // and nothing ever said a peer had COME. Fired only on
@@ -406,7 +410,7 @@ where
                         // interval.
                         if matches!(admission, Some(JoinOutcome::Admitted)) {
                             on_event(IterationEvent::MulticastPeerArrived(MulticastPeerArrived {
-                                peer: MulticastPeerId::from_wire(join.zid),
+                                peer: MulticastPeerId::from_wire(join.zid.into_inner()),
                                 // The role is read off the BEACON, not off
                                 // `JoinBaseline::whatami` — that field is
                                 // `multicast-declarations`-gated because the
@@ -659,7 +663,7 @@ fn dispatch_multicast_frame_in_place<F, R, const MAX_PEERS: usize>(
     stats: &R,
 ) -> MulticastRxNext
 where
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     let Some(Ok((head, payload_at))) = crate::inbound::parse_frame_in_place(bytes) else {
@@ -721,7 +725,7 @@ pub fn dispatch_multicast_inbound_reassembling<
     stats: &R,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     walk_multicast_inbound_reassembling(
@@ -763,7 +767,7 @@ pub fn dispatch_multicast_inbound_reassembling_in<
     stats: &R,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     walk_multicast_inbound_reassembling(
@@ -803,7 +807,7 @@ fn walk_multicast_inbound_reassembling<
     stats: &R,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     #[cfg(feature = "transport-compression")]
@@ -860,7 +864,7 @@ fn walk_multicast_batch_reassembling<
     stats: &R,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
     // R311y633 (§17.6) — the SAME walk as the plain entry point, but the tail
@@ -1014,7 +1018,7 @@ pub fn sweep_multicast_reassembling<
     on_event: &mut F,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_, '_>),
 {
     crate::reassembly_dispatch::sweep_reporting(reasm, now_ms, on_event);
     // The two observers serve two different consumers and both are used here:
@@ -1229,11 +1233,16 @@ mod batch_walk_tests {
             let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
                 panic!("a literal put carries a Put body");
             };
-            put.extensions = Some(crate::held_list::one_entry(ExtEntryOwned {
-                header,
-                body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-            }));
-            put.header |= 0x80;
+            // Neither header is the shared-memory marker, so the Put stays inline; the setter
+            // sets the body header's `Z` bit with the chain.
+            crate::put_payload::set_chain(
+                put,
+                [ExtEntryOwned {
+                    header,
+                    body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+                }],
+            )
+            .expect("one entry fits");
             let mut datagram = peer_join(&[0x22; 4]);
             datagram.extend_from_slice(&crate::frame_encode::encode_frame_with_push(0, push, true));
             let mut payloads = 0usize;
@@ -1331,7 +1340,12 @@ mod batch_walk_tests {
             let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
                 panic!("a literal put carries a Put body");
             };
-            let lent = put.payload.as_ref().expect("an inline Put").is_shared();
+            let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
+                &put.extensions_has_0x12
+            else {
+                panic!("an inline Put");
+            };
+            let lent = payload.inner().is_shared();
             let at = crate::put_payload::inline_bytes(put).expect("an inline Put");
             (at.as_ptr() as usize, lent)
         }

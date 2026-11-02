@@ -58,30 +58,31 @@ use hashbrown::HashMap;
 use crate::bounded::{Static, Storage};
 use crate::caps;
 use crate::id_map::{FixedIdMap, IdMap, KeyText, PeerAliases};
-use sce_forge_runtime::codec::{CodecStorage, SceStr};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::wireexpr::{WireexprOwnedVariant, WireexprVariant};
+use wz_codecs::wireexpr::{WireexprOwnedVariant, WireexprStorage, WireexprVariant};
 
 /// The `(id, suffix)` a Wireexpr carries, whichever mapping arm holds them.
 ///
 /// Generic over the storage profile because both planes carry Wireexprs: a
 /// `Declare`'s key expression is on the default profile and a received
 /// `Push`'s is on [`WireStorage`](crate::wire::WireStorage), and every reader in
-/// this module serves both. The text is read through [`SceStr`], which is what
-/// every profile's text container provides.
+/// this module serves both. The text is read through the field's `as_text`,
+/// which every profile's text container provides.
 ///
 /// Public so an observer that reads a Wireexpr off a received message
 /// (`wz-capture`) asks the same function, rather than re-spelling the two-arm
 /// match against a text container whose type depends on the build.
-pub fn id_and_suffix<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> (u64, Option<&str>) {
+pub fn id_and_suffix<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> (u64, Option<&str>) {
     match body {
-        WireexprOwnedVariant::WireexprLocal(arm) => {
-            (arm.id, arm.suffix.as_ref().map(SceStr::as_str))
-        }
-        WireexprOwnedVariant::WireexprNonlocal(arm) => {
-            (arm.id, arm.suffix.as_ref().map(SceStr::as_str))
-        }
+        WireexprOwnedVariant::WireexprLocal(arm) => (
+            arm.id,
+            arm.suffix.as_ref().map(|s| s.as_text().into_inner()),
+        ),
+        WireexprOwnedVariant::WireexprNonlocal(arm) => (
+            arm.id,
+            arm.suffix.as_ref().map(|s| s.as_text().into_inner()),
+        ),
     }
 }
 
@@ -108,7 +109,7 @@ pub fn id_and_suffix<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> (u64, O
 /// for it — an empty keyexpr resolves to nothing) but pass it through with only
 /// the rid rewritten, exactly as zenoh's `route_send_response` forwards a reply
 /// with NO keyexpr resolution at all (`dispatcher/queries.rs:595-635`).
-pub fn wireexpr_is_empty<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> bool {
+pub fn wireexpr_is_empty<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> bool {
     let (id, suffix_opt) = id_and_suffix(body);
     id == 0 && suffix_opt.map_or(true, str::is_empty)
 }
@@ -120,7 +121,7 @@ pub fn wireexpr_is_empty<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> boo
 /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `None => compute_route(),`);
 /// an id plus a suffix may name a child no one declared, so it is not
 /// answered here.
-pub fn wireexpr_names_a_declaration<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> bool {
+pub fn wireexpr_names_a_declaration<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> bool {
     let (id, suffix_opt) = id_and_suffix(body);
     id != 0 && suffix_opt.map_or(true, str::is_empty)
 }
@@ -167,7 +168,7 @@ pub fn wireexpr_names_a_declaration<S: CodecStorage>(body: &WireexprOwnedVariant
 /// The heap profile's form: it returns a `String` out of a `HashMap`. The bounded
 /// forms ([`resolve_wireexpr_into`], [`resolve_wireexpr_view`]) are the slot's.
 #[cfg(feature = "alloc")]
-pub fn resolve_wireexpr<S: CodecStorage>(
+pub fn resolve_wireexpr<S: WireexprStorage>(
     body: &WireexprOwnedVariant<S>,
     table: &HashMap<u64, String>,
 ) -> Option<String> {
@@ -536,7 +537,7 @@ impl<'a> From<&'a PeerAliases<Static>> for MappingSpaces<'a> {
 /// mappings from 1, so a wrong-space read very likely FINDS an entry and
 /// returns a confident, wrong keyexpr.
 #[cfg(feature = "alloc")]
-pub fn resolve_wireexpr_in<S: CodecStorage>(
+pub fn resolve_wireexpr_in<S: WireexprStorage>(
     body: &WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'_>,
 ) -> Option<String> {
@@ -589,8 +590,8 @@ pub struct KeyexprPastBound;
 /// lies: [`id_and_suffix`] over the borrowed form.
 pub fn id_and_suffix_view<'k>(body: &WireexprVariant<'k>) -> (u64, Option<&'k str>) {
     match body {
-        WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix),
-        WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix),
+        WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
+        WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
     }
 }
 
@@ -609,8 +610,10 @@ pub fn id_and_suffix_view<'k>(body: &WireexprVariant<'k>) -> (u64, Option<&'k st
 /// fixed backing does. A caller that must still deliver such a message resolves
 /// it through [`resolve_wireexpr_in`]; the receive path that delivers a record
 /// in place does exactly that (`pubsub::SubscriberRegistry`), and counts it.
-pub fn resolve_wireexpr_view<'k>(
-    body: &WireexprVariant<'k>,
+// The frame's lifetime `'f` is its own: the borrowed wireexpr is invariant in it, so it cannot
+// shrink to the caller's buffer, and the suffix it lends outlives the answer.
+pub fn resolve_wireexpr_view<'k, 'f: 'k>(
+    body: &WireexprVariant<'f>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
@@ -627,8 +630,8 @@ pub fn resolve_wireexpr_view<'k>(
 /// wireexpr has no list, so each arm is its own view). The arm is copied into the codec's variant
 /// (an id and a reference to the suffix, a few words) and the rule is the one rule.
 #[cfg(feature = "codec-request")]
-pub fn resolve_wireexpr_viewed<'k>(
-    body: &wz_codecs::wireexpr::WireexprViewVariant<'k>,
+pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
+    body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
@@ -652,7 +655,7 @@ pub fn resolve_wireexpr_viewed<'k>(
 /// absorb of one declaration is allocation-free once the message exists. On the
 /// growable backing `out` is a growable string and this allocates exactly when
 /// [`resolve_wireexpr_in`] did.
-pub fn resolve_wireexpr_into<'k, S: CodecStorage>(
+pub fn resolve_wireexpr_into<'k, S: WireexprStorage>(
     body: &'k WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
@@ -794,7 +797,7 @@ fn resolve_parts<'k>(
 /// exactly the pre-existing behaviour: with no second space there is nothing to
 /// disagree with, and the rule collapses to the one-space lookup.
 #[cfg(feature = "alloc")]
-pub fn resolve_declared_keyexpr<S: CodecStorage>(
+pub fn resolve_declared_keyexpr<S: WireexprStorage>(
     body: &WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'_>,
 ) -> Option<String> {
@@ -836,7 +839,7 @@ pub fn resolve_declared_keyexpr<S: CodecStorage>(
 /// lies against the peer's, which is borrowed; the answer is then built over
 /// whichever of the two the rule picks. [`KeyexprPastBound`] is the one answer a
 /// bounded buffer adds, as for [`resolve_wireexpr_into`].
-pub fn resolve_declared_keyexpr_into<'k, S: CodecStorage>(
+pub fn resolve_declared_keyexpr_into<'k, S: WireexprStorage>(
     body: &'k WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
@@ -848,8 +851,8 @@ pub fn resolve_declared_keyexpr_into<'k, S: CodecStorage>(
 /// [`resolve_declared_keyexpr_into`] over a wireexpr read where its frame lies:
 /// the same rule through one shared function, so a declaration the receive path
 /// lends is bound under exactly the keyexpr the owned one is.
-pub fn resolve_declared_keyexpr_view<'k>(
-    body: &WireexprVariant<'k>,
+pub fn resolve_declared_keyexpr_view<'k, 'f: 'k>(
+    body: &WireexprVariant<'f>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {

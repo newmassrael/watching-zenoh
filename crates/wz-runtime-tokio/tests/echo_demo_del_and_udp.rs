@@ -125,15 +125,14 @@ async fn echo_msg_put_udp_round_trip() {
             header: MID_Z_PUT,
             timestamp: None,
             encoding: None,
-            extensions: None,
+            extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(PUT_PAYLOAD).unwrap(),
+            },
             payload_len: Some(3),
-            payload: Some(&[0x11, 0x22, 0x33]),
             slice_count: None,
-            slices: None,
         };
-        let bytes = original
-            .encode_to_vec()
-            .expect("a Put in the inline layout encodes");
+        let bytes = original.encode_to_vec();
         // Tiny grace so the subscriber's recv_from is ready; UDP
         // is connectionless, so a too-early send would be silently
         // dropped (no kernel buffer set up yet on the listener).
@@ -151,7 +150,11 @@ async fn echo_msg_put_udp_round_trip() {
     assert_eq!(received.header, original.header);
     assert_eq!(
         wz_session_core::put_payload::inline_bytes(&received),
-        original.payload
+        Some(PUT_PAYLOAD)
     );
     assert_eq!(received.payload_len, original.payload_len);
 }
+
+/// The payload the UDP publisher puts and the subscriber must read back.
+#[cfg(feature = "transport-link-udp")]
+const PUT_PAYLOAD: &[u8] = &[0x11, 0x22, 0x33];

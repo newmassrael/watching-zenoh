@@ -491,7 +491,7 @@ mod tests {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id: 0,
                     suffix_len: Some(key.len() as u64),
-                    suffix: Some(key),
+                    suffix: Some(wz_codecs::Bounded::new(key).unwrap()),
                 }),
             },
             body: RequestVariant::CodecZenohQuery(Query::default()),
@@ -632,7 +632,10 @@ mod tests {
     /// admin queryable registered, a peer on the other end of an in-memory link.
     fn rig(
         status: &'static NodeStatus,
-    ) -> (impl FnMut(IterationEvent<'_>), Rc<crate::memory::MemoryEnd>) {
+    ) -> (
+        impl FnMut(IterationEvent<'_, '_>),
+        Rc<crate::memory::MemoryEnd>,
+    ) {
         static CONFIG: FixedConfig = FixedConfig;
         static WRITES_OFF: WritesOff = WritesOff;
         let net = MemoryNetwork::new();

@@ -52,7 +52,7 @@
      value=>` so Interest::default() carries the wire MID. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="interest">
+       sce:kind="codec" sce:default-endian="big" name="interest">
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <sce:import src="interest_body.scxml" kind="codec" as="codec_zenoh_interest_body"/>
   <datamodel>
@@ -66,7 +66,7 @@
     <sce:embed id="body" type="codec_zenoh_interest_body" sce:byte="2"
                sce:present-if="header.C || header.F"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
-                   max-depth="8" on-overflow="reject"
+                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>

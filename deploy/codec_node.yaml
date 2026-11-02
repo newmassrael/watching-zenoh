@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# What a wz node stores of each codec field whose bound is the protocol's
+# (SCE ADR 0077 section 7). A document's `sce:max-size` is what a frame may
+# say; the number here is what the `Node` profile holds inline, and a frame
+# past it is refused by a storing form as `CodecError::CapacityExceeded`
+# while a lent decode or a view still reads it whole.
+#
+# The numbers are the ones the documents carried as their bound until the SCE
+# pin crossed ADR 0077 step 1, so the inline footprint of every `Owned<Node>`
+# is what `Owned<Inline>` was. `xtask regen` generates
+# `out/wz-codecs/node.rs` from this file and the codec set.
+codecs:
+  msg_put:
+    capacity:
+      payload: 256
+  err:
+    capacity:
+      payload: 256
+  zbuf_slice:
+    capacity:
+      bytes: 256
+  ext_zbuf:
+    capacity:
+      value: 32
+  query_value_zbuf:
+    capacity:
+      value: 32
+  query:
+    capacity:
+      parameters: 256
+  init_body:
+    capacity:
+      cookie: 128
+  open_body:
+    capacity:
+      cookie: 128
+  locator:
+    capacity:
+      locator: 128
+  encoding:
+    capacity:
+      schema: 128
+  wireexpr_local:
+    capacity:
+      suffix: 128
+  wireexpr_nonlocal:
+    capacity:
+      suffix: 128

@@ -286,7 +286,6 @@ fn the_tracked_publisher_fields_capture_is_a_qos_session_with_a_control_and_a_fu
             .try_as_borrowed()
             .expect("a built push re-borrows")
             .encode_to_vec()
-            .expect("a built push is encodable")
     };
     assert_eq!(
         &control[2..],

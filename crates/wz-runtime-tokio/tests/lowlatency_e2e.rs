@@ -358,7 +358,6 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec()
-            .expect("a literal Push encodes")
     };
     let oam = wz_codecs::oam::Oam {
         id: 7,
@@ -396,7 +395,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
                 &actions,
                 &mut engine,
                 &mut record,
-                &mut |event: IterationEvent<'_>| match event {
+                &mut |event: IterationEvent<'_, '_>| match event {
                     IterationEvent::InPlace(_) => {
                         handed += 1;
                         lent_puts += 1;
@@ -456,12 +455,11 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             &actions,
             &mut engine,
             &mut record,
-            &mut |event: IterationEvent<'_>| match event {
+            &mut |event: IterationEvent<'_, '_>| match event {
                 IterationEvent::InPlace(lent) => got.push(
                     lent.push()
                         .expect("only Puts and an OAM were encoded")
-                        .encode_to_vec()
-                        .expect("a decoded Push re-encodes"),
+                        .encode_to_vec(),
                 ),
                 IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                     messages,
@@ -486,7 +484,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
         &actions,
         &mut engine,
         &mut record,
-        &mut |_: IterationEvent<'_>| {},
+        &mut |_: IterationEvent<'_, '_>| {},
     );
     assert_eq!(
         path,
@@ -501,8 +499,7 @@ fn record_bytes(message: &wz_session_core::network_message::NetworkMessage) -> V
         NetworkMessage::Push(push) => push
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec()
-            .expect("a decoded Push re-encodes"),
+            .encode_to_vec(),
         NetworkMessage::Oam(oam) => oam
             .try_as_borrowed()
             .expect("a borrowed view")

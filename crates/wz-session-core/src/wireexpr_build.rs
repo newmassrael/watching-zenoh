@@ -12,24 +12,29 @@
 //! `alloc`, so the Request forward path (`set_request_keyexpr_literal`) can
 //! reuse the SAME constructor without pulling in the Push codec.
 
-use sce_forge_runtime::codec::{CodecError, CodecStorage, SceStr};
-use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-use wz_codecs::wireexpr_local::WireexprLocalOwned;
+use sce_forge_runtime::codec::{Bounded, CodecError};
+use wz_codecs::wireexpr::{WireexprFrom, WireexprOwned, WireexprOwnedVariant};
+use wz_codecs::wireexpr_local::{WireexprLocalOwned, WireexprLocalSuffixField};
 
 /// A literal `Wireexpr` carrying `suffix` (mapping id 0 — the literal
 /// sentinel). The codec-agnostic SSOT a forwarder re-expresses an aliased
 /// keyexpr through before it crosses a link that does not share the inbound
-/// alias table (c3c-3 B1). Fallible only by the owned-string copy.
+/// alias table (c3c-3 B1). Fallible by the suffix's bound: `LengthOutOfRange`
+/// past the `u16` length the protocol gives a suffix, and `CapacityExceeded`
+/// past what the profile stores of one.
 ///
 /// Generic over the storage profile (R3011): Push, Request and Response build
 /// theirs at the wire profile and Declare at the default, and the profile is
 /// the one the caller's field names.
-pub fn literal_wireexpr<S: CodecStorage>(suffix: &str) -> Result<WireexprOwned<S>, CodecError> {
+pub fn literal_wireexpr<S: for<'x> WireexprFrom<'x>>(
+    suffix: &str,
+) -> Result<WireexprOwned<S>, CodecError> {
+    let text = Bounded::new(suffix).ok_or(CodecError::LengthOutOfRange)?;
     Ok(WireexprOwned {
         body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
             id: 0,
             suffix_len: Some(suffix.len() as u64),
-            suffix: Some(<S::Str<128> as SceStr>::from_view(suffix)?),
+            suffix: Some(text.store::<S, WireexprLocalSuffixField>()?),
         }),
     })
 }
@@ -46,7 +51,7 @@ pub const NAMED_FLAG: u8 = 0x20;
 /// suffix-bearing wireexpr offset-shifts the peer's decode of the following body.
 /// Takes the two fields by `&mut` (disjoint borrows of the message struct) so the
 /// per-message wrappers are a one-line delegation with no duplicated logic.
-pub fn set_literal_keyexpr_fields<S: CodecStorage>(
+pub fn set_literal_keyexpr_fields<S: for<'x> WireexprFrom<'x>>(
     keyexpr: &mut WireexprOwned<S>,
     header: &mut u8,
     suffix: &str,

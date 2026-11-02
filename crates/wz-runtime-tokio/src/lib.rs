@@ -3136,12 +3136,11 @@ impl LinkDriver for TcpDriver {
         // no owned copy (the envelope lives only until `encode_to_vec`).
         let envelope = StreamEnvelope {
             payload_len,
-            payload: frame.bytes,
+            payload: wz_codecs::Bounded::new(frame.bytes).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "frame > 65535 bytes")
+            })?,
         };
-        // `payload_len` came from a checked `u16` conversion above, so the codec has no refusal.
-        let wire = envelope
-            .encode_to_vec()
-            .expect("a frame within the u16 prefix encodes");
+        let wire = envelope.encode_to_vec();
         stream.write_all(&wire).await?;
         stream.flush().await?;
         Ok(())
@@ -3927,10 +3926,10 @@ mod poll_framed_lowlatency_tests {
     async fn a_zero_length_batch_is_skipped_and_the_next_frame_still_arrives() {
         let real = StreamEnvelope {
             payload_len: 3,
-            payload: &[0x01, 0x02, 0x03],
+            payload: wz_codecs::Bounded::new(&[0x01u8, 0x02, 0x03] as &[u8])
+                .expect("a three-byte payload fits the u16 stream envelope"),
         }
-        .encode_to_vec()
-        .expect("a three-byte payload fits the u16 stream envelope");
+        .encode_to_vec();
 
         // An empty batch is the two prefix bytes and nothing else.
         let mut wire = vec![0x00u8, 0x00];
@@ -4279,10 +4278,10 @@ mod poll_framed_lowlatency_tests {
         ] {
             let wire = StreamEnvelope {
                 payload_len: payload.len() as u16,
-                payload: &payload,
+                payload: wz_codecs::Bounded::new(payload.as_slice())
+                    .expect("a payload of at most 258 bytes fits the u16 stream envelope"),
             }
-            .encode_to_vec()
-            .expect("a payload of at most 258 bytes fits the u16 stream envelope");
+            .encode_to_vec();
             let mut src: &[u8] = &wire;
             let mut st = ReadState::Idle;
             match poll_framed(&mut st, &mut src, false, &mut HeapArena).await {

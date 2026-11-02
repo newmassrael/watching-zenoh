@@ -81,11 +81,11 @@ pub trait SessionFactory<
 pub struct EventsOf<E>(E);
 
 impl<E: SessionEvents> EventSink for EventsOf<E> {
-    fn event(&mut self, event: IterationEvent<'_>) {
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
         self.0.on_event(event);
     }
 
-    fn record(&mut self, record: InPlaceRecord<'_>) {
+    fn record(&mut self, record: InPlaceRecord<'_, '_>) {
         self.0.on_record(record);
     }
 }

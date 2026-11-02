@@ -60,8 +60,7 @@ use wz_session_core::held_list::HeldList;
 use wz_session_core::network_message::{BatchParse, NetworkMessage};
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
 
-use wz_codecs::wireexpr::WireexprOwnedVariant;
-use wz_codecs::CodecStorage;
+use wz_codecs::wireexpr::{WireexprOwnedVariant, WireexprStorage};
 use wz_session_core::wire::parts::WireexprOwnedVariant as WireKeyexpr;
 
 use crate::filter::{Content, Filter, RecordKind, RecordView, Selection, Truth};
@@ -835,7 +834,7 @@ impl KeyexprSpaces {
     ///
     /// `Ok(literal)` when it resolved, `Err(alias)` naming the space and id
     /// when it did not. Never a lookup in the space the `M` bit did not name.
-    pub fn resolve<S: CodecStorage>(
+    pub fn resolve<S: WireexprStorage>(
         &self,
         direction: Direction,
         body: &WireexprOwnedVariant<S>,
@@ -869,7 +868,7 @@ impl KeyexprSpaces {
     /// `Err` names the DECLARER's space and id when nothing resolved, matching
     /// what [`Self::resolve`] reports for the same reference, and is also what
     /// an ambiguous scope yields: two candidate bases and no bit to choose.
-    fn resolve_declared<S: CodecStorage>(
+    fn resolve_declared<S: WireexprStorage>(
         &self,
         direction: Direction,
         body: &WireexprOwnedVariant<S>,
@@ -2176,7 +2175,8 @@ pub(crate) fn put_bytes(put: &wz_session_core::wire::parts::MsgPutOwned) -> &[u8
 /// sliced Put is never reported as a measured payload of zero bytes.
 #[cfg(feature = "network-codecs")]
 pub(crate) fn put_payload_is_elsewhere(put: &wz_session_core::wire::parts::MsgPutOwned) -> bool {
-    wz_session_core::put_payload::is_sliced(put) || carries_shm_marker(put.extensions.entries())
+    wz_session_core::put_payload::is_sliced(put)
+        || carries_shm_marker(Some(wz_session_core::put_payload::chain(put)))
 }
 
 /// What one `Put`'s payload slot is worth to the totals: the inline bytes
@@ -2816,7 +2816,7 @@ pub(crate) mod tests {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id,
                 suffix_len: suffix.map(|s| s.len() as u64),
-                suffix,
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
             }),
         }
     }
@@ -2846,7 +2846,6 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Push is encodable")
     }
 
     /// `DeclKexpr`: bind `id` to the literal `suffix` in the SENDER's space.
@@ -2864,7 +2863,6 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Declare is encodable")
     }
 
     /// R2385— a `DeclKexpr` binding `id` to `scope` + `suffix`, as a decoded
@@ -2967,7 +2965,6 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Declare is encodable")
     }
 
     /// R311y640 (§1.1w) — the ext body zenoh actually puts on the wire for a
@@ -3006,7 +3003,7 @@ pub(crate) mod tests {
             // flag, so setting it shifts the id and adds the two schema fields.
             packed_id: if schema.is_some() { 1 } else { 0 },
             schema_len: schema.map(|s| s.len() as u64),
-            schema,
+            schema: schema.map(|s| wz_codecs::Bounded::new(s).unwrap()),
         }
         .encode_to_vec();
         wz_codecs::VecSink::new(&mut body)
@@ -3141,16 +3138,18 @@ pub(crate) mod tests {
             ));
             owned.header |= 0x80;
         }
-        let query = owned.try_as_borrowed().expect("the chain is within bounds");
-        // Bound rather than returned directly: the borrowed query points into
-        // `owned`, which the tail expression would drop first.
-        let encoded = wz_codecs::request::Request {
+        // The Request is built owned around the owned query, and borrowed back to
+        // encode: the borrowed form is invariant in its lifetime, so a `'static`
+        // keyexpr and a query borrowed from a local cannot share one.
+        let encoded = wz_codecs::request::RequestOwned {
             header: wz_codecs::request::Request::default().header | n_flag,
             rid,
-            keyexpr,
-            body: wz_codecs::request::RequestVariant::CodecZenohQuery(query),
+            keyexpr: keyexpr.try_into_owned().expect("the fixture key owns"),
+            body: wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(owned),
             ..Default::default()
         }
+        .try_as_borrowed()
+        .expect("the chain is within bounds")
         .encode_to_vec()
         .expect("a fixture Request is encodable");
         encoded
@@ -3377,7 +3376,7 @@ pub(crate) mod tests {
                     header: body_ext_id::SHM | EXT_ENC_ZBUF,
                     body: ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
                         value_len: 1,
-                        value: &[0xAB],
+                        value: wz_codecs::Bounded::new(&[0xABu8] as &[u8]).unwrap(),
                     }),
                 }),
             }
@@ -3417,27 +3416,37 @@ pub(crate) mod tests {
         let z_put = if entry.is_some() { FLAG_Z_PUT_Z } else { 0 };
         let put = if ext == BodyExt::ShmMarker {
             // The marker makes the payload sliced: one slice of kind SHM_PTR
-            // whose bytes stand in for the descriptor, and no inline pair.
+            // whose bytes stand in for the descriptor, and no inline pair. The
+            // marker is the chain's whole content, so the arm holds it by its
+            // place and no other entry.
             wz_codecs::msg_put::MsgPut {
                 header: wz_codecs::msg_put::MsgPut::default().header | z_put,
-                extensions: entry.clone().map(|e| core::iter::once(e).collect()),
                 slice_count: Some(1),
-                slices: Some(
-                    core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
-                        kind: u32::from(wz_session_core::put_payload::SLICE_KIND_SHM_PTR),
-                        len: payload.len() as u64,
-                        bytes: payload,
-                    })
-                    .collect(),
-                ),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 {
+                    extensions: Default::default(),
+                    slices: wz_codecs::Bounded::new(
+                        core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
+                            kind: u32::from(wz_session_core::put_payload::SLICE_KIND_SHM_PTR),
+                            len: payload.len() as u64,
+                            bytes: wz_codecs::Bounded::new(payload).unwrap(),
+                        })
+                        .collect(),
+                    )
+                    .unwrap(),
+                },
                 ..Default::default()
             }
         } else {
             wz_codecs::msg_put::MsgPut {
                 header: wz_codecs::msg_put::MsgPut::default().header | z_put,
-                extensions: entry.clone().map(|e| core::iter::once(e).collect()),
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: entry.clone().map(|e| {
+                        wz_codecs::Chain::new(core::iter::once(e).collect())
+                            .expect("an extension other than the marker")
+                    }),
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }
         };
@@ -3449,8 +3458,7 @@ pub(crate) mod tests {
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(put),
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture Push is encodable"),
+            .encode_to_vec(),
             Carrier::Request => wz_codecs::request::Request {
                 header: wz_codecs::request::Request::default().header | FLAG_N_N,
                 rid: 11,
@@ -3472,8 +3480,7 @@ pub(crate) mod tests {
                 ),
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture Response is encodable"),
+            .encode_to_vec(),
             // The ERR carrier does NOT wrap a Put: it declares `encoding` and
             // `payload` as its own fields, and its own shm ext beside them.
             Carrier::Err => {
@@ -3485,16 +3492,17 @@ pub(crate) mod tests {
                     body: wz_codecs::response::ResponseVariant::CodecZenohErr(
                         wz_codecs::err::Err {
                             header: wz_codecs::err::Err::default().header | z_err,
-                            extensions: entry.map(|e| core::iter::once(e).collect()),
+                            extensions: entry.map(|e| {
+                                wz_codecs::Bounded::new(core::iter::once(e).collect()).unwrap()
+                            }),
                             payload_len: payload.len() as u64,
-                            payload,
+                            payload: wz_codecs::Bounded::new(payload).unwrap(),
                             ..Default::default()
                         },
                     ),
                     ..Default::default()
                 }
                 .encode_to_vec()
-                .expect("a fixture Response is encodable")
             }
         }
     }
@@ -4163,12 +4171,7 @@ pub(crate) mod tests {
         };
         let table = aggregate_datagrams(&[
             (true, declare_kexpr(1, "parent")),
-            (
-                true,
-                chained
-                    .encode_to_vec()
-                    .expect("a fixture Declare is encodable"),
-            ),
+            (true, chained.encode_to_vec()),
             (true, push(sender_space(2, None), &[0u8; 6])),
         ]);
         let row = table.row("parent/child").expect("the chain composed");
@@ -4579,8 +4582,7 @@ pub(crate) mod tests {
                     header_c_or_f: None,
                     ..Default::default()
                 }
-                .encode_to_vec()
-                .expect("a fixture Interest is encodable"),
+                .encode_to_vec(),
             ),
         ]);
 

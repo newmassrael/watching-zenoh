@@ -70,6 +70,7 @@ use wz_runtime_core::TimeSource;
 // serves exactly one item and must carry exactly that item's gate; carrying a
 // narrower one is what turned a `declare-subscriber`-without-`liveliness-token`
 // build into E0425 the moment the method's own gate was widened.
+use crate::transport_profile::ExtEntryOwned;
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::ResponseOwned;
 #[cfg(all(
@@ -77,7 +78,6 @@ use crate::wire::ResponseOwned;
     feature = "alloc"
 ))]
 use wz_codecs::declare::DeclareOwned;
-use wz_codecs::ext_entry::ExtEntryOwned;
 
 use crate::action_trace::ActionTrace;
 use crate::close_reason::CloseReason;
@@ -2614,12 +2614,15 @@ enum LentDeclaration<'a> {
     )
 ))]
 impl<'a> LentDeclaration<'a> {
-    /// The declaration, borrowing the text the arguments borrow.
-    fn declare(&self) -> wz_codecs::declare::Declare<'a> {
+    /// The declaration, borrowing the text the arguments borrow. `LengthOutOfRange` for a
+    /// keyexpr suffix past the protocol's `u16` length, which is not sent.
+    fn declare(
+        &self,
+    ) -> Result<wz_codecs::declare::Declare<'a>, sce_forge_runtime::codec::CodecError> {
         match *self {
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
             Self::FinalReply { interest_id } => {
-                crate::lent_control::declare_final_reply(interest_id)
+                Ok(crate::lent_control::declare_final_reply(interest_id))
             }
             #[cfg(feature = "declare-subscriber")]
             Self::SubscriberReply {
@@ -2656,6 +2659,20 @@ impl<'a> LentDeclaration<'a> {
                 suffix,
             } => crate::lent_control::declare_token(id, mapping_id, suffix),
         }
+    }
+
+    /// The bytes the declaration encodes to: what the dispatch asks the link to lend for it, since
+    /// a `Declare` has no size constant (its keyexpr suffix's bound is upstream's u16 length). Its
+    /// own frame, not inlined, so the `Declare` it counts is on the stack only while it counts, and
+    /// the dispatch's frame does not carry it beside the one the encoder builds.
+    ///
+    /// A declaration that cannot be composed counts as zero: the encoder then refuses it with the
+    /// same error, and the dispatch reports that refusal.
+    #[inline(never)]
+    fn encoded_len(&self) -> usize {
+        self.declare().map_or(0, |declare| {
+            wz_codecs::declare::Declare::measure(&declare).len()
+        })
     }
 }
 
@@ -3025,13 +3042,20 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
             return;
         };
         let qos = parts.qos;
+        // The reply's own size, counted by running its writer into a sink that keeps nothing: a
+        // Response has no size constant (its payload's bound is a u32 length), and the link lends
+        // a slot of this size. A reply the writer refuses is refused by the encode below too.
+        let size = {
+            let mut count = sce_forge_runtime::codec::CountSink::new();
+            writer.encode(&mut count).map_or(0, |()| count.len())
+        };
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
                 qos.priority(),
                 /*reliable=*/ true,
                 qos,
-                wz_codecs::response::Response::MAX_ENCODED_BYTES,
+                size,
                 crate::stats::NetworkStatsClass::unread(),
                 as_encoder(&|sink| writer.encode_tx(sink)),
             )
@@ -3127,19 +3151,21 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 Priority::Control,
                 /*reliable=*/ true,
                 crate::sample::QosLevel::DEFAULT,
-                wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+                crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id),
                 crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-                as_encoder(&|sink| build_token_reply(token_id, keyexpr, interest_id).encode(sink)),
+                as_encoder(&|sink| build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)),
             )
             .map(|_| ());
     }
     #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        self.send_declare(
-            build_token_reply(token_id, keyexpr, interest_id)
-                .try_into_owned()
-                .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES"),
-        );
+        // A keyexpr past the protocol's bound is not answered, as the subscriber reply
+        // below skips one: the chain's `DeclFinal` still terminates the interest.
+        if let Ok(declare) = build_token_reply(token_id, keyexpr, interest_id)
+            .and_then(|reply| reply.try_into_owned())
+        {
+            self.send_declare(declare);
+        }
     }
     #[cfg(all(
         any(feature = "liveliness-token", feature = "declare-subscriber"),
@@ -5325,13 +5351,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
         let caps = self.init_caps(is_ack);
-        // The codec's worst case for the body and the longest chain a peer can
-        // send back, so the link lends one slot that holds any InitSyn / InitAck.
-        const WANT: usize = 1
-            + wz_codecs::init_body::InitBody::MAX_ENCODED_BYTES
-            + crate::parse_error::MAX_EXT_CHAIN_DEPTH
-                * wz_codecs::ext_entry::ExtEntry::MAX_ENCODED_BYTES;
-        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, WANT, |buf| {
+        // The message's own length, so the link lends a slot that holds this
+        // InitSyn / InitAck. An Init body has no size constant to ask for instead:
+        // its cookie's bound is upstream's u16 length.
+        let want = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            crate::handshake_encode::init_frame_len(
+                &self.params,
+                caps,
+                is_ack,
+                chain,
+                cookie_override,
+            )
+        });
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 crate::handshake_encode::encode_init_into(
                     buf,
@@ -5362,10 +5394,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
         let initial_sn = self.open_initial_sn().unwrap_or(self.params.initial_sn);
-        const WANT: usize = 1
-            + wz_codecs::open_body::OpenBody::MAX_ENCODED_BYTES
-            + crate::parse_error::MAX_EXT_CHAIN_DEPTH
-                * wz_codecs::ext_entry::ExtEntry::MAX_ENCODED_BYTES;
         // The staged chain is taken out of its slot for the encode and put back
         // after it (a move of the vector's handle, which allocates nothing), so
         // the encode holds ONE session mutex at a time: the cookie's, when it
@@ -5375,7 +5403,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // reader of a handshake chain runs inside of (the send is the chain's
         // only consumer, and the drive loop is one task on this profile).
         let chain = R::with_mutex_mut(self.ext_chain_slot(role), core::mem::take);
-        let sent = self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, WANT, |buf| {
+        // The message's own length, so the link lends a slot that holds this
+        // OpenSyn / OpenAck. An Open body has no size constant to ask for instead:
+        // its cookie's length is a `usize`.
+        let want = if echo_inbound_cookie {
+            R::with_mutex_mut(&self.inbound_cookie, |cookie| {
+                crate::handshake_encode::open_frame_len(
+                    &self.params,
+                    initial_sn,
+                    is_ack,
+                    cookie.as_deref(),
+                    &chain,
+                )
+            })
+        } else {
+            crate::handshake_encode::open_frame_len(&self.params, initial_sn, is_ack, None, &chain)
+        };
+        let sent = self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
             if echo_inbound_cookie {
                 R::with_mutex_mut(&self.inbound_cookie, |cookie| {
                     crate::handshake_encode::encode_open_into(
@@ -11778,7 +11822,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_declare_qos(declare),
-            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            wz_codecs::declare::Declare::measure(declare).len(),
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
             // labels cover the four data kinds).
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -11814,18 +11858,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             /*reliable=*/ true,
             crate::declare_ext_qos::QOS_DECLARE,
-            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            what.encoded_len(),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-            as_encoder(&|sink| what.declare().encode(sink)),
+            as_encoder(&|sink| what.declare()?.encode(sink)),
         )
         .map(|_| ())
     }
 
     /// See [`Self::dispatch_push`]. The OAM-LINKSTATE TX path (c3d
-    /// linkstate-peer flood). The reserve hint is the fixed
-    /// `Oam::MAX_ENCODED_BYTES`; the variable LinkStateList ZBuf payload
-    /// grows the `VecSink` past it, and the oversize / fragment decision
-    /// keys off the ACTUAL encoded length (not this hint), so a large
+    /// linkstate-peer flood). The reserve hint is the OAM's own measured
+    /// size, and the oversize / fragment decision keys off the ACTUAL
+    /// encoded length as well, so a large
     /// multi-node flood fragments correctly — PROVIDED `transport-fragmentation`
     /// is on, which the `routing-peer` feature PULLS (R311rd); without it an
     /// oversize OAM is dropped at the `u16` stream guard. Co-gated on
@@ -11862,7 +11905,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_oam_qos(oam),
-            wz_codecs::oam::Oam::MAX_ENCODED_BYTES,
+            wz_codecs::oam::Oam::measure(oam).len(),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
             as_encoder(&encode_body),
         )
@@ -11905,7 +11948,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Self::REQUEST_ROUTE_PRIORITY,
             reliable,
             crate::declare_ext_qos::read_request_qos(request),
-            wz_codecs::request::Request::MAX_ENCODED_BYTES,
+            // A Request the encode refuses is refused by the body as well; the
+            // reservation for it is moot.
+            wz_codecs::request::Request::measure(request).map_or(0, |measured| measured.len()),
             class,
             as_encoder(&encode_body),
         )
@@ -11954,7 +11999,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos.priority(),
             reliable,
             qos,
-            wz_codecs::response::Response::MAX_ENCODED_BYTES,
+            wz_codecs::response::Response::measure(response).len(),
             class,
             as_encoder(&encode_body),
         )?;
@@ -12001,7 +12046,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos.priority(),
             reliable,
             qos,
-            wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+            wz_codecs::response_final::ResponseFinal::measure(response_final).len(),
             // A pure correlation marker — no key expression and no payload, so
             // it is control plane even though it closes a data-plane exchange.
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
@@ -12049,7 +12094,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_interest_qos(interest),
-            wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
+            wz_codecs::interest::Interest::measure(interest).len(),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
             as_encoder(&encode_body),
         )
@@ -12290,13 +12335,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             });
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
+        // The Put's own size, from the same writer run into a sink that keeps nothing: a Push
+        // has no size constant (its payload's bound is a u32 length), and the link lends a slot
+        // of this size. A Put the writer refuses counts as zero, and the encoder below refuses
+        // it with the same error, which the dispatch reports.
+        let size = {
+            let mut count = sce_forge_runtime::codec::CountSink::new();
+            match crate::lent_push::write_plain_put(&mut count, mapping_id, suffix, value, qos) {
+                Ok(()) => count.len(),
+                Err(_) => 0,
+            }
+        };
         let sent = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
                 priority,
                 reliable,
                 qos,
-                wz_codecs::push::Push::MAX_ENCODED_BYTES,
+                size,
                 class,
                 as_encoder(&|sink| {
                     crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
@@ -12358,12 +12414,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // A Put built here carries no extension, so no `ext_qos`: the
                 // default QoS, which `read_push_qos` answers for the same message.
                 crate::sample::QosLevel::DEFAULT,
-                wz_codecs::push::Push::MAX_ENCODED_BYTES,
+                crate::lent_push::literal_put_len(keyexpr_suffix, value),
                 class,
                 as_encoder(
                     &// The borrowed composition the multicast TX of a build with no
                 // allocator encodes too (`multicast_tx::MulticastTxPut`).
-                |sink| crate::lent_push::literal_put(keyexpr_suffix, value).encode(sink),
+                |sink| crate::lent_push::literal_put(keyexpr_suffix, value)?.encode(sink),
                 ),
             )
             .map(|_| ())
@@ -12572,35 +12628,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // and no owned mirror.
         #[cfg(all(feature = "codec-push", not(feature = "alloc")))]
         {
-            use wz_codecs::msg_del::MsgDel;
-            use wz_codecs::push::{Push, PushVariant};
-            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-            use wz_codecs::wireexpr_local::WireexprLocal;
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
                 Priority::DEFAULT,
                 reliable,
                 crate::sample::QosLevel::DEFAULT,
-                wz_codecs::push::Push::MAX_ENCODED_BYTES,
+                crate::lent_push::literal_del_len(keyexpr_suffix),
                 crate::stats::NetworkStatsClass::unread(),
-                as_encoder(&|sink| {
-                    Push {
-                        header: wz_codecs::wire_const::N_MID_PUSH | 0x20,
-                        keyexpr: Wireexpr {
-                            body: WireexprVariant::WireexprLocal(WireexprLocal {
-                                id: 0,
-                                suffix_len: Some(keyexpr_suffix.len() as u64),
-                                suffix: Some(keyexpr_suffix),
-                            }),
-                        },
-                        extensions: None,
-                        body: PushVariant::CodecZenohMsgDel(MsgDel {
-                            header: 0x02,
-                            ..MsgDel::default()
-                        }),
-                    }
-                    .encode(sink)
-                }),
+                as_encoder(&|sink| crate::lent_push::literal_del(keyexpr_suffix)?.encode(sink)),
             )
             .map(|_| ())
         }
@@ -13504,10 +13539,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: &str,
     ) {
         #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+        // A key past the protocol's bound cannot be named, so its retraction carries the
+        // id alone, which the peer retracts by as well; the replay cache is pruned either way.
         self.retract_subscriber(
             subscriber_id,
             build_undeclare_subscriber_on_wire(subscriber_id, mapping_id, suffix)
-                .expect("the ext body rides the alloc carrier, which is unbounded"),
+                .unwrap_or_else(|_| build_undeclare_subscriber(subscriber_id)),
         );
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
         let _ = (subscriber_id, mapping_id, suffix);
@@ -13553,10 +13590,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: &str,
     ) {
         #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
+        // Named by its id alone past the key's bound, as the subscriber retraction is.
         self.retract_queryable(
             queryable_id,
             build_undeclare_queryable_on_wire(queryable_id, mapping_id, suffix)
-                .expect("the ext body rides the alloc carrier, which is unbounded"),
+                .unwrap_or_else(|_| build_undeclare_queryable(queryable_id)),
         );
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
         let _ = (queryable_id, mapping_id, suffix);
@@ -13599,10 +13637,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
     pub fn send_undeclare_token_naming(&self, token_id: u64, mapping_id: u64, suffix: &str) {
         #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+        // Named by its id alone past the key's bound, as the subscriber retraction is.
         self.retract_token(
             token_id,
             build_undeclare_token_on_wire(token_id, mapping_id, suffix)
-                .expect("the ext body rides the alloc carrier, which is unbounded"),
+                .unwrap_or_else(|_| build_undeclare_token(token_id)),
         );
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = (token_id, mapping_id, suffix);
@@ -14218,12 +14257,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             SendWireError::Codec(sce_forge_runtime::codec::CodecError::PresentIfMismatch)
         })?;
         let qos = parts.qos;
+        // The query's own size, counted by running its writer into a sink that keeps nothing: a
+        // Request has no size constant (its value's bound is a u32 length), and the link lends a
+        // slot of this size. A query the writer refuses is refused by the encode below too.
+        let size = {
+            let mut count = sce_forge_runtime::codec::CountSink::new();
+            writer.encode(&mut count).map_or(0, |()| count.len())
+        };
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
             qos.priority(),
             /*reliable=*/ true,
             qos,
-            wz_codecs::request::Request::MAX_ENCODED_BYTES,
+            size,
             crate::stats::NetworkStatsClass::unread(),
             as_encoder(&|sink| writer.encode(sink)),
         )
@@ -14335,7 +14381,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     qos.priority(),
                     /*reliable=*/ true,
                     qos,
-                    wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+                    crate::lent_control::response_final_len(request_id, qos),
                     crate::stats::NetworkStatsClass::control(
                         crate::stats::MessageLabel::ResponseFinal,
                     ),
@@ -15080,7 +15126,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// peer's answer to an interest the node sent: the node stops waiting for each
     /// ([`Self::note_declare_final`]). The inbound dispatch calls this for every event.
     /// R311g1 — signature-stability: a no-op without `session-reconnect` and `codec-declare`.
-    pub fn note_declare_finals_in(&self, event: crate::driver_loop::IterationEvent<'_>) {
+    pub fn note_declare_finals_in(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
         #[cfg(all(feature = "session-reconnect", feature = "codec-declare"))]
         crate::declaration_sync::finals_in_event(event, |interest_id| {
             let _ = self.note_declare_final(interest_id);

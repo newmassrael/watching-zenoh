@@ -29,33 +29,43 @@
 
 use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::msg_del::MsgDel;
-use wz_codecs::msg_put::MsgPut;
+use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
+use wz_codecs::Bounded;
 
-/// A default Put names neither payload layout, and the encoder refuses it.
+/// A default Put holds the inline layout with an empty payload and no chain.
 ///
-/// The payload is gated on the extension chain (`extensions.has(0x12)`), so
-/// `payload_len` and `payload` are `None` until a caller says the Put is inline
-/// and the slice fields are `None` until it says the Put is sliced. A Put that
-/// says neither is two descriptions of nothing, not an empty payload, and the
-/// encoder turns it away before writing a byte instead of guessing a layout.
+/// The payload layout is the arm of `extensions_has_0x12` a value holds, so a
+/// Put cannot name both layouts or neither: its default is the arm where the
+/// chain carries no shared-memory marker, and it encodes as the header and a
+/// zero length.
 #[test]
-fn a_default_msg_put_names_no_payload_layout_and_is_refused() {
+fn a_default_msg_put_is_an_empty_inline_put() {
     let put = MsgPut::default();
     assert!(
-        put.encode_to_vec().is_err(),
-        "a Put with neither payload pair given must not encode"
+        matches!(
+            &put.extensions_has_0x12,
+            MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload,
+            } if payload.is_empty()
+        ),
+        "the default Put is inline, with no chain and an empty payload"
+    );
+    assert_eq!(
+        put.encode_to_vec(),
+        [0x01, 0x00],
+        "the default Put is its header and a zero payload length"
     );
 }
 
 #[test]
 fn msg_put_default_encode_decode_roundtrip() {
-    // The default with the one thing it lacks: an explicit, empty inline payload.
+    // The default, with the length a decode of it reads.
     let put = MsgPut {
         payload_len: Some(0),
-        payload: Some(&[]),
         ..MsgPut::default()
     };
-    let encoded = put.encode_to_vec().expect("an inline Put encodes");
+    let encoded = put.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "Default MsgPut encode produced 0 bytes — at minimum the \
@@ -70,7 +80,13 @@ fn msg_put_default_encode_decode_roundtrip() {
         decoded.payload_len, put.payload_len,
         "payload_len round-trip"
     );
-    assert_eq!(decoded.payload, put.payload, "payload bytes round-trip");
+    // The decoded value borrows `encoded` and the built one does not, so the two
+    // are compared by what they write rather than as values of one lifetime.
+    assert_eq!(
+        decoded.encode_to_vec(),
+        encoded,
+        "payload layout, chain and payload bytes round-trip"
+    );
     assert!(
         decoded.timestamp.is_none(),
         "timestamp gate cleared in default"
@@ -80,7 +96,13 @@ fn msg_put_default_encode_decode_roundtrip() {
         "encoding gate cleared in default"
     );
     assert!(
-        decoded.extensions.is_none(),
+        matches!(
+            decoded.extensions_has_0x12,
+            MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                ..
+            }
+        ),
         "extensions gate cleared in default"
     );
 }
@@ -113,18 +135,13 @@ fn reply_default_encode_decode_roundtrip() {
     // baked-in.
     use wz_codecs::reply::{Reply, ReplyVariant};
 
-    // The default body is a Put that names no payload layout, which the encoder
-    // refuses (see `a_default_msg_put_names_no_payload_layout_and_is_refused`),
-    // so the body carries an explicit, empty inline payload.
+    // The default body is an empty inline Put (see
+    // `a_default_msg_put_is_an_empty_inline_put`).
     let reply = Reply {
-        body: ReplyVariant::CodecZenohMsgPut(MsgPut {
-            payload_len: Some(0),
-            payload: Some(&[]),
-            ..MsgPut::default()
-        }),
+        body: ReplyVariant::CodecZenohMsgPut(MsgPut::default()),
         ..Reply::default()
     };
-    let encoded = reply.encode_to_vec().expect("a default Reply encodes");
+    let encoded = reply.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "default Reply encode produced 0 bytes — header byte expected"
@@ -185,9 +202,9 @@ fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
     for (i, (payload, expected_wire)) in cases.iter().enumerate() {
         let env = StreamEnvelope {
             payload_len: payload.len() as u16,
-            payload,
+            payload: Bounded::new(*payload).expect("a case payload fits a u16 length"),
         };
-        let wire = env.encode_to_vec().expect("an envelope encodes");
+        let wire = env.encode_to_vec();
         assert_eq!(
             wire.len(),
             expected_wire.len(),

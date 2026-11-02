@@ -164,7 +164,7 @@ fn native_peer(
         let timeouts = SessionTimeouts::spec_defaults();
         let dispatch_session = session.clone();
         let mut dispatch =
-            |event: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(event);
+            |event: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(event);
         let _ = ready.send(());
 
         let pump = drive_session_until_terminal(

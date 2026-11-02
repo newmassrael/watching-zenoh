@@ -22,18 +22,73 @@ use sce_forge_runtime::codec::VecSink;
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
+/// The field `sensor_id` of `TempPayload`, which a storage profile
+/// answers for by this type.
 #[allow(dead_code)]
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct TempPayload<'a> {
+pub struct TempPayloadSensorIdField;
+
+impl ::sce_forge_runtime::codec::HoldsStr<TempPayloadSensorIdField> for ::sce_forge_runtime::codec::Inline {
+    type Str = ::sce_forge_runtime::codec::InlineStr<64>;
+}
+
+/// The field `raw` of `TempPayload`, which a storage profile
+/// answers for by this type.
+#[allow(dead_code)]
+pub struct TempPayloadRawField;
+
+impl ::sce_forge_runtime::codec::HoldsBytes<TempPayloadRawField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<64>;
+}
+
+/// What `TempPayloadIn` and the codecs it holds ask of a storage profile.
+#[allow(dead_code)]
+pub trait TempPayloadStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<TempPayloadSensorIdField> + ::sce_forge_runtime::codec::HoldsBytes<TempPayloadRawField> {}
+
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<TempPayloadSensorIdField> + ::sce_forge_runtime::codec::HoldsBytes<TempPayloadRawField>> TempPayloadStorage for S {}
+
+/// What a decode of a frame of the lifetime `'f` asks of a storage profile
+/// beside TempPayloadStorage: how it stores each field of that frame.
+#[allow(dead_code)]
+pub trait TempPayloadFrom<'f>: TempPayloadStorage + ::sce_forge_runtime::codec::StoresStr<'f, TempPayloadSensorIdField> + ::sce_forge_runtime::codec::StoresBytes<'f, TempPayloadRawField> {}
+
+impl<'f, S: TempPayloadStorage + ::sce_forge_runtime::codec::StoresStr<'f, TempPayloadSensorIdField> + ::sce_forge_runtime::codec::StoresBytes<'f, TempPayloadRawField>> TempPayloadFrom<'f> for S {}
+
+// `TempPayloadIn<S>` is the one value this codec has, at the storage
+// profile `S` (docs/adr/0077 §7). `TempPayload<'a>` is it on `Lent`, which
+// borrows bytes and text from the frame, and `TempPayloadOwned<S>` names it
+// at a profile that holds them.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempPayloadIn<S: TempPayloadStorage> {
     pub celsius_centi: u16,
     pub sensor_id_len: u64,
-    pub sensor_id: &'a str,
+    pub sensor_id: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsStr<TempPayloadSensorIdField>>::Str, 64>,
     pub raw_len: u64,
-    pub raw: &'a [u8],
+    pub raw: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<TempPayloadRawField>>::Bytes, 64>,
+}
+
+/// The eager form: bytes and text borrowed from the frame, lists held inline.
+#[allow(dead_code)]
+pub type TempPayload<'a> = TempPayloadIn<::sce_forge_runtime::codec::Lent<'a>>;
+
+/// The value at a profile that holds its bytes and text.
+#[allow(dead_code)]
+pub type TempPayloadOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = TempPayloadIn<S>;
+
+impl<S: TempPayloadStorage> Default for TempPayloadIn<S> {
+    fn default() -> Self {
+        Self {
+            celsius_centi: Default::default(),
+            sensor_id_len: Default::default(),
+            sensor_id: Default::default(),
+            raw_len: Default::default(),
+            raw: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl<'a> TempPayload<'a> {
+impl<S: TempPayloadStorage> TempPayloadIn<S> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -49,7 +104,7 @@ impl<'a> TempPayload<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+    pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: TempPayloadFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
@@ -65,7 +120,24 @@ impl<'a> TempPayload<'a> {
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
     /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
-    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: TempPayloadFrom<'f> {
+        // A form past its capacity stopped where it could not store, so the
+        // frame is judged by what cannot run out, and only a frame that parses
+        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
+        // less than a bound, so this stands on every codec that takes one.
+        let mut _frame = *cursor;
+        match Self::store_into(cursor, _out) {
+            Err(CodecError::CapacityExceeded) => {
+                TempPayload::store_into(&mut _frame, &mut TempPayload::default())?;
+                Err(CodecError::CapacityExceeded)
+            }
+            stored => stored,
+        }
+    }
+
+    /// The reading of [`Self::decode_into`], which stops where a field is past
+    /// its capacity.
+    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: TempPayloadFrom<'f> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -86,21 +158,33 @@ impl<'a> TempPayload<'a> {
         };
         let sensor_id_len = cursor.read_vle_u64()?;
         let sensor_id = {
-            let _n = sensor_id_len as usize;
+            let _len = sensor_id_len;
+            if _len > 64 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = core::str::from_utf8(raw)
                 .map_err(|_| CodecError::InvalidUtf8)?;
             cursor.advance(_n)?;
             _v
         };
+        let sensor_id = ::sce_forge_runtime::codec::Bounded::new(sensor_id).ok_or(CodecError::LengthOutOfRange)?;
+        let sensor_id = sensor_id.store::<S, TempPayloadSensorIdField>()?;
         let raw_len = cursor.read_vle_u64()?;
         let raw = {
-            let _n = raw_len as usize;
+            let _len = raw_len;
+            if _len > 64 {
+                return Err(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
             _v
         };
+        let raw = ::sce_forge_runtime::codec::Bounded::new(raw).ok_or(CodecError::LengthOutOfRange)?;
+        let raw = raw.store::<S, TempPayloadRawField>()?;
         _out.celsius_centi = celsius_centi;
         _out.sensor_id_len = sensor_id_len;
         _out.sensor_id = sensor_id;
@@ -120,8 +204,8 @@ impl<'a> TempPayload<'a> {
     /// `CodecError::BufferOverflow` from a bounded sink when the destination
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Self::encode_source(self, w)
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        TempPayload::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -152,19 +236,19 @@ pub trait TempPayloadSource {
     /// The `celsius_centi` field.
     fn celsius_centi(&self) -> u16;
     /// The `sensor_id` field.
-    fn sensor_id(&self) -> &str;
+    fn sensor_id(&self) -> ::sce_forge_runtime::codec::Text<'_, 64>;
     /// The `raw` field.
-    fn raw(&self) -> &[u8];
+    fn raw(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 64>;
 }
 
 impl<T: TempPayloadSource + ?Sized> TempPayloadSource for &T {
     fn celsius_centi(&self) -> u16 {
         (**self).celsius_centi()
     }
-    fn sensor_id(&self) -> &str {
+    fn sensor_id(&self) -> ::sce_forge_runtime::codec::Text<'_, 64> {
         (**self).sensor_id()
     }
-    fn raw(&self) -> &[u8] {
+    fn raw(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 64> {
         (**self).raw()
     }
 }
@@ -178,44 +262,32 @@ pub struct TempPayloadParts<'a> {
     /// The `celsius_centi` field.
     pub celsius_centi: u16,
     /// The `sensor_id` field.
-    pub sensor_id: &'a str,
+    pub sensor_id: ::sce_forge_runtime::codec::Text<'a, 64>,
     /// The `raw` field.
-    pub raw: &'a [u8],
+    pub raw: ::sce_forge_runtime::codec::Bytes<'a, 64>,
 }
 
 impl<'a> TempPayloadSource for TempPayloadParts<'a> {
     fn celsius_centi(&self) -> u16 {
         self.celsius_centi
     }
-    fn sensor_id(&self) -> &str {
+    fn sensor_id(&self) -> ::sce_forge_runtime::codec::Text<'_, 64> {
         self.sensor_id
     }
-    fn raw(&self) -> &[u8] {
+    fn raw(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 64> {
         self.raw
     }
 }
 
-impl<'a> TempPayloadSource for TempPayload<'a> {
+impl<S: TempPayloadStorage> TempPayloadSource for TempPayloadOwned<S> {
     fn celsius_centi(&self) -> u16 {
         self.celsius_centi
     }
-    fn sensor_id(&self) -> &str {
-        self.sensor_id
+    fn sensor_id(&self) -> ::sce_forge_runtime::codec::Text<'_, 64> {
+        self.sensor_id.as_text()
     }
-    fn raw(&self) -> &[u8] {
-        self.raw
-    }
-}
-
-impl<S: ::sce_forge_runtime::codec::CodecStorage> TempPayloadSource for TempPayloadOwned<S> {
-    fn celsius_centi(&self) -> u16 {
-        self.celsius_centi
-    }
-    fn sensor_id(&self) -> &str {
-        ::sce_forge_runtime::codec::SceStr::as_str(&self.sensor_id)
-    }
-    fn raw(&self) -> &[u8] {
-        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.raw)
+    fn raw(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 64> {
+        self.raw.as_bytes()
     }
 }
 
@@ -240,9 +312,9 @@ impl<'a> TempPayload<'a> {
         w.write_u8((src.celsius_centi() >> 8 & 0xFF) as u8)?;
         w.write_u8((src.celsius_centi() & 0xFF) as u8)?;
         w.write_vle_u64(_d_sensor_id_len)?;
-        w.write_bytes(src.sensor_id().as_bytes())?;
+        w.write_bytes(src.sensor_id().into_inner().as_bytes())?;
         w.write_vle_u64(_d_raw_len)?;
-        w.write_bytes(src.raw())?;
+        w.write_bytes(src.raw().into_inner())?;
         Ok(())
     }
 
@@ -315,20 +387,9 @@ impl<'a> TempPayload<'a> {
 // `let v: TempPayloadOwned = TempPayloadOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
-// Naming it once is also what lets each field's declared capacity infer,
-// so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-// Same pub-API policy as the borrowed view above: the owned mirror and its
-// projections are cross-crate surface, and which of them a given in-repo
-// fixture happens to call says nothing about their value.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct TempPayloadOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub celsius_centi: u16,
-    pub sensor_id_len: u64,
-    pub sensor_id: S::Str<64>,
-    pub raw_len: u64,
-    pub raw: S::Bytes<64>,
-}
+// Naming it once is also what lets each field's container infer, so no call
+// site repeats a capacity. A capacity is not in this file at all except as
+// what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
 impl<'a> TempPayload<'a> {
@@ -338,18 +399,19 @@ impl<'a> TempPayload<'a> {
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
     ///
-    /// Fallible for profile uniformity: on the inline profile a field longer
-    /// than its declared capacity raises `CodecError::TooManyElements` (the
-    /// same bound and error decode enforces), on the growable profile the
-    /// copy cannot fail. The borrowed zero-copy path is unaffected either
-    /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<TempPayloadOwned<S>, CodecError> {
+    /// Fallible for profile uniformity. Every value of this type is within
+    /// each declared bound, since its lists, bytes and text hold their bounds
+    /// in their types (docs/adr/0077 §3), and the inline and growable profiles
+    /// hold each field at its bound, so the projection does not fail on them.
+    /// A profile whose capacity is below a bound raises
+    /// `CodecError::CapacityExceeded` for a value it cannot hold.
+    pub fn try_into_owned_in<S: TempPayloadFrom<'a>>(self) -> Result<TempPayloadOwned<S>, CodecError> {
         Ok(TempPayloadOwned {
             celsius_centi: self.celsius_centi,
             sensor_id_len: self.sensor_id_len,
-            sensor_id: <S::Str<64> as ::sce_forge_runtime::codec::SceStr>::from_view(self.sensor_id)?,
+            sensor_id: self.sensor_id.store::<S, TempPayloadSensorIdField>()?,
             raw_len: self.raw_len,
-            raw: <S::Bytes<64> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.raw)?,
+            raw: self.raw.store::<S, TempPayloadRawField>()?,
         })
     }
 
@@ -361,7 +423,7 @@ impl<'a> TempPayload<'a> {
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> TempPayloadOwned<S> {
+impl<S: TempPayloadStorage> TempPayloadOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -386,9 +448,9 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> TempPayloadOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut TempPayload<'o>) {
         _out.celsius_centi = self.celsius_centi;
         _out.sensor_id_len = self.sensor_id_len;
-        _out.sensor_id = ::sce_forge_runtime::codec::SceStr::as_str(&self.sensor_id);
+        _out.sensor_id = self.sensor_id.as_text();
         _out.raw_len = self.raw_len;
-        _out.raw = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.raw);
+        _out.raw = self.raw.as_bytes();
         
     }
 
@@ -400,32 +462,7 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> TempPayloadOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<TempPayloadOwned<D>, CodecError> {
+    pub fn transcode_in<D: for<'x> TempPayloadFrom<'x>>(&self) -> Result<TempPayloadOwned<D>, CodecError> {
         self.as_borrowed().try_into_owned_in::<D>()
-    }
-}
-
-#[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> TempPayloadOwned<S> {
-    /// Encode `self` into the caller-owned sink, straight from the owned
-    /// fields: the bytes `as_borrowed` followed by
-    /// [`TempPayload::encode`] writes, without the projection.
-    ///
-    /// The projection builds the whole borrowed record (every list and
-    /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here.
-    /// Every value has a frame (docs/adr/0065), so the only error is the
-    /// sink's own.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        TempPayload::encode_source(self, w)
-    }
-
-    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
-    /// value.
-    #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(TempPayload::MAX_ENCODED_BYTES);
-        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
-        _sce_v
     }
 }

@@ -24,7 +24,7 @@ fn keyexpr(suffix: &'static str) -> wz_codecs::wireexpr::Wireexpr<'static> {
             wz_codecs::wireexpr_local::WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
+                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
             },
         ),
     }
@@ -46,7 +46,10 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -54,7 +57,6 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// R311y716 ([REDACTED-REQ]) — a PUSH, which is the one record shape in this module
@@ -76,13 +78,15 @@ fn push(suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
         keyexpr: keyexpr(suffix),
         body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
             payload_len: Some(payload.len() as u64),
-            payload: Some(payload),
+            extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: wz_codecs::Bounded::new(payload).unwrap(),
+            },
             ..Default::default()
         }),
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// R311y716 ([REDACTED-REQ]) — a capture with NOTHING wrong with it.
@@ -207,7 +211,6 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// A reply whose keyexpr is the bare numeric `id`, with no suffix at all.
@@ -227,7 +230,10 @@ fn aliased_reply(request_id: u64, id: u64, payload: &'static [u8]) -> Vec<u8> {
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 payload_len: Some(payload.len() as u64),
-                payload: Some(payload),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -235,7 +241,6 @@ fn aliased_reply(request_id: u64, id: u64, payload: &'static [u8]) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture message is encodable")
 }
 
 /// R311y703 (RP4) — two replies in SEPARATE PACKETS, 350 ms apart.

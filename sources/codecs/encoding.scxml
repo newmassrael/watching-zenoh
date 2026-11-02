@@ -19,8 +19,12 @@
                                   bits 1..31 = real id zero-extended)
        has_schema-gated:
          VLE bytes: schema_len   (VLE u64 byte-count of schema)
-         bytes    : schema       (UTF-8 string max=128, length-prefixed
+         bytes    : schema       (UTF-8 string max=255, length-prefixed
                                   by schema_len above)
+
+     The schema's bound is the u8 length upstream reads it with
+     (`commons/zenoh-codec/src/core/encoding.rs` @
+     `let zodec = Zenoh080Bounded::<u8>::new();`).
 
      Composition (no new SCE primitives — the VLE+flags carrier
      composition was first shipped in codec_ext_encoding_info):
@@ -63,7 +67,7 @@
     <sce:field id="schema_len" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
                sce:present-if="packed_id.has_schema"/>
     <sce:field id="schema" sce:type="string" sce:byte="2" sce:bit-size="length-ref"
-               sce:length-field="schema_len" sce:max-size="128"
+               sce:length-field="schema_len" sce:max-size="255"
                sce:present-if="packed_id.has_schema"/>
   </datamodel>
 </scxml>

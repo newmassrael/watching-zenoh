@@ -33,7 +33,7 @@
 //! allocator and no unwinding can do about a malformed reply: the drain skips it, as it
 //! skips a reply whose bounded field overflows on the heap profile.
 
-use sce_forge_runtime::codec::{CodecError, SceSink, SliceSink};
+use sce_forge_runtime::codec::{Bounded, CodecError, SceSink, SliceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zbuf::ExtZbuf;
@@ -236,7 +236,8 @@ impl IdentityBody {
     fn zbuf(&self) -> ExtZbuf<'_> {
         ExtZbuf {
             value_len: self.len as u64,
-            value: &self.bytes[..self.len],
+            value: Bounded::new(&self.bytes[..self.len])
+                .expect("an extension body this node writes is within the u32 length"),
         }
     }
 }
@@ -254,6 +255,14 @@ fn link_chain(chain: &mut HeaplessVec<ExtEntry<'_>, 8>) {
             entry.header | EXT_FLAG_Z
         };
     }
+}
+
+/// A staged encoding's schema as the codec's schema field, whose bound is the protocol's `u8`
+/// length: `LengthOutOfRange` past it, so a reply with such a schema is refused and not sent
+/// with another encoding.
+#[cfg(any(feature = "pubsub-encoding", feature = "query-reply-err"))]
+fn schema_text<const MAX: usize>(schema: &str) -> Result<Bounded<&str, MAX>, CodecError> {
+    crate::codec_owned::sent(schema)
 }
 
 /// A staged reply, ready to encode: the description it borrows and the two extension
@@ -369,6 +378,7 @@ impl<'a> ResponseWriter<'a> {
         if GENERIC_REACHABLE && !self.is_direct() {
             return self.encode_generic(sink);
         }
+        self.direct_bounds()?;
         match sink.reserve(self.direct_len())? {
             Some(window) => {
                 self.write_direct(window);
@@ -378,6 +388,30 @@ impl<'a> ResponseWriter<'a> {
             // Every buffer of a build without fragmentation hands out a window.
             None => Err(CodecError::BufferOverflow),
         }
+    }
+
+    /// The protocol bounds the codec's encoder holds a reply to, held by the direct writer too, so
+    /// both paths refuse the same reply with the same `LengthOutOfRange`: the keyexpr's `u16`
+    /// length, the schema's `u8` length and the payload's `u32` length.
+    fn direct_bounds(&self) -> Result<(), CodecError> {
+        let within = |len: usize, max: usize| {
+            if len <= max {
+                Ok(())
+            } else {
+                Err(CodecError::LengthOutOfRange)
+            }
+        };
+        within(self.parts.keyexpr.len(), usize::from(u16::MAX))?;
+        let (payload, encoding) = match self.direct_view().body {
+            BodyView::Put { payload, encoding } => (payload, encoding),
+            BodyView::Del => return Ok(()),
+            #[cfg(feature = "query-reply-err")]
+            BodyView::Err { payload, encoding } => (payload, encoding),
+        };
+        if let Some(schema) = encoding.and_then(|encoding| encoding.schema) {
+            within(schema.len(), usize::from(u8::MAX))?;
+        }
+        within(payload.len(), u32::MAX as usize)
     }
 
     /// The bytes [`Self::write_direct`] writes, counted: the same layout, summed.
@@ -563,33 +597,36 @@ impl<'a> ResponseWriter<'a> {
                 *encoding,
                 *timestamp,
                 *attachment,
-            )),
+            )?),
             #[cfg(feature = "query-reply-err")]
             PartsKind::Err { encoding, payload } => {
-                ResponseVariant::CodecZenohErr(Self::err(*encoding, payload))
+                ResponseVariant::CodecZenohErr(Self::err(*encoding, payload)?)
             }
         };
         Response {
             header,
             request_id: parts.rid,
-            keyexpr: local(0, Some(parts.keyexpr)),
-            extensions: (!chain.is_empty()).then_some(chain),
+            keyexpr: local(0, Some(parts.keyexpr))?,
+            // A chain of no entry is none: the bounds of a chain hold one entry or more, and
+            // the list's capacity is the bound.
+            extensions: Bounded::new(chain),
             body,
         }
         .encode(sink)
+        .map_err(CodecError::from)
     }
 
     /// The Reply body: a Put or a Del, with the value's timestamp and encoding (each
     /// behind the feature the owned builder gates it on) and the source-info and
     /// attachment extensions, in that order, with the attachment under the id of the
-    /// arm it rides.
+    /// arm it rides. `LengthOutOfRange` for a field past its protocol bound.
     fn reply(
         &self,
         body: &PartsBody<'a>,
         encoding: Option<crate::reply_stage::EncodingParts<'a>>,
         timestamp: Option<crate::reply_stage::TimestampParts<'a>>,
         attachment: Option<&'a [u8]>,
-    ) -> wz_codecs::reply::Reply<'_> {
+    ) -> Result<wz_codecs::reply::Reply<'_>, CodecError> {
         use wz_codecs::reply::{Reply, ReplyVariant};
         let payload: Option<&[u8]> = match body {
             PartsBody::Put(bytes) => Some(bytes),
@@ -611,11 +648,15 @@ impl<'a> ResponseWriter<'a> {
         let _ = encoding;
 
         #[cfg(feature = "pubsub-timestamp")]
-        let timestamp = timestamp.map(|ts| wz_codecs::timestamp::Timestamp {
-            time: ts.time,
-            zid_len: ts.zid.len() as u64,
-            zid: ts.zid,
-        });
+        let timestamp = timestamp
+            .map(|ts| {
+                Ok::<_, CodecError>(wz_codecs::timestamp::Timestamp {
+                    time: ts.time,
+                    zid_len: ts.zid.len() as u64,
+                    zid: crate::codec_owned::sent(ts.zid)?,
+                })
+            })
+            .transpose()?;
         #[cfg(not(feature = "pubsub-timestamp"))]
         let timestamp: Option<wz_codecs::timestamp::Timestamp<'_>> = None;
 
@@ -623,11 +664,14 @@ impl<'a> ResponseWriter<'a> {
         #[cfg(feature = "pubsub-encoding")]
         let encoding = encoding
             .filter(|_| is_put)
-            .map(|e| wz_codecs::encoding::Encoding {
-                packed_id: e.packed_id,
-                schema_len: e.schema.map(|s| s.len() as u64),
-                schema: e.schema,
-            });
+            .map(|e| {
+                Ok::<_, CodecError>(wz_codecs::encoding::Encoding {
+                    packed_id: e.packed_id,
+                    schema_len: e.schema.map(|s| s.len() as u64),
+                    schema: e.schema.map(schema_text).transpose()?,
+                })
+            })
+            .transpose()?;
         #[cfg(not(feature = "pubsub-encoding"))]
         let encoding: Option<wz_codecs::encoding::Encoding<'_>> = None;
 
@@ -650,13 +694,13 @@ impl<'a> ResponseWriter<'a> {
                 },
                 body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
                     value_len: attachment.len() as u64,
-                    value: attachment,
+                    value: crate::codec_owned::sent(attachment)?,
                 }),
             });
         }
         link_chain(&mut chain);
         let has_chain = !chain.is_empty();
-        let extensions = has_chain.then_some(chain);
+        let extensions = Bounded::new(chain);
 
         let inner = match payload {
             Some(bytes) => {
@@ -674,11 +718,17 @@ impl<'a> ResponseWriter<'a> {
                     header,
                     timestamp,
                     encoding,
-                    extensions,
+                    // The reply's chain holds the source info and the attachment, never the
+                    // shared-memory marker, so the Put is inline.
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: extensions.map(|chain| {
+                            sce_forge_runtime::codec::Chain::new(chain.into_inner())
+                                .expect("the chain holds no shared-memory marker")
+                        }),
+                        payload: crate::codec_owned::sent(bytes)?,
+                    },
                     payload_len: Some(bytes.len() as u64),
-                    payload: Some(bytes),
                     slice_count: None,
-                    slices: None,
                 })
             }
             None => {
@@ -696,34 +746,43 @@ impl<'a> ResponseWriter<'a> {
                 })
             }
         };
-        Reply {
+        Ok(Reply {
             header: REPLY_HEADER,
             consolidation: None,
             extensions: None,
             body: inner,
-        }
+        })
     }
 
     /// The Err body: the payload, and the error's own encoding when it names one, its id
     /// packed with the schema bit as `ResponseErrBuilder::encoding` packs it.
+    ///
+    /// The lifetime of the value is the caller's (`'o`) and not the parts' (`'a`): a lent
+    /// value is invariant in its lifetime, so an `Err<'a>` cannot be shortened to sit in a
+    /// `Response` that also borrows this writer, and the borrows are shortened here instead.
     #[cfg(feature = "query-reply-err")]
-    fn err(encoding: Option<(u32, Option<&'a str>)>, payload: &'a [u8]) -> wz_codecs::err::Err<'a> {
+    fn err<'o>(
+        encoding: Option<(u32, Option<&'o str>)>,
+        payload: &'o [u8],
+    ) -> Result<wz_codecs::err::Err<'o>, CodecError> {
         let mut header = ERR_HEADER;
-        let encoding = encoding.map(|(id, schema)| {
-            header |= wire_const::FLAG_Z_ERR_E;
-            wz_codecs::encoding::Encoding {
-                packed_id: (id << 1) | u32::from(schema.is_some()),
-                schema_len: schema.map(|s| s.len() as u64),
-                schema,
-            }
-        });
-        wz_codecs::err::Err {
+        let encoding = encoding
+            .map(|(id, schema)| {
+                header |= wire_const::FLAG_Z_ERR_E;
+                Ok::<_, CodecError>(wz_codecs::encoding::Encoding {
+                    packed_id: (id << 1) | u32::from(schema.is_some()),
+                    schema_len: schema.map(|s| s.len() as u64),
+                    schema: schema.map(schema_text).transpose()?,
+                })
+            })
+            .transpose()?;
+        Ok(wz_codecs::err::Err {
             header,
             encoding,
             extensions: None,
             payload_len: payload.len() as u64,
-            payload,
-        }
+            payload: crate::codec_owned::sent(payload)?,
+        })
     }
 }
 
@@ -750,7 +809,6 @@ mod tests {
             .expect("the owned response is built");
         let view = response.try_as_borrowed().expect("a view");
         view.encode_to_vec()
-            .expect("the response view is encodable")
     }
 
     /// The bytes the writer writes for `parts`.
@@ -950,6 +1008,77 @@ mod tests {
         let mut tx = crate::tx_buf::TxSink::over(&mut slice);
         writer.encode_tx(&mut tx).expect("exactly fits");
         assert_eq!(slice.len(), whole);
+    }
+
+    /// A reply with a field past its protocol bound is refused with `LengthOutOfRange` by the
+    /// direct path and by the codec's encoder alike, and nothing of it reaches the buffer; the
+    /// same reply at the bound is written.
+    #[test]
+    fn a_reply_past_a_protocol_bound_is_refused_by_both_paths() {
+        fn refused(keyexpr: &str, encoding: Option<EncodingParts<'_>>) -> Option<CodecError> {
+            let parts = ReplyParts {
+                rid: 1,
+                keyexpr,
+                responder: None,
+                qos: QosLevel::DEFAULT,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: None,
+                kind: PartsKind::Reply {
+                    body: PartsBody::Put(b"x"),
+                    encoding,
+                    timestamp: None,
+                    attachment: None,
+                    source_info: None,
+                },
+            };
+            let writer = ResponseWriter::new(parts).expect("writable");
+            let mut vector: Vec<u8> = Vec::new();
+            let mut tx = crate::tx_buf::TxSink::over(&mut vector);
+            let direct = writer.encode_tx(&mut tx).err();
+            assert!(vector.is_empty(), "nothing of a refused reply is kept");
+            let mut room = [0u8; 16];
+            let mut sink = SliceSink::new(&mut room);
+            let generic = writer.encode_generic(&mut sink).err();
+            assert_eq!(direct, generic, "both paths answer alike");
+            direct
+        }
+        let past_key = "k".repeat(usize::from(u16::MAX) + 1);
+        assert_eq!(refused(&past_key, None), Some(CodecError::LengthOutOfRange));
+        #[cfg(feature = "pubsub-encoding")]
+        {
+            let past_schema = "s".repeat(usize::from(u8::MAX) + 1);
+            let encoding = EncodingParts {
+                packed_id: (5 << 1) | 1,
+                schema: Some(&past_schema),
+            };
+            assert_eq!(
+                refused("demo/a", Some(encoding)),
+                Some(CodecError::LengthOutOfRange)
+            );
+        }
+        let at_key = "k".repeat(usize::from(u16::MAX));
+        let parts = ReplyParts {
+            rid: 1,
+            keyexpr: &at_key,
+            responder: None,
+            qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"x"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        };
+        let writer = ResponseWriter::new(parts).expect("writable");
+        let mut vector: Vec<u8> = Vec::new();
+        let mut tx = crate::tx_buf::TxSink::over(&mut vector);
+        writer
+            .encode_tx(&mut tx)
+            .expect("a key at the bound is written");
+        assert_eq!(vector.len(), writer.direct_len());
     }
 
     #[cfg(feature = "query-reply-err")]
