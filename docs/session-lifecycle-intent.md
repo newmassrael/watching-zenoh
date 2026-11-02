@@ -1422,9 +1422,23 @@ peer's, so a hint dials nobody; the router's `open/<peer>` is taken
 with the link from the image's own port to the peer's `tls/` port, so the image
 dialled the peer for its zid. The control of the first part stays (a router
 whose key is not listed is refused `status`). Held on the first run and on the
-repeat with the before-open check, against the pinned router. What D14 still
-lacks is the image's stack gate row (the 32,768-byte stack is the build's
-default until a row sets it), its text and resource rows, and a hosted build.
+repeat with the before-open check, against the pinned router.
+
+The image's rows (2026-11-02). The stack gate read the image's worst chain of
+direct calls at 35,272 bytes against the 32,768-byte stack the first runs had
+used, which the kit's reading (22,189, then 22,949 once the node had also
+dialled the peer) had not shown: the chain is a path the node takes when it
+accepts or dials, and 19,104 bytes of it is one frame, `spawn_pump`, which
+builds a session pump's future on the stack before it moves it into its task
+cell (the client images do not reach it). The stack is now 47,104 bytes, a
+quarter free over the chain in units of 64, and the frame is the thing to
+remove (the future built in its cell gives the bytes back); the stack was sized
+to the chain and not to the reading because the chain is what a path the run did
+not take can still use. The image has a stack-chain row, a text row (326,088
+bytes) and a resource row whose `latency_source` is `none`, a kind of row the
+resource gate learned for an image that makes no claim about a round trip; the
+kit run is held to the stack reading (22,949, in three of three runs). Layer Qzk
+builds the image on the hosted runner as it builds the client images.
 
 **D15. An `open` for a peer the graphs do not hold enters the table.** An
 intent is declarative state: a configured BGP neighbour exists whether or not

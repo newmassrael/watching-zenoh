@@ -16,7 +16,7 @@
 #   scripts/kit-lane.sh compare [--boots N] <image>...   answering images side by side, alternating boots
 #   scripts/kit-lane.sh build-responder      the host node that answers the asking image (needs cargo)
 #   scripts/kit-lane.sh list                 the images
-#   scripts/kit-lane.sh images               the gated client images (the ones Layer Qzk builds)
+#   scripts/kit-lane.sh images               the images whose build needs no kit (the ones Layer Qzk builds)
 #   scripts/kit-lane.sh --selftest           the table of images against the gates and the overlays
 #
 # Images are the keys of the stack gate: zephyr-client-heap (the fixed client with its storage on the
@@ -453,8 +453,6 @@ PY
         ok "$key" "a measure image: its stack is one of the figures it reports, not the stack gate's"
     elif [[ "$KIND" == verify ]]; then
         ok "$key" "a verify image: no stack gate row yet, its first runs on the kit set it"
-    elif [[ "$KIND" == admin ]]; then
-        ok "$key" "an admin image: no stack gate row yet, its first runs on the kit set it"
     elif is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
         ok "$key" "a compare build: not the stack gate's, a compare run reports what it reads of it"
     elif python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
@@ -1061,6 +1059,14 @@ EOF
     else
         ok "$key" "the console has no 'wz: FAIL' line"
     fi
+    # The stack the firmware says it used over the run, against the image's row (no latency is held).
+    since >"$OUT/console.run"
+    if python3 "$ROOT/scripts/lib/resource_budget_gate.py" --measure "$key" --log "$OUT/console.run" \
+        >"$OUT/budget.log" 2>&1; then
+        ok "$key" "the run is inside its row ($(tail -n 1 "$OUT/budget.log" | sed 's/^ *//'))"
+    else
+        bad "$key" "the run is outside its row: $(sed 's/^ *//' "$OUT/budget.log" | head -n 3 | tr '\n' ' ')"
+    fi
 }
 
 # ── compare ─────────────────────────────────────────────────────────────────────────────────────
@@ -1302,7 +1308,7 @@ case "$cmd" in
     compare) compare "$@" ;;
     build-responder) build_responder ;;
     list) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
-    images) printf '%s\n' "${IMAGES[@]}" ;; # the gated client images, which `build` holds to their rows with no kit
+    images) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" ;; # the images `build` holds to their rows with no kit
     --selftest) selftest ;;
     *)
         sed -n '12,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2

@@ -25430,7 +25430,9 @@ layer_qzb_zephyr_board_matrix() {
 #
 # Layer Qzb builds the one fixed-client row of the board table and holds it to the stack chain. The
 # client has four more images (the batching, the heap, the asking and the secure-channel variants), and
-# each is built with limits its overlay states, which the crates' own defaults do not: a stand-in build
+# the fixed-memory admin node over the secure channel is built the same way (its commanders and its peer
+# hint are keys the lane makes before the build). Each is built with limits its overlay states, which
+# the crates' own defaults do not: a stand-in build
 # of the defaults read as an outgrown arena what the board's build held, and an arena that did outgrow
 # its limits was seen only on a kit day. This lane builds every image of `scripts/kit-lane.sh images`
 # the way the kit lane builds it (the board's configuration, line tables on) and requires the verdicts

@@ -43,7 +43,9 @@ Two optional keys say where an image differs from that shape, and each is held t
   its chain is a red, so the key cannot outlive the reason for it;
 * `latency_source`: `rest-probe` (the default) is the host's view of a GET through a router, read
   from the harness's result files; `getter-line` is the image's own round trip as the asker, read
-  from the `ZEPHYR-WZ-GET done` line of its console, at the resolution of the kernel tick.
+  from the `ZEPHYR-WZ-GET done` line of its console, at the resolution of the kernel tick;
+  `none` is an image that makes no claim about a round trip (the admin node answers verbs): its row
+  leaves the two `get_median` keys out, and a run is held to its stack alone.
 
 ## Modes
 
@@ -96,7 +98,18 @@ BOUND_KEY = "static_bound_bytes"
 #: object of image key to the reason it has no row.
 OFF_KIT_KEY = "not_measured_on_the_kit"
 
-LATENCY_SOURCES = ("rest-probe", "getter-line")
+LATENCY_SOURCES = ("rest-probe", "getter-line", "none")
+
+#: The keys a row of an image that has no latency to hold leaves out: the admin node answers verbs, and
+#: no figure of its round trip is a claim the repository makes (`latency_source` "none").
+LATENCY_KEYS = ("get_median_us", "get_median_tolerance_pct")
+
+
+def required_keys(row: dict) -> dict:
+    """The keys `row` must carry: all of them, but for the median of an image whose latency is "none"."""
+    if row.get("latency_source") == "none":
+        return {f: k for f, k in ROW_KEYS.items() if f not in LATENCY_KEYS}
+    return ROW_KEYS
 
 #: The line the firmware prints when its stack high-water mark moves (`StackWatch`).
 STACK_LINE = re.compile(r"stack: peak (\d+) of (\d+) bytes")
@@ -146,7 +159,8 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
         out.append(f"{key}: a row with no committed worst chain in the stack gate behind it")
     for key in sorted(set(rows) & set(images)):
         row = rows[key]
-        for field, kind in ROW_KEYS.items():
+        needed = required_keys(row)
+        for field, kind in needed.items():
             if field not in row:
                 out.append(f"{key}: no `{field}`")
             elif not isinstance(row[field], kind) or isinstance(row[field], bool):
@@ -155,14 +169,14 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
                 out.append(f"{key}: `{field}` is empty")
             elif kind is int and row[field] <= 0:
                 out.append(f"{key}: `{field}` is not positive")
-        for field in sorted(set(row) - set(ROW_KEYS) - set(OPTIONAL_KEYS) - {BOUND_KEY}):
+        for field in sorted(set(row) - set(needed) - set(OPTIONAL_KEYS) - {BOUND_KEY}):
             out.append(f"{key}: `{field}` is a key nothing reads")
         for field, kind in OPTIONAL_KEYS.items():
             if field in row and (not isinstance(row[field], kind) or not row[field].strip()):
                 out.append(f"{key}: `{field}` is not a non-empty {kind.__name__}")
         if row.get("latency_source", LATENCY_SOURCES[0]) not in LATENCY_SOURCES:
             out.append(f"{key}: `latency_source` is {row['latency_source']!r}, one of {LATENCY_SOURCES}")
-        if any(f not in row or not isinstance(row[f], ROW_KEYS[f]) for f in ROW_KEYS):
+        if any(f not in row or not isinstance(row[f], needed[f]) for f in needed):
             continue
         if row["static_chain_bytes"] != images[key].peak:
             out.append(
@@ -207,7 +221,7 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
                         f"{key}: `{BOUND_KEY}` {bound} is over three quarters of the declared stack "
                         f"{declared[key]}"
                     )
-        if not 0 < row["get_median_tolerance_pct"] < 100:
+        if "get_median_tolerance_pct" in needed and not 0 < row["get_median_tolerance_pct"] < 100:
             out.append(f"{key}: get_median_tolerance_pct is not between 0 and 100")
     return out
 
@@ -242,7 +256,11 @@ def measure_problems(row: dict, declared: int | None, log: str, results: list[di
             out.append(f"the stack peak is {used} bytes, the row holds {row['peak_stack_bytes']} +/- {row['peak_stack_tolerance_bytes']}")
         if declared is not None and size != declared:
             out.append(f"the firmware says its stack is {size} bytes and the image declares {declared}")
-    if row.get("latency_source") == "getter-line":
+    if row.get("latency_source") == "none":
+        # The image has no latency to hold: a result file of a GET probe is not its instrument.
+        if results:
+            out.append("this row holds no latency: result files of a GET probe are not its instrument")
+    elif row.get("latency_source") == "getter-line":
         # The image is the asker: its own line carries the round trip, and a run that was not clean has
         # no latency worth holding.
         if results:
@@ -291,10 +309,14 @@ def check() -> int:
         for key in sorted(rows):
             margin = declared[key] - rows[key]["peak_stack_bytes"]
             not_a_bound = " (the chain is not a bound here)" if "chain_misses" in rows[key] else ""
+            latency = (
+                "no latency held"
+                if rows[key].get("latency_source") == "none"
+                else f"GET {rows[key]['get_median_us']} us ({rows[key].get('latency_source', LATENCY_SOURCES[0])})"
+            )
             print(f"  resource-budget: {key}: static chain {rows[key]['static_chain_bytes']}{not_a_bound}, "
                   f"measured peak {rows[key]['peak_stack_bytes']} of {declared[key]} "
-                  f"({margin} bytes of margin), GET {rows[key]['get_median_us']} us "
-                  f"({rows[key].get('latency_source', LATENCY_SOURCES[0])})")
+                  f"({margin} bytes of margin), {latency}")
         print(f"  resource-budget: {len(rows)} image(s) held")
     return 1 if found else 0
 
@@ -359,6 +381,20 @@ def selftest() -> int:
     case("an empty reason", {"schema": 1, "images": {"k": dict(asker, chain_misses=" ")}}, want="non-empty")
     case("a latency source nothing reads", {"schema": 1, "images": {"k": dict(row, latency_source="guess")}}, want="latency_source")
     case("a key nothing reads", {"schema": 1, "images": {"k": dict(row, extra=1)}}, want="nothing reads")
+    # An image with no latency to hold leaves the median out, and only such an image may.
+    nolatency = {f: v for f, v in row.items() if f not in LATENCY_KEYS}
+    case("a row that holds no latency needs no median",
+         {"schema": 1, "images": {"k": dict(nolatency, latency_source="none")}})
+    case("a row that holds a latency needs its median",
+         {"schema": 1, "images": {"k": nolatency}}, want="no `get_median_us`")
+    case("a row that holds no latency and carries a median anyway",
+         {"schema": 1, "images": {"k": dict(row, latency_source="none")}}, want="nothing reads")
+    expect("a run is not held to a latency the row does not hold",
+           measure_problems(dict(nolatency, latency_source="none"), 9216, "stack: peak 5936 of 9216 bytes\n", []), [])
+    expect("a result file of a GET probe is not that row's instrument",
+           [p for p in measure_problems(dict(nolatency, latency_source="none"), 9216,
+                                        "stack: peak 5936 of 9216 bytes\n", [{"get_status_ms": [0.4]}])
+            if "holds no latency" in p] != [], True)
     # The bound the stack bound gate computes: over the chain and the reading, under three quarters
     # of the stack (6,912 of the 9,216 bytes here).
     case("a bound that holds", {"schema": 1, "images": {"k": dict(row, static_bound_bytes=6900)}})

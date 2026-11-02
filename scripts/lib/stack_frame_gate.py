@@ -528,6 +528,25 @@ IMAGES = (
         entry="wz_app_main",
         peak=7432,
     ),
+    # The fixed-memory ADMIN node over Zephyr's sockets and the secure channel on the T2G kit
+    # (`overlays/t2g_admin_fixed_tls.conf`, decision D14 of docs/session-lifecycle-intent.md): it listens,
+    # takes a session through the channel, answers the verbs and dials a peer it is asked to open by its
+    # zid. Its stack is the overlay's own.
+    Image(
+        key="zephyr-admin-fixed-tls",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_admin_fixed_tls.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="wz_app_main",
+        # 35,272 bytes over 9 frames at the first reading of 2026-11-02: `wz_app_main` 2,840, the node's
+        # `start` 7,592, `AdminCore::tick` 336 and the connect manager's two frames (272 and 176), the
+        # slot dialer's `dial_expecting` 4,920, and under it `spawn_pump` at 19,104, which builds the
+        # pump's future by value (the pump table's cell holds it, the stack holds it first) and which
+        # the client images do not reach. 12 calls through a register on the path are not followed. The
+        # kit's reading is 22,949 over an accept, a dial and an open by zid.
+        peak=35272,
+    ),
 )
 
 _HEAD = re.compile(r"^([0-9a-f]{8}) <(.*)>:$")
