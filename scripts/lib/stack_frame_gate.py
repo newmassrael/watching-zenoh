@@ -547,8 +547,11 @@ IMAGES = (
         # liveliness snapshots at their default limits (16 and 8). The node asks neither, and
         # `overlays/qemu_admin_fixed_tls.conf` states both as zero: 14,684 bytes over 26 frames, the
         # largest frame the node's `start` at 7,624 and 15 calls through a register on the path not
-        # followed.
-        peak=14684,
+        # followed. 9,588 with the other limits the node does not use stated as well (keyexpr bytes
+        # 128, locator length 32, static connects 2, queryables 2, subscriptions 2, no inbound
+        # interests and no remote declarations, 4 peer key aliases, 2 pending replies and finals): the
+        # same 26 frames, the largest the node's `start` at 3,968.
+        peak=9588,
     ),
 )
 

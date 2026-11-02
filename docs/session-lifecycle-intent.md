@@ -1440,9 +1440,16 @@ query and no snapshot, and it had left both at their defaults (16 and 8).
 Stating them as zero in `overlays/qemu_admin_fixed_tls.conf` (the overlay both
 the QEMU and the kit images build after) took the chain from 35,272 to 14,684
 bytes, the reading from 22,949 to 13,608 (in three of three runs on the kit,
-every step of the witness held) and the `.bss` by 27,504 bytes, and the stack
-is 19,584 bytes now, a quarter free over the chain and 30 percent over the
-reading. The image has a stack-chain row, a text row (325,720 bytes) and a
+every step of the witness held) and the `.bss` by 27,504 bytes. The node's other
+limits it does not use were then stated as the client images state theirs
+(keyexpr bytes 128, locator length 32, static connects 2, queryables 2,
+subscriptions 2, no inbound interests and no remote declarations, 4 peer key
+aliases, 2 pending replies and finals): the chain is 9,588 bytes, the reading
+7,744 (three of three runs, every step held), the `.bss` 298,391 bytes (385,207
+before them) and the stack 12,800 bytes, a quarter free over the chain and 39
+percent over the reading. The write of the connect endpoints (the config
+subscriber) was not exercised on the kit with these limits. The image has a
+stack-chain row, a text row (324,728 bytes) and a
 resource row whose `latency_source` is `none`, a kind of row the resource gate
 learned for an image that makes no claim about a round trip; the kit run is held
 to the stack reading. Layer Qzk builds the image on the hosted runner as it
