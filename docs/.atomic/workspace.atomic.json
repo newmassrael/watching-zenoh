@@ -306728,6 +306728,34 @@
         "Open: that a hosted run reads 36, 5 and 11 for the new order; the other reds of run 41481900203 (Layers C1bt, C1cs, C1bzr, C1cf and Layer 0), which are other sessions' and are read at the next round; the 19,104-byte spawn_pump frame of the admin image."
       ]
     },
+    "Round 4145": {
+      "decision_summary": "The carry item \"whether a wz-native listening peer that declares a publisher before a router dials it reaches a client behind the router\" is measured. In the differential crate, with the pinned zenohd dialing a peer after the peer had declared its publisher and an upstream client subscribed behind zenohd, the peer built on the wz session API put every 250 ms for 12 s and the client received 47 samples; the upstream crate's peer in the same run, the control, delivered 47. So wz-native matches upstream where the pico drop-in does not (pico's own rule, round 4128). The doubt in the carry, that the cache which replays the declare-time Interest runs only after a reconnect, did not matter here: the Interest reached the router, whether by that path or by another. The measurement is not kept as a test. The differential lane that would hold it, Layer E18, states no zenohd prerequisite and declines nothing for want of one, and a lane that skipped without the router would show green without having run it; pinning it waits for a lane that checks for the router first.",
+      "changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the publisher-a-router-dials bullet of the L6 record states the wz-native measurement and why it is not kept. No code changed; the scratch test in conformance/differential was removed."
+      ],
+      "verification_bullets": [
+        "On pc2, with the test crate compiled in the log (it failed to compile once, the wz crate's Wait trait on an upstream client, and was fixed): one test, two runs of the same scenario in sequence, upstream peer publisher 47 samples received and wz peer publisher 47. The zenohd was the pinned 1.10.2 router. Not run: any gate beyond the commit hooks, since no code or script changed; the hosted run of this round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Open: the wz peer publisher a router dials is measured and not pinned; a test needs a lane that checks for zenohd and builds the differential crate (Layer E18 states no zenohd prerequisite). The drop counters of TlsListener are not reachable from the C ABI: the listener is boxed behind TlsDial::listen and a C program holds no listener handle, so an accessor would be a process-wide count behind a new wz_ext symbol, with the typed listener kept in the provider; not built. Not rebuilt: the Zephyr kit image, which needs the Zephyr workspace. The hosted runs of recent rounds are mostly cancelled while queued."
+      ],
+      "publishable_decision_summary": "The carry item \"whether a wz-native listening peer that declares a publisher before a router dials it reaches a client behind the router\" is measured. In the differential crate, with the pinned zenohd dialing a peer after the peer had declared its publisher and an upstream client subscribed behind zenohd, the peer built on the wz session API put every 250 ms for 12 s and the client received 47 samples; the upstream crate's peer in the same run, the control, delivered 47. So wz-native matches upstream where the pico drop-in does not (pico's own rule, round 4128). The doubt in the carry, that the cache which replays the declare-time Interest runs only after a reconnect, did not matter here: the Interest reached the router, whether by that path or by another. The measurement is not kept as a test. The differential lane that would hold it, Layer E18, states no zenohd prerequisite and declines nothing for want of one, and a lane that skipped without the router would show green without having run it; pinning it waits for a lane that checks for the router first.",
+      "publishable_changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the publisher-a-router-dials bullet of the L6 record states the wz-native measurement and why it is not kept. No code changed; the scratch test in conformance/differential was removed."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2, with the test crate compiled in the log (it failed to compile once, the wz crate's Wait trait on an upstream client, and was fixed): one test, two runs of the same scenario in sequence, upstream peer publisher 47 samples received and wz peer publisher 47. The zenohd was the pinned 1.10.2 router. Not run: any gate beyond the commit hooks, since no code or script changed; the hosted run of this round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the wz peer publisher a router dials is measured and not pinned; a test needs a lane that checks for zenohd and builds the differential crate (Layer E18 states no zenohd prerequisite). The drop counters of TlsListener are not reachable from the C ABI: the listener is boxed behind TlsDial::listen and a C program holds no listener handle, so an accessor would be a process-wide count behind a new wz_ext symbol, with the typed listener kept in the provider; not built. Not rebuilt: the Zephyr kit image, which needs the Zephyr workspace. The hosted runs of recent rounds are mostly cancelled while queued."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
