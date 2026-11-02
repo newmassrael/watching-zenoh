@@ -180,7 +180,7 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-admin-fixed-tls": {
-      "text_bytes": 326088,
+      "text_bytes": 325720,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
@@ -236,7 +236,7 @@
         "c:aes": 564,
         "c:route": 514
       },
-      "measured": "2026-11-02, scripts/kit-lane.sh build of the fixed-memory admin node over Zephyr's sockets and the secure channel (overlays/t2g_admin_fixed_tls.conf), at the first row of this image: text 326,088 bytes, data 4,132, bss 412,711 with the main stack at 47,104 bytes. Most of it is the channel (Mbed TLS, about 55 KB of its own symbols with the PSA and ECP parts beside) and the session core (60 KB, the verbs and the admin surface among it).",
+      "measured": "2026-11-02, scripts/kit-lane.sh build of the fixed-memory admin node over Zephyr's sockets and the secure channel (overlays/t2g_admin_fixed_tls.conf), at the first row of this image: text 326,088 bytes, data 4,132, bss 412,711 with the main stack at 47,104 bytes; 325,720 once the pending-query registries were stated as zero (the stack 19,584, .bss 385,207), 368 bytes less, inside the row's tolerance, and the row moved to it. Most of it is the channel (Mbed TLS, about 55 KB of its own symbols with the PSA and ECP parts beside) and the session core (60 KB, the verbs and the admin surface among it).",
       "evidence": "docs/text-ownership.md"
     }
   }

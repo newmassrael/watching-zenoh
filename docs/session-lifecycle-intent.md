@@ -1430,15 +1430,23 @@ used, which the kit's reading (22,189, then 22,949 once the node had also
 dialled the peer) had not shown: the chain is a path the node takes when it
 accepts or dials, and 19,104 bytes of it is one frame, `spawn_pump`, which
 builds a session pump's future on the stack before it moves it into its task
-cell (the client images do not reach it). The stack is now 47,104 bytes, a
-quarter free over the chain in units of 64, and the frame is the thing to
-remove (the future built in its cell gives the bytes back); the stack was sized
-to the chain and not to the reading because the chain is what a path the run did
-not take can still use. The image has a stack-chain row, a text row (326,088
-bytes) and a resource row whose `latency_source` is `none`, a kind of row the
-resource gate learned for an image that makes no claim about a round trip; the
-kit run is held to the stack reading (22,949, in three of three runs). Layer Qzk
-builds the image on the hosted runner as it builds the client images.
+cell (the client images do not reach it). The stack was first set to 47,104
+bytes, a quarter free over that chain in units of 64, and sized to the chain and
+not to the reading because the chain is what a path the run did not take can
+still use. The frame was then taken away, not sized for: the pump's future holds
+the session's event sink, and the sink the registries of pending queries and of
+liveliness snapshots, which an image states the limits of; the admin node asks no
+query and no snapshot, and it had left both at their defaults (16 and 8).
+Stating them as zero in `overlays/qemu_admin_fixed_tls.conf` (the overlay both
+the QEMU and the kit images build after) took the chain from 35,272 to 14,684
+bytes, the reading from 22,949 to 13,608 (in three of three runs on the kit,
+every step of the witness held) and the `.bss` by 27,504 bytes, and the stack
+is 19,584 bytes now, a quarter free over the chain and 30 percent over the
+reading. The image has a stack-chain row, a text row (325,720 bytes) and a
+resource row whose `latency_source` is `none`, a kind of row the resource gate
+learned for an image that makes no claim about a round trip; the kit run is held
+to the stack reading. Layer Qzk builds the image on the hosted runner as it
+builds the client images.
 
 **D15. An `open` for a peer the graphs do not hold enters the table.** An
 intent is declarative state: a configured BGP neighbour exists whether or not
