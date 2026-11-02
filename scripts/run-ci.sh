@@ -6522,7 +6522,7 @@ layer_c1ay_cargo_test_router_hat() {
     # Step (b), step 2: 258 -> 261 (+3, the peer placement tests); step 3: 264.
     # The network gate: 264 -> 266.
     # Step (b), step 5: 266 -> 267.
-    _runci_guarded_test "C1AY router_forward mcast-faces 323" 323 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 324" 324 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
