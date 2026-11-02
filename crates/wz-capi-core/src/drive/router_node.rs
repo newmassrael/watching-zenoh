@@ -428,9 +428,10 @@ pub(crate) fn open_router_blocking(
         // A client node routes on the peer node's tables: its south is kept apart by the same
         // partition, and what it owes the router it dialled is what a peer owes its gateway, which
         // declares nothing of what its other remotes hold, so every message whose source is south
-        // goes up to it (`zenoh/src/net/routing/hat/peer/pubsub.rs`, and the client hat sends all
-        // it has north). What differs is how the node announces itself: as a client, which the
-        // router tells only what the node asked for, so the interest of its south goes north.
+        // goes up to it (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn maybe_propagate_subscriber`,
+        // and the client hat sends all it has north). What differs is how the node announces
+        // itself: as a client, which the router tells only what the node asked for, so the
+        // interest of its south goes north.
         NodeRole::Peer => RouterForwarder::peer_with_timestamping(own_zid, timestamping),
         NodeRole::Client => {
             RouterForwarder::peer_with_timestamping(own_zid, timestamping).as_client_of_north()

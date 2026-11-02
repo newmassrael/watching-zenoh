@@ -13,7 +13,7 @@
 //!   (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `.remote_subs.remove(&id)`). A node that
 //!   sends them all as id 0 has each replace the one before: of every key it declares, the
 //!   router holds the last. A client numbers each declaration with an id of its own, one for each
-//!   resource (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `let id = face_hat.next_id.fetch_add(1, Ordering::SeqCst);`),
+//!   resource (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `.next_id`),
 //!   and withdraws it by that id.
 //! - A peer south of this node keeps the liveliness tokens it is told by id. A token reaches it
 //!   twice, in the flood of the token and in the answer to the interest that asked for the
