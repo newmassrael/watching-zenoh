@@ -1267,8 +1267,9 @@ carried it (`StreamAssembler::integrity_of`).
   directions it is weighed for. This is the decomposition D11 made for a
   datagram's unit reading.
 - A TLS flow decrypted into its plaintext has offsets of its own and no SYN of
-  its own: its fronts are not weighed. Nor, yet, are the fronts of WebSocket
-  messages, which delimit a batch as a datagram does.
+  its own: its fronts are not weighed. Nor, under model 5, were the fronts of
+  WebSocket messages, which delimit a batch as a datagram does; model 6
+  weighs them (section 6.11).
 
 **D14. The version header's zenoh side is derived.** D10's hypothesis is
 zenoh of this wire, every sender of which writes version `0x09` in an Init,
@@ -1320,3 +1321,42 @@ parameters model 5 moves:
   mDNS's zero id are fronts of the wire, and neither reads `no` at any length.
   DNS reads `no` in 169, 285, 487, 581 and 600 of 600 flows of 3, 5, 10, 20
   and 50 datagrams, and CoAP in 78, 176, 307, 434 and 574.
+
+### 6.11 Model 6: a WebSocket message's front (2026-11-03)
+
+Model 6 ships: `model` reads 6, the field document moves to revision 54 and
+the session table to revision 10. It derives the observation section 6.10
+left for later.
+
+**D15. A WebSocket message's front is derived where the upgrade is the
+stream's start.** zenoh's WebSocket link is not streamed: each write is one
+Binary message holding one batch, so a message delimits a batch as a datagram
+does, and its first payload byte, unmasked, is a batch's first byte. It is a
+`wire_front` observation where two things hold, for the reason D13 gives for a
+stream: the capture holds the direction's SYN, so the HTTP upgrade the deframer
+stepped over was the stream's first bytes; and the deframer has not lost its
+framing since, so no message was found by a scan, which accepts a frame for
+looking like a zenoh batch. A flow classified as WebSocket after its opening
+was lost starts in a scan, and none of its fronts is weighed. The integrity is
+the weakest of the segments that carried the byte and, on a masked frame, the
+key it is read through. A message whose front is foreign is not weighed again
+by `unit_reading`, as a datagram's is not.
+
+**The scan's own test, by D12.** The deframer's scan (a resynchronisation, or
+the classification of a flow whose opening was lost) accepted a frame only if
+its first payload byte was a credible transport header, 42 of 256 bytes. That
+refused every frame of a lowlatency link, so a lowlatency zenoh session over
+WebSocket that lost a segment lost every message after it. The scan now asks
+`is_credible_lowlatency_header` (98 of 256): a transport header whose flags
+its message defines, or a network header. A batch header of `0x00` (an
+uncompressed batch on a link that negotiated compression) is still refused:
+zero runs are common in any payload, and accepting it let a zero-filled buffer
+confirm a chain, which two tests of the reader caught. A compressed link's
+uncompressed batch is therefore not a point a scan resumes at; the next
+compressed or plain one is. `the_ws_chain_discriminator_refuses_noise` measures
+the wider test: depth 4 is still the shallowest that accepts no noise buffer
+and no real zenoh stream (noise accepted 40, 35, 4 and 0 of 40 at depths 1 to
+4), so `WS_CHAIN_DEPTH` stays 4.
+
+No word of the corpus moves and no front of it is added: the corpus holds no
+WebSocket capture. The validation corpus is where D15 meets the wire.
