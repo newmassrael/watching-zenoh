@@ -5,11 +5,11 @@
     "^core::str::slice_error_fail"
   ],
   "site_pins": {
-    "engine-host": {"zephyr-client-fixed": 38, "zephyr-client-heap": 38, "zephyr-client-fixed-batching": 38, "zephyr-client-fixed-get": 38},
-    "engine-turn": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "engine-turn": {"zephyr-client-fixed": 36, "zephyr-client-heap": 36, "zephyr-client-fixed-batching": 36, "zephyr-client-fixed-get": 36},
+    "engine-host": {"zephyr-client-fixed": 5, "zephyr-client-heap": 5, "zephyr-client-fixed-batching": 5, "zephyr-client-fixed-get": 5},
     "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1},
     "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
-    "engine-behaviour": {"zephyr-client-fixed": 13, "zephyr-client-heap": 13, "zephyr-client-fixed-batching": 13, "zephyr-client-fixed-get": 13},
+    "engine-behaviour": {"zephyr-client-fixed": 11, "zephyr-client-heap": 11, "zephyr-client-fixed-batching": 11, "zephyr-client-fixed-get": 11},
     "exec-drop": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
     "waker": {"zephyr-client-fixed": 8, "zephyr-client-heap": 8, "zephyr-client-fixed-batching": 8, "zephyr-client-fixed-get": 8},
     "planner-call": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
@@ -115,16 +115,16 @@
       "why": "the entry walk, the effective targets and the final-state test take the document's tables, the store and sets, and no Behaviour (microstep.rs, `walk_entry`, `effective_target_states_on`, `is_in_final_state`): their calls through a register are the history and parallel procedures read from the tables (`HISTORY` and `PARALLEL`), which a document without a <history> and a <parallel> does not carry, so none is linked (the premise: no function of the image is one of the seven procedures of the two tables). The Behaviour hooks are called from `enter_states`, beside them and not under them, and the rule below claims them there"
     },
     {
+      "id": "engine-turn",
+      "where": {"function": "engine::Turn>::run$"},
+      "callees": "engine::MainLoop>::",
+      "why": "the asks of the machine the engine drives (its host, behind a reference to MainLoop), made by `Turn::run` (the entry into the initial configuration and the main event loop it hands over to). `Turn` holds the machine as a `&mut dyn MainLoop` (engine.rs `struct Turn`), and its `core`, `behaviour`, `queue` and `start_pending_invokes` are the methods of that trait. The rule claims by the function and stands BEFORE the rules that claim by file: the file a line table gives a register call inside `Turn::run` is not the same in every build (the lab host, a workstation and the hosted runner gave three splits of the same sites among `engine-host`, this rule and `engine-behaviour`), and a count that depends on it is a pin that goes red on a machine that did not move it"
+    },
+    {
       "id": "engine-host",
       "where": {"file": "engine.rs"},
       "callees": "engine::MainLoop>::",
       "why": "the engine's one shared copy of Appendix D asks the machine it drives (its host, behind a reference to MainLoop) for its state, its queues and its invocations"
-    },
-    {
-      "id": "engine-turn",
-      "where": {"function": "engine::Turn>::run$"},
-      "callees": "engine::MainLoop>::",
-      "why": "the same asks as the rule above, made by `Turn::run` (the entry into the initial configuration and the main event loop it hands over to), whose register call the image's line table gives no file since the SCE pin 955774d15a: `Turn` holds the machine as a `&mut dyn MainLoop` (engine.rs `struct Turn`), and its `core`, `behaviour`, `queue` and `start_pending_invokes` are the methods of that trait. The site was one of the 39 of `engine-host` before the pin and is claimed here by the function, not the file; the two pins sum to the 39 of before"
     },
     {
       "id": "engine-behaviour",
