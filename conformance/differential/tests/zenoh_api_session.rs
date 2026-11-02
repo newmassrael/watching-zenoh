@@ -2378,7 +2378,7 @@ macro_rules! session_cases {
                 // The version: `v`, the version of the crate, `-`, and a commit of 40 digits (with
                 // `-modified` for a tree with changes) or `release`, whichever the build asks for.
                 let version = $z::GIT_VERSION;
-                let commit = version.strip_prefix("v1.10.1-");
+                let commit = version.strip_prefix("v1.10.2-");
                 out.push(format!("version names the crate: {}", commit.is_some()));
                 out.push(format!(
                     "version names a commit or a release: {}",
@@ -3234,16 +3234,21 @@ mod wz {
 /// The lines on which the two differ, with the words of both, held so that a change on either side
 /// shows. Empty while no difference has been seen.
 fn known_differences() -> Vec<(&'static str, &'static str, &'static str)> {
-    // The engine reports that a link it was told to listen on did not open and not which one or
-    // why, so a session that listens and dials says "LinkFailed" where upstream says what the
-    // operating system answered. The slice that carries the cause of a failed open through the
-    // engine closes these two.
+    // The engine reports that a link it was told to listen on did not open and not why: it names
+    // the listener that failed in upstream's words and says the address cannot be bound, where
+    // upstream says what the operating system answered. The slice that carries the cause of a
+    // failed open through the engine closes these two.
     //
     // The role of a router is the other: this engine's session announces a peer's role to a node
     // that dials it whatever `mode` says, and a router is the router data plane, which a session
     // does not carry yet, so it is refused by its key and not opened as what it is not. The two
     // lines of the roles test that open one hold the words of both.
     vec![
+        (
+            "refusals",
+            "Can not create a new TCP listener bound to",
+            "the address cannot be bound",
+        ),
         (
             "refusals",
             "Can not create a new TCP listener bound to",

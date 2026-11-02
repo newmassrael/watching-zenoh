@@ -353,7 +353,8 @@ mod forward_stamp {
     // (this crate denies warnings).
     #[cfg(feature = "time-hlc")]
     use wz_session_core::push_build::{
-        build_push_del_literal, build_push_literal_with_meta, read_push_timestamp,
+        build_push_del_literal, build_push_literal_with_meta, read_publication_timestamp,
+        read_push_timestamp, set_publication_timestamp,
     };
 
     /// A Put whose inline timestamp slot is empty — what a client that does
@@ -485,6 +486,58 @@ mod forward_stamp {
             t1 - t0,
             1,
             "treating a Del must not mint a timestamp (frozen clock: 1 per mint)"
+        );
+    }
+
+    /// The publication of the node's OWN session is stamped on a delete as on a put: the session
+    /// that publishes gives a time from its clock whatever the kind, where a router relaying a
+    /// delete does not ([`a_del_is_neither_stamped_nor_allowed_to_advance_the_clock`]).
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn a_delete_of_the_nodes_own_session_is_stamped_and_the_header_bit_agrees() {
+        let node = frozen_node(&[0x01]);
+        let before = build_push_del_literal("demo/hlc").expect("build del");
+        assert!(
+            read_publication_timestamp(&before).is_none(),
+            "the fixture must start bare or this proves nothing"
+        );
+        let mut after = before.clone();
+        assert_eq!(
+            node.treat_own_timestamp(&mut after),
+            TimestampVerdict::Relay
+        );
+        let ts = read_publication_timestamp(&after).expect("the session stamps its delete");
+        assert_eq!(ts.zid, vec![0x01], "the stamp carries the node's zid");
+        let wz_codecs::push::PushOwnedVariant::CodecZenohMsgDel(del) = &after.body else {
+            panic!("fixture is a Del");
+        };
+        assert_eq!(
+            del.header & 0x20,
+            0x20,
+            "the T flag moves with the field, read off the wire header"
+        );
+        // And the relay of a delete is as it was: not stamped.
+        let mut relayed = before.clone();
+        node.treat_timestamp(&mut relayed);
+        assert_eq!(before, relayed);
+    }
+
+    /// A delete that already carries its time keeps it: the session stamps what has none.
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn a_delete_that_carries_a_time_keeps_it_when_the_session_publishes_it() {
+        let node = NodeHlc::for_node(&[0x01], WhatAmI::Router, TimestampingEnabled::default());
+        let mut push = build_push_del_literal("demo/hlc").expect("build del");
+        let given = wz_session_core::sample::TimestampHint {
+            time: 1u64 << 40,
+            zid: vec![0xB2],
+        };
+        set_publication_timestamp(&mut push, &given).expect("sets");
+        let before = push.clone();
+        node.treat_own_timestamp(&mut push);
+        assert_eq!(
+            before, push,
+            "a time within the drift bound is absorbed, not replaced"
         );
     }
 

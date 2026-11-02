@@ -486,18 +486,40 @@ Each lands whole with its surface lines, tests and faults in one round.
     10 faults injected, 9 were caught by a failing test; the sixth (an undeclare that never reaches
     the engine) hung the run and was stopped for memory, which is a hang and not a verdict, so it
     is open.
-  - **Carried from Z2c: the engine's reception of a batch with two frames.** Upstream's pipeline
-    puts a message of the other reliability in the open batch behind a second frame header
-    (`io/zenoh-transport/src/common/pipeline.rs` @ `BatchError::NewFrame`). The engine's reception
-    takes the payload of a frame as the tail of the batch (`parse_unit`, the frame arm, in
-    `crates/wz-session-core/src/inbound.rs`) and `parse_frame_payload` absorbs an unknown message id
-    into the remainder, so what follows the first frame is lost. A burst of 12 operations from an
-    upstream peer with one best-effort put among them arrived as 7; with a pause after it, 11;
-    with the best-effort put last, 12, which is the order the differential uses. Zenoh's codec ends
-    a frame at the first message it cannot read and reads the next transport message. The repair is
-    an engine round of its own: end a frame's payload at a transport message id and park the
-    residue as the next one, on the strict, the best-effort, the in-place and the plain-put paths.
-    Not done here, and it is the owner's to decide.
+  - **Repaired (rounds 4100 and 4103), carried from Z2c: the engine's reception of a batch with
+    two frames.** Upstream's pipeline puts a message of the other reliability in the open batch
+    behind a second frame header (`io/zenoh-transport/src/common/pipeline.rs` @ `BatchError::NewFrame`).
+    The engine's reception took the payload of a frame as the tail of the batch (`parse_unit`, the
+    frame arm, in `crates/wz-session-core/src/inbound.rs`) and `parse_frame_payload` absorbed an
+    unknown message id into the remainder, so what followed the first frame was lost. A burst of 12
+    operations from an upstream peer with one best-effort put among them arrived as 7; with a pause
+    after it, 11; with the best-effort put last, 12. Zenoh's codec ends a frame at the first
+    message it cannot read and reads the next transport message, and so does the engine now: the
+    walk of a frame's records stops before a transport message id, and what follows is the next
+    unit of the batch, parked for the driver on the copying path (round 4100) and read on from
+    that offset on the in-place path (round 4103). The best-effort parse that the capture tools
+    use keeps reporting the id as unknown, on purpose. The differential still sends its best-effort
+    put last: it was moved among the others and the scenario did not finish on this tree, for a
+    reason that is not the reception (the control with the old order did not finish either; see
+    the gaps of the node engine). Not run here: a datagram of several frames through the loop of
+    a build with no allocator.
+  - **Found in round 4109: the differential of the session (Layer E18, `zenoh_api_session`) was
+    red from round 3928, when a listening peer began to open as a node, and nothing ran it.**
+    Twelve of its twenty-five tests failed and one did not finish; they compare the API on the
+    engine with upstream's, and the node engine had gaps the session engine did not. Repaired
+    here, each with a test that failed before: a best-effort publication left the node
+    reliable (the forwarder took `reliable = true` for every publication of the node's own
+    session); a delete of the node's own session carried no time (a router relays a delete
+    unstamped, and a session stamps its own); a key declared on a node could not be undeclared
+    (the node declared none and so held none: it keeps a count of the keys declared now, and
+    names every key whole on the wire); the configuration test held the pin's old version
+    (`v1.10.1-`); and the held difference of a listener that cannot bind named words the
+    engine no longer says. Open: the node records no timestamp stack on a query or a reply and takes its own clock, not the
+    session's custom one, for the route point; a token undeclared by a peer stays in the node's
+    liveliness history; the matching status of a querier says there is a remote queryable when
+    there is none; a queryable of the node does not answer an upstream get; and the burst of an
+    upstream publisher is not received to the end (the scenario does not finish, and the
+    control with the old order does not either).
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

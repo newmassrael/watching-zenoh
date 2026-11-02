@@ -356,6 +356,55 @@ enum Engine {
 struct RouterEngine {
     node: wz_capi_core::drive::RouterState,
     ids: AtomicU64,
+    /// The key expressions declared on the session, by the id each was given and the number of
+    /// holders. A node names every key whole on the wire, so a declaration costs it nothing and
+    /// is kept only so that `Session::undeclare` finds what `Session::declare_keyexpr` made, as
+    /// upstream's does.
+    keys: std::sync::Mutex<RouterKeys>,
+}
+
+/// The key expressions a node holds as declared: [`RouterEngine::keys`].
+#[cfg(feature = "engine-tokio")]
+#[derive(Default)]
+struct RouterKeys {
+    /// The last id given: ids start at 1, and 0 is the scope of a key that is not declared.
+    last: u64,
+    /// `id -> (key, holders)`.
+    held: std::collections::HashMap<u64, (String, usize)>,
+}
+
+#[cfg(feature = "engine-tokio")]
+impl RouterKeys {
+    /// Hold `keyexpr` as declared: the id it already has, with one holder more, or a new one.
+    /// `None` when the wire could not name the id (sixteen bits).
+    fn acquire(&mut self, keyexpr: &str) -> Option<u64> {
+        if let Some((id, held)) = self
+            .held
+            .iter_mut()
+            .find(|(_, (key, _))| key == keyexpr)
+            .map(|(id, (_, held))| (*id, held))
+        {
+            *held += 1;
+            return Some(id);
+        }
+        let id = self
+            .last
+            .checked_add(1)
+            .filter(|id| *id <= u64::from(u16::MAX))?;
+        self.last = id;
+        self.held.insert(id, (keyexpr.to_owned(), 1));
+        Some(id)
+    }
+
+    /// Let go of one holder of `id`; the declaration ends with the last.
+    fn release(&mut self, id: u64) {
+        if let Some((_, held)) = self.held.get_mut(&id) {
+            *held -= 1;
+            if *held == 0 {
+                self.held.remove(&id);
+            }
+        }
+    }
 }
 
 /// The handler a queryable hosted on the router node runs for each query it is asked.
@@ -540,6 +589,7 @@ impl Engine {
             let engine = Engine::Router(RouterEngine {
                 node,
                 ids: AtomicU64::new(0),
+                keys: std::sync::Mutex::new(RouterKeys::default()),
             });
             return Ok((engine, zid));
         }
@@ -568,15 +618,24 @@ impl Engine {
     fn acquire_keyexpr(&self, keyexpr: &str) -> Option<u64> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr.to_owned()),
-            // A node that declares no key expression to its peers names none by an id.
-            Engine::Router(_) => None,
+            // A node declares no key expression to its peers and names none by an id on the wire,
+            // but it holds the declaration, so that the key is undeclared as it was declared.
+            Engine::Router(router) => router
+                .keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .acquire(keyexpr),
         }
     }
 
     fn release_keyexpr(&self, mapping_id: u64) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().release_keyexpr(mapping_id),
-            Engine::Router(_) => {}
+            Engine::Router(router) => router
+                .keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release(mapping_id),
         }
     }
 
@@ -6334,6 +6393,42 @@ mod tests {
             .map(|_| start + HANDED_OUT.fetch_add(1, Ordering::Relaxed) % 2_000)
             .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
             .expect("a free port below the ephemeral range")
+    }
+
+    /// The keys a node holds as declared: a key declared again is the same declaration with one
+    /// holder more, it ends with its last holder, and the id is one the wire could name.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn a_node_holds_a_declared_key_once_and_until_its_last_holder_lets_go() {
+        let mut keys = RouterKeys::default();
+        let first = keys.acquire("demo/a").expect("an id");
+        let again = keys.acquire("demo/a").expect("an id");
+        let other = keys.acquire("demo/b").expect("an id");
+        assert_eq!(first, again, "the same key is the same declaration");
+        assert_ne!(first, other);
+        assert!(first != 0, "0 is the scope of a key that is not declared");
+        keys.release(first);
+        assert!(keys.held.contains_key(&first), "one holder is left");
+        keys.release(first);
+        assert!(!keys.held.contains_key(&first), "the last holder ends it");
+        keys.release(first);
+        let renewed = keys.acquire("demo/a").expect("an id");
+        assert_ne!(
+            renewed, first,
+            "a declaration that ended is not given again"
+        );
+    }
+
+    /// A node that has handed out every id the wire can name declares nothing more, and the key
+    /// is used whole, as one that is not worth a declaration is.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn a_node_that_has_no_id_left_for_the_wire_declares_nothing() {
+        let mut keys = RouterKeys {
+            last: u64::from(u16::MAX),
+            ..RouterKeys::default()
+        };
+        assert_eq!(keys.acquire("demo/a"), None);
     }
 
     /// A node with no clock still gives a timestamp: the time of the system with the id of the

@@ -599,12 +599,33 @@ impl NodeHlc {
     /// and fans the one stamped `msg` out to all of `route`.
     #[cfg(feature = "codec-push")]
     pub fn treat_timestamp(&self, push: &mut wz_session_core::wire::PushOwned) -> TimestampVerdict {
+        self.treat_timestamp_of(push, false)
+    }
+
+    /// [`treat_timestamp`](Self::treat_timestamp) for the publication of this node's own
+    /// session: a delete is stamped as a put is, because the session that publishes it gives it a
+    /// time from its clock, whichever kind it is, where a router stamps only the puts it relays.
+    #[cfg(feature = "codec-push")]
+    pub fn treat_own_timestamp(
+        &self,
+        push: &mut wz_session_core::wire::PushOwned,
+    ) -> TimestampVerdict {
+        self.treat_timestamp_of(push, true)
+    }
+
+    /// The verdict on `push`, a delete included only when `stamps_deletes`.
+    #[cfg(feature = "codec-push")]
+    fn treat_timestamp_of(
+        &self,
+        push: &mut wz_session_core::wire::PushOwned,
+        stamps_deletes: bool,
+    ) -> TimestampVerdict {
         #[cfg(feature = "time-hlc")]
         {
             let Some(clock) = self.clock.as_deref() else {
                 return TimestampVerdict::Relay;
             };
-            if !wz_session_core::push_build::push_is_put(push) {
+            if !stamps_deletes && !wz_session_core::push_build::push_is_put(push) {
                 return TimestampVerdict::Relay;
             }
             // `trusted-only`: a clock that is not to be trusted neither stamps nor judges. The Put
@@ -615,7 +636,13 @@ impl NodeHlc {
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return TimestampVerdict::Relay;
             }
-            if let Some(inbound) = wz_session_core::push_build::read_push_timestamp(push) {
+            // The publication of the node's own session carries its time on a delete as on a put.
+            let carried = if stamps_deletes {
+                wz_session_core::push_build::read_publication_timestamp(push)
+            } else {
+                wz_session_core::push_build::read_push_timestamp(push)
+            };
+            if let Some(inbound) = carried {
                 match clock
                     .hlc
                     .update_with_timestamp(wz_session_core::ntp64::Ntp64::from_word(inbound.time))
@@ -637,14 +664,36 @@ impl NodeHlc {
                 // zenoh's default `false` arm replaces rather than dropping.
             }
             if let Some(stamp) = self.stamp() {
-                let _ = wz_session_core::push_build::set_push_timestamp(push, &stamp);
+                let _ = if stamps_deletes {
+                    wz_session_core::push_build::set_publication_timestamp(push, &stamp)
+                } else {
+                    wz_session_core::push_build::set_push_timestamp(push, &stamp)
+                };
             }
             TimestampVerdict::Relay
         }
         #[cfg(not(feature = "time-hlc"))]
         {
-            let _ = push;
+            let _ = (push, stamps_deletes);
             TimestampVerdict::Relay
+        }
+    }
+
+    /// [`stamp_for_every_destination`](Self::stamp_for_every_destination) for the publication of
+    /// this node's own session: a delete is stamped too
+    /// ([`treat_own_timestamp`](Self::treat_own_timestamp)).
+    #[cfg(feature = "codec-push")]
+    pub fn stamp_own_publication<'a>(
+        &self,
+        push: &'a wz_session_core::wire::PushOwned,
+    ) -> Option<std::borrow::Cow<'a, wz_session_core::wire::PushOwned>> {
+        if !self.is_stamping() {
+            return Some(std::borrow::Cow::Borrowed(push));
+        }
+        let mut carrier = push.clone();
+        match self.treat_own_timestamp(&mut carrier) {
+            TimestampVerdict::Drop => None,
+            TimestampVerdict::Relay => Some(std::borrow::Cow::Owned(carrier)),
         }
     }
 

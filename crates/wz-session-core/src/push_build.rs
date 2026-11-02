@@ -604,6 +604,40 @@ pub fn set_push_timestamp(
     Ok(true)
 }
 
+/// [`read_push_timestamp`] for the publication of a session's own, which stamps a `Del` as it
+/// stamps a `Put`: the time the body carries, whichever kind it is.
+pub fn read_publication_timestamp(push: &PushOwned) -> Option<crate::sample::TimestampHint> {
+    match &push.body {
+        PushOwnedVariant::CodecZenohMsgPut(put) => put
+            .timestamp
+            .as_ref()
+            .map(crate::sample::TimestampHint::from_codec),
+        PushOwnedVariant::CodecZenohMsgDel(del) => del
+            .timestamp
+            .as_ref()
+            .map(crate::sample::TimestampHint::from_codec),
+        _ => None,
+    }
+}
+
+/// [`set_push_timestamp`] for the publication of a session's own: a `Del` carries the time in its
+/// body, with the `T` flag (`0x20`) kept in step with the field, as a `Put` does. `false` for a
+/// body of neither kind, or on a build that does not carry a timestamp.
+pub fn set_publication_timestamp(
+    push: &mut PushOwned,
+    timestamp: &crate::sample::TimestampHint,
+) -> Result<bool, CodecError> {
+    if let PushOwnedVariant::CodecZenohMsgDel(del) = &mut push.body {
+        let Some(field) = gated_timestamp_field(Some(timestamp))? else {
+            return Ok(false);
+        };
+        del.timestamp = Some(field);
+        del.header |= 0x20;
+        return Ok(true);
+    }
+    set_push_timestamp(push, timestamp)
+}
+
 /// R233 — build a `MsgPut` body carrying caller-set metadata
 /// (timestamp, encoding, source_info, attachment). Sets the
 /// `_Z_FLAG_Z_P_T` (0x20) and `_Z_FLAG_Z_P_E` (0x40) header bits to

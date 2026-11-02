@@ -10288,6 +10288,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.route_local_push(
             options.priority_band(),
             options.qos.is_some_and(|qos| qos.is_express()),
+            options.reliable_bool(),
             &push,
             &wire,
             options.allowed_destination,
@@ -10333,6 +10334,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.route_local_push(
             options.priority_band(),
             options.qos.is_some_and(|qos| qos.is_express()),
+            options.reliable_bool(),
             &push,
             &wire,
             options.allowed_destination,
@@ -10353,19 +10355,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         priority: Priority,
         express: bool,
+        reliable: bool,
         push: &PushOwned,
         keyexpr: &str,
         destination: wz_session_core::locality::Locality,
         own: &dyn SampleView,
         own_relative: &dyn SampleView,
     ) {
-        let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
+        // The node's own session stamps what it publishes, a delete as well as a put, which is
+        // what a relayed message is not given.
+        let Some(stamped) = self.node_hlc.stamp_own_publication(push) else {
             return;
         };
         let push: &PushOwned = &stamped;
-        // Fresh data is reliable: `reliable` follows the inbound frame for a
-        // relayed message, and there is none here.
-        let reliable = true;
+        // `reliable` follows the inbound frame for a relayed message; a publication of the
+        // node's own session is as reliable as its publisher asked it to be.
         let egress = Egress {
             reliable,
             priority,
@@ -19947,6 +19951,65 @@ mod tests {
                 *remote.lock().unwrap()
             ),
             (3, 2, 1)
+        );
+    }
+
+    /// A publication of the node's own session leaves with the reliability it was published with,
+    /// where it used to leave reliable whatever the publisher asked.
+    #[test]
+    fn a_publication_of_the_node_leaves_with_the_reliability_it_was_published_with() {
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        use wz_session_core::reliability::Reliability;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/pub"));
+
+        let reliable_of = |options: PublishOptions| {
+            sink.reset();
+            fwd.publish_with("demo/pub", b"x", &options)
+                .expect("publish");
+            assert_eq!(sink.frame_count(), 1);
+            let Ok(InboundFrame::Frame { reliable, .. }) = parse_inbound(&sink.frame_bytes(0))
+            else {
+                panic!("the face is sent a frame");
+            };
+            reliable
+        };
+        assert!(
+            reliable_of(PublishOptions::put()),
+            "reliable is the default"
+        );
+        assert!(
+            !reliable_of(PublishOptions::put().with_reliability(Reliability::BestEffort)),
+            "a best-effort publication is a best-effort frame"
+        );
+    }
+
+    /// The session of the node gives a delete a time from its clock, as it gives a put one; a
+    /// delete that the node relays is not given one.
+    #[cfg(all(
+        feature = "pubsub-delete",
+        feature = "pubsub-timestamp",
+        feature = "time-hlc"
+    ))]
+    #[test]
+    fn a_delete_of_the_nodes_own_session_leaves_with_a_time() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/pub"));
+
+        sink.reset();
+        fwd.publish_with("demo/pub", &[], &PublishOptions::del())
+            .expect("publish");
+        assert_eq!(sink.frame_count(), 1);
+        let push = forwarded_push(&sink.frame_bytes(0));
+        assert!(
+            wz_session_core::push_build::read_publication_timestamp(&push).is_some(),
+            "a router's own session stamps a delete it publishes"
         );
     }
 
