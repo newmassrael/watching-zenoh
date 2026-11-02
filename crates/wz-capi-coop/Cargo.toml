@@ -163,7 +163,7 @@ listen = ["wz-runtime-coop/session-unicast-accept"]
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the
 # engine's read tasks are threads and the library keeps process-wide state with no lock of its
 # own. Off, a `tls/` endpoint is the stack's `Unsupported`, and the text has none of it.
-tls-mbedtls = ["std", "dep:wz-tls-mbedtls", "wz-tls-mbedtls/vendored", "wz-tls-mbedtls/host-lock"]
+tls-mbedtls = ["std", "dep:wz-tls-mbedtls", "wz-tls-mbedtls/vendored", "wz-tls-mbedtls/host-lock", "wz-tls-mbedtls/rsa"]
 # Delivery of the session's own get to the session's own queryables (`Z_FEATURE_LOCAL_QUERYABLE`):
 # a get reaches the queryables of the session that made it, after it has gone out on the link,
 # and a querier's write filter or matching listener that counts the session's own entities counts

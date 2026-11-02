@@ -77,6 +77,14 @@ vendored = []
 # and PSA's key store are process-wide state with no lock of their own. An image that runs one
 # thread leaves it off and pays nothing (`src/lock.rs`).
 host-lock = []
+# RSA keys and signatures, beside the P-256 ones: a certificate authority's chain as the stock
+# zenoh-pico examples and zenoh's own tests carry it is RSA-2048 (signed with
+# `sha256WithRSAEncryption`, its keys `RSA PRIVATE KEY`), measured in Layer E (step T4 of L6), and
+# TLS 1.3 signs a handshake with an RSA key by RSA-PSS. It is the host's: the code and the larger
+# public key buffer it needs are not what the kit image budgets, which compiles the channel by its
+# own Kconfig and never sets this, so the kit's image is byte for byte what it was. Needs
+# `vendored`, which is what builds the configuration this reads.
+rsa = []
 # The session lifecycle verbs on the cooperative runtime. Offered here, by the channel, because
 # they compile only beside one (decision D2): this crate always states `secure-channel`, so every
 # build that has the verbs through it has the channel too. The runtime offers no such feature.

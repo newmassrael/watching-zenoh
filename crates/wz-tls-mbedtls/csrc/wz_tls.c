@@ -26,8 +26,13 @@
 #include <mbedtls/memory_buffer_alloc.h>
 #endif
 
-/* The largest DER SubjectPublicKeyInfo of a key this channel takes: P-256 is 91 bytes. */
+/* The largest DER SubjectPublicKeyInfo of a key this channel takes: P-256 is 91 bytes, and with
+ * RSA (a host's, `WZ_TLS_RSA`) a 2048-bit key is 294 and a 4096-bit one 550. */
+#if defined(WZ_TLS_RSA)
+#define SPKI_MAX 600
+#else
 #define SPKI_MAX 160
+#endif
 /* The largest certificate this file writes: a self-signed P-256 one is under 400 bytes. */
 #define CERT_MAX 1024
 

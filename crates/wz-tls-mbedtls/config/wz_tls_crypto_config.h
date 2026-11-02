@@ -30,6 +30,23 @@
 #define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_EXPORT   1
 #define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_GENERATE 1
 
+/* RSA, for the host (`rsa` feature of the crate, which defines WZ_TLS_RSA): a certificate
+ * authority's chain as the stock zenoh-pico examples and zenoh's own tests carry it is RSA-2048,
+ * the authority's signature `sha256WithRSAEncryption` (PKCS#1 v1.5, read to verify a chain) and
+ * the end's key `RSA PRIVATE KEY`; TLS 1.3 signs a handshake with an RSA key by RSA-PSS. The kit
+ * image configures the channel by Kconfig and does not define this. */
+#if defined(WZ_TLS_RSA)
+#define PSA_WANT_KEY_TYPE_RSA_PUBLIC_KEY        1
+#define PSA_WANT_KEY_TYPE_RSA_KEY_PAIR_BASIC    1
+#define PSA_WANT_KEY_TYPE_RSA_KEY_PAIR_IMPORT   1
+#define PSA_WANT_ALG_RSA_PKCS1V15_SIGN          1
+#define PSA_WANT_ALG_RSA_PSS                    1
+/* The TLS layer's RSA-PSS signature algorithms (`MBEDTLS_X509_RSASSA_PSS_SUPPORT`, in
+ * `wz_tls_mbedtls_config.h`) are refused by Mbed TLS's configuration check without OAEP beside
+ * them (`mbedtls_check_config.h`); the channel does not use it. */
+#define PSA_WANT_ALG_RSA_OAEP                   1
+#endif
+
 /* PSA Crypto itself, with its random generator: a CTR_DRBG seeded from the platform's entropy
  * (the operating system's on a host, as the kit's is its TRNG). */
 #define MBEDTLS_PSA_CRYPTO_C

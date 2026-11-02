@@ -27,6 +27,15 @@
 #define MBEDTLS_X509_CREATE_C
 #define MBEDTLS_X509_CRT_WRITE_C
 
+/* RSA, for the host (`rsa` feature of the crate, which defines WZ_TLS_RSA; the crypto side is in
+ * `wz_tls_crypto_config.h`). TLS 1.3 signs a handshake with an RSA key by RSA-PSS, and the TLS
+ * layer offers `rsa_pss_rsae_sha256` in its signature algorithms, and takes it, only with this
+ * defined: without it a peer whose certificate is RSA ends the handshake with "no suitable
+ * signature algorithm" (measured against OpenSSL with the chain the zenoh-pico examples carry). */
+#if defined(WZ_TLS_RSA)
+#define MBEDTLS_X509_RSASSA_PSS_SUPPORT
+#endif
+
 /* The record buffers, decided in Round 3495. RECEIVE is the protocol's maximum, 2^14: a peer
  * that did not negotiate the record size limit (RFC 8449; rustls 0.23, which zenohd 1.10.1
  * links, does not implement it) may send a record that large. SEND is ours to bound: a

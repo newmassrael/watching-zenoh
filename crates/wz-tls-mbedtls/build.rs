@@ -55,7 +55,15 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", crypto.join("core").display());
 
-    let dst = cmake::Config::new(&mbedtls)
+    // RSA is the host's (feature `rsa`): the configuration headers and the C side read this one
+    // macro, so the library and the channel are built to the same answer.
+    let rsa = env::var_os("CARGO_FEATURE_RSA").is_some();
+
+    let mut cmake_config = cmake::Config::new(&mbedtls);
+    if rsa {
+        cmake_config.cflag("-DWZ_TLS_RSA=1");
+    }
+    let dst = cmake_config
         .define("TF_PSA_CRYPTO_DIR", &crypto)
         .define("MBEDTLS_CONFIG_FILE", config.join(TLS_CONFIG))
         .define("TF_PSA_CRYPTO_CONFIG_FILE", config.join(CRYPTO_CONFIG))
@@ -75,7 +83,8 @@ fn main() {
         .build();
 
     let include = dst.join("include");
-    cc::Build::new()
+    let mut channel = cc::Build::new();
+    channel
         .file(csrc.join("wz_tls.c"))
         .include(&csrc)
         .include(&config)
@@ -84,8 +93,11 @@ fn main() {
         .define(
             "TF_PSA_CRYPTO_CONFIG_FILE",
             Some(quoted(CRYPTO_CONFIG).as_str()),
-        )
-        .compile("wz_tls");
+        );
+    if rsa {
+        channel.define("WZ_TLS_RSA", Some("1"));
+    }
+    channel.compile("wz_tls");
 
     for lib_dir in ["lib", "lib64"] {
         let dir = dst.join(lib_dir);
