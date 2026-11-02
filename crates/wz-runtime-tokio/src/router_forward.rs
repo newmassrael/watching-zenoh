@@ -4243,7 +4243,7 @@ impl RouterForwarder {
     /// (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn route_interest`), which sends the
     /// interest of a face south of it on to its one north face; the router in turn tells a client
     /// only what the client asked for. The interest of a south face is therefore brokered north
-    /// ([`broker_current_interest`](OnTables::broker_current_interest)) as a client's is.
+    /// (`broker_current_interest`, built with `routing-interest-pending-gc`) as a client's is.
     ///
     /// The routing tables stay a peer node's: the north region has no client hat of its own here,
     /// and the answers a router gives a client are the ones it gives a peer that asks.
