@@ -1893,27 +1893,27 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     // units read whole. The keep-alives carry no SN, and the fixture's TCP opens
     // without a SYN, so its framing is not weighed.
     let row = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
-               \"zenoh_evidence\":{\"log2_lr_millibits\":64964,\
-               \"log2_lr_no_millibits\":92373,\
-               \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":3,\
+               \"zenoh_evidence\":{\"log2_lr_millibits\":64330,\
+               \"log2_lr_no_millibits\":85382,\
+               \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":4,\
                \"crossed_at_packet\":2,\
-               \"log2_lr_max_millibits\":64964,\"log2_lr_min_millibits\":0,\
-               \"log2_lr_no_max_millibits\":92373,\"log2_lr_no_min_millibits\":0,\
+               \"log2_lr_max_millibits\":64330,\"log2_lr_min_millibits\":0,\
+               \"log2_lr_no_max_millibits\":85382,\"log2_lr_no_min_millibits\":0,\
                \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
                \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
                \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-               \"confirmed\":8,\"violated\":0,\"millibits\":966,\"no_millibits\":28372,\
+               \"confirmed\":8,\"violated\":0,\"millibits\":332,\"no_millibits\":21381,\
                \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     // The FLOW: the same, and the two Inits' version headers, their roles and
     // their units.
     let flow = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
-                \"zenoh_evidence\":{\"log2_lr_millibits\":81961,\
-                \"log2_lr_no_millibits\":116467,\
-                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":3,\
+                \"zenoh_evidence\":{\"log2_lr_millibits\":81327,\
+                \"log2_lr_no_millibits\":107729,\
+                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":4,\
                 \"crossed_at_packet\":2,\
-                \"log2_lr_max_millibits\":81961,\"log2_lr_min_millibits\":0,\
-                \"log2_lr_no_max_millibits\":116467,\"log2_lr_no_min_millibits\":0,\
+                \"log2_lr_max_millibits\":81327,\"log2_lr_min_millibits\":0,\
+                \"log2_lr_no_max_millibits\":107729,\"log2_lr_no_min_millibits\":0,\
                 \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
                 \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
@@ -1924,10 +1924,10 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":2,\"violated\":0,\"millibits\":15999,\"no_millibits\":16001,\
                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                 {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                \"confirmed\":10,\"violated\":0,\"millibits\":966,\"no_millibits\":35464,\
+                \"confirmed\":10,\"violated\":0,\"millibits\":332,\"no_millibits\":26726,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":7}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":8}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
@@ -2163,7 +2163,7 @@ fn a_session_with_its_handshake_is_zenoh() {
     let head = alloc::format!(
         "\"zenoh\":\"yes\",\"announced_version\":\"own\",\"zenoh_evidence\":\
          {{\"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":20000,\
-         \"no_at_millibits\":-20000,\"model\":3,\"crossed_at_packet\":2,\
+         \"no_at_millibits\":-20000,\"model\":4,\"crossed_at_packet\":2,\
          \"log2_lr_max_millibits\":{},\"log2_lr_min_millibits\":{},\
          \"log2_lr_no_max_millibits\":{},\"log2_lr_no_min_millibits\":{},\
          \"checks\":[{{\"check\":\"cookie_echo\"",
@@ -2381,7 +2381,7 @@ fn the_declared_zenoh_words_are_the_enums() {
         AnnouncedVersion::names()
     );
     assert_eq!(
-        crate::doc_revision::ZENOH_CHECK_R46.to_vec(),
+        crate::doc_revision::ZENOH_CHECK_R50.to_vec(),
         Check::names()
     );
     assert_eq!(
@@ -2393,7 +2393,7 @@ fn the_declared_zenoh_words_are_the_enums() {
         Basis::names()
     );
     assert_eq!(
-        crate::doc_revision::ZENOH_EPS_BASIS_R49.to_vec(),
+        crate::doc_revision::ZENOH_EPS_BASIS_R50.to_vec(),
         Check::eps_basis_names()
     );
 }
@@ -3322,11 +3322,16 @@ fn structured_protocols() -> [(&'static str, StructuredBuilder, u16, u16); 6] {
 /// against protocols outside it.
 ///
 /// Under model 2 every flow of twenty datagrams or more read `no` (measured
-/// 2026-10-26). Under model 3 none does, at any length: a flow whose units fail
+/// 2026-10-26). Under model 3 none did, at any length: a flow whose units fail
 /// is evidence against zenoh only as far as a new group of zenoh captures
-/// could fail them, a few bits, and `no` comes from recognising what the flow
-/// is (model 4, `docs/flow-zenoh-verdict.md` §6.7, D6). The run prints the
-/// table.
+/// could fail them, a few bits. Under model 4 a `no` comes from what the wire
+/// allows (`docs/flow-zenoh-verdict.md` §6.9): the text protocols write a
+/// letter where zenoh writes a transport message id, and no checksum vouches
+/// for these bytes, so each such datagram weighs about ten bits and three
+/// cross; mDNS's zero id is an id of the wire and never reads `no`. DNS's
+/// random id, NTP version 3's first byte (`0x1B`, `0x1C`; version 4's is an id
+/// of the wire) and CoAP's eight-byte token length are foreign some of the
+/// time, so their share of `no` grows with the flow. The run prints the table.
 #[test]
 fn the_sequential_test_says_yes_to_no_generated_flow_of_another_protocol() {
     for (name, build, sport, dport) in structured_protocols() {
@@ -3345,8 +3350,17 @@ fn the_sequential_test_says_yes_to_no_generated_flow_of_another_protocol() {
         }
         std::println!("{name} (n, yes, no) of 600: {rows:?}");
         assert_eq!(yes, 0, "{name} (n, yes, no): {rows:?}");
-        let no: u64 = rows.iter().map(|(_, _, said_no)| said_no).sum();
-        assert_eq!(no, 0, "{name} (n, yes, no): {rows:?}");
+        for &(n, _, said_no) in &rows {
+            let want = match name {
+                "ssdp" | "syslog" if n >= 3 => Some(600),
+                "ssdp" | "syslog" if n < 3 => Some(0),
+                "mdns" => Some(0),
+                _ => None,
+            };
+            if let Some(want) = want {
+                assert_eq!(said_no, want, "{name} at {n} (n, yes, no): {rows:?}");
+            }
+        }
     }
 }
 

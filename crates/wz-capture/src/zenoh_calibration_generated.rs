@@ -3,8 +3,8 @@
 
 //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.
 //!
-//! The counts of the corpus and model 3's parameters computed from them
-//! (`docs/flow-zenoh-verdict.md` section 6.8), written by
+//! The counts of the corpus and model 4's parameters computed from them
+//! (`docs/flow-zenoh-verdict.md` sections 6.8 and 6.9), written by
 //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which
 //! fails when this file is not what the corpus gives. Regenerate with
 //! `scripts/regen-calibration.sh` and commit the result with the capture
@@ -14,7 +14,7 @@
 
 use crate::zenoh_eprocess::{Prior, Region};
 use crate::zenoh_evidence::model::measured::Member;
-use crate::zenoh_evidence::model::{Derived, Measured, Params};
+use crate::zenoh_evidence::model::{Derived, Front, Measured, Params};
 
 /// The concentrations of the regions' grid, `10^(-3 + i/8)`, in the fixed point
 /// of `zenoh_eprocess::Q32_BITS`, rounded down.
@@ -522,7 +522,7 @@ pub const VERSIONS_CELLS: [u64; 80] = [
     105_163_778_295_622,
 ];
 
-/// Model 3's parameters.
+/// Model 4's parameters.
 pub const PARAMS: Params = Params {
     units: Measured {
         zenoh: Prior {
@@ -535,11 +535,15 @@ pub const PARAMS: Params = Params {
             cells: &UNITS_CELLS,
             top: 260_002,
         },
-        log2_null_bound: [-17_832_035_507_726_000_128, 16_777_216, 16_777_216],
+        log2_null_bound: [
+            -6_130_493_637_990_960_128,
+            16_777_216,
+            -2_818_774_441_678_764_544,
+        ],
         log2_null_mean: [
-            -65_419_427_123_328_958_464,
-            -26_161_995_340_242_350_080,
-            -16_386_677_087_673_565_184,
+            -49_299_475_123_159_515_136,
+            -13_617_169_904_051_277_824,
+            -37_577_438_385_722_433_536,
         ],
     },
     framing: Measured {
@@ -596,99 +600,124 @@ pub const PARAMS: Params = Params {
         num: [19_911, 89],
         den: 10_000,
     },
+    front: Front {
+        log2_null_bound: [16_777_216, 16_777_216],
+        null: Prior {
+            num: [546_373_292, 453_626_708],
+            den: 1_000_000_000,
+        },
+    },
 };
 
 /// The null protocols, in the manifest's order.
 pub const NULL: [Member; 18] = [
     Member {
         file: "lan-dns.pcap",
-        units: [26, 32, 320],
+        units: [26, 32, 22],
         framing: [0, 0],
+        front: [80, 298],
     },
     Member {
         file: "lan-mdns.pcap",
-        units: [13, 8, 15],
+        units: [13, 8, 0],
         framing: [0, 0],
+        front: [21, 15],
     },
     Member {
         file: "lan-ssdp.pcap",
-        units: [0, 0, 26],
+        units: [0, 0, 0],
         framing: [0, 0],
+        front: [0, 26],
     },
     Member {
         file: "stack-mqtt.pcap",
         units: [6, 28, 7],
         framing: [0, 84],
+        front: [25, 0],
     },
     Member {
         file: "stack-rtps.pcap",
-        units: [0, 2, 147],
+        units: [0, 2, 0],
         framing: [0, 0],
+        front: [2, 147],
     },
     Member {
         file: "stack-coap.pcap",
         units: [0, 24, 144],
         framing: [0, 0],
+        front: [168, 0],
     },
     Member {
         file: "stack-someip.pcap",
-        units: [0, 28, 278],
+        units: [0, 28, 0],
         framing: [0, 0],
+        front: [28, 278],
     },
     Member {
         file: "stack-quic.pcap",
         units: [0, 22, 0],
         framing: [0, 0],
+        front: [22, 0],
     },
     Member {
         file: "busylan-dhcp.pcap",
         units: [16, 98, 133],
         framing: [0, 0],
+        front: [247, 0],
     },
     Member {
         file: "busylan-ntp.pcap",
         units: [5, 183, 0],
         framing: [0, 0],
+        front: [188, 0],
     },
     Member {
         file: "busylan-wsd.pcap",
-        units: [5, 12, 155],
+        units: [5, 12, 14],
         framing: [0, 0],
+        front: [22, 141],
     },
     Member {
         file: "stack-http.pcap",
         units: [0, 0, 0],
         framing: [0, 0],
+        front: [0, 0],
     },
     Member {
         file: "stack-tls.pcap",
         units: [0, 0, 0],
         framing: [0, 0],
+        front: [0, 0],
     },
     Member {
         file: "stack-http-post.pcap",
         units: [0, 0, 0],
         framing: [0, 50],
+        front: [0, 0],
     },
     Member {
         file: "stack-redis.pcap",
         units: [0, 0, 0],
         framing: [0, 120],
+        front: [0, 0],
     },
     Member {
         file: "stack-postgres.pcap",
         units: [0, 531, 0],
         framing: [0, 48],
+        front: [0, 0],
     },
     Member {
         file: "stack-ssh.pcap",
         units: [33, 20, 40],
         framing: [0, 34],
+        front: [0, 0],
     },
     Member {
         file: "stack-smtp.pcap",
         units: [0, 0, 0],
         framing: [0, 20],
+        front: [0, 0],
     },
 ];
 
@@ -706,3 +735,6 @@ pub const ZENOH_ROLES: [u64; 2] = [611, 0];
 
 /// The zenoh files' version headers: this reader's, another.
 pub const ZENOH_VERSIONS: [u64; 2] = [1_222, 0];
+
+/// The zenoh files' datagram fronts: of this wire, foreign.
+pub const ZENOH_FRONT: [u64; 2] = [27_067, 0];

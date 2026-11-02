@@ -34,11 +34,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use wz_session_core::passive::ReadingEvidence;
-
 use crate::zenoh_corpus_tests::{corpus_dir, manifest};
 use crate::zenoh_eprocess::{Prior, Region, ONE_Q32};
-use crate::zenoh_evidence::model::{self, Derived, Measured, Params};
+use crate::zenoh_evidence::model::{self, Derived, Front, Measured, Params};
 use crate::zenoh_evidence::{Check, ZenohEvidence};
 use crate::zenoh_hierarchy_tests::{
     fit_sn, grid_kappas, kind_groups, mean_bound, upper_bound, GroupOutcomes, KINDS,
@@ -60,6 +58,8 @@ pub(crate) struct Counts {
     pub(crate) versions: [u64; 2],
     /// SN steps that followed, that broke.
     pub(crate) sn: [u64; 2],
+    /// Datagram fronts of this wire, foreign.
+    pub(crate) front: [u64; 2],
 }
 
 impl Counts {
@@ -75,6 +75,7 @@ impl Counts {
         add(&mut self.roles, &other.roles);
         add(&mut self.versions, &other.versions);
         add(&mut self.sn, &other.sn);
+        add(&mut self.front, &other.front);
     }
 }
 
@@ -95,26 +96,29 @@ pub(crate) struct File {
 
 fn flows_of(d: &Dissection) -> Vec<Flow> {
     let mut out = Vec::new();
-    let mut push = |r: ReadingEvidence, e: ZenohEvidence| {
+    // The unit readings are the ones the test weighed: a datagram whose front
+    // was foreign is weighed by its front, and its reading is not (model 4).
+    let mut push = |e: ZenohEvidence| {
         let t = |check| e.tally(check);
         let pair = |check| [t(check).confirmed, t(check).violated];
         out.push(Flow {
             counts: Counts {
-                units: [r.explained.units, r.residual.units, r.undecoded.units],
+                units: e.unit_outcomes(),
                 framing: pair(Check::StreamFraming),
                 cookie: pair(Check::CookieEcho),
                 roles: pair(Check::InitRoles),
                 versions: pair(Check::VersionHeader),
                 sn: pair(Check::SnFollows),
+                front: pair(Check::WireFront),
             },
             evidence: e,
         });
     };
     for f in d.flows() {
-        push(f.ingest.readings(), f.zenoh_evidence());
+        push(f.zenoh_evidence());
     }
     for f in d.datagram_flows() {
-        push(f.ingest.readings(), f.zenoh_evidence());
+        push(f.zenoh_evidence());
     }
     out
 }
@@ -179,6 +183,26 @@ fn zenoh_prior<const K: usize>(counts: [u64; K]) -> Prior<K> {
     num[0] = PRIOR_DEN - num[1..].iter().sum::<u64>();
     Prior {
         num,
+        den: PRIOR_DEN,
+    }
+}
+
+/// A prior of weight one outcome centred on the null members' average Jeffreys
+/// share of the failure, over the members that observed the check: what the
+/// `no` sum mixes a flow's own share of foreign fronts over.
+fn null_prior(members: &[[u64; 2]]) -> Prior<2> {
+    let seen: Vec<&[u64; 2]> = members
+        .iter()
+        .filter(|m| m.iter().sum::<u64>() > 0)
+        .collect();
+    let share = seen
+        .iter()
+        .map(|m| (m[1] as f64 + 0.5) / (m.iter().sum::<u64>() as f64 + 1.0))
+        .sum::<f64>()
+        / seen.len() as f64;
+    let failed = ((share * PRIOR_DEN as f64).round() as u64).clamp(1, PRIOR_DEN - 1);
+    Prior {
+        num: [PRIOR_DEN - failed, failed],
         den: PRIOR_DEN,
     }
 }
@@ -284,6 +308,8 @@ fn calibrate<'a>(files: impl Iterator<Item = &'a File> + Clone) -> Calibration {
     let framing: Vec<[u64; 2]> = null.iter().map(|(_, c)| c.framing).collect();
     let (units_bound, units_mean) = null_side(&units);
     let (framing_bound, framing_mean) = null_side(&framing);
+    let front: Vec<[u64; 2]> = null.iter().map(|(_, c)| c.front).collect();
+    let (front_bound, _) = null_side(&front);
     let (mean, kappa) = fit_sn(&steps);
     let a = ((kappa * mean * SN_DEN as f64).round() as u64).max(1);
     let g = ((kappa * (1.0 - mean) * SN_DEN as f64).round() as u64).max(1);
@@ -315,6 +341,10 @@ fn calibrate<'a>(files: impl Iterator<Item = &'a File> + Clone) -> Calibration {
         sn: Prior {
             num: [g, a],
             den: SN_DEN,
+        },
+        front: Front {
+            log2_null_bound: front_bound,
+            null: null_prior(&front),
         },
     };
     let groups = |zenoh: bool| {
@@ -407,6 +437,14 @@ fn derived_lit(d: &Derived, cells: &str) -> String {
     )
 }
 
+fn front_lit(f: &Front) -> String {
+    alloc::format!(
+        "Front {{\n{}        null: {},\n    }}",
+        array_lit(&f.log2_null_bound, 8, "log2_null_bound: ", ","),
+        prior_lit(&f.null, 8),
+    )
+}
+
 fn counts_literal(counts: &[u64]) -> String {
     let each: Vec<String> = counts.iter().map(|&n| lit(i128::from(n))).collect();
     alloc::format!("[{}]", each.join(", "))
@@ -423,8 +461,8 @@ fn render(c: &Calibration) -> String {
          // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael\n\n\
          //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.\n\
          //!\n\
-         //! The counts of the corpus and model 3's parameters computed from them\n\
-         //! (`docs/flow-zenoh-verdict.md` section 6.8), written by\n\
+         //! The counts of the corpus and model 4's parameters computed from them\n\
+         //! (`docs/flow-zenoh-verdict.md` sections 6.8 and 6.9), written by\n\
          //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which\n\
          //! fails when this file is not what the corpus gives. Regenerate with\n\
          //! `scripts/regen-calibration.sh` and commit the result with the capture\n\
@@ -441,7 +479,7 @@ fn render(c: &Calibration) -> String {
     out.push_str(
         "use crate::zenoh_eprocess::{Prior, Region};\n\
          use crate::zenoh_evidence::model::measured::Member;\n\
-         use crate::zenoh_evidence::model::{Derived, Measured, Params};\n\n",
+         use crate::zenoh_evidence::model::{Derived, Front, Measured, Params};\n\n",
     );
     let kappas: Vec<i128> = p
         .units
@@ -483,13 +521,14 @@ fn render(c: &Calibration) -> String {
     }
     let _ = writeln!(
         out,
-        "\n/// Model 3's parameters.\npub const PARAMS: Params = Params {{\n    units: {},\n    framing: {},\n    cookie: {},\n    roles: {},\n    versions: {},\n    sn: {},\n}};",
+        "\n/// Model 4's parameters.\npub const PARAMS: Params = Params {{\n    units: {},\n    framing: {},\n    cookie: {},\n    roles: {},\n    versions: {},\n    sn: {},\n    front: {},\n}};",
         measured_lit(&p.units, "UNITS_CELLS"),
         measured_lit(&p.framing, "FRAMING_CELLS"),
         derived_lit(&p.cookie, "COOKIE_CELLS"),
         derived_lit(&p.roles, "ROLES_CELLS"),
         derived_lit(&p.versions, "VERSIONS_CELLS"),
         prior_lit(&p.sn, 4),
+        front_lit(&p.front),
     );
     let _ = writeln!(
         out,
@@ -499,9 +538,10 @@ fn render(c: &Calibration) -> String {
     for (file, counts) in &c.null {
         let _ = writeln!(
             out,
-            "    Member {{\n        file: \"{file}\",\n        units: {},\n        framing: {},\n    }},",
+            "    Member {{\n        file: \"{file}\",\n        units: {},\n        framing: {},\n        front: {},\n    }},",
             counts_literal(&counts.units),
-            counts_literal(&counts.framing)
+            counts_literal(&counts.framing),
+            counts_literal(&counts.front)
         );
     }
     out.push_str("];\n\n");
@@ -511,12 +551,14 @@ fn render(c: &Calibration) -> String {
          /// The zenoh files' stream directions captured from their start: framing held, lost.\npub const ZENOH_FRAMING: [u64; 2] = {};\n\n\
          /// The zenoh files' cookie echoes: matched, differing.\npub const ZENOH_COOKIE: [u64; 2] = {};\n\n\
          /// The zenoh files' Init pairs: of opposite kinds, of one kind.\npub const ZENOH_ROLES: [u64; 2] = {};\n\n\
-         /// The zenoh files' version headers: this reader's, another.\npub const ZENOH_VERSIONS: [u64; 2] = {};",
+         /// The zenoh files' version headers: this reader's, another.\npub const ZENOH_VERSIONS: [u64; 2] = {};\n\n\
+         /// The zenoh files' datagram fronts: of this wire, foreign.\npub const ZENOH_FRONT: [u64; 2] = {};",
         counts_literal(&c.zenoh.units),
         counts_literal(&c.zenoh.framing),
         counts_literal(&c.zenoh.cookie),
         counts_literal(&c.zenoh.roles),
-        counts_literal(&c.zenoh.versions)
+        counts_literal(&c.zenoh.versions),
+        counts_literal(&c.zenoh.front)
     );
     out
 }
@@ -602,6 +644,16 @@ fn doc_rows(c: &Calibration) -> Vec<String> {
         ));
     }
     rows.push(alloc::format!(
+        "| wire front | {} | {} |",
+        p.front
+            .log2_null_bound
+            .iter()
+            .map(|&x| prob(x))
+            .collect::<Vec<_>>()
+            .join(", "),
+        share(p.front.null.num[1], p.front.null.den)
+    ));
+    rows.push(alloc::format!(
         "SN prior: Beta({}/{}, {}/{})",
         p.sn.num[1],
         p.sn.den,
@@ -682,6 +734,28 @@ fn the_generated_calibration_is_current() {
         "docs/flow-zenoh-verdict.md does not say what the corpus gives; it should hold:\n{}",
         stale.join("\n")
     );
+}
+
+/// THE DERIVATION OF THE WIRE'S FRONT, put to the corpus: the zenoh side of
+/// [`Check::WireFront`] is not measured, it says a zenoh datagram's front is of
+/// the wire unless the bytes were altered on the way, and a foreign front in a
+/// zenoh file would refute it. Every zenoh file is read, with its datagrams of
+/// every integrity the check weighs.
+#[test]
+fn no_zenoh_file_shows_a_foreign_front() {
+    let files = read_corpus();
+    let mut fronts = [0u64; 2];
+    let mut refuting = Vec::new();
+    for f in files.iter().filter(|f| f.zenoh) {
+        fronts[0] += f.counts.front[0];
+        fronts[1] += f.counts.front[1];
+        if f.counts.front[1] > 0 {
+            refuting.push(alloc::format!("{}: {:?}", f.name, f.counts.front));
+        }
+    }
+    assert!(refuting.is_empty(), "{}", refuting.join("\n"));
+    assert!(fronts[0] > 0, "the zenoh files weigh datagram fronts");
+    assert_eq!(fronts, model::measured::ZENOH_FRONT);
 }
 
 /// Every flow read again from its observations, with the parameters the reader

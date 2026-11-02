@@ -8990,11 +8990,15 @@ impl Dissection {
         // R311y631 (§1.2b) — one datagram, every message it batched.
         flow.residue.fed += d.payload.len() as u64;
         let handshake = link.handshake(&d);
+        // Model 4 — the link delimits the datagram, so its first byte is where
+        // a zenoh sender writes its batch's first header.
+        let weigh_reading = flow.ingest.observe_datagram_front(d.payload, &d.checksums);
         if let Some(unit) =
             flow.session
                 .next_datagram_unit_on(direction, d.payload, d.packet_index, handshake)
         {
-            flow.ingest.observe_unit(&unit.frames);
+            flow.ingest
+                .observe_unit_weighed(&unit.frames, weigh_reading);
             match flow.keep {
                 // Open-debt item 924, step 4c — read again from the list's log,
                 // or from the container where the payload sits in one.

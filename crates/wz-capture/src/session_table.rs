@@ -505,6 +505,14 @@ impl LinkIngest {
     /// the unit are told together because the unit's class is stamped on its
     /// messages: a caller that told only the messages would lose the count.
     pub(crate) fn observe_unit(&mut self, frames: &[PassiveFrame]) {
+        self.observe_unit_weighed(frames, true);
+    }
+
+    /// [`Self::observe_unit`] for the unit of a datagram whose front was weighed
+    /// first ([`Self::observe_datagram_front`]): `weigh_reading` is `false` when
+    /// that front was foreign, because such a unit cannot read but `undecoded`
+    /// and the front already said so. Its reading is still counted.
+    pub(crate) fn observe_unit_weighed(&mut self, frames: &[PassiveFrame], weigh_reading: bool) {
         for frame in frames {
             self.observe_frame(frame);
         }
@@ -519,9 +527,44 @@ impl LinkIngest {
                     wz_session_core::passive::Carried::Undecompressible
                 )
             });
-        if let Some(reading) = UnitReading::of_frames(frames).filter(|_| !unopenable) {
+        if let Some(reading) =
+            UnitReading::of_frames(frames).filter(|_| weigh_reading && !unopenable)
+        {
             self.observe_reading(reading);
         }
+    }
+
+    /// The first byte of a datagram this link delimits, as evidence of the test
+    /// ([`crate::zenoh_evidence::Check::WireFront`]), weighed before the unit
+    /// read out of it. Answers whether that unit's reading is to be weighed:
+    /// not when the front was foreign.
+    ///
+    /// A zenoh sender writes a batch at the datagram's first byte, and that
+    /// byte is a transport message's header (its low five bits the message id,
+    /// one of the wire's eight, `0x00` to `0x07`) or a `BatchHeader`, whose only
+    /// value bit is bit 0 (`io/zenoh-transport/src/common/batch.rs` @
+    /// `const COMPRESSION: u8 = 1; // 1 << 0`), so its low five bits are an id
+    /// of the wire as well. A datagram whose checksum failed is not weighed: its
+    /// bytes are known to be altered.
+    pub(crate) fn observe_datagram_front(
+        &mut self,
+        payload: &[u8],
+        checksums: &crate::link::Checksums,
+    ) -> bool {
+        use crate::link::TransportChecksum;
+        use crate::zenoh_evidence::Integrity;
+        let Some(&first) = payload.first() else {
+            return true;
+        };
+        let integrity = match (checksums.ip, checksums.transport) {
+            (Some(false), _) | (_, Some(TransportChecksum::Invalid)) => return true,
+            (_, Some(TransportChecksum::Valid)) => Integrity::Verified,
+            (_, Some(TransportChecksum::Partial) | None) => Integrity::Unchecked,
+        };
+        // `T_MID_JOIN` is the highest of the eight.
+        let own = first & 0x1F <= wz_codecs::wire_const::T_MID_JOIN;
+        self.record(Observation::WireFront { own, integrity });
+        own
     }
 
     /// One scouting datagram's decode, for the evidence alone: a Scout or a

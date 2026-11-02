@@ -454,23 +454,25 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("link-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
     ("link-pico-tcp.pcap", (2, 0, 0), (2, 0, 0)),
     // The null protocols. Under model 2, 345 of their 653 flows read `no`;
-    // under model 3 none does (`docs/flow-zenoh-verdict.md` §6.7, D6): a flow
+    // under model 3 none did (`docs/flow-zenoh-verdict.md` §6.7, D6): a flow
     // whose units fail is evidence against zenoh only as far as a new group of
-    // zenoh captures could fail them, a few bits, and `no` comes from
-    // recognising the protocol (model 4). No flow reads `yes` under either.
-    ("lan-dns.pcap", (0, 0, 187), (0, 0, 187)),
-    ("lan-mdns.pcap", (0, 0, 19), (0, 0, 19)),
-    ("lan-ssdp.pcap", (0, 0, 2), (0, 0, 2)),
+    // zenoh captures could fail them, a few bits. Under model 4 (§6.9) 187 do,
+    // each on datagrams whose first byte no zenoh sender writes there; the
+    // protocols whose first byte is an id of the wire stay `undecided`. No flow
+    // reads `yes` under any.
+    ("lan-dns.pcap", (0, 148, 39), (0, 148, 39)),
+    ("lan-mdns.pcap", (0, 15, 4), (0, 15, 4)),
+    ("lan-ssdp.pcap", (0, 2, 0), (0, 2, 0)),
     // The real implementations of three protocols that run beside zenoh, in
     // containers (2026-10-26). The forty MQTT connections that publish once and
     // leave lose their framing in both directions, from their SYN, and frame
     // no unit.
     ("stack-mqtt.pcap", (0, 0, 44), (0, 0, 44)),
-    ("stack-rtps.pcap", (0, 0, 12), (0, 0, 12)),
+    ("stack-rtps.pcap", (0, 10, 2), (0, 10, 2)),
     ("stack-coap.pcap", (0, 0, 25), (0, 0, 25)),
     // Upstream vsomeip between two containers: service discovery, a method
     // over UDP and TCP, and a field's notifications.
-    ("stack-someip.pcap", (0, 0, 7), (0, 0, 7)),
+    ("stack-someip.pcap", (0, 4, 3), (0, 4, 3)),
     // HTTP/3 on aioquic, QUIC versions 1 and 2. Every one of the 23 QUIC
     // connections is `undecided`, as it should be: zenoh runs over QUIC too,
     // and a protected flow carries nothing that tells the two apart. The other
@@ -481,7 +483,7 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // WS-Discovery between a file server and four askers.
     ("busylan-dhcp.pcap", (0, 0, 23), (0, 0, 23)),
     ("busylan-ntp.pcap", (0, 0, 94), (0, 0, 94)),
-    ("busylan-wsd.pcap", (0, 0, 8), (0, 0, 8)),
+    ("busylan-wsd.pcap", (0, 8, 0), (0, 8, 0)),
     // Structured TCP, the first stream protocols besides MQTT (2026-10-27):
     // HTTP/1.1, plain and over TLS 1.2 and 1.3, 34 connections each. The
     // reader frames no unit of them and loses no framing (neither is weighed),
@@ -597,6 +599,8 @@ struct Counts {
     /// SN steps that followed, that broke: reported, not weighed from here
     /// (`Check::eps_basis`).
     sn: [u64; 2],
+    /// Datagram fronts of this wire, foreign.
+    front: [u64; 2],
 }
 
 #[cfg(all(feature = "network-codecs", feature = "reassembly"))]
@@ -613,6 +617,7 @@ impl Counts {
         add(&mut self.roles, &other.roles);
         add(&mut self.versions, &other.versions);
         add(&mut self.sn, &other.sn);
+        add(&mut self.front, &other.front);
     }
 }
 
@@ -620,12 +625,13 @@ impl Counts {
 fn counts(d: &Dissection) -> Counts {
     use crate::zenoh_evidence::{Check, ZenohEvidence};
     let mut out = Counts::default();
-    let mut add = |r: wz_session_core::passive::ReadingEvidence,
-                   o: crate::session_table::SessionObservations,
-                   e: ZenohEvidence| {
-        out.units[0] += r.explained.units;
-        out.units[1] += r.residual.units;
-        out.units[2] += r.undecoded.units;
+    // The unit readings are the ones the test weighed: not a datagram's whose
+    // front was foreign (model 4), and not an lz4 batch a build that cannot
+    // open lz4 reads.
+    let mut add = |o: crate::session_table::SessionObservations, e: ZenohEvidence| {
+        for (slot, n) in out.units.iter_mut().zip(e.unit_outcomes()) {
+            *slot += n;
+        }
         out.framing[0] += o.framing_held;
         out.framing[1] += o.framing_lost;
         for (check, slot) in [
@@ -633,6 +639,7 @@ fn counts(d: &Dissection) -> Counts {
             (Check::InitRoles, &mut out.roles),
             (Check::VersionHeader, &mut out.versions),
             (Check::SnFollows, &mut out.sn),
+            (Check::WireFront, &mut out.front),
         ] {
             let t = e.tally(check);
             slot[0] += t.confirmed;
@@ -640,18 +647,10 @@ fn counts(d: &Dissection) -> Counts {
         }
     };
     for f in d.flows() {
-        add(
-            f.ingest.readings(),
-            f.session_observations(),
-            f.zenoh_evidence(),
-        );
+        add(f.session_observations(), f.zenoh_evidence());
     }
     for f in d.datagram_flows() {
-        add(
-            f.ingest.readings(),
-            f.session_observations(),
-            f.zenoh_evidence(),
-        );
+        add(f.session_observations(), f.zenoh_evidence());
     }
     out
 }
@@ -664,7 +663,9 @@ fn counts(d: &Dissection) -> Counts {
 ///
 /// The counts are a build's that opens lz4. A build that cannot reads the one
 /// lz4 batch of `zenoh-tcp-lz4.pcap` that no plain unit stands beside as
-/// `undecoded`, which it does not weigh ([`wz_session_core::passive::OPENS_LZ4_BATCHES`]).
+/// `undecoded`, which it does not weigh ([`wz_session_core::passive::OPENS_LZ4_BATCHES`]),
+/// so its weighed units are one fewer. The unit readings are the weighed ones:
+/// a datagram whose front was foreign is weighed by its front (model 4).
 #[cfg(all(feature = "network-codecs", feature = "reassembly"))]
 #[test]
 fn the_corpus_measures_the_counts_model_two_is_computed_from() {
@@ -682,20 +683,23 @@ fn the_corpus_measures_the_counts_model_two_is_computed_from() {
             continue;
         }
         match measured::NULL.iter().find(|m| m.file == entry.file) {
-            Some(m) if m.units == c.units && m.framing == c.framing => {}
+            Some(m) if m.units == c.units && m.framing == c.framing && m.front == c.front => {}
             Some(m) => failures.push(alloc::format!(
-                "{}: units {:?} framing {:?}, stated {:?} {:?}",
+                "{}: units {:?} framing {:?} front {:?}, stated {:?} {:?} {:?}",
                 entry.file,
                 c.units,
                 c.framing,
+                c.front,
                 m.units,
-                m.framing
+                m.framing,
+                m.front
             )),
             None => failures.push(alloc::format!(
-                "{}: units {:?} framing {:?}, and no member states it",
+                "{}: units {:?} framing {:?} front {:?}, and no member states it",
                 entry.file,
                 c.units,
-                c.framing
+                c.framing,
+                c.front
             )),
         }
     }
@@ -703,13 +707,14 @@ fn the_corpus_measures_the_counts_model_two_is_computed_from() {
         units: if wz_session_core::passive::OPENS_LZ4_BATCHES {
             measured::ZENOH_UNITS
         } else {
-            [measured::ZENOH_UNITS[0] - 1, 0, 1]
+            [measured::ZENOH_UNITS[0] - 1, 0, 0]
         },
         framing: measured::ZENOH_FRAMING,
         cookie: measured::ZENOH_COOKIE,
         roles: measured::ZENOH_ROLES,
         versions: measured::ZENOH_VERSIONS,
         sn: zenoh.sn,
+        front: measured::ZENOH_FRONT,
     };
     if zenoh != want {
         failures.push(alloc::format!("zenoh: {zenoh:?}, stated {want:?}"));
