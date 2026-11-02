@@ -305574,6 +305574,44 @@
         "captures/upstream is outside the calibration corpus; the verdict's owner decides whether the multicast capture joins it."
       ]
     },
+    "Round 4109": {
+      "decision_summary": "The differential of the session (E18, zenoh_api_session) has been red since round 3928 made a listening peer open as a node, and nothing ran it: twelve of twenty-five tests failed and one did not finish. Four defects of the node engine are repaired, each with a test that failed before. A best-effort publication of the node's own session left reliable, because route_local_push took reliable = true. A delete of the node's own session carried no time, because the node clock relays a delete unstamped as a router does; the session's own publication is stamped, a delete too. A key declared on a node could not be undeclared; the node now counts the keys declared and still names every key whole on the wire. The test also held the pin's old version and a held difference whose words had moved. Open, in the roadmap note: the timestamp stack of queries and replies, a stale liveliness token, the matching status of a querier, a queryable that does not answer, and the burst that does not finish.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: route_local_push takes the reliability of the publication and stamps with stamp_own_publication; two tests.",
+        "crates/wz-node-time/src/node_clock.rs and node_clock/tests.rs: treat_own_timestamp, stamp_own_publication; two tests.",
+        "crates/wz-session-core/src/push_build.rs: read_publication_timestamp and set_publication_timestamp, which cover a delete.",
+        "crates/wz-zenoh/src/api/session.rs: RouterEngine keeps the keys declared (RouterKeys) and acquire_keyexpr and release_keyexpr use it; two tests.",
+        "conformance/differential/tests/zenoh_api_session.rs: the version the configuration test expects is the pin's, and the held difference of a listener that cannot bind has the engine's words.",
+        "docs/zenoh-api-on-the-engine.md and docs/reason-review-pins.md: the finding and what is open; the pin of api-compat-rust on the differential, re-read."
+      ],
+      "verification_bullets": [
+        "Locally: the differential tests for the publication, the clock, the key declaration, the refusals and the configuration pass, where they failed (each run alone, the binary built against this tree); the tests of wz-node-time (52), of the forwarder (374 with the clock features) and the two of the top crate pass; clippy with warnings denied passes for wz-node-time with all features, wz-runtime-tokio with all features and all targets, wz-session-core and the top crate with its tests; the pin, citation and prose gates pass. Not run: the whole of the differential file, which does not finish because of the burst, the hosted run and the pico layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the differential of the session: the timestamp stack of a query and a reply on the node (and the route point, which takes the session's custom clock), a token that a peer undeclared and the node still reports, the matching status of a querier, a queryable of the node that does not answer an upstream get, and the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ],
+      "publishable_decision_summary": "The differential of the session (E18, zenoh_api_session) has been red since round 3928 made a listening peer open as a node, and nothing ran it: twelve of twenty-five tests failed and one did not finish. Four defects of the node engine are repaired, each with a test that failed before. A best-effort publication of the node's own session left reliable, because route_local_push took reliable = true. A delete of the node's own session carried no time, because the node clock relays a delete unstamped as a router does; the session's own publication is stamped, a delete too. A key declared on a node could not be undeclared; the node now counts the keys declared and still names every key whole on the wire. The test also held the pin's old version and a held difference whose words had moved. Open, in the roadmap note: the timestamp stack of queries and replies, a stale liveliness token, the matching status of a querier, a queryable that does not answer, and the burst that does not finish.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: route_local_push takes the reliability of the publication and stamps with stamp_own_publication; two tests.",
+        "crates/wz-node-time/src/node_clock.rs and node_clock/tests.rs: treat_own_timestamp, stamp_own_publication; two tests.",
+        "crates/wz-session-core/src/push_build.rs: read_publication_timestamp and set_publication_timestamp, which cover a delete.",
+        "crates/wz-zenoh/src/api/session.rs: RouterEngine keeps the keys declared (RouterKeys) and acquire_keyexpr and release_keyexpr use it; two tests.",
+        "conformance/differential/tests/zenoh_api_session.rs: the version the configuration test expects is the pin's, and the held difference of a listener that cannot bind has the engine's words.",
+        "docs/zenoh-api-on-the-engine.md and docs/reason-review-pins.md: the finding and what is open; the pin of api-compat-rust on the differential, re-read."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the differential tests for the publication, the clock, the key declaration, the refusals and the configuration pass, where they failed (each run alone, the binary built against this tree); the tests of wz-node-time (52), of the forwarder (374 with the clock features) and the two of the top crate pass; clippy with warnings denied passes for wz-node-time with all features, wz-runtime-tokio with all features and all targets, wz-session-core and the top crate with its tests; the pin, citation and prose gates pass. Not run: the whole of the differential file, which does not finish because of the burst, the hosted run and the pico layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the differential of the session: the timestamp stack of a query and a reply on the node (and the route point, which takes the session's custom clock), a token that a peer undeclared and the node still reports, the matching status of a querier, a queryable of the node that does not answer an upstream get, and the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
