@@ -1579,7 +1579,7 @@ const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm = RECORD_FORM;
 /// there), and a compressed batch. A `Frame` is read to the end of its records, which is
 /// the end of its unit unless a transport message of the same batch follows the last record (a
 /// second Frame header, a KeepAlive): the walk stops there and the datagram goes on from that
-/// offset ([`unit_after_in_place_frame`]).
+/// offset (`unit_after_in_place_frame`, private).
 ///
 /// One difference from the copying path is deliberate: when a record does not
 /// decode, or carries an extension a participant must refuse, the records

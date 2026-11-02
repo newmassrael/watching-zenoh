@@ -7,8 +7,8 @@
 //! (SCE ADR 0065 section 6, R2), so a list past its bound is not a value: the encode no longer
 //! refuses one, and a `Bounded` has no mutable access. What a chain's bound refused at the send
 //! is refused here, where the list is made or edited, and the three ways this crate holds a list
-//! are written once: [`HeldList::entries`] reads one, [`held`] and [`one_entry`] make one, and
-//! [`edit_chain`] changes one.
+//! are written once: `HeldList::entries` reads one, `held` and `one_entry` make one, and
+//! `edit_chain` changes one (each needs the `alloc` feature, so none is linked from here).
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
