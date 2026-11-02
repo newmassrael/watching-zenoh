@@ -230,7 +230,37 @@ get = ["fixed-client", "wz-session-mcu/query-get"]
 # start, its certificate is printed for the router's operator, and its zid is the one the key
 # names. The channel's C side is compiled by the image's CMake against Zephyr's own Mbed TLS, so
 # the crate is built without `vendored`.
-tls = ["fixed-client", "dep:wz-tls-mbedtls"]
+tls = ["fixed-client", "secure-channel"]
+# The secure channel itself, the part of `tls` that is no client's: the channel's crate, which the
+# image's CMake gives the Mbed TLS the platform carries (`vendored` stays off). The fixed client
+# dials with it (`tls`), the fixed admin node (`fixed-admin`) accepts with it.
+secure-channel = ["dep:wz-tls-mbedtls"]
+# The FIXED-MEMORY ADMIN NODE over Zephyr's sockets (`CONFIG_WZ_FIXED_MEMORY` with a peer role on
+# `CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS`, `fixed_admin.rs`): the admin node of the slot profile,
+# `wz_session_mcu::slot_admin::AcceptingAdminNode`, whose sessions come from the secure channel's
+# listener over Zephyr's TCP and whose admin queryable binds the four lifecycle verbs, each
+# commanded by the zids the build lists for it (decision D12 of docs/session-lifecycle-intent.md).
+# It takes a session only over `tls/`: a zid is proven only by a secure channel, and the stack has
+# no datagram listener of the slot profile. No allocator, as the fixed client has none.
+fixed-admin = [
+    "net-zephyr-sockets",
+    "secure-channel",
+    "dep:wz-runtime-coop",
+    "dep:wz-runtime-zephyr",
+    "wz/platform-zephyr-fixed",
+    "wz/runtime-coop-core",
+    "wz/adminspace-write",
+    "wz/adminspace-fixed",
+    "wz-runtime-zephyr/session-slot",
+    "wz-runtime-coop/session-slot",
+    "wz-session-mcu/session-slot",
+    "wz-session-mcu/adminspace-write",
+    "wz-session-mcu/adminspace-fixed",
+    "wz-session-mcu/lifecycle-close",
+    "wz-session-mcu/lifecycle-reset",
+    "wz-session-mcu/lifecycle-status",
+    "wz-session-core/session-slot",
+]
 # The messages of one send window leave as one datagram (`CONFIG_WZ_TX_BATCHING`): a reply and the
 # final that ends its query are one frame. Off, every message is a datagram of its own.
 batching = [

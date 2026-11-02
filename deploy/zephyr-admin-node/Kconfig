@@ -33,15 +33,53 @@ config WZ_CLIENT_ENDPOINT
 	  built: an endpoint longer than a locator row does not build.
 
 config WZ_TLS
-	bool "The client dials its router over the secure channel"
-	depends on WZ_ROLE_CLIENT && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	bool "The node speaks the secure channel: the client dials it, the admin node accepts it"
+	depends on WZ_ROLE_CLIENT || (WZ_FIXED_MEMORY && !WZ_ROLE_ROUTER)
+	depends on WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	depends on NET_TCP && MBEDTLS && PSA_CRYPTO
 	help
-	  The fixed-memory client dials `tls/`: TLS 1.3 with mutual authentication (decision D9 of
-	  docs/session-lifecycle-intent.md) through wz-tls-mbedtls over Zephyr's TCP, its memory the
-	  arena Zephyr gives Mbed TLS (CONFIG_MBEDTLS_HEAP_SIZE). The node generates its identity at
-	  start, prints its certificate as PEM for the router's operator to pin, and takes the zid
-	  its key names. overlays/t2g_client_tls.conf states the Mbed TLS configuration it needs.
+	  The fixed-memory client dials `tls/`, and the fixed-memory admin node accepts it: TLS 1.3
+	  with mutual authentication (decision D9 of docs/session-lifecycle-intent.md) through
+	  wz-tls-mbedtls over Zephyr's TCP, its memory the arena Zephyr gives Mbed TLS
+	  (CONFIG_MBEDTLS_HEAP_SIZE). The node generates its identity at start, prints its
+	  certificate as PEM for the other end's operator to pin, and takes the zid its key names.
+	  overlays/t2g_client_tls.conf and overlays/qemu_admin_fixed_tls.conf state the Mbed TLS
+	  configuration it needs. The admin node over Zephyr's sockets takes a session only this way:
+	  it needs this switch on.
+
+config WZ_COMMANDERS_OPEN
+	string "Who may hold a peer by its zid (open): comma-separated lowercase hex zids"
+	default ""
+	depends on WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS && !WZ_ROLE_CLIENT
+	help
+	  The zids whose key may ask the node to hold a peer, in the form a zid is written everywhere
+	  else (`a1b2...`, lowercase, no spaces; at most four). Read when the image is compiled: a
+	  text that is not such a list does not build. Empty: nobody (decision D12 of
+	  docs/session-lifecycle-intent.md, default deny). A zid listed for one verb commands no other.
+
+config WZ_COMMANDERS_CLOSE
+	string "Who may close the sessions with a peer (close): comma-separated lowercase hex zids"
+	default ""
+	depends on WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS && !WZ_ROLE_CLIENT
+	help
+	  As WZ_COMMANDERS_OPEN, for the verb that takes a peer out of the node's intent and hangs up
+	  its sessions.
+
+config WZ_COMMANDERS_RESET
+	string "Who may cycle the sessions with a peer (reset): comma-separated lowercase hex zids"
+	default ""
+	depends on WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS && !WZ_ROLE_CLIENT
+	help
+	  As WZ_COMMANDERS_OPEN, for the verb that ends the sessions with a peer once per generation
+	  and leaves it in the intent.
+
+config WZ_COMMANDERS_STATUS
+	string "Who may read which peers the node holds (status): comma-separated lowercase hex zids"
+	default ""
+	depends on WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS && !WZ_ROLE_CLIENT
+	help
+	  As WZ_COMMANDERS_OPEN, for the verb that reads and changes nothing and still needs a
+	  permit, because it reveals which peers a node holds.
 
 config WZ_BATCH_BYTES
 	int "Largest batch the node's sessions negotiate, in bytes"

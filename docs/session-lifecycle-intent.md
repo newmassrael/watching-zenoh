@@ -1321,10 +1321,38 @@ status answer. What the witness does not exercise is the query transport: the
 permit is given the zid of the live session, not a GET that carries it, so the
 step (1) plumbing of the requester through a real session stays held by its host
 tests. Step (4) is therefore built and witnessed for the commander list on a node
-of the sockets profile; what is left of it is the product image that binds the
-same assembly (the `zephyr-admin-node` crate takes the sockets backend as an admin
-role, with the Kconfig axis, the stated pools and the commander list from the
-declaration), and D14's witness on the kit with a real router.
+of the sockets profile.
+
+The product image binds the same assembly. The `zephyr-admin-node` crate takes the
+sockets backend as the admin role of the fixed-memory profile (the feature
+`fixed-admin`, `fixed_admin.rs`; the axes of `deploy/wz-config.toml` admit a peer
+role beside the client, and the generated Kconfig and CMake follow). It takes a
+session only through the secure channel (`CONFIG_WZ_TLS`, which the build requires
+of it), and its commanders are stated by the build: `CONFIG_WZ_COMMANDERS_OPEN`,
+`_CLOSE`, `_RESET` and `_STATUS`, each a comma-separated list of lowercase hex
+zids, read when the image is compiled (`CommanderList`, so a text that is no list of
+zids does not build) and empty for nobody. The Zephyr images state their
+configuration in Kconfig, so the Kconfig strings are their declaration; the
+`commander` role of `wz_node.py` is the declaration of the host nodes. The image
+is built for the QEMU board by `overlays/qemu_admin_fixed_tls.conf`, with no
+allocator (the no-allocator gate holds its build, `zephyr-admin-fixed-sockets`),
+and Layer Qz boots it and runs a stock TLS 1.3 client against it
+(`scripts/lib/admin_tls_probe.py`, OpenSSL through Python, with nothing of wz's):
+the node completes the mutual handshake with a client it had never heard of, and
+the certificate it presented is the key whose zid its READY line names. A control
+that falsifies the announced zid fails the probe. What no witness yet has is a
+router's session reaching the verbs of this image: the query transport through a
+real session, and D14's witness on the kit with a real router, remain.
+
+Building it found that the arena the fixed client builds its host, factory and
+node in had been outgrown without a lane saying so. It was 832 bytes (960 asking,
+1,792 over the channel), and the connect manager's intent for a node nothing can
+dial yet (D15), its passive form (D10) and its lists of commanders (D12) took the
+plain client to between 2,433 and 2,560 bytes: the assertion that holds the number
+is evaluated when the node's code is generated, so `cargo check` does not see it,
+and the no-allocator gate's row for that image, which no hosted lane builds, was
+the only place it showed. The numbers are 2,560, 2,688 and 3,584 now, each held by
+a real build of every variant the repository states.
 
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the

@@ -11871,7 +11871,8 @@ layer_c1m_session_lwip() {
         --quiet || return 1
     # 29 -> 31: the commanders of a verb are a list per verb, default deny, and the same request
     # is answered for the one a list names and refused by name for the others (decision D12).
-    _runci_guarded_test "C1m mcu lifecycle verbs" 31 \
+    # 31 -> 32: the text a build states a list in reads as the bytes a link's key proves.
+    _runci_guarded_test "C1m mcu lifecycle verbs" 32 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
@@ -25172,6 +25173,45 @@ layer_qz_zephyr_boot() {
     fi
     rm -f "$adm_log"
     rm -rf "$(dirname "$adm_dir")"
+
+    # The product image of that node (decision D12, step 4): deploy/zephyr-admin-node as the fixed-memory
+    # admin node over Zephyr's sockets, built as the board is built (overlays/qemu_admin_fixed_tls.conf),
+    # with no allocator and its commanders stated by the build. A stock TLS 1.3 client (OpenSSL through
+    # Python, scripts/lib/admin_tls_probe.py) dials the port QEMU forwards to it, presents a certificate
+    # of its own, completes the mutual handshake, and checks that the certificate the node presented is
+    # the key its READY line names. The witness above holds the verbs and the commander lists; this
+    # holds the image that ships and a TLS stack that is not wz's.
+    local prod_dir prod_elf prod_log prod_pid prod_ready="" prod_port=17448
+    prod_dir="$(mktemp -d)/zbuild"
+    prod_elf="$prod_dir/zephyr/zephyr.elf"
+    if ! _qz_west_build Qz deploy/zephyr-admin-node mps2/an385 "$prod_dir" qz-admin-node-fixed-tls-west-build.log \
+        -- -DEXTRA_CONF_FILE=overlays/qemu_admin_fixed_tls.conf; then
+        rm -rf "$(dirname "$prod_dir")"
+        return 1
+    fi
+    prod_log="$(mktemp)"
+    timeout 400 qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -monitor none -serial stdio \
+        -nic "user,model=lan9118,mac=52:54:00:aa:bb:cc,hostfwd=tcp:127.0.0.1:${prod_port}-10.0.2.15:7448" \
+        -kernel "$prod_elf" >"$prod_log" 2>&1 &
+    prod_pid=$!
+    for _ in $(seq 1 1800); do
+        prod_ready="$(tr -d '\r' <"$prod_log" | grep -E '^ZEPHYR-WZ-ADMIN READY ' | head -n 1)"
+        [[ -n "$prod_ready" ]] && break
+        kill -0 "$prod_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if [[ -n "$prod_ready" ]] && python3 scripts/lib/admin_tls_probe.py --port "$prod_port" --ready-line "$prod_ready"; then
+        echo "  Qz run deploy/zephyr-admin-node (fixed-memory admin over sockets, secure channel) via mps2/an385 PASS"
+    else
+        echo "  Qz run deploy/zephyr-admin-node (fixed-memory admin over sockets, secure channel) FAIL (no READY line, or the probe's verdict above)" >&2
+        echo "  ── Qz: captured qemu output ──" >&2
+        sed 's/^/    | /' "$prod_log" >&2
+        fail=1
+    fi
+    kill "$prod_pid" 2>/dev/null
+    wait "$prod_pid" 2>/dev/null
+    rm -f "$prod_log"
+    rm -rf "$(dirname "$prod_dir")"
     return "$fail"
 }
 

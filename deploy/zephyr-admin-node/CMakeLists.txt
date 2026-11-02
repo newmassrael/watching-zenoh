@@ -34,6 +34,25 @@ set(no_default_features ${wz_axes_no_default_features})
 # buffers: the Rust side reads it when it compiles.
 set(backend_env WZ_BATCH_BYTES=${CONFIG_WZ_BATCH_BYTES})
 
+# The secure channel (decision D9 of docs/session-lifecycle-intent.md): the channel's C side is
+# compiled here, against Zephyr's own Mbed TLS (the crate is built without its `vendored`), and the
+# stream calls and the channel's calls are the Rust side's to find at the image link. A macro, so
+# that it adds to the caller's `backend_undefined`: the client that dials with it and the admin node
+# that accepts with it both name them.
+macro(wz_secure_channel)
+  set(tls_src ${CMAKE_CURRENT_SOURCE_DIR}/../../crates/wz-tls-mbedtls)
+  target_sources(app PRIVATE ${tls_src}/csrc/wz_tls.c)
+  target_include_directories(app PRIVATE ${tls_src}/csrc)
+  target_include_directories(mbedtls_iface INTERFACE ${tls_src}/config/zephyr)
+  list(APPEND backend_undefined
+    connect send recv getpeername shutdown setsockopt
+    wz_tls_start wz_tls_arena_peak wz_tls_arena_peak_reset
+    wz_tls_identity_generate wz_tls_identity_zid wz_tls_identity_cert wz_tls_identity_free
+    wz_tls_session_open wz_tls_session_set_io_ctx wz_tls_session_handshake
+    wz_tls_session_peer_zid wz_tls_session_suite wz_tls_session_write wz_tls_session_read
+    wz_tls_session_pending wz_tls_session_close_notify wz_tls_session_free)
+endmacro()
+
 if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   # The POSIX socket layer the sockets seam calls (`zephyr_sys::socket`) and the
   # two board hooks that read the interface (wz_board_hooks.c).
@@ -63,6 +82,25 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     list(APPEND backend_feature initial-sn-compact)
   endif()
 
+  # The admin node on the fixed-memory profile (its features come with the axes): it takes a
+  # session only through the secure channel, and the zids that may command each lifecycle verb are
+  # stated here, once, as texts the Rust side reads when it compiles (a text that is no list of
+  # lowercase hex zids does not build).
+  if(CONFIG_WZ_FIXED_MEMORY AND NOT CONFIG_WZ_ROLE_CLIENT)
+    if(NOT CONFIG_WZ_TLS)
+      message(FATAL_ERROR "wz: the admin node over Zephyr's sockets takes a session only through "
+                          "the secure channel: it needs CONFIG_WZ_TLS (overlays/qemu_admin_fixed_tls.conf).")
+    endif()
+    wz_secure_channel()
+    # The listening half of the stream calls (`bind` is named above).
+    list(APPEND backend_undefined listen accept)
+    list(APPEND backend_env
+      WZ_COMMANDERS_OPEN=${CONFIG_WZ_COMMANDERS_OPEN}
+      WZ_COMMANDERS_CLOSE=${CONFIG_WZ_COMMANDERS_CLOSE}
+      WZ_COMMANDERS_RESET=${CONFIG_WZ_COMMANDERS_RESET}
+      WZ_COMMANDERS_STATUS=${CONFIG_WZ_COMMANDERS_STATUS})
+  endif()
+
   # The client node (its features come with the axes): the router it dials is stated here, once,
   # as a constant the Rust side checks when it compiles.
   if(CONFIG_WZ_ROLE_CLIENT)
@@ -88,17 +126,7 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
       # stream calls and the channel's calls are the Rust side's to find at the image link.
       if(CONFIG_WZ_TLS)
         list(APPEND backend_feature tls)
-        set(tls_src ${CMAKE_CURRENT_SOURCE_DIR}/../../crates/wz-tls-mbedtls)
-        target_sources(app PRIVATE ${tls_src}/csrc/wz_tls.c)
-        target_include_directories(app PRIVATE ${tls_src}/csrc)
-        target_include_directories(mbedtls_iface INTERFACE ${tls_src}/config/zephyr)
-        list(APPEND backend_undefined
-          connect send recv getpeername shutdown setsockopt
-          wz_tls_start wz_tls_arena_peak wz_tls_arena_peak_reset
-          wz_tls_identity_generate wz_tls_identity_zid wz_tls_identity_cert wz_tls_identity_free
-          wz_tls_session_open wz_tls_session_set_io_ctx wz_tls_session_handshake
-          wz_tls_session_peer_zid wz_tls_session_suite wz_tls_session_write wz_tls_session_read
-          wz_tls_session_pending wz_tls_session_close_notify wz_tls_session_free)
+        wz_secure_channel()
       endif()
       if(CONFIG_WZ_GET)
         list(APPEND backend_feature get)

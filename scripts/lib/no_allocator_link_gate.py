@@ -477,6 +477,32 @@ IMAGES: dict[str, Image] = {
         ),
         ci=False,
     ),
+    # The admin node of the same image over Zephyr's sockets on the fixed-memory profile
+    # (`CONFIG_WZ_FIXED_MEMORY` with a peer role, `overlays/qemu_admin_fixed_tls.conf`): it takes a
+    # session only through the secure channel, and decides the four lifecycle verbs by the zid the
+    # link's key proved (decision D12 of docs/session-lifecycle-intent.md). Its sessions, the
+    # driver's buffers, the observer, the runtime's tables and the commander lists are statics the
+    # staticlib declares, so the Rust side has no allocator and the proof is that no crate of its
+    # graph names `alloc`: the secure channel's crate is built on the slot profile with its heap
+    # form off, and its memory is the arena Zephyr gives Mbed TLS. Booted under QEMU by Layer Qz,
+    # where a stock TLS 1.3 client completed the handshake with it.
+    "zephyr-admin-fixed-sockets": Image(
+        "deploy/zephyr-admin-node/rust/Cargo.toml",
+        "staticlib",
+        "wz-zephyr-admin-node",
+        "gated",
+        (
+            Build(
+                V7EMHF,
+                None,
+                ("fixed-admin", "rx-in-place", "mac-cyt4bf", "zeth-driver"),
+                env=ZEPHYR_BUILD_VALUES,
+                label="cyt4bf-sockets-admin-fixed",
+                no_default_features=True,
+            ),
+        ),
+        ci=False,
+    ),
     # The client node of the same image on the fixed-memory profile, over Zephyr's sockets
     # (`CONFIG_WZ_ROLE_CLIENT` with `CONFIG_WZ_FIXED_MEMORY`, `overlays/t2g_client_fixed.conf`):
     # sessions, the driver's receive and send buffers, the observer and the runtime's tables are

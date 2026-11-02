@@ -88,15 +88,22 @@ const TX: usize = BATCH_SIZE as usize;
 /// the kit, and the 248 bytes of what the connect manager's planner asked for in the call it runs
 /// (`ConnectManager::actions`, a field since it was a local of a frame on the stack of the thread
 /// that ticks it); the loop checks the number when it is compiled, and a build that grows past it
-/// stops. A node that asks keeps its pending queries in the layer the factory holds, so it is
+/// stops. That was 832 (960 asking, 1792 over the channel) until the connect manager took the
+/// intent of a node nothing can dial yet (decision D15), its passive form (D10) and the lists of
+/// commanders (D12): they stopped the build of this image on the no-allocator gate's row
+/// (`zephyr-client-fixed`), which no hosted lane builds. MEASURED by building the plain client at
+/// each arena (the assertion is evaluated when the node's code is generated, so `cargo check` does
+/// not see it): 2,432 does not build and 2,560 does, so the node, the factory and the host need
+/// between the two, three times what they needed; the other two are moved by the same 1,728. A node
+/// that asks keeps its pending queries in the layer the factory holds, so it is
 /// given more. The client over the secure channel holds the channel in its stack, which the node
 /// and the host each carry; it is a verify image with no budget row, and is given room.
 #[cfg(not(any(feature = "get", feature = "tls")))]
-const RUN: usize = 832;
+const RUN: usize = 2560;
 #[cfg(all(feature = "get", not(feature = "tls")))]
-const RUN: usize = 960;
+const RUN: usize = 2688;
 #[cfg(feature = "tls")]
-const RUN: usize = 1792;
+const RUN: usize = 3584;
 /// The queryables the node declares: its status and its config.
 const DOCS: usize = 2;
 /// How long the node waits for the board to have an address: a DHCP lease on a slow link takes
@@ -344,7 +351,7 @@ fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
     // Over the secure channel the node's zid is the one its key names (decision D1), and its
     // certificate is printed for the router's operator to pin; otherwise the board derives it.
     #[cfg(feature = "tls")]
-    let channel = match crate::fixed_tls::identity() {
+    let channel = match crate::fixed_tls::identity(c"CN=wz-zephyr-client") {
         Ok(channel) => channel,
         Err(why) => {
             log(why);

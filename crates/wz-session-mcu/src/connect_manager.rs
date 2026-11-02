@@ -640,6 +640,80 @@ impl LifecyclePermits for Commanders {
     }
 }
 
+/// The zids of one verb's list, read from the text a build states them in (decision D12, step 4):
+/// the zids as lowercase hex, separated by commas, the way a zid is written everywhere else, and
+/// nothing else in the text (no space, no empty entry, no uppercase). A `static` of this type is
+/// evaluated when the image is compiled, so a text that is not a list of zids, or that names more
+/// than `N`, is a build that does not compile and not a node that refuses everybody at run time.
+///
+/// The bytes of a zid are those of the number its hex spells, least significant first, which is
+/// the form a link's key proves (`scripts/lib/wz_node.py` writes the same bytes for a declared
+/// commander).
+#[cfg(feature = "lifecycle-verbs")]
+pub struct CommanderList<const N: usize> {
+    zids: [DirectoryZid; N],
+    len: usize,
+}
+
+#[cfg(feature = "lifecycle-verbs")]
+impl<const N: usize> CommanderList<N> {
+    /// The zids `text` names, none for an empty text. Refuses what it cannot read by panicking,
+    /// which in a `static` is a compile error that says why.
+    pub const fn parse(text: &str) -> Self {
+        let text = text.as_bytes();
+        let mut zids = [[0u8; CREDENTIAL_ZID_BYTES]; N];
+        let mut len = 0;
+        if !text.is_empty() {
+            let mut start = 0;
+            loop {
+                let mut end = start;
+                while end < text.len() && text[end] != b',' {
+                    end += 1;
+                }
+                assert!(
+                    len < N,
+                    "the text names more commanders than the list holds"
+                );
+                zids[len] = zid_from_hex(text, start, end);
+                len += 1;
+                if end == text.len() {
+                    break;
+                }
+                start = end + 1;
+            }
+        }
+        Self { zids, len }
+    }
+
+    /// The zids the text named.
+    pub const fn as_slice(&self) -> &[DirectoryZid] {
+        self.zids.split_at(self.len).0
+    }
+}
+
+/// The zid that `text[start..end]` spells in lowercase hex.
+#[cfg(feature = "lifecycle-verbs")]
+const fn zid_from_hex(text: &[u8], start: usize, end: usize) -> DirectoryZid {
+    assert!(end > start, "a commander entry is empty");
+    assert!(
+        end - start <= 2 * CREDENTIAL_ZID_BYTES,
+        "a zid is at most thirty-two hex digits"
+    );
+    let mut zid = [0u8; CREDENTIAL_ZID_BYTES];
+    let mut digit = 0;
+    while digit < end - start {
+        let c = text[end - 1 - digit];
+        let value = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("a zid is written in lowercase hex digits"),
+        };
+        zid[digit / 2] |= value << (4 * (digit % 2));
+        digit += 1;
+    }
+    zid
+}
+
 /// The permit of a node that is commanded over a pipe as well as by peers (decision D12): the
 /// owner of the pipe may ask any verb, since the process that starts a node owns it, and every
 /// other commander is judged by `P`.
@@ -3276,6 +3350,37 @@ mod tests {
             }
             std::assert!(with_pipe.permits(Verb::Status, Commander::Verified(&READER)));
             std::assert!(!with_pipe.permits(Verb::Open, Commander::Verified(&READER)));
+        }
+
+        /// Decision D12, step 4: the text a build states its commanders in reads as the bytes a
+        /// link's key proves (the number the hex spells, least significant byte first), an empty
+        /// text names nobody, and the list is the slice the text named.
+        #[test]
+        fn a_list_of_commanders_is_read_from_its_text() {
+            static NONE: CommanderList<4> = CommanderList::parse("");
+            std::assert!(NONE.as_slice().is_empty());
+
+            static ONE: CommanderList<4> = CommanderList::parse("1f");
+            let mut one = [0u8; CREDENTIAL_ZID_BYTES];
+            one[0] = 0x1f;
+            std::assert_eq!(ONE.as_slice(), &[one]);
+
+            static TWO: CommanderList<4> =
+                CommanderList::parse("ccbbaa005452,0123456789abcdef0123456789abcdef");
+            let mut kit = [0u8; CREDENTIAL_ZID_BYTES];
+            kit[..6].copy_from_slice(&[0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc]);
+            let half = [0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01];
+            let mut full = [0u8; CREDENTIAL_ZID_BYTES];
+            full[..8].copy_from_slice(&half);
+            full[8..].copy_from_slice(&half);
+            std::assert_eq!(TWO.as_slice(), &[kit, full]);
+
+            let listed = Commanders {
+                open: ONE.as_slice(),
+                ..Commanders::NONE
+            };
+            std::assert!(listed.permits(Verb::Open, Commander::Verified(&one)));
+            std::assert!(!listed.permits(Verb::Open, Commander::Verified(&kit)));
         }
 
         /// Decision D12 end to end through the node's one function: the same request is refused

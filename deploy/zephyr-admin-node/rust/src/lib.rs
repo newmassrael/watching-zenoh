@@ -48,16 +48,18 @@ use wz::runtime_coop::ClockSource;
 #[cfg(not(storage_fixed))]
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
-#[cfg(not(all(role_client, storage_fixed)))]
+#[cfg(not(any(all(role_client, storage_fixed), feature = "fixed-admin")))]
 use wz::runtime_zephyr::glue::log;
-use wz::runtime_zephyr::glue::{core_clock_hz, log_args, log_parts};
+#[cfg(any(feature = "net-lwip-mac", feature = "spi-probe"))]
+use wz::runtime_zephyr::glue::log_args;
+use wz::runtime_zephyr::glue::{core_clock_hz, log_parts};
 #[cfg(not(storage_fixed))]
 use wz::runtime_zephyr::glue::{log_line, stack_usage, yield_us};
 #[cfg(not(storage_fixed))]
 use wz::runtime_zephyr::stack::StackWatch;
 #[cfg(any(not(storage_fixed), feature = "mac-cyt4bf"))]
 use wz::runtime_zephyr::ZephyrClock;
-#[cfg(not(all(role_client, storage_fixed)))]
+#[cfg(not(any(all(role_client, storage_fixed), feature = "fixed-admin")))]
 use wz::runtime_zephyr::ZephyrEntropy;
 #[cfg(not(storage_fixed))]
 use wz_session_core::entropy::EntropySource;
@@ -90,9 +92,12 @@ use wz_session_mcu::connect_manager::StaticEndpoints;
 mod fixed_client;
 #[cfg(all(feature = "get", role_client, storage_fixed))]
 mod fixed_get;
-#[cfg(all(role_admin, storage_fixed))]
+#[cfg(all(role_admin, storage_fixed, feature = "net-lwip-mac"))]
 mod fixed_node;
-#[cfg(all(feature = "tls", role_client, storage_fixed))]
+// The admin node over Zephyr's sockets, which takes a session only through the secure channel.
+#[cfg(feature = "fixed-admin")]
+mod fixed_admin;
+#[cfg(feature = "secure-channel")]
 mod fixed_tls;
 #[cfg(feature = "mac-cyt4bf")]
 mod mac_cyt4bf;
@@ -102,7 +107,7 @@ mod mac_lan865x;
 mod net_lwip;
 // The heap profile's board net: `Rc` links, a `Vec` zid. The fixed client reads the board's
 // address and identity into arrays (`fixed_client`).
-#[cfg(all(feature = "net-zephyr-sockets", not(all(role_client, storage_fixed))))]
+#[cfg(all(feature = "net-zephyr-sockets", not(storage_fixed)))]
 mod net_zephyr;
 #[cfg(any(feature = "spi-probe", feature = "t1s-lan865x"))]
 mod spi_cyt4bf;
@@ -145,8 +150,10 @@ const IDLE_SLEEP_US: i32 = {
 /// How many passes in a row may skip the sleep because the one before took a frame
 /// in: a stream of frames cannot keep this thread from ever giving the CPU away. The
 /// loops that skip a sleep are this file's and `fixed_node`'s; the fixed client's is
-/// `wz_session_mcu::slot_node`'s, which sleeps only between two dials.
-#[cfg(not(all(role_client, storage_fixed)))]
+/// `wz_session_mcu::slot_node`'s, which sleeps only between two dials, and the fixed admin node
+/// over Zephyr's sockets (`fixed_admin`) gives the kernel a tick on every pass, since its stack is
+/// run by the kernel's threads and not polled from here.
+#[cfg(not(any(all(role_client, storage_fixed), feature = "fixed-admin")))]
 const BUSY_PASSES_MAX: u32 = 64;
 
 /// The core clock this image was built for: the board's
@@ -164,8 +171,9 @@ fn uptime_ms() -> u64 {
 }
 
 /// The port the node listens on: zenoh's default. Only the admin node listens; the
-/// client dials.
-#[cfg(role_admin)]
+/// client dials. The admin node over the secure channel listens on a port of its own
+/// (`fixed_admin::TLS_PORT`), since its datagram port is not one it has.
+#[cfg(all(role_admin, not(feature = "fixed-admin")))]
 const LISTEN_PORT: u16 = 7447;
 
 /// The largest IP packet one Ethernet frame carries: the MTU of every interface
@@ -523,13 +531,28 @@ compile_error!(
     feature = "heap",
     feature = "client-node",
     feature = "fixed-memory",
-    feature = "fixed-client"
+    feature = "fixed-client",
+    feature = "fixed-admin"
 )))]
 compile_error!(
     "no memory profile: `heap` (the growable admin node over the kernel heap, the default), \
      `client-node` (the growable client node, with the defaults off), `fixed-memory` (the \
-     slot profile's admin node over statics, with the defaults off) or `fixed-client` (the \
-     slot profile's client node over statics, with the defaults off)"
+     slot profile's admin node over lwIP and statics, with the defaults off), `fixed-client` \
+     (the slot profile's client node over statics, with the defaults off) or `fixed-admin` \
+     (the slot profile's admin node over Zephyr's sockets and the secure channel)"
+);
+
+#[cfg(all(feature = "fixed-admin", feature = "fixed-client"))]
+compile_error!(
+    "two nodes: the fixed-memory image over Zephyr's sockets is the admin node (`fixed-admin`) \
+     or the client (`fixed-client`), and CMakeLists.txt turns on one from CONFIG_WZ_ROLE_*"
+);
+
+#[cfg(all(feature = "fixed-admin", feature = "lifecycle-declared"))]
+compile_error!(
+    "the admin node over Zephyr's sockets exists to be commanded in band: with \
+     CONFIG_WZ_LIFECYCLE_DECLARED it binds no verb, and a build that declares its peers is the \
+     lwIP admin node's"
 );
 
 #[cfg(all(feature = "fixed-client", feature = "client-node"))]
@@ -649,7 +672,13 @@ fn start() -> i32 {
 }
 
 /// Bring the board's network up and run the node over it.
-#[cfg(all(feature = "net-zephyr-sockets", not(all(role_client, storage_fixed))))]
+#[cfg(feature = "fixed-admin")]
+fn start() -> i32 {
+    fixed_admin::run()
+}
+
+/// Bring the board's network up and run the node over it.
+#[cfg(all(feature = "net-zephyr-sockets", not(storage_fixed)))]
 fn start() -> i32 {
     match net_zephyr::ZephyrNet::bring_up() {
         #[cfg(role_admin)]

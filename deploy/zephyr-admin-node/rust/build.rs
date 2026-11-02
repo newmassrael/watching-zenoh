@@ -12,9 +12,9 @@
 //!
 //! | cfg | the axis it states | the features that turn it on |
 //! | --- | --- | --- |
-//! | `storage_fixed` | the node's tables are statics, the slot profile | `fixed-memory`, `fixed-client` |
+//! | `storage_fixed` | the node's tables are statics, the slot profile | `fixed-memory`, `fixed-client`, `fixed-admin` |
 //! | `role_client` | the node built is a client of a router | `fixed-client`; `client-node` on the heap |
-//! | `role_admin` | the node built is the admin node | `fixed-memory`; `admin-node` on the heap |
+//! | `role_admin` | the node built is the admin node | `fixed-memory`, `fixed-admin`; `admin-node` on the heap |
 //!
 //! A role is the role of the node that is BUILT. The fixed storage wins over the heap's: with the
 //! default `heap` feature left on beside `fixed-client` (the census-only build, which has an
@@ -37,7 +37,7 @@ fn main() {
         let name = format!("CARGO_FEATURE_{}", feature.to_uppercase().replace('-', "_"));
         std::env::var_os(name).is_some()
     };
-    let storage_fixed = on("fixed-memory") || on("fixed-client");
+    let storage_fixed = on("fixed-memory") || on("fixed-client") || on("fixed-admin");
     let aliases = [
         ("storage_fixed", storage_fixed),
         (
@@ -46,7 +46,7 @@ fn main() {
         ),
         (
             "role_admin",
-            on("fixed-memory") || (!storage_fixed && on("admin-node")),
+            on("fixed-memory") || on("fixed-admin") || (!storage_fixed && on("admin-node")),
         ),
     ];
     for (name, enabled) in aliases {

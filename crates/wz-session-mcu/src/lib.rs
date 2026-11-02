@@ -89,6 +89,10 @@ pub mod slot_host;
 // The dialler of the slot profile, over that host: a written endpoint becomes an initiator session.
 #[cfg(all(feature = "session-slot", feature = "dial"))]
 pub mod slot_dial;
+// Room in a `static` for the parts of a node's loop that live as long as it runs: the slot profile's,
+// whichever node it is.
+#[cfg(feature = "session-slot")]
+pub mod run_arena;
 // The admin node of the slot profile, over any stack: the connect manager, the admin space declared
 // on each session and the report of what the node holds, around the links the stack hands it.
 #[cfg(all(
