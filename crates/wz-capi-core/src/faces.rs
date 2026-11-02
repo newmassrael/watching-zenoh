@@ -658,6 +658,18 @@ enum Admission {
     Replace(u64),
 }
 
+/// What the first half of `SharedSession::face_up` leaves for the second: the faces the gossip
+/// told of the new link.
+struct LinkAnnounced {
+    /// Each with the wake that gets its drive loop to send what was staged on it. Empty for a
+    /// node that does not gossip, and for the first link of a node.
+    #[cfg_attr(
+        not(all(feature = "gossip", feature = "liveliness-get")),
+        allow(dead_code)
+    )]
+    told: Vec<(TokioSession, Arc<Notify>)>,
+}
+
 /// The decision for a link `dialled` (or not) that has completed its handshake to the node
 /// `zid`, as face `id`, against the faces `held` (each its id, the node it links to and whether
 /// this session dialled it). The rule is `wz_session_core::link_admission`'s, which the
@@ -948,6 +960,16 @@ struct MatchEntry {
 /// The member a [`MatchAggregate`] files the session's own entities under, beside the
 /// ids of its faces. Face ids count up from zero and never reach it.
 const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
+
+/// The key a new link's barrier asks about ([`SharedSession::face_up`]): no node holds a
+/// liveliness token on it, so the answer is the final alone.
+#[cfg(all(feature = "gossip", feature = "liveliness-get"))]
+const LINK_BARRIER_KEY: &str = "wz/link/barrier";
+
+/// How long a new link's declarations wait for the faces told of it to answer. A face that is
+/// slower is let go of, and the replay goes ahead as it did before the barrier.
+#[cfg(all(feature = "gossip", feature = "liveliness-get"))]
+const LINK_BARRIER_TIMEOUT_MS: u32 = 1000;
 
 /// Install the per-face watch of what `plane` counts on `session` for `keyexpr`: a publisher's
 /// for the subscribers, a querier's for the queryables.
@@ -2043,6 +2065,106 @@ impl SharedSession {
         }
     }
 
+    /// The registry's decision about the link `id` (see [`Self::face_up`]), taken under its
+    /// lock, which is returned held: `None` when the face is refused. A held link that the new
+    /// one replaces is closed and removed first, outside the lock, and the decision read again.
+    fn admit_under_lock(
+        &self,
+        id: u64,
+        peer_zid: Option<&[u8]>,
+        dialled: bool,
+    ) -> Option<MutexGuard<'_, Inner>> {
+        // Decided under the lock that inserts the face, so two faces that come up
+        // together cannot both pass: the one that takes the lock second sees the
+        // first.
+        let mut guard = self.lock();
+        loop {
+            let verdict = admission_of(
+                &self.zid,
+                guard
+                    .faces
+                    .iter()
+                    .map(|(held, face)| (*held, face.peer_zid.as_deref(), face.dialled)),
+                id,
+                peer_zid,
+                dialled,
+            );
+            match verdict {
+                Admission::Admit => return Some(guard),
+                Admission::Refuse => return None,
+                Admission::Replace(held_id) => {
+                    // The held link is the one to close: it is told why, the way zenoh tells a
+                    // link refused for the node it already holds, and its face leaves the
+                    // registry, with the events and the replay state that go with it, before
+                    // this one is admitted. Both happen OUTSIDE the lock, which a close and a
+                    // face's departure take again. The decision is read again after, because the
+                    // registry may have changed while the lock was open.
+                    let held = guard
+                        .faces
+                        .get(&held_id)
+                        .map(|face| face.session.actions().clone());
+                    drop(guard);
+                    if let Some(held) = held {
+                        held.send_close_with_reason(
+                            wz_session_core::close_reason::CloseReason::MaxLinks,
+                        );
+                    }
+                    self.face_down(held_id);
+                    guard = self.lock();
+                }
+            }
+        }
+    }
+
+    /// Wait until each of `told` has answered a question asked on its link after the
+    /// announcement of a new link: the barrier of [`Self::face_up_after_links_told`].
+    ///
+    /// The question is a liveliness get for a key nobody holds, which every node, `zenohd`
+    /// included, answers with its final alone; the final comes after the announcement because
+    /// the link is a FIFO. A face that does not answer within [`LINK_BARRIER_TIMEOUT_MS`] is
+    /// not waited for, and neither is one that ends while it is asked: the replay goes ahead as
+    /// it did before the barrier.
+    #[cfg(all(feature = "gossip", feature = "liveliness-get"))]
+    async fn await_links_told(told: Vec<(TokioSession, Arc<Notify>)>) {
+        if told.is_empty() {
+            return;
+        }
+        let (done, mut answers) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let opts = crate::runtime::session::LivelinessGetOptions::default()
+            .with_timeout_ms(LINK_BARRIER_TIMEOUT_MS);
+        let mut asked = Vec::new();
+        for (session, revised) in told {
+            let answered = done.clone();
+            let got = session.liveliness_get(
+                LINK_BARRIER_KEY,
+                opts,
+                |_view: &dyn ReplyView| {},
+                move |_id| {
+                    let _ = answered.send(());
+                },
+            );
+            if let Ok(interest_id) = got {
+                asked.push((session, interest_id));
+                // The face's drive loop arms the deadline just registered.
+                revised.notify_one();
+            }
+        }
+        drop(done);
+        let mut waiting = asked.len();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(LINK_BARRIER_TIMEOUT_MS.into()),
+            async {
+                while waiting > 0 && answers.recv().await.is_some() {
+                    waiting -= 1;
+                }
+            },
+        )
+        .await;
+        for (session, interest_id) in asked {
+            session.cancel_pending_liveliness_get(interest_id);
+        }
+    }
+
     /// The local plane's session. A get's and a publish's local legs are issued on
     /// it inside this file ([`Self::fan_query`], the publish fan-out); the ABIs
     /// reach it for what else is session-scope (a held query, the clock).
@@ -2143,7 +2265,60 @@ impl SharedSession {
     /// which both ends read alike, and keeps the link the lower zid dialled
     /// ([`wz_session_core::link_admission`]). When that is the NEW link, the held face is closed
     /// (`MaxLinks`, the reason zenoh gives) and removed, and the new one takes its place.
+    ///
+    /// This is the form for a caller that cannot wait (the accept loop's `admit` is not async).
+    /// A caller that can wait uses [`Self::face_up_after_links_told`], which holds the replay
+    /// back until the faces told of the new link have processed the announcement.
     pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>, dialled: bool) -> bool {
+        match self.face_up_announced(id, actions, dialled) {
+            Some(_) => self.face_up_replayed(id),
+            None => false,
+        }
+    }
+
+    /// [`Self::face_up`] for a caller that can wait: the declarations this node replays over
+    /// the new link are not sent until the faces told of the link have PROCESSED what they were
+    /// told (the barrier `await_links_told` states).
+    ///
+    /// Two gateways of a region that hold different sets of a peer's links for the time one
+    /// tells the other both read themselves the primary, and a sample is carried twice. The peer
+    /// is the one that creates that time: its declaration over the new link reaches the second
+    /// gateway while its announcement of the link, sent over the link it already had, is still on
+    /// its way to the first (measured on upstream's regions test, scenario 7: held back by a
+    /// fixed 100 ms the scenario fails 0 of 600 runs, against about 1.4 percent without). Nothing
+    /// in the protocol orders two links, and upstream has the same window; a link is a FIFO,
+    /// though, so a request sent after the announcement on the same link is answered only after
+    /// the announcement was handled, and the answer is the barrier.
+    ///
+    /// The wait is an `await`, not a blocked thread: the answers are read by the other faces'
+    /// drives, which under `FaceDrive::Serial` are tasks of this very thread. The registry is
+    /// unlocked for it, because those drives take the lock. The face is held by the registry
+    /// meanwhile and owed nothing yet: what the other faces say of it (gossip) must find it, and
+    /// measured without that, the sends to a face the registry did not hold were dropped and
+    /// the scenario failed 10 percent of runs.
+    pub async fn face_up_after_links_told(
+        &self,
+        id: u64,
+        actions: &Arc<SessionLinkActions>,
+        dialled: bool,
+    ) -> bool {
+        let Some(announced) = self.face_up_announced(id, actions, dialled) else {
+            return false;
+        };
+        #[cfg(all(feature = "gossip", feature = "liveliness-get"))]
+        Self::await_links_told(announced.told).await;
+        self.face_up_replayed(id)
+    }
+
+    /// The first half of [`Self::face_up`]: the admission, and the gossip that tells the other
+    /// faces of the new link and the new face of every node this one knows. The registry holds
+    /// the face when this returns, with nothing declared on it, and is not locked.
+    fn face_up_announced(
+        &self,
+        id: u64,
+        actions: &Arc<SessionLinkActions>,
+        dialled: bool,
+    ) -> Option<LinkAnnounced> {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         // R311y554 — THE hand-off that makes `allowed_destination` honourable.
         //
@@ -2185,47 +2360,15 @@ impl SharedSession {
         // R3065 -- the face reads what its peer sends through the node's own clients.
         install_shm_reader(&session, &self.shm_clients);
 
-        let mut guard = self.lock();
-        // Decided under the lock that inserts the face, so two faces that come up
-        // together cannot both pass: the one that takes the lock second sees the
-        // first.
         let peer_zid = actions.peer_zid();
-        loop {
-            let verdict = admission_of(
-                &self.zid,
-                guard
-                    .faces
-                    .iter()
-                    .map(|(held, face)| (*held, face.peer_zid.as_deref(), face.dialled)),
-                id,
-                peer_zid.as_deref(),
-                dialled,
-            );
-            match verdict {
-                Admission::Admit => break,
-                Admission::Refuse => return false,
-                Admission::Replace(held_id) => {
-                    // The held link is the one to close: it is told why, the way zenoh tells a
-                    // link refused for the node it already holds, and its face leaves the
-                    // registry, with the events and the replay state that go with it, before
-                    // this one is admitted. Both happen OUTSIDE the lock, which a close and a
-                    // face's departure take again. The decision is read again after, because the
-                    // registry may have changed while the lock was open.
-                    let held = guard
-                        .faces
-                        .get(&held_id)
-                        .map(|face| face.session.actions().clone());
-                    drop(guard);
-                    if let Some(held) = held {
-                        held.send_close_with_reason(
-                            wz_session_core::close_reason::CloseReason::MaxLinks,
-                        );
-                    }
-                    self.face_down(held_id);
-                    guard = self.lock();
-                }
-            }
-        }
+        let mut guard = self.admit_under_lock(id, peer_zid.as_deref(), dialled)?;
+        // The faces that are told of the new link, which the barrier of
+        // [`Self::face_up_after_links_told`] asks.
+        #[cfg_attr(
+            not(all(feature = "gossip", feature = "liveliness-get")),
+            allow(unused_mut)
+        )]
+        let mut told: Vec<(TokioSession, Arc<Notify>)> = Vec::new();
         // R3074 -- gossip: the new face is told every node this one knows and where each can be
         // reached, and the faces that hear of a new link are told this one is up. Sent from
         // here, with the face's identity read off its handshake (this runs past a completed
@@ -2247,8 +2390,71 @@ impl SharedSession {
         #[cfg(feature = "gossip")]
         if let Some(gossip) = &self.gossip {
             let outbound = gossip.face_up(id, &FaceIdentity::of(actions));
+            #[cfg(feature = "liveliness-get")]
+            {
+                let mut ids: Vec<u64> = outbound
+                    .iter()
+                    .map(|out| out.face)
+                    .filter(|face| *face != id)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                told = ids
+                    .iter()
+                    .filter_map(|face| guard.faces.get(face))
+                    .map(|face| (face.session.clone(), face.revised.clone()))
+                    .collect();
+            }
             Self::send_gossip(&guard.faces, Some((id, actions)), outbound);
         }
+        // The face is held by the registry from here, owed nothing yet: what the other faces
+        // say of it, from now until the replay, must find it (a gossip message for a face the
+        // registry does not hold is dropped), and it is the lock that decided its admission
+        // that inserts it. What it is owed is replayed by [`Self::face_up_replayed`].
+        let replaced = guard.faces.insert(
+            id,
+            FaceEntry {
+                session,
+                subs: BTreeMap::new(),
+                qbls: BTreeMap::new(),
+                tokens: BTreeMap::new(),
+                live_subs: BTreeMap::new(),
+                matches: BTreeMap::new(),
+                filters: BTreeMap::new(),
+                #[cfg(feature = "group")]
+                groups: BTreeMap::new(),
+                revised: Arc::new(Notify::new()),
+                peer_zid,
+                dialled,
+            },
+        );
+        guard.refresh_face_set();
+        drop(guard);
+        // Outside the lock: the teardown of a replaced entry drops its subscribers and
+        // queryables and may release the last `Arc<CClosure>`, running the C `drop(context)`
+        // under the registry lock. A fresh face id makes this `None` in practice; the
+        // discipline is uniform rather than conditional on that. R2932 -- its group copies
+        // are copies of a session that is gone, so their members leave the union the way
+        // `face_down`'s do.
+        if let Some(mut old) = replaced {
+            old.retire_groups();
+        }
+        Some(LinkAnnounced { told })
+    }
+
+    /// The second half of [`Self::face_up`]: the declarations the face is owed are replayed
+    /// onto it. `false` when the face is not held any more: it was taken down while the
+    /// registry was unlocked, by the admission of a link to the same node that is kept in its
+    /// place.
+    ///
+    /// What a declaration made in the meantime put on the face is not declared again: the
+    /// registry declares to every face it holds, this one included.
+    fn face_up_replayed(&self, id: u64) -> bool {
+        let mut guard = self.lock();
+        let Some(held) = guard.faces.get(&id) else {
+            return false;
+        };
+        let session = held.session.clone();
         // Keyexpr aliases replay FIRST, before the subscriber and queryable
         // declares below. Ordering is load-bearing on the reliable channel: a
         // peer resolves an aliased id through the mapping table it built from
@@ -2265,6 +2471,9 @@ impl SharedSession {
         }
         let mut subs = BTreeMap::new();
         for entry in &guard.subs {
+            if held.subs.contains_key(&entry.id) {
+                continue;
+            }
             if let Some(sub) = declare_subscriber_on(
                 &session,
                 &entry.keyexpr,
@@ -2279,6 +2488,9 @@ impl SharedSession {
         }
         let mut qbls = BTreeMap::new();
         for entry in &guard.qbls {
+            if held.qbls.contains_key(&entry.id) {
+                continue;
+            }
             if let Some(qbl) = declare_queryable_on(
                 &session,
                 &entry.keyexpr,
@@ -2303,6 +2515,9 @@ impl SharedSession {
         // one C callback.
         let mut tokens = BTreeMap::new();
         for entry in &guard.tokens {
+            if held.tokens.contains_key(&entry.id) {
+                continue;
+            }
             if let Some(tok) =
                 declare_token_on(&session, &entry.keyexpr, &entry.wire, entry.options.clone())
             {
@@ -2311,6 +2526,9 @@ impl SharedSession {
         }
         let mut live_subs = BTreeMap::new();
         for entry in &guard.live_subs {
+            if held.live_subs.contains_key(&entry.id) {
+                continue;
+            }
             let mut opts = LivelinessSubscriberOptions::default();
             opts.history = entry.history;
             if let Some(sub) = declare_liveliness_subscriber_on(
@@ -2332,13 +2550,16 @@ impl SharedSession {
         // stating, because it is not the general rule in this file:
         // `Publisher::declare_matching_listener` delivers an already-matching
         // registration synchronously, which would put a C callback under the
-        // lock. It cannot fire here — `session` was constructed a few lines
-        // above with a FRESH `ApplicationLayerObserver`, so its remote-
+        // lock. It cannot fire here — `session` was constructed by
+        // `face_up_announced` with a FRESH `ApplicationLayerObserver`, so its remote-
         // subscriber registry is empty and the initial verdict is necessarily
         // `false`. A future refactor that hands `face_up` an already-populated
         // observer must move this replay out of the lock.
         let mut matches = BTreeMap::new();
         for entry in guard.matches.iter().filter(|entry| entry.count_remote) {
+            if held.matches.contains_key(&entry.id) {
+                continue;
+            }
             if let Some(listener) = install_matching_watch(
                 entry.plane,
                 &session,
@@ -2355,6 +2576,9 @@ impl SharedSession {
         // installed where they are). Filters that ask nothing keep no hold.
         let mut filters = BTreeMap::new();
         for entry in &guard.filters {
+            if held.filters.contains_key(&entry.id) {
+                continue;
+            }
             if let Some(form) = &entry.ask {
                 let hold = match entry.plane {
                     FilterPlane::Subscribers => {
@@ -2382,6 +2606,9 @@ impl SharedSession {
         let mut groups = BTreeMap::new();
         #[cfg(feature = "group")]
         for entry in &guard.groups {
+            if held.groups.contains_key(&entry.id) {
+                continue;
+            }
             if let Ok(copy) =
                 FaceGroup::join(&session, &entry.agg, Locality::Remote, entry.priority)
             {
@@ -2393,30 +2620,17 @@ impl SharedSession {
         // `face_up` runs (both callers reach it past a completed handshake), so
         // the identity slots this reads are already populated.
         let snapshot = snapshot_of(&session);
-        let replaced = guard.faces.insert(
-            id,
-            FaceEntry {
-                session,
-                subs,
-                qbls,
-                tokens,
-                live_subs,
-                matches,
-                filters,
-                #[cfg(feature = "group")]
-                groups,
-                revised: Arc::new(Notify::new()),
-                peer_zid,
-                dialled,
-            },
-        );
-        guard.refresh_face_set();
-        drop(guard);
-        // R2932 — a replaced entry's group copies are copies of a session that
-        // is gone, so their members leave the union the way `face_down`'s do.
-        if let Some(mut old) = replaced {
-            old.retire_groups();
+        if let Some(face) = guard.faces.get_mut(&id) {
+            face.subs.extend(subs);
+            face.qbls.extend(qbls);
+            face.tokens.extend(tokens);
+            face.live_subs.extend(live_subs);
+            face.matches.extend(matches);
+            face.filters.extend(filters);
+            #[cfg(feature = "group")]
+            face.groups.extend(groups);
         }
+        drop(guard);
         // Outside the lock, for the reason `fire_face_event` states: a C
         // listener may re-enter this registry.
         if let Some(snapshot) = snapshot {
@@ -6570,6 +6784,108 @@ mod face_up_order_tests {
         assert!(
             topology < declaration,
             "the topology comes first: {kinds:?}"
+        );
+    }
+
+    /// The kinds of the messages a link was sent after its `before`-th send, in order.
+    #[cfg(feature = "liveliness-get")]
+    fn kinds_sent_since(
+        pair: &wz_runtime_tokio_test_support::EstablishedPair,
+        before: usize,
+    ) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        for (bytes, _) in pair.resp_driver.snapshot().sends.iter().skip(before) {
+            let Ok(InboundFrame::Frame { payload, .. }) = pair.init_actions.handle_inbound(bytes)
+            else {
+                continue;
+            };
+            for message in parse_frame_payload(&payload).expect("the frame decodes") {
+                kinds.push(match message {
+                    NetworkMessage::Oam(_) => "topology",
+                    NetworkMessage::Declare(_) => "declaration",
+                    NetworkMessage::Interest(_) => "interest",
+                    _ => "other",
+                });
+            }
+        }
+        kinds
+    }
+
+    /// A node that already has a link, and gets a second one to another node, does not replay
+    /// its declarations over the second until the first link has answered a question asked
+    /// after the announcement of the second.
+    ///
+    /// The first link is FIFO, so its answer says its far end has handled the announcement; a
+    /// gateway told of a peer's second link only after the peer's declarations reached the other
+    /// gateway reads itself the primary beside it, and a sample is carried twice (regions
+    /// scenario 7, about 1.4 percent of runs). Here nobody answers on the first link, so the
+    /// declaration is held for the whole of the barrier's bound, and then goes ahead: a link
+    /// that does not answer is not waited for forever. The topology goes at once, as the test
+    /// above states, and the first link is asked. This test fails (the declaration is sent
+    /// with the topology) when the replay is not behind the barrier.
+    #[cfg(feature = "liveliness-get")]
+    #[tokio::test(start_paused = true)]
+    async fn a_second_link_is_declared_to_only_after_the_first_answers_or_the_bound() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let first = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let second = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let (dials, _intents) = tokio::sync::mpsc::unbounded_channel();
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources {
+                gossip: Some(GossipSetup {
+                    whatami: WhatAmI::Peer,
+                    // Multihop, so that a link already held hears of a new one: a single-hop
+                    // peer tells only its gateways, and these far ends are peers.
+                    policy: GossipPolicy {
+                        multihop: true,
+                        ..GossipPolicy::shipped(WhatAmI::Peer)
+                    },
+                    dials,
+                }),
+                ..SessionResources::default()
+            },
+        )
+        .expect("test host entropy");
+        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+        shared.declare_subscriber("wz/order/test".to_owned(), Locality::Any, sink);
+
+        // The first link has nobody to tell, so it is up at once.
+        assert!(shared.face_up(1, &first.resp_actions, false));
+        let first_before = first.resp_driver.snapshot().sends.len();
+        let second_before = second.resp_driver.snapshot().sends.len();
+
+        let up = shared.face_up_after_links_told(2, &second.resp_actions, false);
+        tokio::pin!(up);
+        // Half of the bound: the face is not up, it was sent its topology and not what it is
+        // owed, and the first link was told of the new one and asked.
+        let half = std::time::Duration::from_millis(u64::from(LINK_BARRIER_TIMEOUT_MS) / 2);
+        let held_back = tokio::time::timeout(half, &mut up).await.is_err();
+        let held = kinds_sent_since(&second, second_before);
+        let asked = kinds_sent_since(&first, first_before);
+        assert!(
+            held_back,
+            "the second link is held while the first has not answered: the second was sent \
+             {held:?}, the first {asked:?}"
+        );
+        assert!(
+            held.contains(&"topology") && !held.contains(&"declaration"),
+            "held: the topology, and no declaration yet: {held:?}"
+        );
+        assert!(
+            asked.contains(&"topology") && asked.contains(&"interest"),
+            "the first link is told of the second and asked after it: {asked:?}"
+        );
+
+        // The bound: a link that does not answer is let go.
+        assert!(up.await, "the face is admitted once the bound has passed");
+        let released = kinds_sent_since(&second, second_before);
+        let topology = released.iter().position(|k| *k == "topology");
+        let declaration = released.iter().position(|k| *k == "declaration");
+        assert!(
+            topology.is_some() && declaration.is_some() && topology < declaration,
+            "released: the topology and then the declaration: {released:?}"
         );
     }
 }

@@ -1956,7 +1956,10 @@ async fn drive_face(
     // one ([`SharedSession::face_up`]). The link is closed the way every face's
     // is, through the drain, and `on_up` does not run: the open was not
     // released by a face that is not held.
-    if !shared.face_up(face, &actions, true) {
+    //
+    // This is the form that waits (it is async) until the faces told of the new link have
+    // processed the announcement, before the declarations are replayed over it.
+    if !shared.face_up_after_links_told(face, &actions, true).await {
         OpenedSession {
             engine,
             actions,

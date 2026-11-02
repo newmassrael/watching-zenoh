@@ -1437,12 +1437,29 @@ pub async fn establish_capability_pair(
     resp_offer: bool,
     apply_offer: impl Fn(&Arc<SessionLinkActions>),
 ) -> EstablishedPair {
+    establish_capability_pair_between(0x01, 0x02, init_offer, resp_offer, apply_offer).await
+}
+
+/// [`establish_capability_pair`] between the nodes whose zids are four bytes of `init_zid` and
+/// of `resp_zid`: a test that needs two links to two different nodes makes two pairs with
+/// different bytes, because a registry holds one link per node.
+pub async fn establish_capability_pair_between(
+    init_zid: u8,
+    resp_zid: u8,
+    init_offer: bool,
+    resp_offer: bool,
+    apply_offer: impl Fn(&Arc<SessionLinkActions>),
+) -> EstablishedPair {
     let init_driver = Arc::new(LifecycleRecordingDriver::default());
     let resp_driver = Arc::new(LifecycleRecordingDriver::default());
 
     let init_actions = {
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = init_driver.clone();
-        let a = new_session_actions(outbound, fixture_params_with_zid(0x01), TokioTime::new());
+        let a = new_session_actions(
+            outbound,
+            fixture_params_with_zid(init_zid),
+            TokioTime::new(),
+        );
         if init_offer {
             apply_offer(&a);
         }
@@ -1450,7 +1467,11 @@ pub async fn establish_capability_pair(
     };
     let resp_actions = {
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = resp_driver.clone();
-        let a = new_session_actions(outbound, fixture_params_with_zid(0x02), TokioTime::new());
+        let a = new_session_actions(
+            outbound,
+            fixture_params_with_zid(resp_zid),
+            TokioTime::new(),
+        );
         if resp_offer {
             apply_offer(&a);
         }
