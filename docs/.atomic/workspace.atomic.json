@@ -306040,6 +306040,36 @@
         "Open: D14's witness on the kit with a real router's session reaching the verbs of the product image (no kit was attached to this host). The product admin image keeps the default of 4 TCP connections; whether a restart under load needs more is not measured."
       ]
     },
+    "Round 4123": {
+      "decision_summary": "Decision D14's witness is built and held on the T2G kit for its first part: a real router's session reaches the verbs of the product admin node, and the verbs decide by the zid the link's key proved. scripts/kit-lane.sh gains an admin image, zephyr-admin-fixed-tls, which is the fixed admin node over Zephyr's sockets and the secure channel for the kit's board (overlays/t2g_admin_fixed_tls.conf after qemu_admin_fixed_tls.conf and t2g_zeth.conf). The build makes the router's key first and states the zid it names as the commander of status and of no other verb, so the commander list the image is built with is the key the run uses. The run flashes the image, requires the key of the certificate the node prints to name the zid its READY line claims, has a stock zenohd dial the node with mutual TLS and the node's certificate as the root it pins, and asks the verbs through the router's REST plugin: status for the listed key is answered with a status document, close, which nobody is listed for, is refused by name, and a control router with a key that is not listed is refused status. Two runs on the kit held every step with no wz: FAIL line; the node reported one session and a stack peak of 22,189 of 32,768 bytes. The commander is one key per image; the open by zid and the read of sessions[] that D14 also names are not part of this part. The kit lane's router identity is made by one function now (make_router_identity), which the verify image uses as well, and a worktree whose vendor/sce is not at the pinned commit fails the codec build, found when the first build of this image stopped on a missing Bounded.",
+      "changes_bullets": [
+        "scripts/kit-lane.sh: the admin image kind, build and run steps, the router identity and zid helpers, the selftest of admin images. deploy/zephyr-admin-node/overlays/t2g_admin_fixed_tls.conf: the kit's delta. docs/session-lifecycle-intent.md: D14's witnessed part."
+      ],
+      "verification_bullets": [
+        "On the T2G kit attached to the lab host, two runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls (preflight and preflight --deep first, all ok): the region written and read back, the READY zid equal to the zid of the certificate's key, status answered, close refused by name, status refused to an unlisted router, no wz: FAIL line. The same image builds locally and on the lab host; kit-lane.sh --selftest passes. Not run: the hosted lanes, which do not build this image."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: D14's open by zid and the read of sessions[] on the kit (the node would dial a second peer by a declared hint), a stack gate row, text row and resource row for zephyr-admin-fixed-tls (the stack is the build's default 32,768 bytes), a hosted build of this image in Layer Qzk, and the commander list holding more than one key per verb on the kit. The lab host's router is zenohd 1.10.0, not the pinned 1.10.2."
+      ],
+      "publishable_decision_summary": "Decision D14's witness is built and held on the T2G kit for its first part: a real router's session reaches the verbs of the product admin node, and the verbs decide by the zid the link's key proved. scripts/kit-lane.sh gains an admin image, zephyr-admin-fixed-tls, which is the fixed admin node over Zephyr's sockets and the secure channel for the kit's board (overlays/t2g_admin_fixed_tls.conf after qemu_admin_fixed_tls.conf and t2g_zeth.conf). The build makes the router's key first and states the zid it names as the commander of status and of no other verb, so the commander list the image is built with is the key the run uses. The run flashes the image, requires the key of the certificate the node prints to name the zid its READY line claims, has a stock zenohd dial the node with mutual TLS and the node's certificate as the root it pins, and asks the verbs through the router's REST plugin: status for the listed key is answered with a status document, close, which nobody is listed for, is refused by name, and a control router with a key that is not listed is refused status. Two runs on the kit held every step with no wz: FAIL line; the node reported one session and a stack peak of 22,189 of 32,768 bytes. The commander is one key per image; the open by zid and the read of sessions[] that D14 also names are not part of this part. The kit lane's router identity is made by one function now (make_router_identity), which the verify image uses as well, and a worktree whose vendor/sce is not at the pinned commit fails the codec build, found when the first build of this image stopped on a missing Bounded.",
+      "publishable_changes_bullets": [
+        "scripts/kit-lane.sh: the admin image kind, build and run steps, the router identity and zid helpers, the selftest of admin images. deploy/zephyr-admin-node/overlays/t2g_admin_fixed_tls.conf: the kit's delta. docs/session-lifecycle-intent.md: D14's witnessed part."
+      ],
+      "publishable_verification_bullets": [
+        "On the T2G kit attached to the lab host, two runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls (preflight and preflight --deep first, all ok): the region written and read back, the READY zid equal to the zid of the certificate's key, status answered, close refused by name, status refused to an unlisted router, no wz: FAIL line. The same image builds locally and on the lab host; kit-lane.sh --selftest passes. Not run: the hosted lanes, which do not build this image."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: D14's open by zid and the read of sessions[] on the kit (the node would dial a second peer by a declared hint), a stack gate row, text row and resource row for zephyr-admin-fixed-tls (the stack is the build's default 32,768 bytes), a hosted build of this image in Layer Qzk, and the commander list holding more than one key per verb on the kit. The lab host's router is zenohd 1.10.0, not the pinned 1.10.2."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
