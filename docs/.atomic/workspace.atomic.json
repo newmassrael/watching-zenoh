@@ -307050,6 +307050,34 @@
         "Open: a kit step for the write of the connect endpoints (the config subscriber) on the admin image; the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb; the limits the overlay still leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's) and what they cost."
       ]
     },
+    "Round 4155": {
+      "decision_summary": "The order fence of the link's writer lanes covered a unicast link only: a multicast group's lanes are the same priority lanes, so a declaration queued behind a put on the group left first, and an undeclaration could reach the members before the puts that name what it undeclares. The group's stage queue now raises the fence before it queues a datagram of the Control band, so the Control lane waits until what the other lanes held at that moment has gone; a group that runs no QoS has one lane and is not held. The join beacon is queued on its own path and is not held.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/multicast_pipeline.rs: StageQueue raises the fence for a Control datagram in enqueue and enqueue_lent; test a_control_datagram_leaves_behind_the_data_queued_before_it."
+      ],
+      "verification_bullets": [
+        "On the build host: the new test passes, and fails with (Control, Data) when the fence call is disabled; the wz-runtime-tokio lib tests pass with all features (2233); clippy of the crate with all features and all targets is clean. Not run: the hosted run, the multicast Z8 and Layer M tests."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the hosted verdict of this round and the multicast end-to-end tests on the fence; the Control band of a lent-slot datagram raises the fence before the lend, which is the same order as the heap path."
+      ],
+      "publishable_decision_summary": "The order fence of the link's writer lanes covered a unicast link only: a multicast group's lanes are the same priority lanes, so a declaration queued behind a put on the group left first, and an undeclaration could reach the members before the puts that name what it undeclares. The group's stage queue now raises the fence before it queues a datagram of the Control band, so the Control lane waits until what the other lanes held at that moment has gone; a group that runs no QoS has one lane and is not held. The join beacon is queued on its own path and is not held.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/multicast_pipeline.rs: StageQueue raises the fence for a Control datagram in enqueue and enqueue_lent; test a_control_datagram_leaves_behind_the_data_queued_before_it."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: the new test passes, and fails with (Control, Data) when the fence call is disabled; the wz-runtime-tokio lib tests pass with all features (2233); clippy of the crate with all features and all targets is clean. Not run: the hosted run, the multicast Z8 and Layer M tests."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the hosted verdict of this round and the multicast end-to-end tests on the fence; the Control band of a lent-slot datagram raises the fence before the lend, which is the same order as the heap path."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
