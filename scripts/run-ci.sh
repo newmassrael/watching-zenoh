@@ -17203,12 +17203,15 @@ layer_e_ap_demo_round_trip() {
     # build of wz-capi-pico of its own whose features are the reference arm's but for the
     # engine, so the programs, their headers and the foreign peers are the ones above and only
     # the library under them changes. `WZ_PICO_ENGINE=coop` names that library.
-    #   * `tls` -- the cooperative engine has no `tls/` link (a link only the tokio engine has
-    #     selects it by its own feature), so the two TLS programs are the tokio engine's.
     #   * `zenohd` -- the sweep above skips them for the reason it states: this job builds no
     #     zenohd.
     #   * `header_arms` -- the positive control of the header trees, which no engine changes; it
     #     runs the two TLS programs too, and the sweep above has held it.
+    # The reference build of the library carries the cooperative engine's secure channel
+    # (`tls-mbedtls`, step T4 of L6), as the tokio engine's carries `transport-link-tls` above: the
+    # two TLS programs open `tls/` endpoints, and without the feature the scheme parses and then
+    # fails at bind and dial as unsupported. The header arms below do not carry it, as the tokio
+    # engine's do not, and the programs of the TLS pair link the reference build.
     # Each header arm is built for the cooperative engine as it is for the tokio one: its
     # features are read off the arm's own config.h, with the engine changed
     # (`wz_config.py --engine coop`), into a target directory of its own. The single-threaded
@@ -17218,7 +17221,7 @@ layer_e_ap_demo_round_trip() {
     coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
         target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h)" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $coop_features \
+    (cd crates && cargo build -p wz-capi-pico $coop_features,tls-mbedtls \
         --target-dir target/wz-capi-pico-coop --quiet) || return 1
     for arm in st default local; do
         coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
@@ -17227,10 +17230,10 @@ layer_e_ap_demo_round_trip() {
         (cd crates && cargo build -p wz-capi-pico $coop_features \
             --target-dir "target/wz-capi-pico-$arm-coop" --quiet) || return 1
     done
-    _runci_guarded_test "E pico drop-in programs on the cooperative engine" 30 \
+    _runci_guarded_test "E pico drop-in programs on the cooperative engine" 32 \
         env WZ_PICO_ENGINE=coop \
         cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin -- --ignored \
-        --skip tls --skip zenohd --skip header_arms || return 1
+        --skip zenohd --skip header_arms || return 1
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -19948,12 +19951,15 @@ layer_z_zenohd_interop() {
         --target-dir target/wz-capi-pico-local --quiet) || return 1
     # And the reference arm's build for the cooperative engine, which Layer E builds too: the
     # drop-in legs below that need a router run against it as well
-    # (`docs/capi-pico-on-coop-engine.md`, step L4).
+    # (`docs/capi-pico-on-coop-engine.md`, step L4). It carries `tls-mbedtls`, the cooperative
+    # engine's secure channel, exactly as Layer E's line does and for the reason stated above for
+    # `transport-link-tls`: the two lanes build ONE artifact path, and a build at another feature
+    # set would replace the one the TLS legs of Layer E link.
     local coop_features
     coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
         target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h)" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $coop_features \
+    (cd crates && cargo build -p wz-capi-pico $coop_features,tls-mbedtls \
         --target-dir target/wz-capi-pico-coop --quiet) || return 1
     # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
     # pico z_sub_liveliness (the liveliness SUBSCRIBER that prints "New alive

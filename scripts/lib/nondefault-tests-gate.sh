@@ -506,6 +506,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # link the Mbed TLS `vendored` builds from the pinned submodules, which is not a default.
     # `host-lock` serialises the library's calls for the tests that run two engines on two threads.
     "wz-tls-mbedtls|hook|host-lock,vendored|"
+    # The same tests with the host's RSA beside the P-256 (`rsa`, step T4 of L6): a host's chain is
+    # RSA, and the configuration that carries it adds signature algorithms to every handshake, so
+    # the channel against rustls over P-256 is run again with it on. MEASURED: 30 passed, as
+    # without it. The row above is the build the kit's image is, which never sets `rsa`.
+    "wz-tls-mbedtls|hook|host-lock,rsa,vendored|"
     "wz-runtime-core|hook|alloc|"
     "wz-session-core|hook|\
         access-extauth-usrpwd,\
