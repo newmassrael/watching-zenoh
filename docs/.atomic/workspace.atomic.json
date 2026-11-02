@@ -305516,6 +305516,64 @@
         "Open: D14's witness on the kit with a real router's session reaching the verbs of the product image; SO_REUSEADDR on the Zephyr listener; the RAM rows for the larger loop arena of the fixed client and a hosted lane that builds it. A control that makes the query path alone fail was not run: the permit check by the witness shares the commander list with it, and the pair of GETs is what discriminates."
       ]
     },
+    "Round 4108": {
+      "decision_summary": "A consumer measured that a gap on a multicast group link is never counted: the passive reader set the SN ring only from an InitAck, so every Frame and Fragment of a UDP multicast or raweth flow read without_resolution. On a link with no handshake each sender's JOIN now states the ring its SNs are judged on (S clear states the defaults) and where they start: every conduit holds next_sn minus one, per priority under QoS, as upstream's receiver syncs a peer it learns. A later JOIN of the same sender moves nothing; one naming another zid, ring, role, lease or QoS starts the sender again. Rings are per direction, so two senders on one flow are judged apart. A JOIN on a link with a handshake is inadmissible and folds nothing. Field document 48 and census 22 record the moved values; no key moves.",
+      "changes_bullets": [
+        "wz-session-core passive: FlowContext.joined_caps per direction, caps_of / sn_mask_of / batch_size_of; sn_mask and batch_size are the InitAck's or the value every JOIN-stated direction agrees on",
+        "wz-session-core passive: PassiveSession folds a JOIN through JoinStatement and start_sns_at_join; track_sn, the fragment chain ring and the batch ceiling read the direction's ring",
+        "wz-session-core passive: inadmissible_on makes a JOIN inadmissible on a link with a handshake, as INIT and OPEN are on one without",
+        "wz-session-core: PeerInitCaps::from_join_body and DEFAULT_MULTICAST_BATCH_SIZE; join_decode::qos_next_sns and JOIN_QOS_EXT_EID, now the one reader multicast_join::decode_join_qos also calls",
+        "wz-capture: fields revision 48 and census revision 22 rows; the raweth sample capture reads yes, as its Fragment follows the SN its JOIN names",
+        "captures/upstream: a stock zenohd 1.10.0 multicast capture, anonymised, with its manifest; pre-push holds it to the anonymiser's fixed point",
+        "wz_dissect.h, fields_json, node and flow-zenoh-verdict prose follow the change"
+      ],
+      "verification_bullets": [
+        "wz-session-core lib, features dissect: passive 120 passed, among them 7 new join_ring_tests (default ring, next_sn baseline, 7-bit ring across a wrap, later and new-sender JOINs, QoS per priority, JOIN on a handshake link, two senders on one flow)",
+        "wz-session-core lib, features dissect, session-multicast, transport-qos, storage-profile: 1569 passed",
+        "wz-session-core check without codec-join: passes",
+        "wz-capture lib, features dissect: 1619 passed; upstream_capture_tests 3 passed on the stock capture (30 frames judged, missing 1 with frame 1, 15 or 29 taken out, the last one not counted)",
+        "clippy -D warnings, all targets: wz-session-core and wz-capture, each alone",
+        "capture_anonymise --verify-corpus captures/upstream: 1 file a fixed point"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "The last frame lost before a periodic JOIN is counted by nothing; a JOIN of a known sender is not judged against the last frame seen. Reopen if a consumer needs tail loss.",
+        "A JOIN's patch extension is not folded, so fragmentation markers on a multicast group stay unenforced by the passive reader.",
+        "Stock zenohd writes the default resolution into every JOIN whatever its configured SN resolution; a capture of such a group judges its SNs on the stated ring.",
+        "captures/upstream is outside the calibration corpus; the verdict's owner decides whether the multicast capture joins it."
+      ],
+      "publishable_decision_summary": "A consumer measured that a gap on a multicast group link is never counted: the passive reader set the SN ring only from an InitAck, so every Frame and Fragment of a UDP multicast or raweth flow read without_resolution. On a link with no handshake each sender's JOIN now states the ring its SNs are judged on (S clear states the defaults) and where they start: every conduit holds next_sn minus one, per priority under QoS, as upstream's receiver syncs a peer it learns. A later JOIN of the same sender moves nothing; one naming another zid, ring, role, lease or QoS starts the sender again. Rings are per direction, so two senders on one flow are judged apart. A JOIN on a link with a handshake is inadmissible and folds nothing. Field document 48 and census 22 record the moved values; no key moves.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive: FlowContext.joined_caps per direction, caps_of / sn_mask_of / batch_size_of; sn_mask and batch_size are the InitAck's or the value every JOIN-stated direction agrees on",
+        "wz-session-core passive: PassiveSession folds a JOIN through JoinStatement and start_sns_at_join; track_sn, the fragment chain ring and the batch ceiling read the direction's ring",
+        "wz-session-core passive: inadmissible_on makes a JOIN inadmissible on a link with a handshake, as INIT and OPEN are on one without",
+        "wz-session-core: PeerInitCaps::from_join_body and DEFAULT_MULTICAST_BATCH_SIZE; join_decode::qos_next_sns and JOIN_QOS_EXT_EID, now the one reader multicast_join::decode_join_qos also calls",
+        "wz-capture: fields revision 48 and census revision 22 rows; the raweth sample capture reads yes, as its Fragment follows the SN its JOIN names",
+        "captures/upstream: a stock zenohd 1.10.0 multicast capture, anonymised, with its manifest; pre-push holds it to the anonymiser's fixed point",
+        "wz_dissect.h, fields_json, node and flow-zenoh-verdict prose follow the change"
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core lib, features dissect: passive 120 passed, among them 7 new join_ring_tests (default ring, next_sn baseline, 7-bit ring across a wrap, later and new-sender JOINs, QoS per priority, JOIN on a handshake link, two senders on one flow)",
+        "wz-session-core lib, features dissect, session-multicast, transport-qos, storage-profile: 1569 passed",
+        "wz-session-core check without codec-join: passes",
+        "wz-capture lib, features dissect: 1619 passed; upstream_capture_tests 3 passed on the stock capture (30 frames judged, missing 1 with frame 1, 15 or 29 taken out, the last one not counted)",
+        "clippy -D warnings, all targets: wz-session-core and wz-capture, each alone",
+        "capture_anonymise --verify-corpus captures/upstream: 1 file a fixed point"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The last frame lost before a periodic JOIN is counted by nothing; a JOIN of a known sender is not judged against the last frame seen. Reopen if a consumer needs tail loss.",
+        "A JOIN's patch extension is not folded, so fragmentation markers on a multicast group stay unenforced by the passive reader.",
+        "Stock zenohd writes the default resolution into every JOIN whatever its configured SN resolution; a capture of such a group judges its SNs on the stated ring.",
+        "captures/upstream is outside the calibration corpus; the verdict's owner decides whether the multicast capture joins it."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
