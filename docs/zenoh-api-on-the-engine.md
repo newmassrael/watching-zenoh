@@ -534,6 +534,14 @@ Each lands whole with its surface lines, tests and faults in one round.
     token under was never consulted. An empty key now names nothing and the retraction is
     resolved by the id, on the three planes (a subscriber and a queryable were held the same
     way). The differential of the liveliness tells the same as upstream's.
+  - **Repaired after round 4109: the matching status of a querier said there was a remote
+    queryable when there was none.** The node counted a queryable that merely intersected the
+    key of the querier. The pin counts the queryables of a face only when their key includes it
+    (`zenoh/src/net/routing/hat/broker/queries.rs` @ `ke.includes(key_expr)`), and the queryables
+    of the session itself when the two intersect (`zenoh/src/api/session.rs` @ `fn matching_status_local`);
+    a querier that asks for complete queryables needs a complete one that includes its key in
+    both. The node now keeps the two rules, and the differential of the matching status of
+    publishers and queriers is equal to upstream's.
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

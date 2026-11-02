@@ -10775,9 +10775,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Whether anything `plane` counts matches `keyexpr` among the declarations `locality`
     /// admits: those of the node's own face (the `Local` region's hat) are the session's own, and
     /// those of every other region are remote ones, as upstream's matching status counts them
-    /// (`zenoh/src/api/session.rs` @ `matching_status_local`, `matching_status_remote`). A key
-    /// the plane counts by inclusion (a querier that asks for complete queryables) is met by a
-    /// complete queryable whose key includes it and by no other.
+    /// (`zenoh/src/api/session.rs` @ `matching_status_local`, `matching_status_remote`). A
+    /// subscriber matches a publisher's key when the two intersect. A queryable of a face matches
+    /// a querier's key only when its own key INCLUDES it, complete or not
+    /// (`zenoh/src/net/routing/hat/broker/queries.rs` @ `ke.includes(key_expr)`), a queryable of
+    /// the session itself when the two intersect, and a querier that asks for complete queryables
+    /// is met by a complete one that includes its key in both.
     pub fn matching(
         &self,
         plane: MatchPlane,
@@ -10788,6 +10791,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let wire = self.fwd.wire_key(keyexpr);
         let keyexpr = &*wire;
         let chunks: Vec<&str> = keyexpr.split('/').collect();
+        // Whether a queryable of `region` meets the key of a querier. The session counts its own
+        // queryables that intersect the key, or the complete ones that include it when the
+        // querier asks for those (`zenoh/src/api/session.rs` @ `fn matching_status_local`); the
+        // hat counts the queryables of the faces by inclusion, complete or not.
+        let meets = |region: Region, declared: &str, complete: bool, complete_required: bool| {
+            let covers = if region == Region::Local && !complete_required {
+                keyexpr_intersects_target(declared, &chunks)
+            } else {
+                keyexpr_includes_target(declared, &chunks)
+            };
+            covers && (!complete_required || complete)
+        };
         self.tables.hats.iter().any(|(region, hat)| {
             let admitted = if region == Region::Local {
                 locality.allows_local()
@@ -10802,8 +10817,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     (Hat::Mesh(hat), MatchPlane::Queryables { complete_required }) => {
                         hat.qabls.matching_entries(keyexpr, None).iter().any(
                             |(declared, _, info)| {
-                                !complete_required
-                                    || (info.complete && keyexpr_includes_target(declared, &chunks))
+                                meets(region, declared, info.complete, complete_required)
                             },
                         )
                     }
@@ -10815,11 +10829,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     (Hat::Broker(hat), MatchPlane::Queryables { complete_required }) => {
                         hat.qabls.values().any(|by_id| {
                             by_id.values().any(|(declared, info)| {
-                                if complete_required {
-                                    info.complete && keyexpr_includes_target(declared, &chunks)
-                                } else {
-                                    keyexpr_intersects_target(declared, &chunks)
-                                }
+                                meets(region, declared, info.complete, complete_required)
                             })
                         })
                     }
@@ -26509,7 +26519,7 @@ mod tests {
 
     /// What the router's tables hold for a key is counted by the locality that admits it: a
     /// declaration of a face is a remote one, a queryable the node hosts is the session's own,
-    /// and a key the plane counts by inclusion is met only by a complete queryable that covers it.
+    /// and a queryable of a face matches a querier only when its key includes the querier's.
     #[test]
     fn matching_counts_the_declarations_the_locality_admits() {
         use wz_session_core::locality::Locality;
@@ -26536,6 +26546,10 @@ mod tests {
             !fwd.matching(complete, "demo/q/one", Locality::Any),
             "an incomplete queryable does not meet a querier that wants a complete one"
         );
+        assert!(
+            !fwd.matching(queryables, "demo/q/**", Locality::Any),
+            "a queryable narrower than the key of a querier does not match it, complete or not"
+        );
 
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q/**", true));
         assert!(fwd.matching(complete, "demo/q/one", Locality::Any));
@@ -26551,6 +26565,14 @@ mod tests {
         );
         assert!(fwd.matching(queryables, "demo/h", Locality::SessionLocal));
         assert!(!fwd.matching(queryables, "demo/h", Locality::Remote));
+        assert!(
+            fwd.matching(queryables, "demo/**", Locality::SessionLocal),
+            "a queryable of the session that is narrower than the key of a querier meets it"
+        );
+        assert!(
+            !fwd.matching(complete, "demo/**", Locality::SessionLocal),
+            "but a querier that wants a complete one needs a complete queryable that covers it"
+        );
         forward_one(&fwd, FaceId(0), undeclare_qabl("demo/q/*"));
         forward_one(&fwd, FaceId(0), undeclare_qabl("demo/q/**"));
         assert!(!fwd.matching(queryables, "demo/q/one", Locality::Any));
