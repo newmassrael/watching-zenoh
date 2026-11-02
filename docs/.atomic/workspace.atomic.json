@@ -305272,6 +305272,38 @@
         "Phase 4 CI (R46+): GitHub Actions running validate_workspace + verify-codegen.sh + cargo test (all crates) + Layer 3 interop. The Layer 3 lane is what makes the CI gate meaningful — prior to R42, CI would only catch codegen regressions, not wire-format divergence."
       ]
     },
+    "Round 4100": {
+      "decision_summary": "A Frame was read as the tail of its unit, so a batch with a second Frame header (the sender puts a message of the other reliability behind one) or a transport message behind the last record lost everything from there on: the record walk met an id it has no length for and absorbed the rest of the payload as one Unknown record. An upstream publisher's burst of twelve operations, one best-effort, reached a subscriber as seven. The heap profile now takes a trailing Unknown whose id is a transport id (0 to 7) off the frame and parks it as the next unit of the batch, which the driver reads before it reaches for the link, as it reads the rest of a batch that began with a handshake message. An id that is neither a network nor a transport id stays an Unknown record. Two tests fail without the change and pass with it. The in-place path of the fixed-memory profile is not changed and is the next item.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/drive.rs: park_the_batch_after_the_frame takes a trailing Unknown with a transport id off the frame's records and parks it with park_pending_unit.",
+        "crates/wz-runtime-tokio/tests/session_fsm_driver_loop.rs: two tests (a second Frame of the other reliability and a third, a KeepAlive behind a Frame), and the Unknown test uses id 0x18 because 0x00 is the transport OAM id.",
+        "docs/reason-review-pins.md: the pin of session-close-ingress on drive.rs, re-read: the reason is about the close request and none of its claims moved."
+      ],
+      "verification_bullets": [
+        "Locally: the driver loop tests of wz-runtime-tokio pass (33), the two new ones fail with the call to the new function removed and pass with it, the 837 lib tests of wz-session-core pass, clippy with warnings denied passes for wz-session-core with its defaults, and the reason pin, citation and prose gates pass. Not run: the in-place and no-allocator profiles, the pico drop-in layers and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the same split in the in-place path of the fixed-memory profile (frame_in_place and the record walk that lends records where they lie: a transport id ends the frame there and the unit goes on from that offset), the plain-put lane, and the best-effort walk; the differential test of the upstream publisher still sends its best-effort put last and can send it first once those are done. Also owed: the Control frame that overtakes the Data staged before it on the writer lanes, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ],
+      "publishable_decision_summary": "A Frame was read as the tail of its unit, so a batch with a second Frame header (the sender puts a message of the other reliability behind one) or a transport message behind the last record lost everything from there on: the record walk met an id it has no length for and absorbed the rest of the payload as one Unknown record. An upstream publisher's burst of twelve operations, one best-effort, reached a subscriber as seven. The heap profile now takes a trailing Unknown whose id is a transport id (0 to 7) off the frame and parks it as the next unit of the batch, which the driver reads before it reaches for the link, as it reads the rest of a batch that began with a handshake message. An id that is neither a network nor a transport id stays an Unknown record. Two tests fail without the change and pass with it. The in-place path of the fixed-memory profile is not changed and is the next item.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/drive.rs: park_the_batch_after_the_frame takes a trailing Unknown with a transport id off the frame's records and parks it with park_pending_unit.",
+        "crates/wz-runtime-tokio/tests/session_fsm_driver_loop.rs: two tests (a second Frame of the other reliability and a third, a KeepAlive behind a Frame), and the Unknown test uses id 0x18 because 0x00 is the transport OAM id.",
+        "docs/reason-review-pins.md: the pin of session-close-ingress on drive.rs, re-read: the reason is about the close request and none of its claims moved."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the driver loop tests of wz-runtime-tokio pass (33), the two new ones fail with the call to the new function removed and pass with it, the 837 lib tests of wz-session-core pass, clippy with warnings denied passes for wz-session-core with its defaults, and the reason pin, citation and prose gates pass. Not run: the in-place and no-allocator profiles, the pico drop-in layers and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the same split in the in-place path of the fixed-memory profile (frame_in_place and the record walk that lends records where they lie: a transport id ends the frame there and the unit goes on from that offset), the plain-put lane, and the best-effort walk; the differential test of the upstream publisher still sends its best-effort put last and can send it first once those are done. Also owed: the Control frame that overtakes the Data staged before it on the writer lanes, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
