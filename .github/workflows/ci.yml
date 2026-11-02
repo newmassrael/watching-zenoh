@@ -4075,6 +4075,7 @@ jobs:
             deploy/zephyr-app/rust -> target
             deploy/zephyr-admin-node/rust -> target
             deploy/zephyr-tls-loopback/rust -> target
+            deploy/zephyr-admin-loopback/rust -> target
 
       - name: Layer Qz — Zephyr west build + QEMU boot e2e
         # The lane sources ~/zephyrproject/.venv itself for the west build; the

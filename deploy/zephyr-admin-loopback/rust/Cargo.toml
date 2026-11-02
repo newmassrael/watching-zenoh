@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zephyr-admin-loopback/rust -- the wz Rust STATICLIB of the witness that an admin node on Zephyr's
+# own sockets accepts a secure channel, learns the zid of the key its peer proved, and decides its
+# lifecycle verbs by it (decision D12 of docs/session-lifecycle-intent.md, steps 3 and 4). On the
+# slot profile, with no allocator, as the fixed-memory admin node is.
+#
+# Standalone workspace (the empty `[workspace]` table), so cargo does not pull it into
+# crates/Cargo.toml's member build.
+
+[workspace]
+
+[package]
+name = "wz-zephyr-admin-loopback"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+publish = false
+description = "wz Rust staticlib of the Zephyr admin-node witness: an admin node accepting a TLS 1.3 session on one image's loopback interface, its verbs decided by the zid the peer's key proved."
+
+[lib]
+name = "wz_zephyr_admin_loopback"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+critical-section = { version = "1", features = ["restore-state-u32"] }
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The facade and the slot profile, as the fixed-memory admin node and the fixed client name them
+# (deploy/zephyr-admin-node/rust/Cargo.toml): the Zephyr profile's seams without an allocator, the
+# cooperative executor, and the admin space with its config write.
+wz = { path = "../../../crates/wz", default-features = false, features = [
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-close",
+    "transport-keepalive",
+    "platform-zephyr-fixed",
+    "runtime-coop-core",
+    "adminspace-write",
+    "adminspace-fixed",
+] }
+# The session shell: the admin node over any stack (`slot_admin`), the client node it is dialled by,
+# and the lifecycle verbs the commanders are judged for.
+wz-session-mcu = { path = "../../../crates/wz-session-mcu", default-features = false, features = [
+    "transport-keepalive",
+    "session-slot",
+    "client-slot-queryable",
+    "adminspace-write",
+    "adminspace-fixed",
+    "lifecycle-verbs",
+    "lifecycle-status",
+] }
+wz-runtime-coop = { path = "../../../crates/wz-runtime-coop", default-features = false, features = ["session-slot"] }
+wz-runtime-zephyr = { path = "../../../crates/wz-runtime-zephyr", default-features = false, features = ["session-slot"] }
+wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = [
+    "session-unicast",
+    "no_std",
+    "session-slot",
+] }
+# The secure channel, on the slot profile, against the Mbed TLS the platform carries.
+wz-tls-mbedtls = { path = "../../../crates/wz-tls-mbedtls", default-features = false, features = ["session-slot"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

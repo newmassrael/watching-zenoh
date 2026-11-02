@@ -25121,6 +25121,40 @@ layer_qz_zephyr_boot() {
     fi
     rm -f "$tls_log"
     rm -rf "$(dirname "$tls_dir")"
+
+    # The admin node over Zephyr's sockets (decision D12, steps 3 and 4): the node of the slot
+    # profile with no allocator takes a secure channel from a client on the same loopback
+    # interface, learns the zid of the key the client proved, and decides its lifecycle verbs by
+    # it (a commander listed for `status` is answered for it, refused `close`, and a zid nobody
+    # listed is refused). Its sentinel is `ZEPHYR-WZ-ADMIN-TLS`, which neither pattern above matches.
+    local adm_dir adm_elf adm_log adm_pid
+    adm_dir="$(mktemp -d)/zbuild"
+    adm_elf="$adm_dir/zephyr/zephyr.elf"
+    if ! _qz_west_build Qz deploy/zephyr-admin-loopback mps2/an385 "$adm_dir" qz-admin-loopback-west-build.log; then
+        rm -rf "$(dirname "$adm_dir")"
+        return 1
+    fi
+    adm_log="$(mktemp)"
+    timeout 300 qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic \
+        -net none -kernel "$adm_elf" >"$adm_log" 2>&1 &
+    adm_pid=$!
+    for _ in $(seq 1 2900); do
+        grep -qE '^ZEPHYR-WZ-ADMIN-TLS ' "$adm_log" 2>/dev/null && break
+        kill -0 "$adm_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill "$adm_pid" 2>/dev/null
+    wait "$adm_pid" 2>/dev/null
+    if grep -qE '^ZEPHYR-WZ-ADMIN-TLS PASS[[:space:]]*$' "$adm_log"; then
+        echo "  Qz run deploy/zephyr-admin-loopback via mps2/an385 (mps2-an385) PASS"
+    else
+        echo "  Qz run deploy/zephyr-admin-loopback FAIL (no 'ZEPHYR-WZ-ADMIN-TLS PASS' console sentinel)" >&2
+        echo "  ── Qz: captured qemu output ──" >&2
+        sed 's/^/    | /' "$adm_log" >&2
+        fail=1
+    fi
+    rm -f "$adm_log"
+    rm -rf "$(dirname "$adm_dir")"
     return "$fail"
 }
 

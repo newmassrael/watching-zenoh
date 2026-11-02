@@ -1301,8 +1301,30 @@ packet until it is acknowledged, and at the default of four TX packets the fifth
 `send` failed, so the server was dropped before its Finished and the peer read an
 end of stream (the dial reported only that the handshake was refused). The image
 states 16 packets and 64 buffers; the admin node that takes the listener must
-state at least as much. What remains of the channel is the admin node over
-Zephyr's sockets, which does not exist yet.
+state at least as much. The admin node over
+Zephyr's sockets is built and witnessed in the same lane.
+
+The admin node is written once for every stack (`wz_session_mcu::slot_admin`:
+`AdminCore` holds the connect manager, the admin declarations and the report;
+`AcceptingAdminNode` takes its sessions through `Accept`, and lwIP's node is the
+same core around its datagram listener). `deploy/zephyr-admin-loopback` is an
+`AcceptingAdminNode` on Zephyr's sockets with no allocator, its sessions taken from
+`tls_acceptor(TlsListener<ZephyrTcpListener>)` and its admin queryable registered
+with `Verbs(StoreNode<Commanders>)`; the fixed-memory client node dials it over
+`tls/` on the board's loopback interface. Layer Qz boots it and holds that the
+admin node's accepted session is established with its peer verified, that the zid
+the node observed on that live session is the zid of the client's key, and that
+the node's verdicts for that zid are an answer for `status` (the one verb the list
+names it for), a refusal for `close`, and a refusal of `status` for a zid nobody
+listed. A control that lists another zid as the commander fails the image at the
+status answer. What the witness does not exercise is the query transport: the
+permit is given the zid of the live session, not a GET that carries it, so the
+step (1) plumbing of the requester through a real session stays held by its host
+tests. Step (4) is therefore built and witnessed for the commander list on a node
+of the sockets profile; what is left of it is the product image that binds the
+same assembly (the `zephyr-admin-node` crate takes the sockets backend as an admin
+role, with the Kconfig axis, the stated pools and the commander list from the
+declaration), and D14's witness on the kit with a real router.
 
 **D13. The Hello source is the scouting capability's to supply.** D3 gives the
 directory three sources (the build-time declaration, scouting `Hello`, the

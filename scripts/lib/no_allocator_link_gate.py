@@ -712,6 +712,20 @@ IMAGES: dict[str, Image] = {
     # The witness that a node on Zephyr's sockets accepts a secure channel. Not a node: it is a
     # test of the listener, allocates through the Zephyr heap as zephyr-app does, and the
     # fixed-memory admin node that takes the listener will be the gated image.
+    # The witness that an admin node on Zephyr's sockets takes a secure channel and decides its
+    # verbs by the zid the peer proved. It is the fixed-memory profile (the slot tier, no `alloc`)
+    # and declares no allocator, which the build of it already shows: it links. The gate's own
+    # proof reads a linked ELF it builds itself, and the image is not yet one of its builds.
+    "zephyr-admin-loopback": Image(
+        "deploy/zephyr-admin-loopback/rust/Cargo.toml",
+        "staticlib",
+        "wz-zephyr-admin-loopback",
+        "pending",
+        (Build(V7M, env=ZEPHYR_BUILD_VALUES, label="qemu_mps2"),),
+        "the witness is built and run by Layer Qz; its link-time proof of no allocator is the next"
+        " step, taken with the admin node's own image",
+        ci=False,
+    ),
     "zephyr-tls-loopback": Image(
         "deploy/zephyr-tls-loopback/rust/Cargo.toml",
         "staticlib",
