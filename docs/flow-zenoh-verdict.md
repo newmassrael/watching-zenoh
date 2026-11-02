@@ -1226,3 +1226,97 @@ weighed and none is foreign. The parameters model 4 adds or moves:
   does. DNS's random id, NTP version 3's first byte and CoAP's eight-byte
   token length are foreign some of the time, so their share of `no` grows with
   the flow; NTP version 4, as the corpus's NTP is, writes an id of the wire.
+
+### 6.10 Model 5: the derivation corrected, and two more derived checks (2026-11-03)
+
+Model 5 ships: `model` reads 5, the field document moves to revision 53 and
+the session table to revision 9. It corrects D11 and derives two more
+observations, under the owner's criterion of section 6.7.
+
+**D12. D11 left out the lowlatency link.** D11 said a zenoh sender writes a
+transport message's header or a batch header at a datagram's first byte. A
+unicast link may run lowlatency, and a lowlatency link writes a network
+message with no frame around it, on a datagram link at the first byte
+(`io/zenoh-transport/src/unicast/lowlatency/link.rs` @
+`pub(crate) async fn send_with_link(`, the branch that is not streamed). Its
+header's ID is one of the seven network IDs `0x19` to `0x1F`, which model 4
+counted foreign: a zenoh flow over UDP with lowlatency would have read `no`
+on its first verified datagram. The corpus holds no such flow, so the corpus
+test could not see it; a derivation is read off the source, not off the
+corpus. A front of the wire is now one of fifteen IDs whatever the flags
+(`wz_codecs::wire_const::is_wire_front`): the eight transport IDs and the
+seven network IDs. The IDs `0x08` to `0x18` are in neither space.
+
+**D13. A stream's fronts are derived where the capture holds its start.** A
+zenoh sender writes each batch of a TCP stream behind a length prefix, so the
+first byte past each prefix is a batch's first byte. Where the capture holds a
+direction's SYN, the reader's first unit is the sender's first, and each unit
+it frames after it, until the chain first breaks, stands where the sender put
+one. Each such front is a `wire_front` observation (one check: what the wire
+allows at a batch's first byte), of the integrity of the TCP segment that
+carried it (`StreamAssembler::integrity_of`).
+
+- The front is judged before the unit's body arrives, so a front that ends the
+  chain is weighed as well as one whose unit was read. After the first break
+  (a front not credible, a length not possible, a hole the source reported) no
+  front is weighed: a scan's resumption point is chosen for looking like one.
+- The first front of a direction is the one its framing was first judged at,
+  and a foreign front is never one the reader frames behind. When that front is
+  weighed and foreign, the lost framing follows from it and `stream_framing` is
+  not weighed for that direction; its measured null shares are counted over the
+  directions it is weighed for. This is the decomposition D11 made for a
+  datagram's unit reading.
+- A TLS flow decrypted into its plaintext has offsets of its own and no SYN of
+  its own: its fronts are not weighed. Nor, yet, are the fronts of WebSocket
+  messages, which delimit a batch as a datagram does.
+
+**D14. The version header's zenoh side is derived.** D10's hypothesis is
+zenoh of this wire, every sender of which writes version `0x09` in an Init,
+Join, Scout or Hello. Another version in an admissible message read whole is
+then an alteration, bounded as a foreign front is, by the integrity of the
+bytes that carried it: the datagram's checksums, the weakest of the TCP
+segments that carried the unit, or the weaker bound where the reader holds no
+verdict (a QUIC payload, a serial frame, a decrypted plaintext). Bytes whose
+checksum failed are not weighed. The null side is unchanged (`2^-8` for the
+version, the rest for another), so the check takes nothing from the corpus,
+and the version header leaves the group-rate checks of section 6.3.
+
+The derivations are put to the corpus by
+`no_zenoh_file_refutes_a_derived_check`: 49326 fronts of the zenoh files are
+weighed, 22259 of them on stream chains and 27067 on datagrams, and none is
+foreign; 1222 version headers are weighed and none is another version. The
+parameters model 5 moves:
+
+| measured null | `yes` bound per outcome | `no` mean per outcome |
+|---|---|---|
+| unit readings | 7.7639e-1, 1.0000e0, 9.0270e-1 | 1.1127e-1, 4.9302e-1, 3.9571e-1 |
+| stream framing | 6.0503e-2, 1.0000e0 | 8.0432e-3, 9.9196e-1 |
+
+| check | `yes` bound: of the wire, foreign | `no` prior mean of a foreign front |
+|---|---|---|
+| wire front | 1.0000e0, 1.0000e0 | 4.6807e-1 |
+
+**What model 5 reads on the corpus**
+(`the_corpus_holds_both_error_rates_and_every_files_tally`):
+
+| | `yes` | `no` | `undecided` |
+|---|---|---|---|
+| zenoh flows, model 4 | 619 | 0 | 2 |
+| zenoh flows, model 5 | 619 | 0 | 2 |
+| null flows, model 4 | 0 | 187 | 466 |
+| null flows, model 5 | 0 | 234 | 419 |
+
+- No zenoh word moves.
+- The 234 `no` are DNS 102, Redis 60, HTTP POST 28, SSH 17, RTPS 10, SMTP 10,
+  WS-Discovery 4, SSDP 2 and SOME/IP 1. The streams cross on their first
+  front: the reader takes their first two bytes for a length prefix, and the
+  byte past it (a letter, a digit or a line end) is no batch's first byte.
+  PostgreSQL's and MQTT's are IDs of the wire, and those flows stay
+  `undecided`.
+- Fewer datagram flows cross than under model 4, by D12: a DNS id, an mDNS
+  id, a SOME/IP service id or WS-Discovery's `<` whose low five bits are
+  `0x19` to `0x1F` is now a front of the wire.
+- Generated flows: SSDP reads `no` from three datagrams; syslog's `<` and
+  mDNS's zero id are fronts of the wire, and neither reads `no` at any length.
+  DNS reads `no` in 169, 285, 487, 581 and 600 of 600 flows of 3, 5, 10, 20
+  and 50 datagrams, and CoAP in 78, 176, 307, 434 and 574.
