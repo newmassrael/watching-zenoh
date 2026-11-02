@@ -29,6 +29,7 @@ bytes, so writing twice changes nothing.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import pathlib
 import struct
@@ -54,6 +55,21 @@ PINNED: dict[str, tuple[tuple[bytes, str], ...]] = {
     # `wz_dissect_live_follow_lent` lent a container it then refused as shrunk,
     # and the next read of a flow panicked (`Dissection::follow_lent`).
     "live": ((bytes([1, 3, 0, 128, 1, 1, 0, 0x44]), "corpus/zenoh-v1-10-0-tcp-full.pcap"),),
+}
+
+# Inputs that once made a target fail and are small enough to read: the bytes
+# libFuzzer wrote, as the base64 it printed beside them. Text here rather than a
+# binary file under `crates/wz-fuzz/regressions/`, so the commit that fixes the
+# defect shows the input it fixes it for.
+LITERAL: dict[str, tuple[str, ...]] = {
+    # `wz_replay_mutate` built an EXTEND by the caller's count on the heap before
+    # comparing it with the caller's buffer: an allocation larger than any memory
+    # ended the process (`Mutation::changes` and `apply_into` into `out` now).
+    "replay": (
+        "AwMAAAAEAw==",
+        "AwMA/f////kABwAAAAAAAABACgAAAAABAAAAAABhZCBieXRlcw==",
+        "AwAAACgDAAAABwAAAAAAAABAAAMA0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHRAAAAAAAABwAAAAAAAAC1AAEKAAEAAAAAAA==",
+    ),
 }
 
 CONTEXT = b'{"negotiated":true,"lowlatency":false}'
@@ -162,7 +178,8 @@ def transport_payload(link: int, frame: bytes) -> bytes | None:
 
 def seeds(target: str) -> list[bytes]:
     pinned = [head + (CAPTURES / path).read_bytes() for head, path in PINNED.get(target, ())]
-    return pinned + derived(target)
+    literal = [base64.b64decode(text, validate=True) for text in LITERAL.get(target, ())]
+    return pinned + literal + derived(target)
 
 
 def derived(target: str) -> list[bytes]:

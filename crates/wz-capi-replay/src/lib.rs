@@ -449,16 +449,26 @@ pub unsafe extern "C" fn wz_replay_plan_delays(
 ///
 /// # Why the length comes from the mutation and not from a formula
 ///
-/// This door runs the mutation to learn the length, including on the sizing
-/// call. A formula predicting the length would be a second opinion about
-/// `Mutation::apply`, which is the class of defect this crate exists to close —
-/// and it would be wrong the first time a mutation's arm did something the
-/// formula did not model.
+/// The length is `Mutation::output_len`, the length `Mutation::apply_into`
+/// itself writes, and `changed` is `Mutation::changes`, which compares the
+/// bytes `Mutation::bytes` makes, the same bytes `apply_into` writes. A formula
+/// of this door's own would be a second opinion about the mutation, which is
+/// the class of defect this crate exists to close.
+///
+/// # Nothing is allocated for the caller's numbers
+///
+/// The payload is written straight into `out`, and only once `out_cap` holds
+/// it. This door used to build the mutated payload on the heap first and then
+/// compare its length with `out_cap`, so an `EXTEND` by a count no memory holds
+/// ended the caller's process in the allocator instead of answering
+/// [`WZ_REPLAY_ERR_BUFFER_TOO_SMALL`] (found by the `replay` fuzz target of
+/// `crates/wz-fuzz`). The one copy left is of `payload`, when `out` overlaps
+/// it (a mutation in place): it is as long as the caller's own bytes.
 ///
 /// # Safety
 /// `payload` must be null or point to at least `payload_len` readable bytes.
-/// `out` must be null or writable for `out_cap` bytes. `out_len` must not be
-/// null; `changed` must be null or writable.
+/// `out` must be null or writable for `out_cap` bytes, and may overlap
+/// `payload`. `out_len` must not be null; `changed` must be null or writable.
 #[no_mangle]
 pub unsafe extern "C" fn wz_replay_mutate(
     mutation: c_int,
@@ -489,23 +499,41 @@ pub unsafe extern "C" fn wz_replay_mutate(
         // SAFETY: caller contract above.
         unsafe { core::slice::from_raw_parts(payload, payload_len) }
     };
-    let outcome = mutation.apply(input);
+    let len = mutation.output_len(input.len());
     // SAFETY: null-checked above.
-    unsafe { *out_len = outcome.payload.len() };
+    unsafe { *out_len = len };
     if !changed.is_null() {
         // SAFETY: caller contract above.
-        unsafe { *changed = c_int::from(outcome.changed) };
+        unsafe { *changed = c_int::from(mutation.changes(input)) };
     }
-    if out.is_null() || out_cap < outcome.payload.len() {
+    if out.is_null() || out_cap < len {
         return WZ_REPLAY_ERR_BUFFER_TOO_SMALL;
     }
-    if !outcome.payload.is_empty() {
-        // SAFETY: `out` is non-null and `out_cap` is at least this length.
-        unsafe {
-            core::ptr::copy_nonoverlapping(outcome.payload.as_ptr(), out, outcome.payload.len())
-        };
+    if len == 0 {
+        return WZ_REPLAY_OK;
     }
-    WZ_REPLAY_OK
+    // A mutation in place hands the same bytes as `payload` and `out`; Rust may
+    // not hold them as a shared and a mutable slice at once, so the input is
+    // copied first. It is the caller's own bytes, so the copy is bounded by them.
+    let overlaps = !input.is_empty() && {
+        let (a, b) = (input.as_ptr() as usize, out as usize);
+        a < b.saturating_add(len) && b < a.saturating_add(input.len())
+    };
+    let copied: Vec<u8>;
+    let body: &[u8] = if overlaps {
+        copied = input.to_vec();
+        &copied
+    } else {
+        input
+    };
+    // SAFETY: `out` is non-null, writable for `out_cap >= len` bytes, and no
+    // longer overlaps `body`.
+    let dest = unsafe { core::slice::from_raw_parts_mut(out, len) };
+    match mutation.apply_into(body, dest) {
+        Some(_) => WZ_REPLAY_OK,
+        // `dest` is exactly `output_len` long, which `apply_into` accepts.
+        None => unreachable!("apply_into refused a buffer of its own output_len"),
+    }
 }
 
 #[cfg(test)]

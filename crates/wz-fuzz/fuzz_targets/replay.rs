@@ -12,7 +12,8 @@
 //! (one byte) and the instants (eight bytes each), then the payload.
 //!
 //! Beyond each door's contract: a mutated payload is never longer than the
-//! room it was given, and `changed` is a yes or a no.
+//! room it was given, `changed` is a yes or a no, and the mutation done in
+//! place answers and writes what it does into a buffer of its own.
 
 #![no_main]
 
@@ -63,6 +64,41 @@ fuzz_target!(|data: &[u8]| {
         assert!(
             changed == 0 || changed == 1,
             "replay_mutate: changed is {changed}"
+        );
+    }
+
+    // The same mutation in place: the payload in a buffer of the same room (or
+    // its own length, if longer), handed as both `payload` and `out`. It must
+    // answer what the call above did, with the same bytes.
+    let mut in_place = payload.to_vec();
+    in_place.resize(room.max(payload.len()), 0);
+    let (mut len_in_place, mut changed_in_place) = (usize::MAX, -1);
+    // SAFETY: `in_place` is readable for `payload.len()` and writable for its
+    // whole length; the door allows `out` to overlap `payload`.
+    let rc_in_place = unsafe {
+        wz_replay_mutate(
+            mutation,
+            operand,
+            seed,
+            in_place.as_ptr(),
+            payload.len(),
+            in_place.as_mut_ptr(),
+            in_place.len(),
+            &mut len_in_place,
+            &mut changed_in_place,
+        )
+    };
+    assert_eq!(
+        (len_in_place, changed_in_place),
+        (len, changed),
+        "replay_mutate: in place it states another length or change"
+    );
+    if rc == WZ_REPLAY_OK {
+        assert_eq!(rc_in_place, WZ_REPLAY_OK, "replay_mutate: refused in place");
+        assert_eq!(
+            in_place[..len],
+            out[..len],
+            "replay_mutate: in place it wrote other bytes"
         );
     }
 

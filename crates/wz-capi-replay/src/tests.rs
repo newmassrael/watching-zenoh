@@ -730,6 +730,67 @@ fn the_sizing_call_reports_the_length_without_a_buffer() {
     assert_eq!(needed, 8);
 }
 
+/// An extension by a count no memory holds is sized and refused, not allocated:
+/// the door used to build the payload on the heap before comparing it with the
+/// buffer, and this call ended the process (the `replay` fuzz target found it).
+#[test]
+fn an_extension_no_memory_holds_is_refused_not_allocated() {
+    let payload = [1u8, 2, 3];
+    let mut buf = [0xEEu8; 16];
+    let (mut needed, mut changed) = (0usize, -1);
+    let code = unsafe {
+        wz_replay_mutate(
+            WZ_REPLAY_MUTATION_EXTEND,
+            u64::MAX >> 8,
+            1,
+            payload.as_ptr(),
+            payload.len(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut needed,
+            &mut changed,
+        )
+    };
+    assert_eq!(code, WZ_REPLAY_ERR_BUFFER_TOO_SMALL);
+    assert_eq!(needed, ((u64::MAX >> 8) as usize).saturating_add(3));
+    assert_eq!(changed, 1, "an extension changes the payload");
+    assert_eq!(buf, [0xEE; 16], "a refused call writes nothing");
+}
+
+/// A mutation in place, with `out` the payload's own buffer, writes the bytes a
+/// separate buffer receives.
+#[test]
+fn a_mutation_in_place_writes_what_a_separate_buffer_gets() {
+    for (kind, operand) in [
+        (WZ_REPLAY_MUTATION_FLIP_BIT, 9),
+        (WZ_REPLAY_MUTATION_TRUNCATE, 2),
+        (WZ_REPLAY_MUTATION_EXTEND, 3),
+        (WZ_REPLAY_MUTATION_SCRAMBLE, 0),
+    ] {
+        let (code, separate, changed) = mutate(kind, operand, 7, b"payload");
+        assert_eq!(code, WZ_REPLAY_OK);
+        let mut buf = [0u8; 16];
+        buf[..7].copy_from_slice(b"payload");
+        let (mut len, mut in_place_changed) = (0usize, -1);
+        let code = unsafe {
+            wz_replay_mutate(
+                kind,
+                operand,
+                7,
+                buf.as_ptr(),
+                7,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len,
+                &mut in_place_changed,
+            )
+        };
+        assert_eq!(code, WZ_REPLAY_OK, "{kind}");
+        assert_eq!(&buf[..len], separate.as_slice(), "{kind}");
+        assert_eq!(in_place_changed == 1, changed, "{kind}");
+    }
+}
+
 /// A buffer one byte short is refused and left untouched.
 #[test]
 fn a_short_mutation_buffer_is_refused_and_writes_nothing() {
