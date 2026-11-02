@@ -30,7 +30,11 @@ use alloc::vec::Vec;
 ///
 /// All fields default to `None`/`false`, which is the cert-free tcp/udp/ws path
 /// — [`Default`] is what a non-TLS `z_open` passes.
-#[derive(Default, Clone, Debug)]
+///
+/// `Debug` is written out and never prints a PEM: the two private-key fields are secrets, and
+/// the certificate fields are shown by size only so that the output of a logged config stays
+/// the same shape whether or not a field is public.
+#[derive(Default, Clone)]
 pub struct CapiTlsConfig {
     /// The trust bundle a `tls/...` DIAL verifies the peer's server cert
     /// against (pico `Z_CONFIG_TLS_ROOT_CA_CERTIFICATE{,_BASE64}_KEY`). `None`
@@ -59,6 +63,33 @@ pub struct CapiTlsConfig {
     pub require_client_auth: bool,
 }
 
+/// A PEM field as `None` or `Some(<n> bytes)`: the size says whether material arrived, the
+/// bytes themselves are not for a log.
+struct PemSize<'a>(&'a Option<Vec<u8>>);
+
+impl core::fmt::Debug for PemSize<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            None => f.write_str("None"),
+            Some(pem) => write!(f, "Some({} bytes)", pem.len()),
+        }
+    }
+}
+
+impl core::fmt::Debug for CapiTlsConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CapiTlsConfig")
+            .field("root_ca_pem", &PemSize(&self.root_ca_pem))
+            .field("verify_name_on_connect", &self.verify_name_on_connect)
+            .field("connect_cert_pem", &PemSize(&self.connect_cert_pem))
+            .field("connect_key_pem", &PemSize(&self.connect_key_pem))
+            .field("listen_cert_pem", &PemSize(&self.listen_cert_pem))
+            .field("listen_key_pem", &PemSize(&self.listen_key_pem))
+            .field("require_client_auth", &self.require_client_auth)
+            .finish()
+    }
+}
+
 impl CapiTlsConfig {
     /// The mTLS client-auth pair (certificate chain, private key), `Some` only when BOTH halves
     /// are present.
@@ -77,6 +108,22 @@ impl CapiTlsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+
+    #[test]
+    fn debug_shows_the_size_of_a_pem_and_never_its_bytes() {
+        let config = CapiTlsConfig {
+            connect_key_pem: Some(b"-----BEGIN PRIVATE KEY-----SECRETCONNECT".to_vec()),
+            listen_key_pem: Some(b"-----BEGIN PRIVATE KEY-----SECRETLISTEN".to_vec()),
+            listen_cert_pem: Some(b"-----BEGIN CERTIFICATE-----PUBLIC".to_vec()),
+            ..CapiTlsConfig::default()
+        };
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("SECRET"), "a private key leaked: {shown}");
+        assert!(!shown.contains("BEGIN"), "a PEM leaked: {shown}");
+        assert!(shown.contains("connect_key_pem: Some(40 bytes)"), "{shown}");
+        assert!(shown.contains("root_ca_pem: None"), "{shown}");
+    }
 
     #[test]
     fn the_client_auth_pair_needs_both_halves() {
