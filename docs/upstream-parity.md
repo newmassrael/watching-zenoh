@@ -51,8 +51,8 @@ cell without a same-condition measurement makes no claim.
 | MCU text, fixed client vs tuned pico | 157,088 | 164,396 | storage doc 5, different feature sets |
 | MCU answer turnaround | fixed 0.203 ms, heap 0.210 ms | pico 0.213 ms | storage doc 5, 12 boots each |
 | MCU GET (wz node asking) | 76.0 us | pico 80.4, zenoh 99.9, zenoh-c 96.3 | storage doc 5.2, ranges overlap |
-| host no-drop rate, pico ABI, puts batched per 1 ms slot, 8 / 64 / 1024 B | at least 5.12 M / 4.48 M / 160 k msg/s | pico 4.48 M / 4.00 M / 310 k | `pico-compare.sh nodrop`, pc3, TCP loopback peer, median of 3, 2026-10-31 |
-| host no-drop rate, pico ABI, puts one by one, 8 / 64 / 1024 B | 4.96 M / 4.32 M / 310 k msg/s | pico 370 k / 380 k / 360 k | the same, with `write_bound`; 1 KiB was 190 k before it |
+| host no-drop rate, pico ABI, puts batched per 1 ms slot, 8 / 64 / 1024 B | at least 5.12 M / 4.64 M / 570 k msg/s | pico 4.80 M / 4.16 M / 355 k | `pico-compare.sh nodrop`, pc3, TCP loopback peer, median of 2, 2026-11-02, with `write_bound` and the lane of 8; 2026-10-31 read at least 5.12 M / 4.48 M / 160 k against pico 4.48 M / 4.00 M / 310 k |
+| host no-drop rate, pico ABI, puts one by one, 8 / 64 / 1024 B | 4.96 M / 4.32 M / 310 k msg/s | pico 370 k / 380 k / 360 k | the same, with `write_bound` only; 1 KiB was 190 k before it, and 560 k with the lane of 8 (below) |
 
 **The no-drop rate** (`scripts/host-bench/`, RFC 2544): the publisher OFFERS a stated rate and the
 subscriber counts what it is delivered; a rate stands when every message arrived and the rate was
@@ -96,7 +96,7 @@ pair, and wz's sender and writer are two busy threads on it where pico is one; w
 cores the unchanged writer read 290 k. And the 64 B figure read 4.48 M in one session and 4.32 M in
 the next, with and without this change (the unmodified queue read 4.32 M too), so a difference of one
 step of the search (5 percent) between two sessions is the host's. What is left of the gap, 310 k
-against 360 k, has no reading yet. The batched row above is not re-measured with this change.
+against 360 k, had no reading at the time of this change (read below, under the depth of the lane).
 
 Sizes between 64 B and 2 KiB, puts one by one, median of three on pc3, default pinning (msg/s;
 pico to pico / wz to wz / wz to pico / pico to wz):
