@@ -1391,6 +1391,25 @@ image, built with room for one node and a declared hint for the peer the lane
 runs. The lane's grammar change is the kit lane's file; this ruling is the
 instruction for it.
 
+Witnessed on the kit (2026-11-02, first part). `scripts/kit-lane.sh` has an
+admin image, `zephyr-admin-fixed-tls`: the product node of `fixed_admin.rs` on
+the T2G board over Zephyr's sockets and the secure channel
+(`overlays/t2g_admin_fixed_tls.conf` after `qemu_admin_fixed_tls.conf`, which is
+not the QEMU board's alone). The build makes the router's key first and lists
+the zid it names as the commander of `status` and of no other verb; the run
+flashes the image, reads its certificate and READY line (the key of the
+certificate must name the zid the line claims), has a stock `zenohd` dial it
+with mutual TLS and the certificate as the root it pins, and asks the verbs
+through the router's REST plugin: `status` is answered with a status document,
+`close` is refused by name, and the control, a second router whose key is not
+listed, is refused `status`. All held on the first two runs, with no
+`wz: FAIL` line; the node's own console reported one session and a stack peak
+of 22,189 of 32,768 bytes. The requester the verbs decided by is the one the
+link's key proved, on silicon, through a real router. What this part does not
+do is the open by zid and the read of `sessions[]`, and the image has no stack
+gate row yet (the 32,768-byte stack is the build's default until a row sets
+it).
+
 **D15. An `open` for a peer the graphs do not hold enters the table.** An
 intent is declarative state: a configured BGP neighbour exists whether or not
 it is reachable, and a desired state in a reconciliation loop is recorded

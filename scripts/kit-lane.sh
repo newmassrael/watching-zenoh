@@ -150,6 +150,15 @@ image_spec() {
             OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_fixed.conf;overlays/t2g_client_tls.conf"
             KIND=verify
             ;;
+        # An ADMIN image is the product node that LISTENS over the secure channel (decision D14 of
+        # docs/session-lifecycle-intent.md): the router dials it with a key the lane made before the build,
+        # whose zid is the commander the image is built with for the status verb and for no other, and the
+        # host asks the verbs through the router. Its rows are set by its first runs on the kit.
+        zephyr-admin-fixed-tls)
+            OVERLAYS="overlays/t2g_zeth.conf;overlays/qemu_admin_fixed_tls.conf;overlays/t2g_admin_fixed_tls.conf"
+            KIND=admin
+            READY_TAG="ZEPHYR-WZ-ADMIN READY"
+            ;;
         *) return 1 ;;
     esac
 }
@@ -157,6 +166,9 @@ IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get
 # The measure images: not the stack gate's (their stack is what they report) and not yet a resource
 # row's (the row is set from what they measure).
 MEASURE_IMAGES=(zephyr-tls-fit)
+# The admin images: the product node that listens, run against a router that dials it. Not the stack
+# gate's yet (no row until a run sets it).
+ADMIN_IMAGES=(zephyr-admin-fixed-tls)
 # The compare images: run only by `compare`, beside the images above.
 COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
@@ -182,6 +194,38 @@ load_lab() {
 }
 
 openocd() { "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" "$@"; }
+
+# The router's identity in $1: a P-256 key, a certificate self-signed over it, and the zid it names
+# (decision D1: the first 16 bytes of SHA-256 over the key's DER SubjectPublicKeyInfo, which zenoh's
+# configuration spells as hex of those bytes read little-endian, leading zeros dropped, because zenoh
+# refuses an id with them). The zid is left in ROUTER_ID.
+make_router_identity() {
+    local dir="$1" digest
+    mkdir -p "$dir"
+    openssl ecparam -name prime256v1 -genkey -noout -out "$dir/router.key" 2>"$dir/router-id.log" &&
+        openssl req -new -x509 -key "$dir/router.key" -subj /CN=wz-kit-router -days 3650 \
+            -out "$dir/router.pem" 2>>"$dir/router-id.log" || return 1
+    digest="$(openssl pkey -in "$dir/router.key" -pubout -outform DER 2>>"$dir/router-id.log" | sha256sum)"
+    ROUTER_ID="$(zenoh_id_of_digest "$digest")"
+    [[ -n "$ROUTER_ID" ]]
+}
+
+# The zid text a SHA-256 hex digest names: its first 16 bytes read as a little-endian number, leading
+# zeros dropped (wz_session_core::zid_hex::write_zenoh_hex).
+zenoh_id_of_digest() {
+    local digest="${1:0:32}" le="" i
+    for ((i = 30; i >= 0; i -= 2)); do
+        le+="${digest:i:2}"
+    done
+    echo "${le#"${le%%[!0]*}"}"
+}
+
+# The zid the key of a PEM certificate names, derived here and not read from anything the node printed.
+zenoh_id_of_certificate() {
+    local digest
+    digest="$(openssl x509 -in "$1" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)"
+    zenoh_id_of_digest "$digest"
+}
 
 # The router's own version line, without the colour codes its logger puts around it.
 router_version() {
@@ -315,6 +359,18 @@ build() {
     fi
     local dir="$LANE_HOME/build/$name" out="$LANE_HOME/out/$CLOCK_TAG-$name"
     mkdir -p "$out"
+    if [[ "$KIND" == admin ]]; then
+        # The commanders are compiled in, so the router's key exists before the image: the run reads the
+        # same key back from this directory. Status lists the router; close, reset and open list nobody.
+        if ! make_router_identity "$out"; then
+            bad "$key" "the router's identity could not be made ($out/router-id.log)"
+            return 1
+        fi
+        printf 'CONFIG_WZ_COMMANDERS_STATUS="%s"\n' "$ROUTER_ID" >"$out/commanders.conf"
+        echo "$ROUTER_ID" >"$out/router.zid"
+        confs="${confs:+$confs;}$out/commanders.conf"
+        ok "$key" "the router's key names zid $ROUTER_ID, built in as the commander of status and of no other verb"
+    fi
     local avail
     avail="$(LC_ALL=C free -m | awk '/^Mem:/ {print $7}')"
     local floor_mb="${KIT_LANE_MIN_AVAIL_MB:-8000}"
@@ -370,6 +426,8 @@ PY
         ok "$key" "a measure image: its stack is one of the figures it reports, not the stack gate's"
     elif [[ "$KIND" == verify ]]; then
         ok "$key" "a verify image: no stack gate row yet, its first runs on the kit set it"
+    elif [[ "$KIND" == admin ]]; then
+        ok "$key" "an admin image: no stack gate row yet, its first runs on the kit set it"
     elif is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
         ok "$key" "a compare build: not the stack gate's, a compare run reports what it reads of it"
     elif python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
@@ -381,7 +439,7 @@ PY
     # that commit one; it is the figure the quarter of free stack applies to, and the kit's reading lies under it.
     local bound_rows
     bound_rows="$(python3 "$ROOT/scripts/lib/stack_bound_gate.py" --list)"
-    if [[ "$KIND" == measure || "$KIND" == verify ]] || is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
+    if [[ "$KIND" == measure || "$KIND" == verify || "$KIND" == admin ]] || is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
         :
     elif [[ $'\n'"$bound_rows"$'\n' == *$'\n'"$key"$'\n'* ]]; then
         if python3 "$ROOT/scripts/lib/stack_bound_gate.py" --check "$key" --elf "$elf" >"$out/stack-bound.log" 2>&1; then
@@ -502,6 +560,13 @@ run() {
     trap stop_all EXIT
     if [[ "$KIND" == measure ]]; then
         run_measure "$key"
+        stop_all
+        trap - EXIT
+        [[ "$fails" -eq "$before" ]]
+        return
+    fi
+    if [[ "$KIND" == admin ]]; then
+        run_admin "$key"
         stop_all
         trap - EXIT
         [[ "$fails" -eq "$before" ]]
@@ -742,20 +807,11 @@ run_verify() {
     ok "$key" "the image printed its certificate ($(cat "$OUT/device.subject"))"
 
     # The router's identity: a P-256 key, a certificate self-signed over it, and the zid it names.
-    if ! { openssl ecparam -name prime256v1 -genkey -noout -out "$OUT/router.key" 2>"$OUT/router-id.log" &&
-        openssl req -new -x509 -key "$OUT/router.key" -subj /CN=wz-kit-router -days 3650 \
-            -out "$OUT/router.pem" 2>>"$OUT/router-id.log"; }; then
+    if ! make_router_identity "$OUT"; then
         bad "$key" "the router's identity could not be made ($OUT/router-id.log)"
         return 1
     fi
-    local digest le="" i id
-    digest="$(openssl pkey -in "$OUT/router.key" -pubout -outform DER 2>>"$OUT/router-id.log" | sha256sum)"
-    digest="${digest:0:32}"
-    for ((i = 30; i >= 0; i -= 2)); do
-        le+="${digest:i:2}"
-    done
-    # zenoh refuses an id with leading zeros.
-    id="${le#"${le%%[!0]*}"}"
+    local id="$ROUTER_ID"
     cat >"$OUT/router.json5" <<EOF
 { id: "$id", mode: "router",
   transport: { link: { tls: {
@@ -784,6 +840,144 @@ EOF
         return 1
     fi
     ok "$key" "the image and the router verify each other: $verdict"
+}
+
+# An admin image after its flash (decision D14). The image LISTENS over the secure channel and prints its
+# certificate and a READY line with the zid its key names; the router, whose key the image was built to
+# list as the commander of status (build made it, and $OUT/router.zid is its zid), DIALS the image with
+# mutual TLS and the image's certificate as the root it pins; the host then asks the verbs through the
+# router's REST plugin. Status, which the router's key is listed for, must be answered with a status
+# document, and close, which nobody is listed for, must be refused by name. The pair discriminates both
+# ways: a node that could not tell the requester would refuse the status, and one that took the requester
+# for anyone would answer the close.
+run_admin() {
+    local key="$1"
+    if [[ ! -f "$OUT/router.key" || ! -f "$OUT/router.pem" || ! -s "$OUT/router.zid" ]]; then
+        bad "$key" "the router's identity is not in $OUT: build the image again"
+        return 1
+    fi
+    local router_id
+    router_id="$(cat "$OUT/router.zid")"
+    if ! sudo -n ip addr add "$KIT_HOST_IP/24" dev "$KIT_IFACE" 2>"$OUT/ip.log"; then
+        bad "$key" "the interface $KIT_IFACE did not take $KIT_HOST_IP ($OUT/ip.log)"
+        return 1
+    fi
+    ADDR_ADDED=1
+    stty -F "$KIT_CONSOLE" 115200 raw -echo -hupcl
+    setsid timeout 900 cat "$KIT_CONSOLE" >"$OUT/console.raw" 2>"$OUT/console.err" </dev/null &
+    PIDS+=("$!")
+    sleep 2
+    local mark
+    mark="$(stat -c %s "$OUT/console.raw")"
+    if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
+        -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
+        >"$OUT/reset.log" 2>&1; then
+        ok "$key" "the kit was reset ($OUT/reset.log)"
+    else
+        bad "$key" "the reset failed ($OUT/reset.log)"
+        return 1
+    fi
+    since() { tail -c +"$((mark + 1))" "$OUT/console.raw" | tr -d '\r'; }
+    local waited=0
+    while [[ "$waited" -lt 90 ]] && ! since | grep -aq "$READY_TAG"; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    local ready node_id locator
+    ready="$(since | grep -a "$READY_TAG" | tail -n 1)"
+    node_id="$(awk '{print $3}' <<<"$ready")"
+    locator="$(awk '{print $4}' <<<"$ready")"
+    if [[ -z "$node_id" || "$locator" != tls/* ]]; then
+        bad "$key" "no READY line with a zid and a tls/ locator in 90 s after the reset ($OUT/console.raw)"
+        return 1
+    fi
+    since | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' >"$OUT/device.pem"
+    if ! openssl x509 -in "$OUT/device.pem" -noout -subject >"$OUT/device.subject" 2>&1; then
+        bad "$key" "the image printed no certificate a router can read ($OUT/console.raw)"
+        return 1
+    fi
+    local derived
+    derived="$(zenoh_id_of_certificate "$OUT/device.pem")"
+    if [[ "$derived" != "$node_id" ]]; then
+        bad "$key" "the READY line claims zid $node_id and the certificate's key names $derived"
+        return 1
+    fi
+    ok "$key" "the image listens at $locator and the key of its certificate names the zid its READY line claims ($node_id)"
+
+    cat >"$OUT/router.json5" <<EOF
+{ id: "$router_id", mode: "router",
+  connect: { endpoints: ["$locator"] },
+  transport: { link: { tls: {
+    root_ca_certificate: "$OUT/device.pem",
+    connect_certificate: "$OUT/router.pem", connect_private_key: "$OUT/router.key",
+    enable_mtls: true, verify_name_on_connect: false } } } }
+EOF
+    setsid "$KIT_ZENOHD" --config "$OUT/router.json5" -l "tcp/127.0.0.1:17447" \
+        --no-multicast-scouting --plugin-search-dir "$(dirname "$KIT_ZENOHD")" \
+        --rest-http-port "127.0.0.1:$REST_PORT" >"$OUT/router.log" 2>&1 </dev/null &
+    PIDS+=("$!")
+    ok "$key" "a router claiming zid $router_id dials the image and pins its certificate ($OUT/router.json5)"
+
+    # The verbs are asked through the router: under the node's zid, for a peer the lane names (the router).
+    local base="http://127.0.0.1:$REST_PORT/@/$node_id/peer/session" attempt status_body="" close_body=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        status_body="$(curl -s -m 10 "$base/status/$router_id" 2>/dev/null || true)"
+        [[ "$status_body" =~ verdict[^a-z]+status ]] && break
+        sleep 5
+    done
+    printf '%s\n' "$status_body" >"$OUT/status.json"
+    close_body="$(curl -s -m 10 "$base/close/$router_id" 2>/dev/null || true)"
+    printf '%s\n' "$close_body" >"$OUT/close.json"
+    if [[ "$status_body" =~ verdict[^a-z]+status ]]; then
+        ok "$key" "status was answered for the commander the image lists: the key of the router's session ($OUT/status.json)"
+    else
+        bad "$key" "status was not answered for the listed commander: '${status_body:0:160}' ($OUT/status.json, $OUT/router.log)"
+    fi
+    if [[ "$close_body" =~ verdict[^a-z]+refused ]]; then
+        ok "$key" "close was refused by name: nobody is listed for it ($OUT/close.json)"
+    else
+        bad "$key" "close was not refused by name: '${close_body:0:160}' ($OUT/close.json)"
+    fi
+    # The control: the same image, asked through a router whose key is NOT the listed commander. The verb
+    # that was answered must now be refused, or the answer above was the verb's and not the requester's.
+    kill "${PIDS[-1]}" 2>/dev/null
+    wait "${PIDS[-1]}" 2>/dev/null
+    sleep 3
+    local other="$OUT/other"
+    if ! make_router_identity "$other"; then
+        bad "$key" "the control router's identity could not be made ($other/router-id.log)"
+        return 1
+    fi
+    local other_id="$ROUTER_ID" other_port=$((REST_PORT + 1))
+    cat >"$other/router.json5" <<EOF
+{ id: "$other_id", mode: "router",
+  connect: { endpoints: ["$locator"] },
+  transport: { link: { tls: {
+    root_ca_certificate: "$OUT/device.pem",
+    connect_certificate: "$other/router.pem", connect_private_key: "$other/router.key",
+    enable_mtls: true, verify_name_on_connect: false } } } }
+EOF
+    setsid "$KIT_ZENOHD" --config "$other/router.json5" -l "tcp/127.0.0.1:17448" \
+        --no-multicast-scouting --plugin-search-dir "$(dirname "$KIT_ZENOHD")" \
+        --rest-http-port "127.0.0.1:$other_port" >"$other/router.log" 2>&1 </dev/null &
+    PIDS+=("$!")
+    local control_body=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        control_body="$(curl -s -m 10 "http://127.0.0.1:$other_port/@/$node_id/peer/session/status/$other_id" 2>/dev/null || true)"
+        [[ "$control_body" =~ verdict ]] && break
+        sleep 5
+    done
+    printf '%s\n' "$control_body" >"$OUT/control.json"
+    if [[ "$control_body" =~ verdict[^a-z]+refused ]]; then
+        ok "$key" "status was refused to a router whose key is not listed ($other_id): the answer above was the requester's ($OUT/control.json)"
+    else
+        bad "$key" "status was not refused to an unlisted router: '${control_body:0:160}' ($OUT/control.json, $other/router.log)"
+    fi
+    if since | grep -aq 'wz: FAIL'; then
+        bad "$key" "the console says 'wz: FAIL' ($(since | grep -a 'wz: FAIL' | head -n 1))"
+    else
+        ok "$key" "the console has no 'wz: FAIL' line"
+    fi
 }
 
 # ── compare ─────────────────────────────────────────────────────────────────────────────────────
@@ -978,6 +1172,21 @@ PY
             bad selftest "$key is both a compare image and a gated one"
         fi
     done
+    for key in "${ADMIN_IMAGES[@]}"; do
+        if ! image_spec "$key" || [[ "$KIND" != admin ]]; then
+            bad selftest "$key is listed as an admin image and the table does not say so"
+            continue
+        fi
+        IFS=';' read -ra files <<<"$OVERLAYS"
+        for overlay in "${files[@]}"; do
+            [[ -f "$ROOT/deploy/$APP/$overlay" ]] || bad selftest "$key names $overlay, which is not in deploy/$APP"
+        done
+        if grep -rqF "$READY_TAG {} {}" "$ROOT/deploy/$APP/rust/src"; then
+            ok selftest "$key is an admin image of deploy/$APP that prints '$READY_TAG <zid> <locator>'"
+        else
+            bad selftest "$key waits for '$READY_TAG', which deploy/$APP never prints with a zid and a locator"
+        fi
+    done
     for key in "${MEASURE_IMAGES[@]}"; do
         if ! image_spec "$key" || [[ "$KIND" != measure || -z "${DONE_TAG:-}" ]]; then
             bad selftest "$key is listed as a measure image and the table does not say how it ends"
@@ -1009,7 +1218,7 @@ case "$cmd" in
         ;;
     compare) compare "$@" ;;
     build-responder) build_responder ;;
-    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
+    list) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
     images) printf '%s\n' "${IMAGES[@]}" ;; # the gated client images, which `build` holds to their rows with no kit
     --selftest) selftest ;;
     *)
