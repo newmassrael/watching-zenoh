@@ -613,3 +613,208 @@ fn an_idle_z_close_does_not_burn_the_whole_drain_window() {
          should exit immediately, whoever else still holds a sender."
     );
 }
+
+/// Small messages put in a burst and `z_close` on the next line: the frame the session still
+/// holds open must reach the peer too.
+///
+/// The first test queues fragmented tails, which leave the session as they are put. A message
+/// of a few bytes does not: the data plane stages it into the open frame of its priority, and
+/// the link's writer puts that frame on the wire when it falls idle, through a hook that holds
+/// the session weakly. `z_close` let go of the session first, so a close that came before the
+/// writer's idle flush found the hook empty and the open frame was dropped with the session:
+/// the puts of the last moments of a burst returned `Z_OK` and never arrived (found by the
+/// host throughput bench of 8-byte puts, which lost the last slot of a run in most runs).
+///
+/// Many short sessions rather than one, because the loss is a race between the close and the
+/// writer's flush and one close wins it often. The payload is what must be TRUE of it: small
+/// enough to share a frame with its neighbours, and of a length no other test here tells apart.
+#[test]
+fn a_burst_of_small_puts_before_z_close_is_not_left_in_the_open_frame() {
+    const ROUNDS: usize = 10;
+    const BURST: usize = 2000;
+    const BURST_BYTES: usize = 8;
+
+    let port = free_port();
+    let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+
+    let delivered: Delivered = Arc::new(Mutex::new(HashMap::new()));
+    let delivered_acc = delivered.clone();
+    let sub_ready = Arc::new(AtomicBool::new(false));
+    let sub_ready_acc = sub_ready.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_acc = done.clone();
+
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let acceptor = std::thread::spawn(move || unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        let _ = started_tx.send(());
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK,
+            "acceptor z_open failed"
+        );
+
+        let ctx = Box::into_raw(Box::new(Ctx {
+            delivered: delivered_acc,
+        })) as *mut c_void;
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(&mut closure, Some(on_sample), Some(on_drop), ctx),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut ke, c"teardown/**".as_ptr()),
+            Z_OK
+        );
+        let mut subscriber: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&session),
+                &mut subscriber,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "acceptor z_declare_subscriber failed"
+        );
+        sub_ready_acc.store(true, Ordering::SeqCst);
+
+        for _ in 0..3000 {
+            if done_acc.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    });
+
+    started_rx.recv().unwrap();
+
+    let count_of = |len: usize| delivered.lock().unwrap().get(&len).map_or(0, Vec::len);
+    let put = |session: &z_owned_session_t, key: &std::ffi::CStr, payload: &[u8]| unsafe {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut bytes = std::mem::zeroed();
+        assert_eq!(
+            z_bytes_copy_from_buf(&mut bytes, payload.as_ptr(), payload.len()),
+            Z_OK
+        );
+        z_put(
+            z_session_loan(session),
+            z_view_keyexpr_loan(&ke),
+            wz_capi_pico::z_bytes_move(&mut bytes),
+            std::ptr::null(),
+        )
+    };
+    let calibration = payload_of(CALIBRATION_BYTES);
+    let burst = payload_of(BURST_BYTES);
+
+    for round in 0..ROUNDS {
+        let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
+        let mut opened = false;
+        for _ in 0..250 {
+            unsafe {
+                let mut cfg: z_owned_config_t = std::mem::zeroed();
+                assert_eq!(z_config_default(&mut cfg), Z_OK);
+                assert_eq!(
+                    zp_config_insert(
+                        z_config_loan_mut(&mut cfg),
+                        Z_CONFIG_CONNECT_KEY,
+                        connect.as_ptr()
+                    ),
+                    Z_OK
+                );
+                if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                    opened = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(opened, "dialer z_open never succeeded on round {round}");
+        for _ in 0..500 {
+            if sub_ready.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            sub_ready.load(Ordering::SeqCst),
+            "acceptor never declared its subscriber"
+        );
+
+        // The precondition, proved every round: this session's publish path reaches the
+        // acceptor's closure, so a shortfall below is the close and not a subscription that had
+        // not propagated yet.
+        let before = count_of(CALIBRATION_BYTES);
+        let mut calibrated = false;
+        for _ in 0..150 {
+            if count_of(CALIBRATION_BYTES) > before {
+                calibrated = true;
+                break;
+            }
+            assert_eq!(
+                put(&session, c"teardown/calibration", &calibration),
+                Z_OK,
+                "calibration z_put returned an error"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            calibrated,
+            "the calibration put never arrived on round {round}, so nothing below measures the close"
+        );
+
+        for i in 0..BURST {
+            assert_eq!(
+                put(&session, c"teardown/burst", &burst),
+                Z_OK,
+                "burst z_put {i} was rejected before the close, so the close is untested"
+            );
+        }
+        // No sleep, no flush: the C program that publishes and closes.
+        unsafe {
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+
+    // ONE bounded wait for the whole set: every close has returned, so no further byte can
+    // leave this host.
+    for _ in 0..150 {
+        if count_of(BURST_BYTES) >= ROUNDS * BURST {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    done.store(true, Ordering::SeqCst);
+    acceptor.join().expect("acceptor thread panicked");
+
+    let arrived = count_of(BURST_BYTES);
+    assert_eq!(
+        arrived,
+        ROUNDS * BURST,
+        "z_put returned Z_OK for {} small puts and z_close left {} of them in the session's open \
+         frame. The frame a session still holds open when it closes is handed to the writer \
+         before the session is let go, or the writer's idle flush, which holds the session \
+         weakly, finds nothing to flush.",
+        ROUNDS * BURST,
+        (ROUNDS * BURST).saturating_sub(arrived)
+    );
+}

@@ -4287,6 +4287,14 @@ impl OpenedSession {
         } = self.into_parts();
         drop(inbound);
         drop(engine);
+        // What the session still holds open is handed to the writer BEFORE the last owner of
+        // the session lets go. A link whose writer pulls what the session stages flushes it at
+        // idle through a hook that holds the session weakly (`session_glue`), so once `actions`
+        // is dropped the hook finds nothing and the frame open in each conduit is dropped with
+        // the session: the puts of the last milliseconds, returned `Z_OK` to the caller, never
+        // reach the queue the seal below then drains. A session without the batching window
+        // has nothing open and this answers the feature error, which is not a failure here.
+        let _ = actions.batch_flush();
         drop(actions);
         // R311y519 — SEAL, then await to completion. The two local drops above
         // stay: releasing them first is what lets the writer finish a queue no
