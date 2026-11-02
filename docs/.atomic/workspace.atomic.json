@@ -305060,6 +305060,38 @@
         "Owed, from the regions file: it in the hosted lane (one run takes ten minutes), and the gossip test that failed once in a run of the whole file. The client node runs on the peer node's tables and announces itself as a client; a client hat of its own in the forwarder, with the north region as the pin builds it, is not made. Owed from the roadmap: the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane. The leaf peers of a region are still the registry of faces, which does not forward."
       ]
     },
+    "Round 4095": {
+      "decision_summary": "The regions file of upstream's zenoh/tests is now run by the hosted Z8 lane, where it was only in the table: it passes whole (126 of 126 in two runs, round 4094), so the lane can hold it to its row and a repair that breaks a scenario is seen when it is pushed. The harness gives the file a bound of its own, 1800 seconds for the whole file (FILE_RUN_BOUND_S), because it runs 126 tests each in a process of its own and takes ten minutes on a build host of thirty-two cores; a bound asked for with Z8_RUN_BOUND_S still wins. Whether the hosted runner meets the multicast groups the tests use is not known and is read from the first run of the lane; a red there is paid in its own round.",
+      "changes_bullets": [
+        "docs/z8-expected.tsv: the regions row has lane yes.",
+        "scripts/lib/z8_upstream_suite.py: FILE_RUN_BOUND_S and run_bound give a file its own bound; regions has 1800 seconds.",
+        "docs/zenoh-api-on-the-engine.md: the note says regions is in the lane and what is read from its first run."
+      ],
+      "verification_bullets": [
+        "Locally: the selftest of the harness and of the expectation gate pass, the lane names now include regions, and the citation, prose and table gates pass. Not run: the hosted lane itself, which is read from its first run, and whether the hosted runner carries multicast."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the first hosted run of the regions file (multicast on the runner, the time one run takes against the 1800 seconds), the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane, and the gossip test that failed once in a run of the whole file."
+      ],
+      "publishable_decision_summary": "The regions file of upstream's zenoh/tests is now run by the hosted Z8 lane, where it was only in the table: it passes whole (126 of 126 in two runs, round 4094), so the lane can hold it to its row and a repair that breaks a scenario is seen when it is pushed. The harness gives the file a bound of its own, 1800 seconds for the whole file (FILE_RUN_BOUND_S), because it runs 126 tests each in a process of its own and takes ten minutes on a build host of thirty-two cores; a bound asked for with Z8_RUN_BOUND_S still wins. Whether the hosted runner meets the multicast groups the tests use is not known and is read from the first run of the lane; a red there is paid in its own round.",
+      "publishable_changes_bullets": [
+        "docs/z8-expected.tsv: the regions row has lane yes.",
+        "scripts/lib/z8_upstream_suite.py: FILE_RUN_BOUND_S and run_bound give a file its own bound; regions has 1800 seconds.",
+        "docs/zenoh-api-on-the-engine.md: the note says regions is in the lane and what is read from its first run."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the selftest of the harness and of the expectation gate pass, the lane names now include regions, and the citation, prose and table gates pass. Not run: the hosted lane itself, which is read from its first run, and whether the hosted runner carries multicast."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the first hosted run of the regions file (multicast on the runner, the time one run takes against the 1800 seconds), the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane, and the gossip test that failed once in a run of the whole file."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
