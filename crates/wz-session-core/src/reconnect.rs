@@ -755,6 +755,12 @@ where
         })
     }
 
+    // The order fence is the live link's: a seam that kept the default would leave a
+    // reconnecting session's Control frames free to overtake the data queued before them.
+    fn tx_fence(&self) {
+        R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).tx_fence())
+    }
+
     fn open_blocking(&self) {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).open_blocking();
@@ -931,6 +937,11 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
 
     fn shape_tx_queue(&self, shape: crate::link::TxQueueShape) {
         R::link_driver(&self.inner.borrow()).shape_tx_queue(shape)
+    }
+
+    // As `SwappableLink`'s: the live link's order fence.
+    fn tx_fence(&self) {
+        R::link_driver(&self.inner.borrow()).tx_fence()
     }
 
     fn open_blocking(&self) {

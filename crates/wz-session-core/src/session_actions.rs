@@ -9952,6 +9952,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(not(feature = "alloc"))]
             self.flush_open_batch();
         }
+        // The same barrier on the link's side. Handing the staged data over is not leaving the
+        // link first: a link that serves its priorities in strict order sends a Control frame
+        // ahead of data queued earlier, and the undeclaration this message may be reached the
+        // peer before the puts that name what it undeclares. The link is told that what it holds
+        // leaves before the Control frame does.
+        if priority == Priority::Control {
+            self.with_conduit_link(wire_reliability, priority, |link| {
+                link.link_driver().tx_fence()
+            });
+        }
         let stage_and_emit = |batch: &mut BatchTx| {
             #[cfg(feature = "transport-batching")]
             if self.tx_conduits.is_active() {

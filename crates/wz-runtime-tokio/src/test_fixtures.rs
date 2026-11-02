@@ -54,6 +54,9 @@ pub(crate) struct RecordingLinkDriver {
     /// the frame whole or not at all; the priorities were a second vector once,
     /// and a count taken between the two pushes found them unequal.
     frames: Mutex<Vec<(Vec<u8>, Reliability, wz_session_core::qos::Priority)>>,
+    /// Each time the session raised the link's fence ([`BoxedLinkDriver::tx_fence`]), the number
+    /// of frames it had handed over by then.
+    fences: Mutex<Vec<usize>>,
     /// R2943 — the link this recorder stands for, when a test needs one:
     /// egress selection reads a link's intrinsic reliability class off its
     /// kind. `None` (the default) is a driver that names no kind.
@@ -97,6 +100,16 @@ impl RecordingLinkDriver {
         self.frames.lock().expect("recording driver mutex poisoned")[idx].2
     }
 
+    /// The number of frames handed over at each raising of the fence, in order. Gated like its
+    /// consumer, the test of what the session does around a declaration.
+    #[cfg(all(feature = "declare-keyexpr", feature = "codec-push"))]
+    pub(crate) fn fences(&self) -> Vec<usize> {
+        self.fences
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .clone()
+    }
+
     /// Discard all recorded frames — lets a test ignore set-up emits (e.g. a
     /// register-time bootstrap flood) so a later `frame_count()` counts only
     /// the frames the operation under test produced. Gated like its consumers
@@ -126,6 +139,13 @@ impl BoxedLinkDriver for RecordingLinkDriver {
             .expect("recording driver mutex poisoned")
             .push((bytes.to_vec(), reliability, priority));
         LinkSendOutcome::Sent
+    }
+    fn tx_fence(&self) {
+        let handed = self.frame_count();
+        self.fences
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .push(handed);
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
@@ -187,6 +207,7 @@ pub(crate) fn recording_driver_over(
 ) -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
+        fences: Mutex::new(Vec::new()),
         subject: Some(wz_session_core::link::LinkSubject {
             kind: Some(kind),
             ..wz_session_core::link::LinkSubject::UNKNOWN
@@ -224,6 +245,7 @@ pub(crate) fn recording_actions_with_params(
 pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
+        fences: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: false,
     })
@@ -238,6 +260,7 @@ pub(crate) fn recording_actions_length_prefixed(
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let driver = Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
+        fences: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: true,
     });

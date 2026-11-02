@@ -978,6 +978,10 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.tx.wake_for_flush()
     }
 
+    fn tx_fence(&self) {
+        self.tx.fence()
+    }
+
     // R2952 — the block-first slot lives on this link's outbound queue.
     fn block_first_acquire(&self, priority: Priority, wait_us: u64) -> bool {
         self.tx.block_first_acquire(priority, wait_us)

@@ -746,6 +746,18 @@ pub trait BoxedLinkDriver {
     /// writer to wake.
     fn tx_staged(&self) {}
 
+    /// Everything handed to this link so far is to leave before the Control-priority message
+    /// handed to it next, whatever the priorities. The session calls it for a control message
+    /// (a declaration, its retraction, an OAM) after it has handed over the data it staged
+    /// before it, which is what makes the message a barrier: a retraction that overtook the
+    /// puts sent before it would reach the peer ahead of data that still names what it retracts.
+    ///
+    /// A link that serves its priorities in strict order says so here, by holding the Control
+    /// lane back until the frames queued before this call have left; keepalives and everything
+    /// queued later are unaffected. The default is the driver whose hand-over order is its wire
+    /// order, where there is nothing to hold.
+    fn tx_fence(&self) {}
+
     /// Send a transport message that carries no sequence number (the keepalive) so that it
     /// passes whatever the link has queued: at the next frame boundary, ahead of every lane, and
     /// from the calling thread when the link can write from one. Upstream's tx task writes its

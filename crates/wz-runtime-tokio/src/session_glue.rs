@@ -2728,6 +2728,41 @@ mod tests {
 
     // ── R234 outbound mapping table ──
 
+    /// A declaration is a barrier on the link's side as on the session's: the data the session
+    /// had staged is handed over first, and only then does the link learn that what it holds is
+    /// to leave before the declaration. Raised before that data was handed over, the fence would
+    /// leave a put behind the control frame; raised after the declaration, it would hold
+    /// nothing.
+    #[cfg(all(feature = "declare-keyexpr", feature = "codec-push"))]
+    #[test]
+    fn a_declaration_raises_the_links_fence_after_the_data_before_it_and_before_itself() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        // A session that negotiated no QoS writes every frame on one lane, which keeps its own
+        // order and needs no fence: the fence is the QoS session's, so that is the session tested.
+        #[cfg(feature = "transport-qos")]
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions
+            .send_push_literal("home/temp", b"21", true)
+            .expect("a put");
+        assert_eq!(driver.frame_count(), 1, "the put is on the link");
+        assert!(driver.fences().is_empty(), "a put raises no fence");
+
+        actions
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
+
+        assert_eq!(
+            driver.fences(),
+            [1],
+            "one fence, raised with the put handed over and the declaration not yet"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "the declaration followed the fence"
+        );
+    }
+
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_populates_outbound_mapping_table() {

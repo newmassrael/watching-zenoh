@@ -160,6 +160,8 @@ pub fn outbound_channel_with_capacity(
             spare: Vec::new(),
             spare_keep_max: SPARE_CAPACITY_MAX,
             carry: None,
+            next_seq: 0,
+            fence: 0,
             #[cfg(feature = "runtime-zero-copy")]
             pool: None,
             #[cfg(feature = "runtime-zero-copy")]
@@ -792,6 +794,13 @@ struct LaneState {
     /// that holds the role writes it before it takes anything else, so the bytes of the
     /// stream stay in order. Always `None` on a link with no inline write.
     carry: Option<(Priority, WireFrame)>,
+    /// The number the next entry put on a lane is given: entries are numbered in the order they
+    /// were queued, across lanes, so "queued before" is a comparison of two numbers.
+    next_seq: u64,
+    /// The FENCE ([`OutboundTx::fence`]): the control lane may not leave while a lane that is
+    /// not it holds an entry numbered below this. `0` is no fence, and an entry numbered below
+    /// a fence that has been passed never comes back, so a passed fence needs no lowering.
+    fence: u64,
     /// R3239 — ARCHITECTURE section 9.1 under `runtime-zero-copy`: the link's
     /// transmit pool, on a queue built by [`outbound_channel_pooled`] or
     /// [`outbound_channel_datagram`]. While it is here every frame a sender
@@ -811,12 +820,33 @@ struct LaneState {
 
 /// One queued item of a lane.
 enum Entry {
-    /// A frame in a vector of its own, with the priority it was sent at.
-    Heap(Priority, Vec<u8>),
+    /// A frame in a vector of its own, with the priority it was sent at and the number it was
+    /// queued under ([`LaneState::next_seq`]).
+    Heap(Priority, Vec<u8>, u64),
     /// R3239 — a slot of the link's transmit pool: frames back to back on a
     /// stream link, one datagram on a datagram link.
     #[cfg(feature = "runtime-zero-copy")]
     Batch(Batch),
+}
+
+impl Entry {
+    /// The number this entry was queued under ([`LaneState::next_seq`]).
+    fn seq(&self) -> u64 {
+        match self {
+            Entry::Heap(_, _, seq) => *seq,
+            #[cfg(feature = "runtime-zero-copy")]
+            Entry::Batch(batch) => batch.seq,
+        }
+    }
+
+    /// A slot a lend opened and has written no frame into: nothing for the writer yet.
+    fn holds_nothing_yet(&self) -> bool {
+        match self {
+            Entry::Heap(..) => false,
+            #[cfg(feature = "runtime-zero-copy")]
+            Entry::Batch(batch) => batch.lent && batch.fill == 0,
+        }
+    }
 }
 
 /// R3239 — a slot of a pooled queue while it is on its lane: the frames
@@ -832,6 +862,9 @@ enum Entry {
 struct Batch {
     /// The priority of the first frame in it (all of them, on a QoS lane).
     priority: Priority,
+    /// The number the slot was queued under ([`LaneState::next_seq`]): that of its first frame,
+    /// which later frames written into it do not change.
+    seq: u64,
     id: u64,
     /// The size class and the slot's index in it.
     class: usize,
@@ -1019,13 +1052,59 @@ impl LaneState {
         if let Some(urgent) = self.take_urgent() {
             return (urgent, freed);
         }
+        let held = self.control_held_by_fence();
         for lane in 0..Priority::NUM {
+            if held && lane == self.control_lane() {
+                continue;
+            }
             match self.take_from(lane) {
                 Taken::Empty => continue,
                 taken => return (taken, freed),
             }
         }
         (Taken::Empty, freed)
+    }
+
+    /// The number for the entry about to be put on a lane.
+    fn number(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
+
+    /// The lane the control frames are on: its own, or the one lane of a session with no QoS.
+    fn control_lane(&self) -> usize {
+        self.lane_of(Priority::Control)
+    }
+
+    /// Whether the fence ([`OutboundTx::fence`]) holds the control lane back now: a lane that is
+    /// not it still has an entry that was queued before the fence was raised.
+    ///
+    /// Lanes are FIFO, so a lane's first entry is its oldest, and the question is asked of
+    /// that one. A slot a lend has opened and written nothing into holds no frame yet (the
+    /// session lends under the lock of the conduit it sends on, and raises the fence only after
+    /// it has taken every conduit's lock, so no lend that matters is open); it is passed over
+    /// here as `take_from` passes it over, since waiting for it would be waiting for a commit
+    /// or a give-back that wakes no one.
+    ///
+    /// A fence that is found passed is dropped, so the common case, no fence, costs one compare.
+    fn control_held_by_fence(&mut self) -> bool {
+        if self.fence == 0 {
+            return false;
+        }
+        let control = self.control_lane();
+        let fence = self.fence;
+        let older = self.lanes.iter().enumerate().any(|(lane, entries)| {
+            lane != control
+                && entries
+                    .iter()
+                    .find(|entry| !entry.holds_nothing_yet())
+                    .is_some_and(|entry| entry.seq() < fence)
+        });
+        if !older {
+            self.fence = 0;
+        }
+        older
     }
 
     /// The next urgent frame, if one is waiting: the keepalive that passes the lanes.
@@ -1076,7 +1155,7 @@ impl LaneState {
             return Taken::Empty;
         };
         match entry {
-            Entry::Heap(priority, frame) => {
+            Entry::Heap(priority, frame, _) => {
                 self.in_flight[lane] = Some(frame.len());
                 Taken::Frame(priority, Out::Heap(frame))
             }
@@ -1235,15 +1314,21 @@ impl LaneState {
         // `write_bound` for its size (kept here, because the first frame's buffer is
         // emptied when the second is joined to it).
         let mut bound = budget;
+        // Asked once, before any frame is taken: the control lane is held if a lane behind it
+        // has a frame the fence is owed (see `take_next`), and the take then packs the others.
+        let held = self.control_held_by_fence();
         'lanes: for lane in 0..Priority::NUM {
-            while let Some(Entry::Heap(_, frame)) = self.lanes[lane].front() {
+            if held && lane == self.control_lane() {
+                continue;
+            }
+            while let Some(Entry::Heap(_, frame, _)) = self.lanes[lane].front() {
                 if let Some((_, head)) = first.as_ref() {
                     let so_far = joined.as_ref().map_or(head.len(), Vec::len);
                     if so_far.saturating_add(frame.len()) > bound {
                         break 'lanes;
                     }
                 }
-                let Some(Entry::Heap(priority, frame)) = self.lanes[lane].pop_front() else {
+                let Some(Entry::Heap(priority, frame, _)) = self.lanes[lane].pop_front() else {
                     break;
                 };
                 self.in_flight[lane] = Some(self.in_flight[lane].unwrap_or(0) + frame.len());
@@ -1520,7 +1605,8 @@ impl OutboundTx {
         }
         let lane = st.lane_of(priority);
         st.occupied[lane] += frame.len();
-        st.lanes[lane].push_back(Entry::Heap(priority, frame));
+        let seq = st.number();
+        st.lanes[lane].push_back(Entry::Heap(priority, frame, seq));
         drop(st);
         self.shared.frame_landed();
         Ok(())
@@ -1741,10 +1827,33 @@ impl OutboundTx {
         }
         let lane = st.lane_of(priority);
         st.occupied[lane] += frame.len();
-        st.lanes[lane].push_back(Entry::Heap(priority, frame));
+        let seq = st.number();
+        st.lanes[lane].push_back(Entry::Heap(priority, frame, seq));
         drop(st);
         self.shared.frame_landed();
         Ok(())
+    }
+
+    /// Raise the FENCE: what is on the lanes now leaves before any control frame does, however
+    /// full the other lanes are. A control frame queued before, or after, waits for it alike.
+    ///
+    /// The lanes are served in strict priority, so a control frame (a declaration, its
+    /// retraction) leaves ahead of every data frame that is queued, including the ones that were
+    /// queued first. For a declaration that is what is wanted; for a retraction it is a break
+    /// of order: the peer reads "the alias is gone" before the puts that name it, and drops
+    /// them as sent on an alias it does not know (measured against zenoh-c, which logs
+    /// `Route data with unknown scope`). The session raises the fence when it hands a control
+    /// message to the link, after it has handed over everything it staged before it, which makes
+    /// a control message a barrier in the order of the wire as it already is in the order of
+    /// the conduits.
+    ///
+    /// Only a data frame QUEUED BEFORE the fence is waited for, so the wait is bounded by what
+    /// the lanes held at that instant and no data queued later can prolong it. The keepalive
+    /// ([`Self::send_urgent`]) is not held, and a session with no QoS has one lane, which is a
+    /// FIFO already.
+    pub fn fence(&self) {
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        st.fence = st.next_seq;
     }
 
     /// R2921 — wait for `priority`'s lane to have room, zenoh's "wait for an
@@ -2159,8 +2268,10 @@ impl OutboundTx {
                     pool.class(class).note_copied();
                     let id = st.next_batch;
                     st.next_batch += 1;
+                    let seq = st.number();
                     st.lanes[lane].push_back(Entry::Batch(Batch {
                         priority,
+                        seq,
                         id,
                         class,
                         idx,
@@ -2218,10 +2329,12 @@ impl OutboundTx {
                     let base = base as usize;
                     let id = st.next_batch;
                     st.next_batch += 1;
+                    let seq = st.number();
                     // On the lane at once, so its place in the lane's order is
                     // the order the frame was lent in.
                     st.lanes[lane].push_back(Entry::Batch(Batch {
                         priority,
+                        seq,
                         id,
                         class,
                         idx,
@@ -4232,6 +4345,137 @@ mod tests {
             order.push(String::from_utf8(frame).expect("ascii"));
         }
         assert_eq!(order, ["ctl", "rt", "data", "bg-1", "bg-2"]);
+    }
+
+    /// A control frame behind a fence leaves after every frame that was queued before the fence,
+    /// and the frames queued after it keep the order of their priorities: the undeclaration of an
+    /// alias does not reach the peer ahead of the puts sent on it before.
+    #[tokio::test]
+    async fn a_fenced_control_frame_leaves_after_the_frames_queued_before_the_fence() {
+        let (tx, mut rx) = outbound_channel();
+        tx.send(Priority::Background, b"bg-1".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.fence();
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::RealTime, b"rt".to_vec())
+            .expect("enqueue");
+        drop(tx);
+
+        let mut order = Vec::new();
+        while let Some(frame) = rx.recv().await {
+            order.push(String::from_utf8(frame).expect("ascii"));
+        }
+        assert_eq!(order, ["rt", "data", "bg-1", "ctl"]);
+    }
+
+    /// A fence waits for what was queued before it and for nothing queued later: once those
+    /// frames have left, a control frame passes data that arrived after the fence, as it always
+    /// did.
+    #[tokio::test]
+    async fn a_passed_fence_holds_nothing() {
+        let (tx, mut rx) = outbound_channel();
+        tx.send(Priority::Data, b"before".to_vec())
+            .expect("enqueue");
+        tx.fence();
+        assert_eq!(rx.try_recv(), Some(b"before".to_vec()));
+        tx.send(Priority::Background, b"after".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        assert_eq!(rx.try_recv(), Some(b"ctl".to_vec()));
+        assert_eq!(rx.try_recv(), Some(b"after".to_vec()));
+    }
+
+    /// A fence with nothing queued before it holds nothing either.
+    #[tokio::test]
+    async fn a_fence_over_empty_lanes_holds_nothing() {
+        let (tx, mut rx) = outbound_channel();
+        tx.fence();
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        assert_eq!(rx.try_recv(), Some(b"ctl".to_vec()));
+        assert_eq!(rx.try_recv(), Some(b"data".to_vec()));
+    }
+
+    /// The keepalive passes the lanes, the fence or not: a lease is not spent waiting for data.
+    #[tokio::test]
+    async fn a_keepalive_passes_the_fence() {
+        let (tx, mut rx) = outbound_channel();
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.fence();
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        tx.send_urgent(b"ka".to_vec()).expect("enqueue");
+        assert_eq!(rx.try_recv(), Some(b"ka".to_vec()));
+        assert_eq!(rx.try_recv(), Some(b"data".to_vec()));
+        assert_eq!(rx.try_recv(), Some(b"ctl".to_vec()));
+    }
+
+    /// The slots of a pooled queue are numbered as a heap frame is: a datagram queued before the
+    /// fence leaves before the control datagram queued behind it.
+    #[cfg(feature = "runtime-zero-copy")]
+    #[test]
+    fn a_fenced_control_datagram_leaves_after_the_slots_queued_before_the_fence() {
+        let (tx, mut rx) = outbound_channel_datagram();
+        let put = |priority: Priority, bytes: &'static [u8]| {
+            tx.send_encoded(priority, bytes.len(), |dst| {
+                dst[..bytes.len()].copy_from_slice(bytes);
+                Some(bytes.len())
+            })
+            .expect("a slot");
+        };
+        put(Priority::Background, b"bg");
+        put(Priority::Data, b"data");
+        tx.fence();
+        put(Priority::Control, b"ctl");
+        put(Priority::RealTime, b"rt");
+
+        let mut order = Vec::new();
+        while let Some(frame) = rx.try_recv() {
+            order.push(String::from_utf8(frame).expect("ascii"));
+        }
+        assert_eq!(order, ["rt", "data", "bg", "ctl"]);
+    }
+
+    /// A session with no QoS has one lane, which is a FIFO: the fence changes nothing there.
+    #[tokio::test]
+    async fn a_fence_on_one_lane_keeps_arrival_order() {
+        let (tx, mut rx) = outbound_channel();
+        rx.shared.state.lock().expect("lanes").single_lane = true;
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.fence();
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        assert_eq!(rx.try_recv(), Some(b"data".to_vec()));
+        assert_eq!(rx.try_recv(), Some(b"ctl".to_vec()));
+    }
+
+    /// The byte-stream writer packs what it takes into one buffer and holds the control lane
+    /// the same way: the frames queued before the fence leave in one buffer, the control frame
+    /// in the next.
+    #[tokio::test]
+    async fn a_stream_writer_packs_around_a_fenced_control_frame() {
+        let (tx, mut rx) = outbound_channel();
+        tx.send(Priority::Background, b"bg-1".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.fence();
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        drop(tx);
+
+        assert_eq!(
+            rx.recv_wire_packed().await.expect("a buffer").into_vec(),
+            b"databg-1"
+        );
+        assert_eq!(
+            rx.recv_wire_packed().await.expect("a buffer").into_vec(),
+            b"ctl"
+        );
+        assert!(rx.recv_wire_packed().await.is_none());
     }
 
     /// R3366 — a byte-stream writer takes everything that is queued as ONE buffer,
