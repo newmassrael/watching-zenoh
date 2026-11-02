@@ -23,6 +23,8 @@
 //!    completes, and the stream each end holds names the zid of the OTHER end's key
 //!    ([`StreamSocket::peer_credential_zid`]), the two zids being different.
 //! 3. The stream is a stream: a message crosses it each way, over the sockets, as TLS records.
+//! 4. A listener that served a connection, closed it first and went is replaced by one on the same
+//!    port that binds at once (`SO_REUSEADDR`).
 #![no_std]
 
 extern crate alloc;
@@ -51,6 +53,8 @@ const TICK_HZ: u32 = wz::runtime_zephyr::tick_hz_from_build!();
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 /// The port the listener takes secure channels on.
 const PORT: u16 = 7470;
+/// The port the restart check listens on twice.
+const RESTART_PORT: u16 = 7471;
 /// The longest the listener lets one inbound handshake take.
 const ACCEPT_TIMEOUT_MS: u64 = 20_000;
 /// Passes of the listener the witness gives a connection to be taken or dropped, 5 ms apart.
@@ -313,5 +317,61 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     }
     log(c"wz: a message crossed the secure channel each way");
+    drop((client, served));
+
+    // 4. A node restarted on its port takes it again. The end that closes first keeps the
+    //    connection (TIME_WAIT), here the listener's side, and `SO_REUSEADDR` is what lets the
+    //    next listener bind the port while it does.
+    if !restart_takes_the_port() {
+        return 1;
+    }
     0
+}
+
+/// A listener serves one connection, closes it first and goes; a listener on the same port
+/// binds at once.
+fn restart_takes_the_port() -> bool {
+    let first = match ZephyrTcpListener::listen(LOOPBACK, RESTART_PORT, 1) {
+        Ok(first) => first,
+        Err(e) => {
+            log_line(format!("wz: FAIL - listen on the restart port: {e:?}"));
+            return false;
+        }
+    };
+    let peer = match ZephyrTcpSocket::connect(LOOPBACK, RESTART_PORT) {
+        Ok(peer) => peer,
+        Err(e) => {
+            log_line(format!("wz: FAIL - the restart port took no connection: {e:?}"));
+            return false;
+        }
+    };
+    let mut taken = None;
+    for _ in 0..PASSES {
+        if let Ok(Some(stream)) = first.accept() {
+            taken = Some(stream);
+            break;
+        }
+        yield_us(5_000);
+    }
+    let Some(stream) = taken else {
+        log(c"wz: FAIL - the restart port's listener did not take the connection");
+        return false;
+    };
+    // The listener's side closes first, and then the listener goes.
+    drop(stream);
+    drop(first);
+    drop(peer);
+    yield_us(50_000);
+    match ZephyrTcpListener::listen(LOOPBACK, RESTART_PORT, 1) {
+        Ok(_) => {
+            log(c"wz: a listener restarted on its port took it again");
+            true
+        }
+        Err(e) => {
+            log_line(format!(
+                "wz: FAIL - a listener restarted on its port could not bind it: {e:?}"
+            ));
+            false
+        }
+    }
 }

@@ -164,6 +164,9 @@ pub enum ZephyrNetError {
     NoDelay(c_int),
     /// A stream's `getpeername` returned this.
     PeerName(c_int),
+    /// A listener's `setsockopt(SO_REUSEADDR)` returned this: the image has no
+    /// `CONFIG_NET_CONTEXT_REUSEADDR`.
+    ReuseAddr(c_int),
     /// `listen` returned this: the image has no TCP (`CONFIG_NET_TCP`), or the socket was not
     /// bound.
     Listen(c_int),

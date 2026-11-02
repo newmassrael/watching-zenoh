@@ -29,7 +29,7 @@ use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use zephyr_sys::socket::{
     accept, bind, close, connect, getpeername, getsockname, listen, poll, recv, send, setsockopt,
     shutdown, socket, PollFd, SockLen, SockaddrIn, AF_INET, IPPROTO_TCP, POLLIN, SHUT_RDWR,
-    SOCK_STREAM, TCP_NODELAY,
+    SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, TCP_NODELAY,
 };
 
 use crate::net::{sockaddr, ZephyrNetError};
@@ -60,6 +60,26 @@ fn set_nodelay(fd: c_int) -> Result<(), ZephyrNetError> {
     };
     if rc != 0 {
         return Err(ZephyrNetError::NoDelay(rc));
+    }
+    Ok(())
+}
+
+/// `SO_REUSEADDR` on the listening `fd`, as the POSIX listener sets it: a node restarted on its
+/// port is not kept off it by the closed connections of the listener it replaces.
+fn set_reuseaddr(fd: c_int) -> Result<(), ZephyrNetError> {
+    let one: c_int = 1;
+    // SAFETY: `one` is a live `c_int` and the length passed is its size.
+    let rc = unsafe {
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &one as *const c_int as *const c_void,
+            size_of::<c_int>() as SockLen,
+        )
+    };
+    if rc != 0 {
+        return Err(ZephyrNetError::ReuseAddr(rc));
     }
     Ok(())
 }
@@ -252,6 +272,7 @@ impl ZephyrTcpListener {
             local: (addr, port),
             failed: Cell::new(None),
         };
+        set_reuseaddr(fd)?;
         let local = sockaddr(addr, port);
         // SAFETY: `local` is a live `sockaddr_in` of the length passed.
         let rc = unsafe { bind(fd, &local, size_of::<SockaddrIn>() as SockLen) };

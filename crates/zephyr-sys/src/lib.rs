@@ -58,6 +58,13 @@ pub mod socket {
     pub const MSG_DONTWAIT: c_int = 0x40;
     /// `ZSOCK_SHUT_RDWR`: end a connection in both directions.
     pub const SHUT_RDWR: c_int = 2;
+    /// `ZSOCK_SOL_SOCKET`, the `level` of the socket-wide options below
+    /// (`include/zephyr/net/socket.h`).
+    pub const SOL_SOCKET: c_int = 1;
+    /// `ZSOCK_SO_REUSEADDR`, at level [`SOL_SOCKET`]: bind an address a closed
+    /// connection of an earlier listener still holds. The image needs
+    /// `CONFIG_NET_CONTEXT_REUSEADDR`, which `NET_TCP` turns on by default.
+    pub const SO_REUSEADDR: c_int = 2;
     /// `ZSOCK_TCP_NODELAY`, at level [`IPPROTO_TCP`]: send a segment without
     /// waiting to join it with the next write.
     pub const TCP_NODELAY: c_int = 1;
