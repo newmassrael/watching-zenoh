@@ -306672,6 +306672,34 @@
         "Owed: the multicast writer lane is not under the fence (it is not a unicast link driver), so a declaration there can still overtake earlier data. Also owed: the hosted verdicts of rounds 4113 to this one."
       ]
     },
+    "Round 4143": {
+      "decision_summary": "The carry item \"how pico itself settles a certificate's dates\" is answered by reading. In the pinned zenoh-pico, the TLS stream refuses a handshake whose verify result holds any flag outside a short ignore list: a name mismatch on a dial that did not ask for the name check, and a skipped verification on a listener without mutual TLS. Expired and not-yet-valid are not on it, so a lapsed certificate is refused, provided the platform's Mbed TLS reports dates at all: BADCERT_EXPIRED is set only under MBEDTLS_HAVE_TIME_DATE in the pinned Mbed TLS. The provider states the host's wall time at each dial and refuses a lapsed certificate (tls_provider), so the two agree on a host; a pico build without a clock checks no date, which is its platform's property and not a mode the provider offers.",
+      "changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the clock bullet of the L6 record states what pico does with a certificate's dates, with the two source locations in zenoh-pico's tls_stream.c and the one in Mbed TLS's x509_crt.c. No code changed."
+      ],
+      "verification_bullets": [
+        "A reading, not a run: the verify-result handling of the pinned zenoh-pico (dial side and listen side) and the date check of the pinned Mbed TLS were read in the checked-out submodules. Not run: any test; no code changed. The pico behaviour with a lapsed certificate was not exercised against a built pico."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Open: whether a wz-native listening peer that declares a publisher before a router dials it reaches a client behind the router. Measuring it needs a fixture no test has: a process that opens the zenoh-compatible session API with a listener and a publisher, a zenohd that dials it (spawn_zenohd_dialer_on_ephemeral_tcp takes the locator) and a client subscriber behind the router; the demo binary's single-session publisher is a raw frame driver and does not call Session::declare_publisher, so it cannot stand in. The drop counters of TlsListener are not reachable from the C ABI (the listener is boxed behind TlsDial::listen); exposing them is a new exported symbol and is left to a decision. Not rebuilt: the Zephyr kit image. The hosted runs of recent rounds are mostly cancelled while queued."
+      ],
+      "publishable_decision_summary": "The carry item \"how pico itself settles a certificate's dates\" is answered by reading. In the pinned zenoh-pico, the TLS stream refuses a handshake whose verify result holds any flag outside a short ignore list: a name mismatch on a dial that did not ask for the name check, and a skipped verification on a listener without mutual TLS. Expired and not-yet-valid are not on it, so a lapsed certificate is refused, provided the platform's Mbed TLS reports dates at all: BADCERT_EXPIRED is set only under MBEDTLS_HAVE_TIME_DATE in the pinned Mbed TLS. The provider states the host's wall time at each dial and refuses a lapsed certificate (tls_provider), so the two agree on a host; a pico build without a clock checks no date, which is its platform's property and not a mode the provider offers.",
+      "publishable_changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the clock bullet of the L6 record states what pico does with a certificate's dates, with the two source locations in zenoh-pico's tls_stream.c and the one in Mbed TLS's x509_crt.c. No code changed."
+      ],
+      "publishable_verification_bullets": [
+        "A reading, not a run: the verify-result handling of the pinned zenoh-pico (dial side and listen side) and the date check of the pinned Mbed TLS were read in the checked-out submodules. Not run: any test; no code changed. The pico behaviour with a lapsed certificate was not exercised against a built pico."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: whether a wz-native listening peer that declares a publisher before a router dials it reaches a client behind the router. Measuring it needs a fixture no test has: a process that opens the zenoh-compatible session API with a listener and a publisher, a zenohd that dials it (spawn_zenohd_dialer_on_ephemeral_tcp takes the locator) and a client subscriber behind the router; the demo binary's single-session publisher is a raw frame driver and does not call Session::declare_publisher, so it cannot stand in. The drop counters of TlsListener are not reachable from the C ABI (the listener is boxed behind TlsDial::listen); exposing them is a new exported symbol and is left to a decision. Not rebuilt: the Zephyr kit image. The hosted runs of recent rounds are mostly cancelled while queued."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
