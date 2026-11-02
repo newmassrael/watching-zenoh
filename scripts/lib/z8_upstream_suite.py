@@ -380,14 +380,18 @@ def failed_tests(log: pathlib.Path) -> list[str]:
     return re.findall(r"^test (\S+) \.\.\. FAILED", log.read_text(encoding="utf-8", errors="replace"), re.M)
 
 
-def panic_reasons(text: str, limit: int = 3) -> list[str]:
+def panic_reasons(text: str, limit: int = 3, place: bool = False) -> list[str]:
     """The distinct first lines of the panic messages of a run, most frequent first.
 
     The message is the line after `panicked at <place>:`; a run with a hundred failures that all say
-    one thing is one reason, which is what the table of recorded differences is made of."""
+    one thing is one reason, which is what the table of recorded differences is made of. With
+    `place` the line of the test that panicked leads the message (`Z8_PLACES`): a test that has
+    several assertions of one text says which one failed."""
     seen: dict[str, int] = {}
-    for m in re.finditer(r"panicked at [^\n]*:\n([^\n]*)", text):
-        msg = re.sub(r"\s+", " ", m.group(1)).strip()[:160]
+    for m in re.finditer(r"panicked at ([^\n]*):\n([^\n]*)", text):
+        msg = re.sub(r"\s+", " ", m.group(2)).strip()[:160]
+        if place:
+            msg = f"{m.group(1)} {msg}"
         seen[msg] = seen.get(msg, 0) + 1
     return [f"{n}x {msg}" for msg, n in sorted(seen.items(), key=lambda kv: -kv[1])[:limit]]
 
@@ -425,6 +429,13 @@ FILE_FEATURES = {"regions": ("internal",)}
 ISOLATED_FILES = {"regions"}
 
 
+def isolated_files() -> set[str]:
+    """`ISOLATED_FILES` and the files `Z8_ISOLATE` names (comma separated): a flake of one test of
+    any other file is measured by running that test alone, again and again (`Z8_ONLY`,
+    `Z8_REPEAT`), which only an isolated file does."""
+    return ISOLATED_FILES | {n for n in os.environ.get("Z8_ISOLATE", "").split(",") if n}
+
+
 def isolated_run(base: list[str], out: pathlib.Path, log: pathlib.Path, bound: int) -> int | None:
     """Run each test of a file in its own process; the logs are joined, the status is the worst.
 
@@ -445,7 +456,16 @@ def isolated_run(base: list[str], out: pathlib.Path, log: pathlib.Path, bound: i
                 return None
             one = log.with_name(log.name + ".one")
             rc = run([*base, "--", "--exact", test, "--test-threads=1"], out, one, left)
-            fh.write(one.read_text(encoding="utf-8", errors="replace"))
+            text = one.read_text(encoding="utf-8", errors="replace")
+            fh.write(text)
+            if rc != 0 and os.environ.get("Z8_SHOW_FAILS"):
+                # The report keeps a failure's message, not the run: a flake that only a loaded
+                # host shows is read from the run itself, which is this (`Z8_SHOW_FAILS=<lines>`
+                # prints the last that many lines of each failed run).
+                keep = int(os.environ["Z8_SHOW_FAILS"])
+                print(f"--- failed run of {test} (last {keep} lines)")
+                print("\n".join(text.splitlines()[-keep:]))
+                print("--- end of the failed run", flush=True)
             one.unlink()
             if rc is None:
                 return None
@@ -467,7 +487,7 @@ def measure(names: list[str], out: pathlib.Path) -> int:
         if rc != 0:
             rows.append(f"{name}\tno-compile\t{' | '.join(first_errors(clog))}")
             continue
-        if name in ISOLATED_FILES:
+        if name in isolated_files():
             rc = isolated_run(["cargo", "test", "--test", name, *flags], out, rlog, run_bound(name))
         else:
             rc = run(["cargo", "test", "--test", name, *flags, "--", "--test-threads=1"], out, rlog, run_bound(name))
@@ -482,7 +502,7 @@ def measure(names: list[str], out: pathlib.Path) -> int:
         else:
             text = rlog.read_text(encoding="utf-8", errors="replace")
             rows.append(
-                f"{name}\tfail\t{ran} [{', '.join(failed_tests(rlog))[:200]}] {' || '.join(panic_reasons(text))}"
+                f"{name}\tfail\t{ran} [{', '.join(failed_tests(rlog))[:200]}] {' || '.join(panic_reasons(text, place=bool(os.environ.get('Z8_PLACES'))))}"
             )
     (out / "report.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
     print("\n".join(rows))
@@ -527,6 +547,7 @@ def selftest() -> int:
         "thread 'a' panicked at x.rs:1:2:\nboom here\nnote\nthread 'b' panicked at x.rs:3:4:\nboom here\n"
         "thread 'c' panicked at y.rs:5:6:\nother\n"
     ) == ["2x boom here", "1x other"]
+    assert panic_reasons("thread 'a' panicked at x.rs:1:2:\nboom here\n", place=True) == ["1x x.rs:1:2 boom here"]
     assert member_third_party(
         "[dependencies]\nflume = { workspace = true }\nrand = { workspace = true, features = [\"default\"] }\n"
         "zenoh-core = { workspace = true }\nzenoh-shm = { workspace = true, optional = true }\n"
