@@ -590,6 +590,15 @@ ALLOWED = [
         "(`segment_offset`)",
     ),
     (
+        "wz-capture/tcp.rs",
+        "let _ = self.vouched.pop_front();",
+        "Model 5 (`docs/flow-zenoh-verdict.md` §6.10) — `RunMap::pop_front`: "
+        "an integrity boundary that no held run begins at or after any more, "
+        "the entry in force at the new first run kept; it says how far bytes "
+        "the map no longer holds were vouched for, and no reader can ask "
+        "about those bytes (`integrity_of` answers `None` for them)",
+    ),
+    (
         "wz-session-core/passive_messages.rs",
         "self.log.pop_front().map(UnitRow::from_columns)",
         "Open-debt item 924, D10 — `UnitRows::pop_front`, the storage under "

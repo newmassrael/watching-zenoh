@@ -611,8 +611,8 @@ impl LinkIngest {
     }
 
     /// Whether `direction`'s first framing is weighed: not when the first front
-    /// of its chain was weighed and foreign
-    /// ([`Self::observe_stream_front`]).
+    /// of its chain was weighed and foreign, as the capture hands such fronts
+    /// over (`LinkIngest::observe_stream_front`).
     pub fn weighs_framing(&self, direction: Direction) -> bool {
         self.framing_settled_by_front[usize::from(direction == Direction::B)] != Some(true)
     }
