@@ -306868,6 +306868,34 @@
         "Next: measure the 8 B and 64 B cells with a wz publisher in the zenoh-c family table again (idle pc3, default pinning, median of 3) and state them in docs/upstream-parity.md; the 1 KiB cells at the wider pinning wait for a quiet host. Not done: the other session-end paths (a face that goes down while the session is open, the accept path's own drain) were not run against the same burst; they go through the same drain_to_close and are covered by it, but only the dial role was measured."
       ]
     },
+    "Round 4149": {
+      "decision_summary": "The carry item \"the Zephyr kit image is not rebuilt\" is paid for the two secure-channel images. The kit lane's build step (the one Layer Qzk runs for each image) was run on the development host, which has the Zephyr workspace and SDK; of the build hosts, pc2 and pc3 were checked and have none, and four others refused the ssh key used and were not checked. Both images that carry the secure channel built after rounds 4139 and 4145 changed csrc/wz_tls.c and src/stream.rs, which an image compiles itself. The admin image is held by the stack gate and the text gate; its text is 96 bytes over the committed row, inside the gate's allowance, and the 96 bytes are not attributed: no image was built from the commit before. The client image has no stack-gate row yet, as before. Nothing was flashed or booted.",
+      "changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the Zephyr bullet of the L6 record states the two builds, their gate verdicts and where the toolchain is. No code or script changed."
+      ],
+      "verification_bullets": [
+        "On the development host, scripts/kit-lane.sh build for zephyr-client-fixed-tls (rc 0: west build ok, text 256552, data 1604, bss 177327, padded image sha256 1ab77ee5dfea6ad5; no stack-gate row yet) and zephyr-admin-fixed-tls (rc 0: west build ok, text 326184, data 4132, bss 412727, padded image sha256 08103907e18d8a47; stack chain OK, worst chain 35312 bytes over 9 frames against a 47104-byte stack; text-owner OK, 326184 against the committed 326088, 51 owners within 1024). Not run: the other four images of the lane, which do not carry the secure channel; flashing and booting; the hosted Layer Qzk."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Open: the 96 bytes of text of zephyr-admin-fixed-tls over its committed row are not attributed to this work (a build of the commit before it would say); the drop counters of TlsListener are not reachable from the C ABI (a process-wide count behind a wz_ext symbol would be needed); the wz peer publisher a router dials is measured and not pinned for want of a lane that checks for zenohd. The hosted runs of recent rounds are mostly cancelled while queued."
+      ],
+      "publishable_decision_summary": "The carry item \"the Zephyr kit image is not rebuilt\" is paid for the two secure-channel images. The kit lane's build step (the one Layer Qzk runs for each image) was run on the development host, which has the Zephyr workspace and SDK; of the build hosts, pc2 and pc3 were checked and have none, and four others refused the ssh key used and were not checked. Both images that carry the secure channel built after rounds 4139 and 4145 changed csrc/wz_tls.c and src/stream.rs, which an image compiles itself. The admin image is held by the stack gate and the text gate; its text is 96 bytes over the committed row, inside the gate's allowance, and the 96 bytes are not attributed: no image was built from the commit before. The client image has no stack-gate row yet, as before. Nothing was flashed or booted.",
+      "publishable_changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the Zephyr bullet of the L6 record states the two builds, their gate verdicts and where the toolchain is. No code or script changed."
+      ],
+      "publishable_verification_bullets": [
+        "On the development host, scripts/kit-lane.sh build for zephyr-client-fixed-tls (rc 0: west build ok, text 256552, data 1604, bss 177327, padded image sha256 1ab77ee5dfea6ad5; no stack-gate row yet) and zephyr-admin-fixed-tls (rc 0: west build ok, text 326184, data 4132, bss 412727, padded image sha256 08103907e18d8a47; stack chain OK, worst chain 35312 bytes over 9 frames against a 47104-byte stack; text-owner OK, 326184 against the committed 326088, 51 owners within 1024). Not run: the other four images of the lane, which do not carry the secure channel; flashing and booting; the hosted Layer Qzk."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the 96 bytes of text of zephyr-admin-fixed-tls over its committed row are not attributed to this work (a build of the commit before it would say); the drop counters of TlsListener are not reachable from the C ABI (a process-wide count behind a wz_ext symbol would be needed); the wz peer publisher a router dials is measured and not pinned for want of a lane that checks for zenohd. The hosted runs of recent rounds are mostly cancelled while queued."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
