@@ -69,7 +69,7 @@ use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 use wz_session_core::interest_build::InterestKinds;
 #[cfg(feature = "listen")]
-use wz_session_core::link_admission::{judge_second_link, SecondLink};
+use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::policy::SnResolution;
@@ -414,6 +414,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     config: CoopConfig,
     /// The zid in its wire form, which every handshake of the session announces.
     wire_zid: Vec<u8>,
+    /// The session's say on a link to a node it holds a link to, asked while the link's handshake
+    /// runs (`install_link_admission`, `listen`).
+    #[cfg(feature = "listen")]
+    admission: Arc<dyn LinkAdmission>,
     subscribers: Vec<SubEntry>,
     keyexprs: Vec<KexprEntry>,
     next_mapping: u64,
@@ -454,11 +458,6 @@ struct Face<C: ClockSource + 'static> {
     id: FaceId,
     link: Link<C>,
     replay: Replay,
-    /// Whether the session dialled this face's link (the dial role's face, or one attached), and
-    /// not took it off a port. Two links to one node are told apart by it (`Core::admission`),
-    /// which only a session that listens has.
-    #[cfg_attr(not(feature = "listen"), allow(dead_code))]
-    dialled: bool,
 }
 
 /// A face's link: up, in its handshake, waiting to be dialled, or (with `listen`) standing by.
@@ -475,22 +474,13 @@ enum Link<C: ClockSource + 'static> {
     },
     /// Lost, or no endpoint answered: the endpoints are dialled again at `at_us`.
     Waiting { at_us: u64 },
-    /// The dial role's face, whose link reached the node `zid` while another face holds that node:
-    /// the session keeps one face for each remote zid, so this one stands by and the endpoints are
-    /// dialled again when the face that holds the node is lost (`Core::release_held`). Dialled at
-    /// once it would be refused again, and the handshake is paid each time.
+    /// The dial role's face, whose link reached the node `zid` while another face holds that node
+    /// or has a link to it in the making: the session keeps one face for each remote zid, so this
+    /// one stands by and the endpoints are dialled again when no other face has the node
+    /// (`Core::node_is_held`, read at each step). Dialled at once it would be refused again, and
+    /// the handshake is paid each time.
     #[cfg(feature = "listen")]
     Held { zid: Vec<u8> },
-}
-
-/// What the face table decides for a face whose handshake completed (`Core::admission`).
-#[cfg(feature = "listen")]
-enum Admission {
-    /// The node is not held by another face, or this link is kept in place of the held one, which
-    /// is `displace`d.
-    Admit { displace: Option<FaceId> },
-    /// The node is held by a face that stays: this link is closed.
-    Refuse,
 }
 
 /// One link's half of the session: the actions that send over it, the task that runs it, the
@@ -500,8 +490,9 @@ struct Wire<C: ClockSource + 'static> {
     task: CoopLocalJoinHandle<DriverOutcome>,
     link: Rc<dyn SessionDatagramLink>,
     readiness: Option<Arc<dyn LinkReadiness>>,
-    /// Opened by the face table's admission of the link (`admit`); until then the link gives the
-    /// session nothing past its handshake.
+    /// Opened when the face is brought up (`bring_up`); until then the link gives the session
+    /// nothing past its handshake, so the watchers hear the face come up before anything its link
+    /// carried.
     #[cfg(feature = "listen")]
     admitted: Admitted,
     /// The link's generation, which the queries it carries are answered under (`query`).
@@ -818,6 +809,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
         let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(&self.runtime));
+        // The link has its place in the session's admission before the handshake runs, which asks
+        // it once the remote's zid is known: a second link to a node the session holds is refused
+        // there, with nothing declared over it by either end, and not closed after it came up.
+        #[cfg(feature = "listen")]
+        actions.install_link_admission(
+            Arc::clone(&self.admission),
+            matches!(role, SessionRole::Initiator),
+        );
         // An acceptor mints a cookie at each InitAck from a nonce it draws, and one with no source
         // to draw from refuses every handshake (fail closed): it is given the session's, and a
         // source that is dry now is not a link to accept.
@@ -967,16 +966,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Link::Up(wire) if wire.task.is_finished() => {
                 // The face is read before the wire goes: what it was is what a watcher is told.
                 let snapshot = self.face_of(&wire.actions);
-                #[cfg(feature = "listen")]
-                let node = wire.actions.peer_zid();
                 drop(wire);
                 self.lose_link(id);
                 self.report_face(FaceEventKind::Down, snapshot);
-                // A dial role that stood by for this node reaches it again.
-                #[cfg(feature = "listen")]
-                if let Some(node) = node {
-                    self.release_held(&node, now_us);
-                }
                 if id != DIAL_FACE {
                     self.remove_face(at);
                     return Ok(());
@@ -1008,11 +1000,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         (None, true) => String::from("the handshake ended"),
                         (None, false) => String::from("no answer in time"),
                     };
+                    #[cfg(feature = "listen")]
+                    let node = Self::node_of(&wire.actions);
                     wire.task.abort();
                     self.local.run_until_idle();
                     drop(wire);
                     if id != DIAL_FACE {
                         self.remove_face(at);
+                        return Ok(());
+                    }
+                    // The dial role's link reached a node another face holds or is bringing up:
+                    // the node refused it (`install_link_admission`). It stands by, and dials
+                    // again when no other face has the node, where dialling at once would be
+                    // refused again and the handshake paid each time.
+                    #[cfg(feature = "listen")]
+                    if let Some(zid) = node.filter(|zid| self.node_is_held(zid, id)) {
+                        self.faces[at].link = Link::Held { zid };
                         return Ok(());
                     }
                     let last = OpenError::Unreachable(format!(
@@ -1031,91 +1034,45 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Link::Waiting { at_us } if now_us >= at_us => {
                 self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
             }
+            // The face that held the node is gone, and so is any link in the making to it: the
+            // node is dialled again. Read from the face table each step and not told by the face
+            // that goes, so a link that dies in its handshake frees the node as well.
+            #[cfg(feature = "listen")]
+            Link::Held { zid } if !self.node_is_held(&zid, id) => {
+                self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
+            }
             link => link,
         };
         self.faces[at].link = polled;
         Ok(())
     }
 
-    /// Whether the node whose handshake the face at `at` completed is held by another face, and
-    /// what follows. The session keeps one face for each remote zid, as zenoh's transport manager
-    /// keeps one transport for each (and the tokio engine's registry: `SharedSession::face_up`);
-    /// a link that is a second to a node is closed with the reason `MaxLinks`, which is what
-    /// zenoh names it. Two links that were both dialled, or both taken off a port, are the first
-    /// one up and the one after. Two that go opposite ways are two nodes that dialled each other
-    /// at once, and each node must keep the same link of the two or both are closed: the link kept
-    /// is the one the node with the lower zid dialled, which both ends read the same.
-    ///
-    /// A session that does not listen has the dial role's face and the faces attached to it, and
-    /// is told nothing of a node that a second link reaches (`listen`).
+    /// The node a link reaches, as far as the link knows it: the zid its peer announced, or the
+    /// one its admission was asked about when the link was refused before it took the Init that
+    /// carried it (`SessionLinkActions::link_admission_node`).
     #[cfg(feature = "listen")]
-    fn admission(&self, at: usize, node: Option<&[u8]>) -> Admission {
-        let Some(node) = node else {
-            return Admission::Admit { displace: None };
-        };
-        let mine = &self.faces[at];
-        for other in &self.faces {
-            if other.id == mine.id {
-                continue;
-            }
-            let Link::Up(wire) = &other.link else {
-                continue;
-            };
-            let Some(held) = wire.actions.peer_zid() else {
-                continue;
-            };
-            if !same_zid(&held, node) {
-                continue;
-            }
-            // The rule is `wz-session-core`'s, written once for both ends of a link.
-            return match judge_second_link(other.dialled, mine.dialled, &self.wire_zid, node) {
-                SecondLink::Replace => Admission::Admit {
-                    displace: Some(other.id),
-                },
-                SecondLink::Refuse => Admission::Refuse,
-            };
-        }
-        Admission::Admit { displace: None }
+    fn node_of(actions: &McuActions<C>) -> Option<Vec<u8>> {
+        actions.peer_zid().or_else(|| actions.link_admission_node())
     }
 
-    /// Bring up the face at `at`, whose handshake `wire` completed, or refuse it for a node the
-    /// session holds already (`admission`). A refused link is closed and its face goes, and the
-    /// dial role's face stands by (`Link::Held`); a link that is kept in place of the one it
-    /// opposes takes that face's place, as a lost link would.
+    /// Whether a face other than `id` holds the node `zid` or is bringing a link to it up: its
+    /// link is up or in its handshake, and reaches that node.
     #[cfg(feature = "listen")]
-    fn admit(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
-        let id = self.faces[at].id;
-        let node = wire.actions.peer_zid();
-        match self.admission(at, node.as_deref()) {
-            Admission::Refuse => {
-                wire.actions.send_close_with_reason(CloseReason::MaxLinks);
-                wire.task.abort();
-                self.local.run_until_idle();
-                drop(wire);
-                // What the link's frames put in the tables between its handshake and this step
-                // goes with it, so it counts for nothing.
-                self.lose_link(id);
-                if id == DIAL_FACE {
-                    self.faces[at].link = match node {
-                        Some(zid) => Link::Held { zid },
-                        None => Link::Waiting { at_us: now_us },
-                    };
-                } else {
-                    self.remove_face(at);
-                }
+    fn node_is_held(&self, zid: &[u8], id: FaceId) -> bool {
+        self.faces.iter().any(|face| {
+            if face.id == id {
+                return false;
             }
-            Admission::Admit { displace } => {
-                self.bring_up(at, wire, now_us);
-                if let Some(other) = displace {
-                    self.displace(other, now_us);
-                }
-            }
-        }
+            let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
+                return false;
+            };
+            Self::node_of(&wire.actions).is_some_and(|node| same_zid(&node, zid))
+        })
     }
 
-    /// Bring up the face at `at`, whose handshake `wire` completed: its link is the face's, the
-    /// session begins to declare over it what it holds, and the watchers are told.
-    #[cfg(not(feature = "listen"))]
+    /// Bring up the face at `at`, whose handshake `wire` completed. The link was admitted in its
+    /// handshake (`install_link_admission`), so a link that got this far is the session's link to
+    /// its node, and no other link to the node is kept beside it.
     fn admit(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
         self.bring_up(at, wire, now_us);
     }
@@ -1129,47 +1086,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let snapshot = self.face_of(&wire.actions);
         self.faces[at].link = Link::Up(wire);
         self.report_face(FaceEventKind::Up, snapshot);
-    }
-
-    /// Take the face `id`, whose link is up, down for a link to the same node that is kept in its
-    /// place (`admission`). The dial role's face stands by; any other goes.
-    #[cfg(feature = "listen")]
-    fn displace(&mut self, id: FaceId, now_us: u64) {
-        let Some(at) = self.faces.iter().position(|face| face.id == id) else {
-            return;
-        };
-        let Link::Up(wire) =
-            core::mem::replace(&mut self.faces[at].link, Link::Waiting { at_us: now_us })
-        else {
-            return;
-        };
-        let snapshot = self.face_of(&wire.actions);
-        let node = wire.actions.peer_zid();
-        wire.actions.send_close_with_reason(CloseReason::MaxLinks);
-        wire.task.abort();
-        self.local.run_until_idle();
-        drop(wire);
-        self.lose_link(id);
-        self.report_face(FaceEventKind::Down, snapshot);
-        if id == DIAL_FACE {
-            self.faces[at].link = match node {
-                Some(zid) => Link::Held { zid },
-                None => Link::Waiting { at_us: now_us },
-            };
-        } else {
-            self.remove_face(at);
-        }
-    }
-
-    /// Dial again the face that stood by for the node `node`, which the face that held it has let
-    /// go of.
-    #[cfg(feature = "listen")]
-    fn release_held(&mut self, node: &[u8], now_us: u64) {
-        for face in &mut self.faces {
-            if matches!(&face.link, Link::Held { zid } if same_zid(zid, node)) {
-                face.link = Link::Waiting { at_us: now_us };
-            }
-        }
     }
 
     /// Whether the dial role's face has what an open waits for: its link is up, or the node it
@@ -1273,13 +1189,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .accepting_inactivity_ms
                 .saturating_mul(1000),
         );
-        self.push_opening(id, wire, deadline_us, false);
+        self.push_opening(id, wire, deadline_us);
     }
 
-    /// Add a face that holds `wire`, whose handshake is given up at `deadline_us`, and which the
-    /// session `dialled` or took off a port. It is told the session's declarations at the pace the
-    /// dial role's face is.
-    fn push_opening(&mut self, id: FaceId, wire: Wire<C>, deadline_us: u64, dialled: bool) {
+    /// Add a face that holds `wire`, whose handshake is given up at `deadline_us`. It is told the
+    /// session's declarations at the pace the dial role's face is.
+    fn push_opening(&mut self, id: FaceId, wire: Wire<C>, deadline_us: u64) {
         let pacing = self.dial().replay.pacing();
         self.faces.push(Face {
             id,
@@ -1289,7 +1204,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 deadline_us,
             },
             replay: Replay::with_pacing(pacing),
-            dialled,
         });
     }
 
@@ -1553,7 +1467,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },
                 replay: Replay::new(),
-                dialled: true,
             }],
             next_face: 1,
             #[cfg(feature = "connectivity")]
@@ -1563,6 +1476,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             listeners: Vec::new(),
             entropy,
             config,
+            #[cfg(feature = "listen")]
+            admission: Arc::new(LinkRegistry::<CoopRuntime<C>>::new(&wire)),
             wire_zid: wire,
             subscribers: Vec::new(),
             keyexprs: Vec::new(),
@@ -1656,7 +1571,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         core.next_face += 1;
         let deadline_us = core.open_deadline_us();
-        core.push_opening(id, wire, deadline_us, true);
+        core.push_opening(id, wire, deadline_us);
         Ok(id)
     }
 

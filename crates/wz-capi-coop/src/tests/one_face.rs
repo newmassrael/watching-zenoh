@@ -12,6 +12,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use wz_capi_port::{SessionEngine, WireKey};
+use wz_session_core::face::FaceEventKind;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
@@ -54,6 +55,20 @@ fn puts_and_is_heard(
     eventually(what, || into.lock().unwrap().iter().any(|got| got == text));
 }
 
+/// How many faces `session` has been told came up and went down since this call.
+fn counting_faces(session: &Stepped) -> Arc<Mutex<(usize, usize)>> {
+    let counts = Arc::new(Mutex::new((0usize, 0usize)));
+    let into = counts.clone();
+    session.watch_faces(Arc::new(move |kind, _| {
+        let mut counts = into.lock().unwrap();
+        match kind {
+            FaceEventKind::Up => counts.0 += 1,
+            FaceEventKind::Down => counts.1 += 1,
+        }
+    }));
+    counts
+}
+
 /// Both sessions hold exactly one face, and go on holding it for a while: a pair that closed both
 /// links reads zero, and one that closed them late reads one first and zero after.
 fn settle_on_one_face(a: &Stepped, b: &Stepped) {
@@ -91,6 +106,8 @@ fn two_nodes_that_dial_each_other_at_once_keep_one_link() {
         let (second, second_at) = listening(|config| config.zid = Some(vec![second_id; 4]));
         let first_heard = hearing(&first);
         let second_heard = hearing(&second);
+        let first_faces = counting_faces(&first);
+        let second_faces = counting_faces(&second);
 
         let barrier = Barrier::new(2);
         std::thread::scope(|scope| {
@@ -107,6 +124,21 @@ fn two_nodes_that_dial_each_other_at_once_keep_one_link() {
         });
 
         settle_on_one_face(&first, &second);
+        // The loser was refused in its handshake, so neither node saw a face come up and go down:
+        // a link that is decided after it is up reads (1, 1) at the end that admitted it first.
+        // Told only by a build with the connectivity plane.
+        if cfg!(feature = "connectivity") {
+            assert_eq!(
+                *first_faces.lock().unwrap(),
+                (1, 0),
+                "round {round}: the first node's faces (up, down)"
+            );
+            assert_eq!(
+                *second_faces.lock().unwrap(),
+                (1, 0),
+                "round {round}: the second node's faces (up, down)"
+            );
+        }
         puts_and_is_heard(
             &first,
             &second_heard,

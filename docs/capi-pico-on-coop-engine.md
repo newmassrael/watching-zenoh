@@ -767,26 +767,34 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
 - **L5. Both roles at once. Done.** A peer that listens and dials holds the dial role's face and
   the accepted ones in one table, and one face for each remote zid, as zenoh's transport manager
   keeps one transport for each and the tokio registry keeps one face (`SharedSession::face_up`).
-  It is the face table's decision at the moment a handshake completes (`Core::admission`), and it
-  is the `listen` feature's: a build that does not listen has the dial role's face (and the
-  faces attached to it), which nothing there can reach twice, and read 5,000 to 8,000 bytes more
-  when the rule was in it. Each decision of the step:
+  Since 2026-11-03 the decision is made IN the link's handshake, not after it: every link takes a
+  lease on the engine's `LinkRegistry` before the handshake runs (`open_wire`), and the
+  handshake asks it when the remote's zid is known (the acceptor at the OpenSyn, the initiator at
+  the InitAck and again before it takes the OpenAck). The first version decided when a handshake
+  completed (`Core::admission`, a face swap), which let a link come up, declare, and be closed
+  when its rival came up: the declarations that crossed it were retracted and replayed. It is the
+  `listen` feature's: a build that does not listen has the dial role's face (and the faces
+  attached to it), which nothing there can reach twice, and read 5,000 to 8,000 bytes more when
+  the rule was in it. Each decision of the step:
   - A link that is a second to a node the session holds is closed with the reason `MaxLinks`
-    (what zenoh names it), and its face goes. The link gives its session nothing between its
-    handshake and the decision (`admission_gate`, which wraps each link of a session that
-    listens): the frames the peer sent after the handshake wait in the link, are read in order
-    once the link is admitted, and go with a link that is refused. What a frame in the very batch
-    that completed the handshake put in the tables is flushed as a lost link's is.
-  - Two links that went the same way (both dialled, or both taken off a port) are the first one
-    up and the one after. Two that went opposite ways are two nodes that dialled each other at
-    once, which "the first up" decides differently at the two ends (each keeps the link that
-    completed first on its side, and both links are closed). The link kept is the one the node
-    with the lower zid dialled, which both ends compute from the two zids alone, so it holds
-    whichever completes first, and a kept link may replace a held one that went the other way.
-  - The dial role's face is never removed, so a refusal or a replacement leaves it standing by
-    (`Link::Held`) and not dialled: it would be refused at every redial, the handshake paid each
-    time. It is dialled again, at once, when the face that held the node is lost. An open of a
-    session that listens and dials is released by the dial's link or by its being held.
+    (what zenoh names it) before it has a face. The link gives its session nothing between its
+    handshake and the face being brought up (`admission_gate`, which wraps each link of a session
+    that listens): the frames the peer sent after the handshake wait in the link and are read in
+    order once the face is up, so the watchers hear the face before what its link carried.
+  - An established link keeps its place (BGP, RFC 4271 section 6.8). Two links still in their
+    handshake that went the same way are the first reservation and the one after. Two that went
+    opposite ways are two nodes that dialled each other at once, which "the first up" decides
+    differently at the two ends. The link kept is the one the node with the lower zid dialled,
+    which both ends compute from the two zids alone, so it holds whichever completes first; the
+    other is superseded and its initiator closes it before it takes the OpenAck.
+  - The dial role's face is never removed, so a refusal leaves it standing by (`Link::Held`) and
+    not dialled: it would be refused at every redial, the handshake paid each time. It is
+    dialled again, at once, when no other face reaches the node (`Core::node_is_held`, read from
+    the face table at each step, so a link that dies in its handshake frees the node as well). An
+    open of a session that listens and dials is released by the dial's link or by its being
+    held.
+  - The table and its rule are `wz-session-core`'s (`link_admission::LinkBook`, and
+    `LinkRegistry` over the runtime's own mutex); the tokio nodes' registry is the same table.
   - The rule is one pure function, `wz_session_core::link_admission::judge_second_link` (the
     directions of the held and the new link and the two zids, answering refuse or replace), and
     the face table calls it. It is there and not in the engine so that a second engine deciding

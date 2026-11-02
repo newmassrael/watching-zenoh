@@ -9385,6 +9385,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
+    /// The node this link's admission was last asked about, whatever the answer: the remote of a
+    /// link that was refused for it, which [`Self::peer_zid`] may not name yet (an initiator
+    /// refused at the InitAck has not taken the Init that carried the zid). `None` before the
+    /// question, and for a link with no admission.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    pub fn link_admission_node(&self) -> Option<alloc::vec::Vec<u8>> {
+        R::with_mutex_mut(&self.link.link_lease, |slot| {
+            slot.as_ref()
+                .and_then(|lease| lease.node())
+                .map(<[u8]>::to_vec)
+        })
+    }
+
     /// The node refused this link during its handshake: the peer is told why, with the reason
     /// zenoh gives a link refused for the node it already holds (`MAX_LINKS`), and nothing was
     /// declared over it by either end.

@@ -569,7 +569,9 @@ pub mod credential_identity;
 
 /// Which of two links to one node a session keeps: the first up, and of two that went opposite
 /// ways the one the lower zid dialled, which both ends read alike (`docs/capi-pico-on-coop-engine.md`,
-/// step L5). Ungated: the rule reads two zids and two directions and allocates nothing.
+/// step L5). The rule is ungated (it reads two zids and two directions and allocates nothing); the
+/// table that asks it while a link is being established (`LinkBook`, `LinkRegistry`) is the heap
+/// profile's, and is the one table both the tokio runtime's nodes and the cooperative engine use.
 pub mod link_admission;
 
 /// A zid's candidate locators as soft state, each confirmed by a source and

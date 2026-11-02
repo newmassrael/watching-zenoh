@@ -3,13 +3,14 @@
 
 //! The input a link has not yet been admitted to give.
 //!
-//! A session that listens keeps one face for each remote zid, and decides it when a handshake
-//! completes (`CoopEngine::admit`). The link's task runs in the session's local set and reads
-//! frames as fast as the set is run, so a link that is about to be refused would have its
-//! first frames dispatched to the session's tables before the decision. [`AdmissionGate`] stands
-//! between the task and the link and gives the task nothing once the handshake is complete, until
-//! the engine has admitted the link. What the peer sent meanwhile stays queued in the link, and is
-//! read in order after the admission. A link that is refused is dropped with it unread.
+//! A session that listens keeps one face for each remote zid, and decides it in the link's
+//! handshake (`wz_session_core::link_admission`), so a link that completes its handshake is the
+//! session's link to its node. The link's task runs in the session's local set and reads frames as
+//! fast as the set is run, so the peer's first frames after the handshake would be dispatched to
+//! the session's tables before the engine has brought the face up and told its watchers.
+//! [`AdmissionGate`] stands between the task and the link and gives the task nothing once the
+//! handshake is complete, until the engine has brought the face up (`CoopEngine::bring_up`). What
+//! the peer sent meanwhile stays queued in the link, and is read in order after.
 //!
 //! The handshake itself is read through: the gate shuts when the session is established, which is
 //! after the frame that completed the handshake was dispatched, and not before.
