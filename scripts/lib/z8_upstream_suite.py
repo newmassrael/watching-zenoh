@@ -431,6 +431,11 @@ def isolated_run(base: list[str], out: pathlib.Path, log: pathlib.Path, bound: i
     `bound` is for the whole file. `None` when it ran out."""
     listing = subprocess.run([*base, "--", "--list", "--format", "terse"], cwd=out, capture_output=True, text=True)
     tests = re.findall(r"^(\S+): test$", listing.stdout, re.M)
+    # A flake is measured by running the same tests again and again: `Z8_ONLY` keeps the tests
+    # whose name contains it (one scenario module, say `scenario7::`), `Z8_REPEAT` runs each that
+    # many times. Both default to the whole file once, which is what the table of outcomes reads.
+    only = os.environ.get("Z8_ONLY", "")
+    tests = [t for t in tests if only in t] * int(os.environ.get("Z8_REPEAT", "1"))
     deadline = time.monotonic() + bound
     status: int | None = 0
     with log.open("w", encoding="utf-8") as fh:
