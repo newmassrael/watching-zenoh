@@ -1060,9 +1060,17 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     `tests/tls_sessions.rs` holds 24 connections with both ends in one process (it holds 2 of 24
     without the setting).
   - The clock, read: the examples' certificates are valid from March 2023 to March 2123, so no
-    leg here depends on a date. How pico itself settles a certificate's dates was not read, and
-    stays open; the provider states the host's wall time at each dial and a lapsed certificate is
-    refused (`tests/tls_provider.rs`).
+    leg here depends on a date. How pico settles a certificate's dates, read in
+    `src/link/transport/upper/tls_stream.c`: the handshake's verify result is refused unless
+    every set flag is one it ignores, and the only flags ignored are a name mismatch on a dial
+    that did not ask for the name check (lines 468-471) and a skipped verification on a listener
+    without mutual TLS (lines 621-625). An expired or not-yet-valid certificate is therefore
+    refused, as Mbed TLS reports it (`BADCERT_EXPIRED`, set only under `MBEDTLS_HAVE_TIME_DATE`,
+    `vendor/mbedtls/library/x509_crt.c:2536-2539`), provided the platform's Mbed TLS has a wall
+    clock to check against; a build without one checks no date. The provider states the host's wall time at each
+    dial and a lapsed certificate is refused (`tests/tls_provider.rs`), so the two agree on a
+    host. That a pico board without a clock accepts a lapsed certificate is a property of its
+    platform, not of the link, and the provider has no such mode.
   - A key written as PKCS#8 (`BEGIN PRIVATE KEY`, what OpenSSL 3 writes by default) with an RSA
     key in it was refused by `Identity::from_pem` with PSA's invalid-argument code (-135), while
     the same key as PKCS#1 (`BEGIN RSA PRIVATE KEY`, what the examples carry) opened. The pinned
