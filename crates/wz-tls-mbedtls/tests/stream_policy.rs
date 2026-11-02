@@ -315,14 +315,18 @@ fn a_peer_that_stalls_or_speaks_junk_is_dropped_and_the_next_is_served() {
         clock: clock_ms,
         timeout_ms: 300,
     };
+    // The typed listener, not the boxed one a dial's `listen` returns, so its counters are read.
+    let inner = PosixTcpDial.listen(LOOPBACK, 0).expect("the port opens");
     let listener = chain_listener(&server, None)
         .with_accept(quick)
-        .listen(LOOPBACK, 0)
-        .expect("the port opens");
+        .listener(inner)
+        .expect("a listener");
     let (_, port) = listener.local();
+    assert_eq!(listener.dropped(), 0);
+    assert_eq!(listener.last_drop(), None);
 
     // A connection that sends nothing: dropped when its handshake outlasts the budget, which the
-    // peer sees as the end of the stream.
+    // peer sees as the end of the stream. The drop is counted and has no channel error.
     let mut stalled = TcpStream::connect((Ipv4Addr::from(LOOPBACK), port)).expect("connects");
     stalled
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -333,17 +337,25 @@ fn a_peer_that_stalls_or_speaks_junk_is_dropped_and_the_next_is_served() {
         matches!(stalled.read(&mut byte), Ok(0) | Err(_)),
         "the stalled connection was left open"
     );
+    assert_eq!(listener.dropped(), 1, "the stalled connection is counted");
+    assert_eq!(listener.last_drop(), None, "a stall has no channel error");
 
-    // A client that is not speaking TLS: dropped as soon as the handshake fails.
+    // A client that is not speaking TLS: dropped as soon as the handshake fails, with its error.
     let mut junk = TcpStream::connect((Ipv4Addr::from(LOOPBACK), port)).expect("connects");
     junk.write_all(&[b'G'; 200]).expect("junk leaves");
     assert!(accept_within(&listener, Duration::from_millis(1_000)).is_none());
+    assert_eq!(listener.dropped(), 2, "the junk connection is counted");
+    assert!(
+        listener.last_drop().is_some(),
+        "a failed handshake names why"
+    );
 
-    // Neither wedged it.
+    // Neither wedged it, and a served client is not a drop.
     let client = rustls_client(port, &authority, None);
     let stream = accept_within(&listener, Duration::from_secs(10)).expect("a real client");
     serve_echo(&stream);
     client.join().expect("thread").expect("the client verified");
+    assert_eq!(listener.dropped(), 2, "a served client is not counted");
 }
 
 /// A rustls client that accepts any server certificate and still checks the handshake signature

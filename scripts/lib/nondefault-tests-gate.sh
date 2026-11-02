@@ -510,8 +510,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-tls-mbedtls|hook|host-lock,vendored|"
     # The same tests with the host's RSA beside the P-256 (`rsa`, step T4 of L6): a host's chain is
     # RSA, and the configuration that carries it adds signature algorithms to every handshake, so
-    # the channel against rustls over P-256 is run again with it on. MEASURED: 30 passed, as
-    # without it. The row above is the build the kit's image is, which never sets `rsa`.
+    # the channel against rustls over P-256 is run again with it on. MEASURED: 31 passed, the 30
+    # of the row above and `tests/rsa_key_forms.rs` (an RSA key in PKCS#1 and in PKCS#8 opens an
+    # identity of the same zid), which only this row compiles. The row above is the build the
+    # kit's image is, which never sets `rsa`.
     "wz-tls-mbedtls|hook|host-lock,rsa,vendored|"
     "wz-runtime-core|hook|alloc|"
     "wz-session-core|hook|\

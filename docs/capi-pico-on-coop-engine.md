@@ -1063,9 +1063,26 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     leg here depends on a date. How pico itself settles a certificate's dates was not read, and
     stays open; the provider states the host's wall time at each dial and a lapsed certificate is
     refused (`tests/tls_provider.rs`).
+  - A key written as PKCS#8 (`BEGIN PRIVATE KEY`, what OpenSSL 3 writes by default) with an RSA
+    key in it was refused by `Identity::from_pem` with PSA's invalid-argument code (-135), while
+    the same key as PKCS#1 (`BEGIN RSA PRIVATE KEY`, what the examples carry) opened. The pinned
+    Mbed TLS reads a PKCS#8 RSA key without setting its public half (its PKCS#1 branches do
+    set it), so the pair check refused it. The channel now writes every RSA key out as PKCS#1 and
+    reads it back once at load (`pk_complete_public`, under `rsa`); `tests/rsa_key_forms.rs`
+    opens both forms of one key and checks that each names the zid of the key's public half.
+    Elliptic-curve keys in PKCS#8 were never affected.
+  - A handshake the listener ends without a stream (a failed handshake, a peer the policy did
+    not accept, a stall past the accept budget) was seen by the caller of `accept` only as
+    nothing to accept. `TlsListener::dropped` counts them and `TlsListener::last_drop` names the
+    channel's error of the latest that had one, which is how a program sees the arena or the
+    key store run out. The counters are on the typed listener; the C ABI's listener is boxed
+    behind `TlsDial::listen`, so a C program does not read them yet.
   - The Zephyr kit image was not rebuilt here: it needs the Zephyr workspace (Layer Qzk builds it
-    on the hosted runner). Nothing of this step reaches it: `WZ_TLS_HOST` comes from `build.rs`
-    under `host-lock`, and the image compiles the channel's C side itself.
+    on the hosted runner). The first cut of this step did not reach it; this one does: the image
+    compiles `csrc/wz_tls.c` and `src/stream.rs` itself. The C side gained code only under
+    `rsa`, which the image never sets, so its object is what it was; the Rust side gained two
+    fields of a listener (a counter and the last error, about eight bytes of RAM). That has not
+    been built for the image.
 
 ### What is decided and what is open
 

@@ -373,6 +373,8 @@ impl<D> TlsDial<D> {
             policy: self.policy,
             accept,
             pending: RefCell::new(None),
+            dropped: Cell::new(0),
+            last_drop: Cell::new(None),
         })
     }
 }
@@ -485,7 +487,9 @@ struct Pending<S: StreamSocket + 'static> {
 /// on the network: a connection arriving behind it waits in `L`'s own queue, the arena holds one
 /// inbound session and not a table of them, and a peer that stalls is dropped by the
 /// [`AcceptBudget`]. A handshake that fails (a peer that is not trusted, a plain TCP client, a
-/// reset) is dropped and is not the listener's failure.
+/// reset) is dropped and is not the listener's failure, but it is counted: [`Self::dropped`] and
+/// [`Self::last_drop`] are how a program sees that the arena or the key store had no room for a
+/// handshake, which the caller of `accept` otherwise sees only as nothing to accept.
 pub struct TlsListener<L: StreamListen>
 where
     L::Stream: 'static,
@@ -494,6 +498,8 @@ where
     policy: Policy,
     accept: AcceptBudget,
     pending: RefCell<Option<Pending<L::Stream>>>,
+    dropped: Cell<u32>,
+    last_drop: Cell<Option<TlsError>>,
 }
 
 impl<L: StreamListen> TlsListener<L>
@@ -501,8 +507,26 @@ where
     L::Stream: 'static,
 {
     /// End the inbound connection and look for the next.
-    fn drop_pending(pending: Pending<L::Stream>) {
+    fn drop_pending(&self, pending: Pending<L::Stream>, why: Option<TlsError>) {
         pending.lower.socket.shutdown();
+        self.dropped.set(self.dropped.get().saturating_add(1));
+        if why.is_some() {
+            self.last_drop.set(why);
+        }
+    }
+
+    /// How many inbound connections this listener took and ended without a stream: a handshake
+    /// that failed, a peer the policy did not accept, a peer that stalled past the
+    /// [`AcceptBudget`]. Saturates at `u32::MAX`.
+    pub fn dropped(&self) -> u32 {
+        self.dropped.get()
+    }
+
+    /// The channel's error for the latest drop that had one (a stall past the budget has none).
+    /// An arena or a key store with no room is [`TlsError::OutOfMemory`] or a [`TlsError::Code`]
+    /// of PSA's refusal.
+    pub fn last_drop(&self) -> Option<TlsError> {
+        self.last_drop.get()
     }
 }
 
@@ -558,8 +582,8 @@ where
                             &self.policy,
                         ))),
                         // Done, but the peer is not who the policy needs.
-                        Err(_) => {
-                            Self::drop_pending(pending);
+                        Err(e) => {
+                            self.drop_pending(pending, Some(e));
                             Ok(None)
                         }
                     };
@@ -568,14 +592,14 @@ where
                 Ok(Step::Wait(Want::Read)) => {
                     let waited = (self.accept.clock)().saturating_sub(pending.since_ms);
                     if waited > self.accept.timeout_ms {
-                        Self::drop_pending(pending);
+                        self.drop_pending(pending, None);
                     } else {
                         *slot = Some(pending);
                     }
                     return Ok(None);
                 }
-                Err(_) => {
-                    Self::drop_pending(pending);
+                Err(e) => {
+                    self.drop_pending(pending, Some(e));
                     return Ok(None);
                 }
             }

@@ -19,6 +19,9 @@
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/platform.h>
+#if defined(WZ_TLS_RSA)
+#include <mbedtls/platform_util.h>
+#endif
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 
@@ -215,6 +218,46 @@ void wz_tls_identity_cert(const struct wz_tls_identity *id, const uint8_t **der,
 	*len = id->crt.raw.len;
 }
 
+#if defined(WZ_TLS_RSA)
+/* The largest RSA-4096 private key in PKCS#1 DER is about 2350 bytes. */
+#define RSA_PRIV_DER_MAX 2560
+
+/* A PKCS#8 `BEGIN PRIVATE KEY` RSA key (what OpenSSL 3 writes by default) comes out of
+ * `mbedtls_pk_parse_key` without its public half: the library's PKCS#8 branch for RSA never
+ * calls `mbedtls_pk_set_pubkey_from_prv`, which its PKCS#1 branches do, so nothing can write the
+ * key's SubjectPublicKeyInfo and the zid cannot be derived (`mbedtls_pk_check_pair` refuses it
+ * with PSA's invalid-argument code). Writing the key out as PKCS#1 DER and reading that back takes
+ * the branch that sets it. Whether the half is set cannot be asked through the public API, and
+ * `mbedtls_pk_write_pubkey_der` answers with an empty key's wrapper, so every RSA key goes round
+ * once, at load. */
+static int pk_complete_public(mbedtls_pk_context *pk)
+{
+	unsigned char *der;
+	int n;
+	int rc;
+
+	if (mbedtls_pk_get_key_type(pk) != PSA_KEY_TYPE_RSA_KEY_PAIR) {
+		return 0;
+	}
+	der = mbedtls_calloc(1, RSA_PRIV_DER_MAX);
+	if (der == NULL) {
+		return MBEDTLS_ERR_PK_ALLOC_FAILED;
+	}
+	n = mbedtls_pk_write_key_der(pk, der, RSA_PRIV_DER_MAX);
+	if (n > 0) {
+		/* DER is written backwards, from the end of the buffer. */
+		mbedtls_pk_free(pk);
+		mbedtls_pk_init(pk);
+		rc = mbedtls_pk_parse_key(pk, der + RSA_PRIV_DER_MAX - n, (size_t)n, NULL, 0);
+	} else {
+		rc = n == 0 ? MBEDTLS_ERR_PK_BAD_INPUT_DATA : n;
+	}
+	mbedtls_platform_zeroize(der, RSA_PRIV_DER_MAX);
+	mbedtls_free(der);
+	return rc;
+}
+#endif
+
 int wz_tls_identity_from_pem(struct wz_tls_identity **out, const unsigned char *chain,
 			     size_t chain_len, const unsigned char *key, size_t key_len)
 {
@@ -244,6 +287,11 @@ int wz_tls_identity_from_pem(struct wz_tls_identity **out, const unsigned char *
 	if (rc == 0) {
 		rc = mbedtls_pk_parse_key(&id->pk, key, key_len, NULL, 0);
 	}
+#if defined(WZ_TLS_RSA)
+	if (rc == 0) {
+		rc = pk_complete_public(&id->pk);
+	}
+#endif
 	if (rc == 0) {
 		/* The key must be the certificate's own, or a handshake fails at its end, which is
 		 * a long way from the file that was wrong. */
