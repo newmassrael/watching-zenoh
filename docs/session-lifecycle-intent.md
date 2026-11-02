@@ -1402,8 +1402,10 @@ certificate must name the zid the line claims), has a stock `zenohd` dial it
 with mutual TLS and the certificate as the root it pins, and asks the verbs
 through the router's REST plugin: `status` is answered with a status document,
 `close` is refused by name, and the control, a second router whose key is not
-listed, is refused `status`. All held on the first two runs, with no
-`wz: FAIL` line; the node's own console reported one session and a stack peak
+listed, is refused `status`. All held on the first two runs, and again on a
+third against the pinned router (`zenohd` 1.10.2; the first two ran against the
+lab's 1.10.0, and the kit lane's preflight now refuses a router that is not the
+pinned version), with no `wz: FAIL` line; the node's own console reported one session and a stack peak
 of 22,189 of 32,768 bytes. The requester the verbs decided by is the one the
 link's key proved, on silicon, through a real router. What this part does not
 do is the open by zid and the read of `sessions[]`, and the image has no stack

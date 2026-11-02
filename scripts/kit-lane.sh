@@ -275,7 +275,15 @@ preflight() {
         bad preflight "openocd does not run: $KIT_PROGTOOLS/openocd/bin/openocd"
     fi
     if "$KIT_ZENOHD" --version >/dev/null 2>&1; then
-        ok preflight "the router runs ($(router_version))"
+        # The router is the pinned upstream's (UPSTREAM_VERSION of upstream_feature_census.py): a figure or
+        # a verdict taken against another version says nothing about the one the images are held to.
+        local pinned
+        pinned="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1] + "/scripts/lib"); from upstream_feature_census import UPSTREAM_VERSION as v; print(v)' "$ROOT")"
+        if [[ -n "$pinned" && "$(router_version)" == "zenohd v$pinned "* ]]; then
+            ok preflight "the router runs, at the pinned version ($(router_version))"
+        else
+            bad preflight "the router is '$(router_version)' and the pinned upstream is v$pinned: build it with scripts/build-zenohd.sh and name it in $LAB_ENV (KIT_ZENOHD)"
+        fi
     else
         bad preflight "the router does not run: $KIT_ZENOHD"
     fi
