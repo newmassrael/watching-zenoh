@@ -306832,6 +306832,42 @@
         "Owed, still: regions scenario 7 about 0.3 percent (repeated timestamp and an equality assertion of a queque test, not attributed), the alias table that only allocates, a whole-process stop in about 1 of 30 runs, the aggregate reply retraction of peer-hat faces."
       ]
     },
+    "Round 4148": {
+      "decision_summary": "A session that closes while its data plane holds an open frame no longer drops that frame. Small puts are staged into the open frame of their priority and the link's writer puts it on the wire when it falls idle, through a hook that holds the session weakly; OpenedSession::drain_to_close let go of the session first, so a close that came before the writer's idle flush found the hook empty and the frame was dropped with the session. The puts of the last milliseconds of a burst had returned Z_OK and never arrived. drain_to_close now hands the open frames to the writer (batch_flush) before it lets go, and the seal that follows drains them.\n\nThis is a second cause beside the one recorded in the host comparison round. The undeclare of a dropped publisher is a Control barrier that already hands the open frame over, and then overtakes it on the writer lanes (the barrier in the lanes, landed since, holds it back). A close with no undeclare has no barrier, and the open frame was lost. The earlier statement that a close left to the session loses nothing was a reading of timing on that tree, not of the code, and is withdrawn.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_open.rs: OpenedSession::drain_to_close calls actions.batch_flush() after the engine is dropped and before actions is dropped, with the reason in a comment. A build without the batching window answers its feature error, which is ignored.",
+        "crates/wz-capi-pico/tests/teardown_drain.rs: a third test, a_burst_of_small_puts_before_z_close_is_not_left_in_the_open_frame: ten sessions in turn put 2000 eight-byte messages, each after a calibration put proves its publish path, and close on the next line; every put must arrive."
+      ],
+      "verification_bullets": [
+        "pc3 through bx, idle host, 8 B puts at 400 k/s for 2 s, 20 runs per cell, a run lost if the count received differs from the count put. Session-only close (publisher not dropped first), before the change: wz to wz 13 of 20 runs lost puts on the barrier commit (7987 lost) and 13 of 20 on its parent (6387), wz to zenoh-c 15 of 20 (7585); zenoh-c to wz 0 of 20, so the loss is on the sending side. After the change: wz to zenoh-c 0 of 20, wz to wz 0 of 20 session-only and 0 of 20 with the publisher dropped first.",
+        "cargo test -p wz-capi-pico --features engine-tokio,peer --test teardown_drain on pc3: 3 passed with the change. With the one call removed the new test fails (20000 puts, 426 not received) and the other two pass, so the test sees the defect. Each state was run once; the new test is a race, so one failing run shows it can fail and does not give a rate.",
+        "cargo fmt --check on wz-capi-pico and wz-runtime-tokio: clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Next: measure the 8 B and 64 B cells with a wz publisher in the zenoh-c family table again (idle pc3, default pinning, median of 3) and state them in docs/upstream-parity.md; the 1 KiB cells at the wider pinning wait for a quiet host. Not done: the other session-end paths (a face that goes down while the session is open, the accept path's own drain) were not run against the same burst; they go through the same drain_to_close and are covered by it, but only the dial role was measured."
+      ],
+      "publishable_decision_summary": "A session that closes while its data plane holds an open frame no longer drops that frame. Small puts are staged into the open frame of their priority and the link's writer puts it on the wire when it falls idle, through a hook that holds the session weakly; OpenedSession::drain_to_close let go of the session first, so a close that came before the writer's idle flush found the hook empty and the frame was dropped with the session. The puts of the last milliseconds of a burst had returned Z_OK and never arrived. drain_to_close now hands the open frames to the writer (batch_flush) before it lets go, and the seal that follows drains them.\n\nThis is a second cause beside the one recorded in the host comparison round. The undeclare of a dropped publisher is a Control barrier that already hands the open frame over, and then overtakes it on the writer lanes (the barrier in the lanes, landed since, holds it back). A close with no undeclare has no barrier, and the open frame was lost. The earlier statement that a close left to the session loses nothing was a reading of timing on that tree, not of the code, and is withdrawn.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_open.rs: OpenedSession::drain_to_close calls actions.batch_flush() after the engine is dropped and before actions is dropped, with the reason in a comment. A build without the batching window answers its feature error, which is ignored.",
+        "crates/wz-capi-pico/tests/teardown_drain.rs: a third test, a_burst_of_small_puts_before_z_close_is_not_left_in_the_open_frame: ten sessions in turn put 2000 eight-byte messages, each after a calibration put proves its publish path, and close on the next line; every put must arrive."
+      ],
+      "publishable_verification_bullets": [
+        "pc3 through bx, idle host, 8 B puts at 400 k/s for 2 s, 20 runs per cell, a run lost if the count received differs from the count put. Session-only close (publisher not dropped first), before the change: wz to wz 13 of 20 runs lost puts on the barrier commit (7987 lost) and 13 of 20 on its parent (6387), wz to zenoh-c 15 of 20 (7585); zenoh-c to wz 0 of 20, so the loss is on the sending side. After the change: wz to zenoh-c 0 of 20, wz to wz 0 of 20 session-only and 0 of 20 with the publisher dropped first.",
+        "cargo test -p wz-capi-pico --features engine-tokio,peer --test teardown_drain on pc3: 3 passed with the change. With the one call removed the new test fails (20000 puts, 426 not received) and the other two pass, so the test sees the defect. Each state was run once; the new test is a race, so one failing run shows it can fail and does not give a rate.",
+        "cargo fmt --check on wz-capi-pico and wz-runtime-tokio: clean."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: measure the 8 B and 64 B cells with a wz publisher in the zenoh-c family table again (idle pc3, default pinning, median of 3) and state them in docs/upstream-parity.md; the 1 KiB cells at the wider pinning wait for a quiet host. Not done: the other session-end paths (a face that goes down while the session is open, the accept path's own drain) were not run against the same burst; they go through the same drain_to_close and are covered by it, but only the dial role was measured."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
