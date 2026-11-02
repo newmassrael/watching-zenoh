@@ -305698,6 +305698,38 @@
         "Open: whether a zenoh (Rust) peer publisher, dialed by a router, reaches a client subscriber behind it; the suite has no built Rust example to ask, and the answer decides whether wz's peer must send an Interest to a router that dials it (the router logged do_initial_interest=false and sent it nothing, and no Interest came from the peer). The T5 Layer Z lines and the hosted run of 4110 are still unread. Still unmeasured from L6: the 4 MiB TLS arena against a count of sessions, TLS 1.2-only picos, pico's handling of certificate dates, the Zephyr kit image rebuild."
       ]
     },
+    "Round 4113": {
+      "decision_summary": "Three more defects of the node engine that the differential of the session (E18) found are repaired, each with a test that failed before. A peer node sent every declaration to its peers as id 0, and a peer of the pin keeps queryables by id and holds the first resource of an id it has, so a queryable of the node never answered an upstream get; a peer node now numbers what it leaves for its north, as a client node did. A peer of the pin retracts by id with the null key, which the node read as the empty key and so withdrew nothing: a token, subscriber or queryable a peer retracted stayed held; an empty key now names nothing and the id decides. The matching status of a querier counted any queryable that intersected its key; a queryable of a face must include it, one of the session intersects, and a querier that wants complete ones needs a complete one. Open: the timestamp stacks of queries and replies, and the burst that does not finish.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: numbers_every_declaration_to (a peer node numbers what it leaves for its north); resolve_withdrawn reads an empty key as none; matching counts a queryable of a face by inclusion and one of the session by intersection; tests.",
+        "crates/wz-runtime-tokio/src/router_forward/declaration_ids.rs: numbered_for asks the new predicate; a test.",
+        "docs/zenoh-api-on-the-engine.md: the three repairs and what is open."
+      ],
+      "verification_bullets": [
+        "Locally: the differential tests of the queryable, the liveliness and the matching status pass where they failed (the binary built against this tree; 20 of the 24 tests that finish pass, the burst is skipped); the 354 tests of the forwarder with the router, token and clock features pass; clippy with warnings denied passes for wz-runtime-tokio with those features and all targets; the format, reason pin and citation form gates pass; the five peer mesh tests and the dialed-and-accepted-face test pass against wz-ap-demo built with routing-peer. Not run: the hosted run, the pico and zenohd interop layers, the whole of the differential file."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the differential of the session: the timestamp stack of a query and a reply on the node (and the route point, which takes the session's custom clock), and the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ],
+      "publishable_decision_summary": "Three more defects of the node engine that the differential of the session (E18) found are repaired, each with a test that failed before. A peer node sent every declaration to its peers as id 0, and a peer of the pin keeps queryables by id and holds the first resource of an id it has, so a queryable of the node never answered an upstream get; a peer node now numbers what it leaves for its north, as a client node did. A peer of the pin retracts by id with the null key, which the node read as the empty key and so withdrew nothing: a token, subscriber or queryable a peer retracted stayed held; an empty key now names nothing and the id decides. The matching status of a querier counted any queryable that intersected its key; a queryable of a face must include it, one of the session intersects, and a querier that wants complete ones needs a complete one. Open: the timestamp stacks of queries and replies, and the burst that does not finish.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: numbers_every_declaration_to (a peer node numbers what it leaves for its north); resolve_withdrawn reads an empty key as none; matching counts a queryable of a face by inclusion and one of the session by intersection; tests.",
+        "crates/wz-runtime-tokio/src/router_forward/declaration_ids.rs: numbered_for asks the new predicate; a test.",
+        "docs/zenoh-api-on-the-engine.md: the three repairs and what is open."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the differential tests of the queryable, the liveliness and the matching status pass where they failed (the binary built against this tree; 20 of the 24 tests that finish pass, the burst is skipped); the 354 tests of the forwarder with the router, token and clock features pass; clippy with warnings denied passes for wz-runtime-tokio with those features and all targets; the format, reason pin and citation form gates pass; the five peer mesh tests and the dialed-and-accepted-face test pass against wz-ap-demo built with routing-peer. Not run: the hosted run, the pico and zenohd interop layers, the whole of the differential file."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the differential of the session: the timestamp stack of a query and a reply on the node (and the route point, which takes the session's custom clock), and the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
