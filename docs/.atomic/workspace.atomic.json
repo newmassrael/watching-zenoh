@@ -305020,6 +305020,46 @@
         "Open, in order: the prior as generated parameters (a rounded fit in the calibration file, like the rest), sn_steps_weight taking the mixture in place of the two constants, the pinned examples that move with it, the model number and the zenoh-analyzer session (null no flows read undecided under the units candidate). A flow with more steps than 2^36 is counted as 2^36. The prior is a maximum-likelihood point, the null side of the steps is derived, kappa of the units needs zenoh groups that fail units. The reader running maximum of a flow sum; the validation corpus; the owner confirmation of the acceptance levels."
       ]
     },
+    "Round 4094": {
+      "decision_summary": "A client that listens, is told its router and keeps its south apart (gateway/south names subregions) is now a forwarding node, where it was the registry of faces. It runs on the peer node's tables and announces itself as a client; the forwarder has no client hat of its own, which is recorded. Three things the tests found are fixed: a router keeps what a client declares by the id the client numbered it with, so the node numbers its declarations for that face (one id for each key, and tokens the same toward a south peer); a client is told only what it asked, so the interest of a peer south of the node is brokered north, and sent again to a router that comes up after it; a token learned as an answer is held, so its withdrawal reaches the peers. Upstream's regions file passes whole, 126 of 126 in two runs, from 115; the row is pass 126.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: client_fits_node admits a client that listens, dials its router and holds a custom south; a test.",
+        "crates/wz-capi-core/src/drive/router_node.rs: NodeRole::Client, announced as a client and run on the peer node's tables with as_client_of_north; it waits for its connection as a peer does.",
+        "crates/wz-zenoh/src/api/session.rs: Engine::open runs a client that fits a node as one.",
+        "crates/wz-capi-core/Cargo.toml: the router-node feature compiles the interest broker (routing-interest-pending-gc).",
+        "crates/wz-runtime-tokio/src/router_forward.rs and router_forward/brokered_interest.rs: the interest of a south peer is brokered north by a node that is a client of its north, and the future interests held are sent to a router that comes up later; a token answer is also held for a south peer; gateway_faces reads the faces of the north region alone, which ended a duplicate reply.",
+        "crates/wz-runtime-tokio/src/router_forward/declaration_ids.rs: new, the ids a node gives the declarations it sends to a face that keeps them by id; tests.",
+        "docs/z8-expected.tsv and docs/zenoh-api-on-the-engine.md: the regions row is pass 126 and the note says what the tests found."
+      ],
+      "verification_bullets": [
+        "Locally: the upstream regions file measured with a process per test passes 126 of 126 in two runs on the rebased tree, where 115 passed, and 124 passed in the run before the link admission repairs; all ten tests of scenario 1 pass in three runs each. The router_forward tests of wz-runtime-tokio pass with the broker, token and acl features, the open_plan and drive tests of wz-capi-core pass, clippy with warnings denied passes for wz-runtime-tokio with all features, for wz-capi-core with router-node and scout, and for the zenoh library with its defaults and with the unstable set; the capability cost gate passes for the two client builds; the reason, citation, census, notice, prose, surface, needle, licence and table gates pass. Not run: the hosted run and the layers of the pico drop-in."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the regions file: it in the hosted lane (one run takes ten minutes), and the gossip test that failed once in a run of the whole file. The client node runs on the peer node's tables and announces itself as a client; a client hat of its own in the forwarder, with the north region as the pin builds it, is not made. Owed from the roadmap: the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane. The leaf peers of a region are still the registry of faces, which does not forward."
+      ],
+      "publishable_decision_summary": "A client that listens, is told its router and keeps its south apart (gateway/south names subregions) is now a forwarding node, where it was the registry of faces. It runs on the peer node's tables and announces itself as a client; the forwarder has no client hat of its own, which is recorded. Three things the tests found are fixed: a router keeps what a client declares by the id the client numbered it with, so the node numbers its declarations for that face (one id for each key, and tokens the same toward a south peer); a client is told only what it asked, so the interest of a peer south of the node is brokered north, and sent again to a router that comes up after it; a token learned as an answer is held, so its withdrawal reaches the peers. Upstream's regions file passes whole, 126 of 126 in two runs, from 115; the row is pass 126.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: client_fits_node admits a client that listens, dials its router and holds a custom south; a test.",
+        "crates/wz-capi-core/src/drive/router_node.rs: NodeRole::Client, announced as a client and run on the peer node's tables with as_client_of_north; it waits for its connection as a peer does.",
+        "crates/wz-zenoh/src/api/session.rs: Engine::open runs a client that fits a node as one.",
+        "crates/wz-capi-core/Cargo.toml: the router-node feature compiles the interest broker (routing-interest-pending-gc).",
+        "crates/wz-runtime-tokio/src/router_forward.rs and router_forward/brokered_interest.rs: the interest of a south peer is brokered north by a node that is a client of its north, and the future interests held are sent to a router that comes up later; a token answer is also held for a south peer; gateway_faces reads the faces of the north region alone, which ended a duplicate reply.",
+        "crates/wz-runtime-tokio/src/router_forward/declaration_ids.rs: new, the ids a node gives the declarations it sends to a face that keeps them by id; tests.",
+        "docs/z8-expected.tsv and docs/zenoh-api-on-the-engine.md: the regions row is pass 126 and the note says what the tests found."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the upstream regions file measured with a process per test passes 126 of 126 in two runs on the rebased tree, where 115 passed, and 124 passed in the run before the link admission repairs; all ten tests of scenario 1 pass in three runs each. The router_forward tests of wz-runtime-tokio pass with the broker, token and acl features, the open_plan and drive tests of wz-capi-core pass, clippy with warnings denied passes for wz-runtime-tokio with all features, for wz-capi-core with router-node and scout, and for the zenoh library with its defaults and with the unstable set; the capability cost gate passes for the two client builds; the reason, citation, census, notice, prose, surface, needle, licence and table gates pass. Not run: the hosted run and the layers of the pico drop-in."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the regions file: it in the hosted lane (one run takes ten minutes), and the gossip test that failed once in a run of the whole file. The client node runs on the peer node's tables and announces itself as a client; a client hat of its own in the forwarder, with the north region as the pin builds it, is not made. Owed from the roadmap: the files that ask for a Runtime (the arm with internal), Windows, a margin gate for the lane. The leaf peers of a region are still the registry of faces, which does not forward."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
