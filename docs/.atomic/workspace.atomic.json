@@ -306160,6 +306160,36 @@
         "Open: the kit figures taken against 1.10.0 before this entry (the getter's and the answering images' latency medians, the stack peaks of the five client images) are not re-measured against 1.10.2; D14's open by zid and the read of sessions[]; the rows of the admin image."
       ]
     },
+    "Round 4127": {
+      "decision_summary": "The kit rows of the five client images are re-read against the pinned router, zenohd 1.10.2, and moved where the kit's reading or the build had moved. Before this entry the kit lane's figures were taken against 1.10.0 or 1.10.1, and the lane's preflight now holds the router to the pin. Each image was built and run on the T2G kit with the tree of this entry. The plain, batching and heap clients hold their rows. The text of the four answering and asking images grew with the later commits of other sessions and is moved to the figure the build gives on the lab host and on this workstation alike: the plain client 143,420, the batching client 145,108, the asking client 161,600 and the heap client 143,484, the last of which was 1,032 over its row and had been refused by the lane's text gate. The asking client's stack bound reads 4,332 bytes (4,324 before) because one frame of session-core grew by 8, its stack of 5,824 bytes still holds a quarter over it, and its kit reading is 4,216 in every one of three runs (4,168 before). The secure-channel client's stack reading is 4,248 bytes in every one of three runs, 2,440 bytes under its row of 6,688; the row is moved to it, and the cause of the fall was not bisected. The rows say so in their own prose.",
+      "changes_bullets": [
+        "deploy/text_budget.json: the text of four client images and the prose beside it. deploy/resource_budget.json: the asking client's bound and reading, the secure-channel client's reading. deploy/zephyr-admin-node/overlays/t2g_client_get.conf: the stack comment."
+      ],
+      "verification_bullets": [
+        "On the T2G kit with the router at zenohd 1.10.2: scripts/kit-lane.sh all for the plain, batching and asking images and the secure-channel and heap ones; the first pass found the asking bound at 4,332 and its reading at 4,216, the heap text over its row and the secure-channel reading at 4,248, and each reading was repeated three times with the same figure before its row was moved. After the move the secure-channel and heap images hold their rows on the kit and the asking image was run again. resource_budget_gate.py --check and the text gate's selftest pass. The GET medians were not re-read. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the GET medians of the asking and secure-channel clients against 1.10.2; the cause of the secure-channel client's fall from 6,688 to 4,248 bytes; the static chain of the secure-channel client (7,432), which was not re-read; D14's open by zid and the read of sessions[]."
+      ],
+      "publishable_decision_summary": "The kit rows of the five client images are re-read against the pinned router, zenohd 1.10.2, and moved where the kit's reading or the build had moved. Before this entry the kit lane's figures were taken against 1.10.0 or 1.10.1, and the lane's preflight now holds the router to the pin. Each image was built and run on the T2G kit with the tree of this entry. The plain, batching and heap clients hold their rows. The text of the four answering and asking images grew with the later commits of other sessions and is moved to the figure the build gives on the lab host and on this workstation alike: the plain client 143,420, the batching client 145,108, the asking client 161,600 and the heap client 143,484, the last of which was 1,032 over its row and had been refused by the lane's text gate. The asking client's stack bound reads 4,332 bytes (4,324 before) because one frame of session-core grew by 8, its stack of 5,824 bytes still holds a quarter over it, and its kit reading is 4,216 in every one of three runs (4,168 before). The secure-channel client's stack reading is 4,248 bytes in every one of three runs, 2,440 bytes under its row of 6,688; the row is moved to it, and the cause of the fall was not bisected. The rows say so in their own prose.",
+      "publishable_changes_bullets": [
+        "deploy/text_budget.json: the text of four client images and the prose beside it. deploy/resource_budget.json: the asking client's bound and reading, the secure-channel client's reading. deploy/zephyr-admin-node/overlays/t2g_client_get.conf: the stack comment."
+      ],
+      "publishable_verification_bullets": [
+        "On the T2G kit with the router at zenohd 1.10.2: scripts/kit-lane.sh all for the plain, batching and asking images and the secure-channel and heap ones; the first pass found the asking bound at 4,332 and its reading at 4,216, the heap text over its row and the secure-channel reading at 4,248, and each reading was repeated three times with the same figure before its row was moved. After the move the secure-channel and heap images hold their rows on the kit and the asking image was run again. resource_budget_gate.py --check and the text gate's selftest pass. The GET medians were not re-read. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the GET medians of the asking and secure-channel clients against 1.10.2; the cause of the secure-channel client's fall from 6,688 to 4,248 bytes; the static chain of the secure-channel client (7,432), which was not re-read; D14's open by zid and the read of sessions[]."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
