@@ -4011,8 +4011,11 @@ int main(void) {
      * `crossed_at_packet` and the extremes of the two sums. Keys arrive and
      * words move; nothing retires.
      * 50: model 4 of the zenoh test: the `wire_front` check, whose zenoh
-     * side is `derived`. Words move; no key moves. */
-    revisioned[2].revision = 50;
+     * side is `derived`. Words move; no key moves.
+     * 51: a response's `answers` (the request it answered, and the round
+     * trip on the first reply) and a final's `completion_ns`. Keys arrive;
+     * nothing retires. */
+    revisioned[2].revision = 51;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

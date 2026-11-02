@@ -1096,8 +1096,9 @@ pub struct Since {
 ///   the `e2e` key of each `carried` entry and of each `above_transport.carried`
 ///   entry, the key included.
 /// * **The exchange pairing** names, on a final's `carried` entry, the request it
-///   closed (`closes`), and a front trim that takes the request leaves the final
-///   held and unpaired. The cells are everything under `closes`.
+///   closed (`closes`), and on a response's the request it answered (`answers`);
+///   a front trim that takes the request leaves the final or the response held
+///   and unpaired. The cells are everything under `closes` and `answers`.
 /// * **The caller's declarations** are an input of every document: a row written
 ///   under one declaration text and read under another differs under
 ///   `payload_decode` for that reason, which is the same subtree.
@@ -1131,6 +1132,9 @@ pub const REVISABLE_ROW_CELLS: &[&str] = &[
     // `closes` becomes an object of nulls where it named a request, and
     // `request_seq` becomes `null` when only the request's row went.
     "/carried[]/closes/**",
+    // A response's `answers` names the request the same pairing gave it, and
+    // reads the same way when a trim takes the request.
+    "/carried[]/answers/**",
     "/payload_decode/**",
 ];
 
@@ -3384,6 +3388,7 @@ fn push_carried(
                      payload: Option<crate::payload_decode::PayloadSlot>,
                      e2e: Option<crate::payload_decode::E2eJudged<'_>>,
                      closed: Option<String>,
+                     answered: Option<String>,
                      out: &mut String| {
         if !first {
             out.push(',');
@@ -3409,6 +3414,9 @@ fn push_carried(
         // declared `carries` axis (see `RowCloses`).
         out.push_str(",\"closes\":");
         out.push_str(closed.as_deref().unwrap_or("null"));
+        // The same rule: on every entry, `null` on one that is not a `Response`.
+        out.push_str(",\"answers\":");
+        out.push_str(answered.as_deref().unwrap_or("null"));
         out.push('}');
     };
     // The first listing entry is the row itself; subsequent entries are its
@@ -3420,7 +3428,7 @@ fn push_carried(
         } else {
             None
         };
-        entry(message.name(), field, keyexpr, None, None, None, out);
+        entry(message.name(), field, keyexpr, None, None, None, None, out);
     }
     for (index, record) in records.into_iter().enumerate() {
         let word = record_word(bytes, record);
@@ -3436,6 +3444,9 @@ fn push_carried(
         let closed = closes
             .filter(|_| word == "ResponseFinal")
             .map(|c| c.value(index));
+        let answered = closes
+            .filter(|_| word == "Response")
+            .map(|c| c.answer_value(index));
         entry(
             word,
             record,
@@ -3443,6 +3454,7 @@ fn push_carried(
             crate::payload_decode::payload_slot(record),
             e2e,
             closed,
+            answered,
             out,
         );
     }
@@ -3767,7 +3779,7 @@ fn push_above_transport(
             // over the frames a list holds, and a record inside a reassembled
             // chain is not one of them, so this list names no request. Last, so
             // the keys the entry always wrote keep the order they were written in.
-            out.push_str(",\"closes\":null");
+            out.push_str(",\"closes\":null,\"answers\":null");
             out.push('}');
         }
         out.push(']');
@@ -5213,12 +5225,63 @@ impl<'a> RowCloses<'a> {
         let Some(closing) = self.table.closing(&self.row, record) else {
             // The orphan: an object, so it is told from an entry that is not a
             // final (`null`), with nothing to name.
-            out.push_str("{\"request_kind\":null,\"request_seq\":null,\"request_record\":null}");
+            out.push_str(
+                "{\"request_kind\":null,\"request_seq\":null,\"request_record\":null,\
+                 \"completion_ns\":null}",
+            );
             return out;
         };
+        self.push_request(
+            closing.kind,
+            &closing.request,
+            closing.request_record,
+            &mut out,
+        );
+        out.push_str(",\"completion_ns\":");
+        push_opt_u64(closing.completion_ns, &mut out);
+        out.push('}');
+        out
+    }
+
+    /// The value of `answers` for the `Response` that is record `record` of
+    /// this row.
+    fn answer_value(&self, record: usize) -> String {
+        let mut out = String::new();
+        let Some(answer) = self.table.answer(&self.row, record) else {
+            // The orphan: an object of nulls, told from an entry that is not a
+            // response (`null`) and from a first reply with no round trip
+            // (`first_reply` true, `round_trip_ns` null).
+            out.push_str(
+                "{\"request_kind\":null,\"request_seq\":null,\"request_record\":null,\
+                 \"first_reply\":null,\"round_trip_ns\":null}",
+            );
+            return out;
+        };
+        self.push_request(
+            answer.kind,
+            &answer.request,
+            answer.request_record,
+            &mut out,
+        );
+        let _ = write!(out, ",\"first_reply\":{}", answer.first_reply);
+        out.push_str(",\"round_trip_ns\":");
+        push_opt_u64(answer.round_trip_ns, &mut out);
+        out.push('}');
+        out
+    }
+
+    /// The opening of a pairing object: `{` and the three keys that name the
+    /// request, unclosed so the caller adds its own.
+    fn push_request(
+        &self,
+        kind: crate::filter::RecordKind,
+        request: &crate::payload::RowKey,
+        request_record: usize,
+        out: &mut String,
+    ) {
         let seq = self
             .requests
-            .and_then(|requests| requests.produced_of(&closing.request))
+            .and_then(|requests| requests.produced_of(request))
             .and_then(|produced| {
                 let n = self.numbering?;
                 n.coordinates.row_seq(n.list?, produced)
@@ -5226,16 +5289,21 @@ impl<'a> RowCloses<'a> {
         let _ = write!(
             out,
             "{{\"request_kind\":\"{}\",\"request_seq\":",
-            closing.kind.word()
+            kind.word()
         );
-        match seq {
-            Some(seq) => {
-                let _ = write!(out, "{seq}");
-            }
-            None => out.push_str("null"),
+        push_opt_u64(seq, out);
+        let _ = write!(out, ",\"request_record\":{request_record}");
+    }
+}
+
+/// An unsigned integer, or `null`.
+#[cfg(feature = "network-codecs")]
+fn push_opt_u64(value: Option<u64>, out: &mut String) {
+    match value {
+        Some(v) => {
+            let _ = write!(out, "{v}");
         }
-        let _ = write!(out, ",\"request_record\":{}}}", closing.request_record);
-        out
+        None => out.push_str("null"),
     }
 }
 
@@ -5251,6 +5319,10 @@ impl<'a> RowCloses<'a> {
     }
 
     fn value(&self, _: usize) -> String {
+        String::new()
+    }
+
+    fn answer_value(&self, _: usize) -> String {
         String::new()
     }
 }

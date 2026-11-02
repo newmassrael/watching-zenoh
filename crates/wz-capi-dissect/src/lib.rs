@@ -18483,7 +18483,15 @@ mod tests {
                     ..Default::default()
                 },
                 "",
+                // The reply loses its request as the final does (`answers`), and
+                // both lose the interval measured from it.
                 cells(&[
+                    "/carried[]/answers/first_reply",
+                    "/carried[]/answers/request_kind",
+                    "/carried[]/answers/request_record",
+                    "/carried[]/answers/request_seq",
+                    "/carried[]/answers/round_trip_ns",
+                    "/carried[]/closes/completion_ns",
                     "/carried[]/closes/request_kind",
                     "/carried[]/closes/request_record",
                     "/carried[]/closes/request_seq",

@@ -109,6 +109,49 @@ struct Interval {
     ns: u64,
 }
 
+/// What two instants of one exchange give: an interval, or why there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Measured {
+    /// Both ends had a clock, in order.
+    Interval(Interval),
+    /// The later end reads an earlier millisecond than the earlier end.
+    Backwards,
+    /// An end had no clock.
+    Unstamped,
+}
+
+impl Measured {
+    /// The interval from `from` to `to`, both capture instants in nanoseconds.
+    ///
+    /// The verdict on direction is taken on the MILLISECOND readings, as it
+    /// always was: an exchange is backwards when its later end reads an earlier
+    /// millisecond than its earlier end. The nanosecond reading is then the
+    /// difference of the same two instants, floored at zero, so a reply stamped
+    /// a few hundred microseconds BEFORE its request inside one millisecond is
+    /// a 0 ms sample and a 0 ns one. The census's distributions and a row's
+    /// round trip are both taken here, so the two cannot measure one exchange
+    /// two ways.
+    fn between(from: Option<u64>, to: Option<u64>) -> Self {
+        match (from, to) {
+            (Some(f), Some(t)) if t / NANOS_PER_MILLI >= f / NANOS_PER_MILLI => {
+                Self::Interval(Interval {
+                    ms: t / NANOS_PER_MILLI - f / NANOS_PER_MILLI,
+                    ns: t.saturating_sub(f),
+                })
+            }
+            (Some(_), Some(_)) => Self::Backwards,
+            _ => Self::Unstamped,
+        }
+    }
+
+    fn interval(self) -> Option<Interval> {
+        match self {
+            Self::Interval(i) => Some(i),
+            Self::Backwards | Self::Unstamped => None,
+        }
+    }
+}
+
 /// A latency distribution, accumulated without keeping every sample.
 ///
 /// `min` / `max` are `Option` rather than sentinel-initialised: a `0` floor on
@@ -475,6 +518,29 @@ pub struct Closing {
     pub request_record: usize,
     /// The request's kind, in the selector grammar's words (`query`).
     pub kind: crate::filter::RecordKind,
+    /// The request to this final, in nanoseconds: the interval the census's
+    /// `completion` distribution takes for this exchange, or `None` when an end
+    /// had no clock or the two read backwards.
+    pub completion_ns: Option<u64>,
+}
+
+/// The request a `Response` answered, as the row that carried the response can
+/// say it, and the round trip when it is the exchange's first reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Answer {
+    /// The message row that carried the `Request`.
+    pub request: crate::payload::RowKey,
+    /// Which of that row's batched records the `Request` was.
+    pub request_record: usize,
+    /// The request's kind, in the selector grammar's words (`query`).
+    pub kind: crate::filter::RecordKind,
+    /// This response is the exchange's first (a `Reply` or an `Err`).
+    pub first_reply: bool,
+    /// The request to this response, in nanoseconds, on the first reply only:
+    /// the interval the census's `first_reply` distribution takes for this
+    /// exchange. `None` on a later reply, and on a first reply when an end had
+    /// no clock or the two read backwards.
+    pub round_trip_ns: Option<u64>,
 }
 
 /// The batch of network records a frame carries, which is the thing this plane
@@ -528,6 +594,14 @@ pub struct ExchangeTable {
     ///
     /// Not merged by [`Self::merge`], for the reason `row_verdicts` is not.
     closings: crate::overlay_map::OverlayMap<(crate::payload::RowKey, usize), Option<Closing>>,
+    /// For each batched RECORD that was a `Response` to a request the capture
+    /// held: the request it answered, and on the first reply the round trip.
+    /// Recorded when the response passes and whatever the selector says, for
+    /// the reason `closings` is; a response whose request the capture never
+    /// held has no entry (see [`Self::answer`]).
+    ///
+    /// Not merged by [`Self::merge`], for the reason `row_verdicts` is not.
+    answers: crate::overlay_map::OverlayMap<(crate::payload::RowKey, usize), Option<Answer>>,
     /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term. Set
     /// only by [`exchanges_where`], the entry point that has the whole capture.
     capture_origin_ms: Option<u64>,
@@ -775,13 +849,37 @@ impl ExchangeTable {
                     return;
                 };
                 use wz_codecs::response::ResponseOwnedVariant;
+                // The FIRST response is the first reply, whether or not its
+                // frame had a clock: one with none leaves the exchange without
+                // a first-reply interval (an unstamped one), and a later
+                // response does not stand in for it. Its row and the census
+                // then name the same response.
+                let first_reply = entry.replies + entry.errs == 0;
                 match &r.body {
                     ResponseOwnedVariant::CodecZenohErr(_) => entry.errs += 1,
                     _ => entry.replies += 1,
                 }
-                if entry.first_reply_at_ns.is_none() {
+                let round_trip_ns = if first_reply {
                     entry.first_reply_at_ns = at;
-                }
+                    Measured::between(entry.requested_at_ns, at)
+                        .interval()
+                        .map(|i| i.ns)
+                } else {
+                    None
+                };
+                // Before any selector is asked, for the reason the closing of a
+                // final is: which request a response answered is a fact about
+                // the pair.
+                *self
+                    .answers
+                    .entry_or_default((crate::payload::RowKey::of(list, frame), record)) =
+                    Some(Answer {
+                        request: entry.row,
+                        request_record: entry.record,
+                        kind: entry.kind,
+                        first_reply,
+                        round_trip_ns,
+                    });
             }
             NetworkMessage::ResponseFinal(f) => {
                 let key = (list, dir_index(direction.peer()), f.request_id);
@@ -841,26 +939,16 @@ impl ExchangeTable {
 
         let mut unstamped = false;
         let mut backwards = false;
-        // The verdict on direction is taken on the MILLISECOND readings, as it
-        // always was: an exchange is `backwards` when its later end reads an
-        // earlier millisecond than its earlier end, and the counters that say so
-        // keep counting exactly that. The nanosecond reading is then the
-        // difference of the same two instants, floored at zero -- so a reply
-        // stamped a few hundred microseconds BEFORE its request inside one
-        // millisecond is still a 0 ms sample, as it always was, and a 0 ns one.
-        let mut measure = |from: Option<u64>, to: Option<u64>| match (from, to) {
-            (Some(f), Some(t)) if t / NANOS_PER_MILLI >= f / NANOS_PER_MILLI => Some(Interval {
-                ms: t / NANOS_PER_MILLI - f / NANOS_PER_MILLI,
-                ns: t.saturating_sub(f),
-            }),
-            (Some(_), Some(_)) => {
-                backwards = true;
-                None
+        // The counters say which of the exchange's intervals could not be taken
+        // and why ([`Measured::between`]).
+        let mut measure = |from: Option<u64>, to: Option<u64>| {
+            let m = Measured::between(from, to);
+            match m {
+                Measured::Interval(_) => {}
+                Measured::Backwards => backwards = true,
+                Measured::Unstamped => unstamped = true,
             }
-            _ => {
-                unstamped = true;
-                None
-            }
+            m.interval()
         };
         // A first reply that never arrived is not a missing CLOCK — the
         // exchange has no first-reply interval at all, and `replies == 0` on
@@ -952,6 +1040,7 @@ impl ExchangeTable {
                 request: entry.row,
                 request_record: entry.record,
                 kind: entry.kind,
+                completion_ns: total.map(|i| i.ns),
             });
         }
         if truth != Truth::Yes {
@@ -1134,6 +1223,14 @@ impl ExchangeTable {
         self.closings.get(&(*final_row, record))?.as_ref()
     }
 
+    /// The request the `Response` that is record `record` of `response_row`
+    /// answered, and its round trip when it was the first reply; `None` when
+    /// the capture never held the request (the orphan) or the record is not a
+    /// response.
+    pub fn answer(&self, response_row: &crate::payload::RowKey, record: usize) -> Option<&Answer> {
+        self.answers.get(&(*response_row, record))?.as_ref()
+    }
+
     /// Merge another table's rows and totals into this one.
     ///
     /// For a consumer aggregating across captures. Latency merges exactly —
@@ -1242,7 +1339,9 @@ impl ExchangeFold {
     /// closed.
     #[cfg(feature = "dissect")]
     pub(crate) fn memory(&self) -> usize {
-        self.table.row_verdicts.memory() + self.table.closings.memory(|_| 0)
+        self.table.row_verdicts.memory()
+            + self.table.closings.memory(|_| 0)
+            + self.table.answers.memory(|_| 0)
     }
 
     /// A fold that has taken no message.
@@ -1270,7 +1369,10 @@ impl ExchangeFold {
     /// compares with what the lists hold, to know when it has outgrown them.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
     pub(crate) fn kept_entries(&self) -> usize {
-        self.open.len() + self.table.closings.len() + self.table.row_verdicts.len()
+        self.open.len()
+            + self.table.closings.len()
+            + self.table.answers.len()
+            + self.table.row_verdicts.len()
     }
 
     /// The table with every exchange still open given its verdict, over a copy.

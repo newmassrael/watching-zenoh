@@ -1300,7 +1300,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":50,"key":"kind","values":[...],
+ *     {"name":"fields","revision":51,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -3173,10 +3173,34 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * `carried` entry has a `closes` key, as every entry has a `body`, so the word of
  * `message` decides nothing about which keys arrive. Three answers:
  *
- *     "closes":{"request_kind":"query","request_seq":41,"request_record":0}   paired
- *     "closes":{"request_kind":null,"request_seq":null,"request_record":null}  not in
- *                                                        this capture (an orphan)
+ *     "closes":{"request_kind":"query","request_seq":41,"request_record":0,
+ *               "completion_ns":900000}                   paired
+ *     "closes":{"request_kind":null,"request_seq":null,"request_record":null,
+ *               "completion_ns":null}    not in this capture (an orphan)
  *     "closes":null                          the entry is not a ResponseFinal
+ *
+ * `completion_ns` (since field-document revision 51) is the request to the
+ * final in nanoseconds, null when an end had no clock or the two read backwards.
+ *
+ * WHICH REQUEST A Response ANSWERED is said the same way, on every entry's
+ * `answers` key (since revision 51), with the round trip on the first reply:
+ *
+ *     "answers":{"request_kind":"query","request_seq":41,"request_record":0,
+ *                "first_reply":true,"round_trip_ns":575000}      the first reply
+ *     "answers":{...,"first_reply":false,"round_trip_ns":null}    a later reply
+ *     "answers":{"request_kind":null,"request_seq":null,"request_record":null,
+ *                "first_reply":null,"round_trip_ns":null}   not in this capture
+ *     "answers":null                          the entry is not a Response
+ *
+ * The first reply is the exchange's first Response (a Reply or an Err), with a
+ * clock or not; `round_trip_ns` is null on it when an end had no clock or the
+ * two read backwards. Both intervals are the ones the census's `exchanges`
+ * distributions take, by the same rule: over a capture whose exchanges all
+ * closed and a selector that admits them, the first replies' `round_trip_ns`
+ * add up to `first_reply.total_ns` and the finals' `completion_ns` to
+ * `completion.total_ns`. A row says its interval as soon as it is read and
+ * whatever the selector says; the census counts the completed exchanges the
+ * selector admits.
  *
  * It is on the ENTRY and not the row because a row is a transport message that can
  * batch several records, and `carried` has an entry for each: two finals in one
@@ -4923,7 +4947,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":50,"key":"state",
+ *     "value_families":[{"name":"fields","revision":51,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6148,6 +6172,8 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *                                              here it still names the request's
  *                                              kind (`request_seq` is `null` once
  *                                              the request's ROW is gone)
+ *     /carried[]/answers (its whole subtree)   a response whose request was
+ *                                              trimmed: the same
  *
  * and /carried[]/e2e, whose counters this door keeps across a trim like the rest
  * (see WHAT A CALL COSTS): a slot's verdict depends on the frames of its slot

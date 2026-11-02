@@ -14,6 +14,12 @@
 //! Every test runs over BOTH link kinds: a stream flow and a datagram flow are two
 //! row producers with their own loops, and a test over one would leave the other's
 //! wiring unwatched.
+//!
+//! The `answers` key of a `Response`'s entry (field document revision 51) is the
+//! same pairing from the other end, with the round trip on the first reply, and
+//! `closes` carries the request-to-final interval: the tests at the end hold that
+//! each is the interval the census's `exchanges` distributions take, so the rows
+//! add up to the census.
 
 use alloc::vec::Vec;
 
@@ -411,6 +417,355 @@ fn a_continuing_walk_names_a_request_it_does_not_visit_again() {
             memory.stats().resumed >= 1,
             "{link:?}: the second call began again, so it proved nothing about continuing: {:?}",
             memory.stats()
+        );
+    }
+}
+
+/// The `Response` entries of a row.
+fn responses(row: &Json5Value) -> Vec<&Json5Value> {
+    match get(row, "carried") {
+        Some(Json5Value::Array(entries)) => entries
+            .iter()
+            .filter(|e| word(get(e, "message")) == Some("Response"))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether every `carried` entry of the row has an `answers` key and every one
+/// that is not a `Response` reads `null`.
+fn only_responses_answer(row: &Json5Value) -> bool {
+    match get(row, "carried") {
+        Some(Json5Value::Array(entries)) => entries.iter().all(|e| {
+            matches!(
+                (word(get(e, "message")), get(e, "answers")),
+                (Some("Response"), Some(Json5Value::Object(_))) | (Some(_), Some(Json5Value::Null))
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn boolean(value: Option<&Json5Value>) -> Option<bool> {
+    match value? {
+        Json5Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+/// The instant the request of [`timed_exchange`] is taken at.
+const ASKED_NS: u64 = 1_700_000_000_000_000_000;
+
+/// A query, its reply 575 microseconds later and its final 900 microseconds
+/// after the query: the consumer's one-query, one-reply fixture.
+fn timed_exchange(link: Link, rid: u64) -> Wire {
+    let mut wire = Wire::new(link, true);
+    wire.send(
+        true,
+        Some(ASKED_NS),
+        &frame_carrying(&request_query(rid, sender_space(0, Some(KEY)))),
+    );
+    wire.send(
+        false,
+        Some(ASKED_NS + 575_000),
+        &frame_carrying(&response_reply(rid, sender_space(0, Some(KEY)), b"x")),
+    );
+    wire.send(
+        false,
+        Some(ASKED_NS + 900_000),
+        &frame_carrying(&response_final(rid)),
+    );
+    wire
+}
+
+/// Over every row: the first replies' round trips and the finals' completions,
+/// added up.
+fn row_sums(rows: &[Json5Value]) -> (u64, u64, u64) {
+    let (mut first, mut firsts, mut completion) = (0u64, 0u64, 0u64);
+    for row in rows {
+        for r in responses(row) {
+            let answers = get(r, "answers").expect("a response answers");
+            if boolean(get(answers, "first_reply")) == Some(true) {
+                if let Some(ns) = number(get(answers, "round_trip_ns")) {
+                    first += ns;
+                    firsts += 1;
+                }
+            }
+        }
+        for f in finals(row) {
+            completion +=
+                number(get(get(f, "closes").expect("closes"), "completion_ns")).unwrap_or(0);
+        }
+    }
+    (first, firsts, completion)
+}
+
+/// THE CONSUMER'S FIXTURE: one query and one reply 575 microseconds later. The
+/// reply's row carries 575000 ns as its round trip and names the query; the
+/// final's carries the 900000 ns to completion; and both are the census's.
+#[test]
+fn a_reply_row_carries_its_round_trip_and_the_census_adds_the_same() {
+    for link in LINKS {
+        let wire = timed_exchange(link, 7);
+        let doc = since_all(&wire, 5);
+        let rows = rows(&doc);
+        assert_eq!(rows.len(), 5, "{link:?}: {doc}");
+        let request_seq = number(get(&rows[2], "seq")).expect("a numbered request row");
+        let replies = responses(&rows[3]);
+        assert_eq!(replies.len(), 1, "{link:?}: {doc}");
+        let answers = get(replies[0], "answers").unwrap_or_else(|| panic!("{link:?}: {doc}"));
+        assert_eq!(
+            word(get(answers, "request_kind")),
+            Some("query"),
+            "{link:?}"
+        );
+        assert_eq!(
+            number(get(answers, "request_seq")),
+            Some(request_seq),
+            "{link:?}"
+        );
+        assert_eq!(number(get(answers, "request_record")), Some(0), "{link:?}");
+        assert_eq!(boolean(get(answers, "first_reply")), Some(true), "{link:?}");
+        assert_eq!(
+            number(get(answers, "round_trip_ns")),
+            Some(575_000),
+            "{link:?}: {doc}"
+        );
+        let closes = get(finals(&rows[4])[0], "closes").expect("closes");
+        assert_eq!(
+            number(get(closes, "completion_ns")),
+            Some(900_000),
+            "{link:?}: {doc}"
+        );
+        for (i, row) in rows.iter().enumerate() {
+            assert!(only_responses_answer(row), "{link:?}: row {i}: {doc}");
+        }
+
+        let (first, completion) = crate::exchange::exchanges(&wire.d).totals();
+        assert_eq!((first.count(), first.total_ns()), (1, 575_000), "{link:?}");
+        let (sum, firsts, completed) = row_sums(&rows);
+        assert_eq!(
+            sum,
+            first.total_ns(),
+            "{link:?}: the rows add up to the census"
+        );
+        assert_eq!(firsts as usize, first.count(), "{link:?}");
+        assert_eq!(completed, completion.total_ns(), "{link:?}");
+    }
+}
+
+/// Several exchanges, interleaved, with a second reply each: only the first
+/// reply carries a round trip, a later reply names its request with `null`,
+/// and the rows add up to the census's totals.
+#[test]
+fn only_the_first_reply_carries_the_round_trip_and_the_rows_add_up() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        let mut at = ASKED_NS;
+        let mut step = |by: u64| {
+            at += by;
+            Some(at)
+        };
+        for rid in [1u64, 2, 3] {
+            wire.send(
+                true,
+                step(100_000),
+                &frame_carrying(&request_query(rid, sender_space(0, Some(KEY)))),
+            );
+        }
+        for rid in [2u64, 1, 3, 1, 2, 3] {
+            wire.send(
+                false,
+                step(37_000 + rid * 1_000),
+                &frame_carrying(&response_reply(rid, sender_space(0, Some(KEY)), b"x")),
+            );
+        }
+        for rid in [3u64, 1, 2] {
+            wire.send(false, step(250_000), &frame_carrying(&response_final(rid)));
+        }
+        let doc = since_all(&wire, 14);
+        let rows = rows(&doc);
+        assert_eq!(rows.len(), 14, "{link:?}: {doc}");
+        let mut first = 0;
+        let mut later = 0;
+        for row in &rows {
+            for r in responses(row) {
+                let answers = get(r, "answers").expect("answers");
+                match boolean(get(answers, "first_reply")) {
+                    Some(true) => {
+                        first += 1;
+                        assert!(number(get(answers, "round_trip_ns")).is_some(), "{doc}");
+                    }
+                    Some(false) => {
+                        later += 1;
+                        assert_eq!(get(answers, "round_trip_ns"), Some(&Json5Value::Null));
+                    }
+                    None => panic!("{link:?}: a paired reply says whether it is first: {doc}"),
+                }
+            }
+        }
+        assert_eq!((first, later), (3, 3), "{link:?}");
+        let (census_first, census_completion) = crate::exchange::exchanges(&wire.d).totals();
+        let (sum, firsts, completed) = row_sums(&rows);
+        assert_eq!(
+            (sum, firsts as usize),
+            (census_first.total_ns(), census_first.count())
+        );
+        assert_eq!(completed, census_completion.total_ns(), "{link:?}");
+        assert_eq!(census_first.count(), 3, "{link:?}");
+    }
+}
+
+/// A reply whose request the capture never held is an object of nulls, told
+/// from an entry that is not a response (`null`) and from a first reply with no
+/// measurable round trip (`first_reply` true, `round_trip_ns` null).
+#[test]
+fn an_unpaired_reply_is_told_from_one_with_no_round_trip() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        // The orphan: no request of rid 9 in the capture.
+        wire.send(
+            false,
+            Some(ASKED_NS),
+            &frame_carrying(&response_reply(9, sender_space(0, Some(KEY)), b"x")),
+        );
+        // A query whose first reply reads two milliseconds BEFORE it (a
+        // backwards clock), and a second reply that reads after it: the second
+        // does not stand in for the first.
+        wire.send(
+            true,
+            Some(ASKED_NS + 2_000_000),
+            &frame_carrying(&request_query(4, sender_space(0, Some(KEY)))),
+        );
+        wire.send(
+            false,
+            Some(ASKED_NS),
+            &frame_carrying(&response_reply(4, sender_space(0, Some(KEY)), b"x")),
+        );
+        wire.send(
+            false,
+            Some(ASKED_NS + 2_009_000),
+            &frame_carrying(&response_reply(4, sender_space(0, Some(KEY)), b"y")),
+        );
+        wire.send(
+            false,
+            Some(ASKED_NS + 2_010_000),
+            &frame_carrying(&response_final(4)),
+        );
+        let doc = since_all(&wire, 7);
+        let rows = rows(&doc);
+        assert_eq!(rows.len(), 7, "{link:?}: {doc}");
+        let orphan = get(responses(&rows[2])[0], "answers").expect("answers");
+        for key in [
+            "request_kind",
+            "request_seq",
+            "request_record",
+            "first_reply",
+            "round_trip_ns",
+        ] {
+            assert_eq!(
+                get(orphan, key),
+                Some(&Json5Value::Null),
+                "{link:?}: {key}: {doc}"
+            );
+        }
+        let backwards = get(responses(&rows[4])[0], "answers").expect("answers");
+        assert_eq!(
+            word(get(backwards, "request_kind")),
+            Some("query"),
+            "{link:?}"
+        );
+        assert_eq!(
+            boolean(get(backwards, "first_reply")),
+            Some(true),
+            "{link:?}"
+        );
+        // Paired and first, with no round trip to say: not the orphan's nulls,
+        // and not the second reply's 9000 ns standing in.
+        assert_eq!(
+            get(backwards, "round_trip_ns"),
+            Some(&Json5Value::Null),
+            "{link:?}: {doc}"
+        );
+        let second = get(responses(&rows[5])[0], "answers").expect("answers");
+        assert_eq!(boolean(get(second, "first_reply")), Some(false), "{link:?}");
+        assert_eq!(
+            get(second, "round_trip_ns"),
+            Some(&Json5Value::Null),
+            "{link:?}"
+        );
+        let closes = get(finals(&rows[6])[0], "closes").expect("closes");
+        assert_eq!(
+            number(get(closes, "completion_ns")),
+            Some(10_000),
+            "{link:?}: {doc}"
+        );
+        // The census agrees with the rows: no first-reply interval, the
+        // exchange counted backwards, and its completion taken.
+        let table = crate::exchange::exchanges(&wire.d);
+        let (first, completion) = table.totals();
+        assert_eq!(first.count(), 0, "{link:?}");
+        assert_eq!(table.gaps().non_monotonic, 1, "{link:?}");
+        assert_eq!(
+            (completion.count(), completion.total_ns()),
+            (1, 10_000),
+            "{link:?}"
+        );
+    }
+}
+
+/// A live handle's walk that continues from where it stopped writes the reply
+/// row with its round trip, from a request it does not visit again.
+#[test]
+fn a_continuing_walk_writes_the_round_trip_of_a_request_it_does_not_visit_again() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        wire.send(
+            true,
+            Some(ASKED_NS),
+            &frame_carrying(&request_query(7, sender_space(0, Some(KEY)))),
+        );
+        let mut memory = FieldsMemory::new();
+        let window = |after_seq, through_seq| Since {
+            after_seq,
+            through_seq,
+        };
+        let first = fields_json_since_remembering(
+            &wire.d,
+            &wire.file(),
+            None,
+            "",
+            &Numbered,
+            window(0, 3),
+            &mut memory,
+        );
+        assert_eq!(rows(&first).len(), 3, "{link:?}: {first}");
+        wire.send(
+            false,
+            Some(ASKED_NS + 575_000),
+            &frame_carrying(&response_reply(7, sender_space(0, Some(KEY)), b"x")),
+        );
+        let second = fields_json_since_remembering(
+            &wire.d,
+            &wire.file(),
+            None,
+            "",
+            &Numbered,
+            window(3, 4),
+            &mut memory,
+        );
+        let second_rows = rows(&second);
+        assert_eq!(second_rows.len(), 1, "{link:?}: {second}");
+        let answers = get(responses(&second_rows[0])[0], "answers").expect("answers");
+        assert_eq!(
+            number(get(answers, "round_trip_ns")),
+            Some(575_000),
+            "{link:?}: {second}"
+        );
+        assert_eq!(
+            number(get(answers, "request_seq")),
+            Some(3),
+            "{link:?}: {second}"
         );
     }
 }
