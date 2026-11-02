@@ -321,9 +321,12 @@ transport-link-tls = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport-
 # same twelve `Z_CONFIG_TLS_*` keys as `transport-link-tls`, resolved once to PEM bytes, run over
 # the Mbed TLS channel the cooperative engine's stack is given (`wz-capi-coop`'s `tls::HostTls`),
 # for the dial and the listen. It selects the cooperative engine, as `transport-link-tls` selects
-# the tokio one (rustls): a build names the secure channel it wants, and one that names both is
-# refused (the tokio engine would open every session and run neither's `tls/` link as the other's).
-tls-mbedtls = ["engine-coop", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
+# the tokio one (rustls): a build names the secure channel it wants. Features add, and the engines
+# do as well (`engine-tokio` on is the tokio engine whatever else is on, as `engine-coop` beside it
+# has always been), so a build that has the tokio engine on runs its sessions there, where a
+# `tls/` endpoint is that engine's (`transport-link-tls`, or `Unsupported` without it). A build for
+# the cooperative engine says so with `--no-default-features`.
+tls-mbedtls =["engine-coop", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
 # The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
 # it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under
 # `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds; without it the scheme still

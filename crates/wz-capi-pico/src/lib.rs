@@ -76,18 +76,6 @@ compile_error!(
      on its own thread and runtime, `engine-coop` for the one the program steps"
 );
 
-// A secure channel belongs to an engine: `transport-link-tls` is the tokio engine's (rustls) and
-// `tls-mbedtls` the cooperative engine's (Mbed TLS). The tokio engine is what a build runs on
-// whenever it is on, so `tls-mbedtls` beside it would open every session where it does nothing
-// and answer a `tls/` endpoint as unsupported; it is refused by name here and not at the first
-// `tls/` open. (Build with `--no-default-features`, which leaves the tokio engine out.)
-#[cfg(all(feature = "tls-mbedtls", feature = "engine-tokio"))]
-compile_error!(
-    "wz-capi-pico: `tls-mbedtls` is the cooperative engine's secure channel, and `engine-tokio` \
-     is on, so the session would run on the tokio engine: build with `--no-default-features` and \
-     `engine-coop`, or name `transport-link-tls` for the tokio engine's"
-);
-
 pub mod abi;
 #[cfg(feature = "admin-space")]
 pub mod admin_space;
