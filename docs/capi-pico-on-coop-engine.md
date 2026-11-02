@@ -854,7 +854,7 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   tokio peer that races it (the two keep different rules, and a race can close both links until the
   next redial).
 
-- **L6. `tls/`, both roles. Designed; T1 to T4 built.** pico's `tls/` and zenohd's are TLS with a CA
+- **L6. `tls/`, both roles. Designed; T1 to T5 built.** pico's `tls/` and zenohd's are TLS with a CA
   chain, and the cooperative engine has no such link; a build with `tls/` selects the tokio
   engine (rustls) by its own feature. What stands in the way is not a missing composition, which
   the first reading of the tree suggests (`wz-tls-mbedtls` already is a `StreamSocket` and a
@@ -1004,6 +1004,32 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     `TLS_AES_128_GCM_SHA256` and verified the chain both ways, and the two legs pass (`2 passed`).
     The lane's count is 32 and its library is built with `tls-mbedtls`, in Layer E and in Layer
     Z, which build the same artifact path.
+  - T5, built (zenohd v1.10.2, the pin, against the engine in Layer Z, in both roles). Three legs
+    of `pico_c_examples_on_wz_capi_dropin.rs`, each run on the tokio engine and on the cooperative
+    one: upstream's `z_sub_tls` on wz DIALS a zenohd `tls/` listener and hears what a real pico
+    `z_pub` put through the router's `tcp/` listener; upstream's `z_sub_tls` on wz ACCEPTS a
+    zenohd that dials it, and hears the same; and, as the control, the plain-`tcp/` twin of the
+    first. zenohd's rustls presents the examples' RSA-2048 chain (zenoh's own test certificates)
+    and verifies the one wz presents, so this is the first foreign TLS stack that is not Mbed
+    TLS against the channel. Measured: the accepting end first ran as the PUBLISHER and that leg
+    failed on the tokio engine too, so it was not the channel's; the accepting program is the
+    subscriber, as in `wz_tls_acceptor_zenohd_interop`. On the cooperative engine all three
+    legs failed, the plain `tcp/` control included, with the handshake of the `tls/` ones done
+    (the program opened and declared): the channel was not at fault, and the control said so.
+    zenohd's own log showed the subscription registered and the sample routed to the face of the
+    cooperative client (`dst.has_subscriber=true`), so the sample was lost after it arrived. A
+    router names a subscriber's key in what it sends by an id the subscriber declared to it
+    (the receiver's id space, `M=0`), and the tokio engine installs the link's own declarations
+    as that space when it makes the session (R311y739); the cooperative engine installed none,
+    so it dropped every such sample. A peer publisher names its own aliases (the sender's space)
+    and was heard all along, which is why the engine's earlier legs never met it. The engine now
+    installs, for each link it opens (a redialled one included), that link's `actions` as the
+    face's own id space (`LinkOwnSpace`). What holds it: `tests::a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered`
+    (a router stand-in pushes a sample naming an id the engine declared; the literal-key push to
+    the same subscriber is the control), which times out waiting for the sample when the space
+    resolves nothing, and the three legs, which passed after it and failed before. Not covered:
+    the publisher direction through a router over `tls/` (the legs here carry a sample TO wz),
+    and a router the engine is a peer of rather than a client.
   - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: it does
     against upstream's examples as built here (Mbed TLS 3.6.4 with 1.2 and 1.3 both on; the legs
     pass against a channel that speaks 1.3 only, so they negotiated it), and zenohd's rustls
@@ -1035,4 +1061,4 @@ dial role's face stands by when its node is held.
 Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
 history is when two faces hold the same token key (L2 hands it every face's tokens, and each
 face's loss deletes its own); UDP faces by source address; `tls/` on the cooperative engine
-(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 to T4 are built).
+(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5, which are all built).
