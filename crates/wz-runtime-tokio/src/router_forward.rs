@@ -7406,6 +7406,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 }
             }
         }
+        // The subscribers of the router's multicast group are held by no hat and no face, and a
+        // face that asks is told of them as of the others: the answer to its interest is all it
+        // is told of what the router holds (a peer of the peer hat is sent nothing unasked when
+        // it comes up), so a dump without them leaves the group's members unknown to every
+        // face that joins after them.
+        for k in self.sub_keys(Holder::Group) {
+            let matched = match target_chunks.as_deref() {
+                None => true,
+                Some(chunks) => keyexpr_intersects_target(&k, chunks),
+            };
+            if matched {
+                per_ke.insert(k, ());
+            }
+        }
         // An unrestricted interest cannot aggregate: the aggregate reply is keyed on the
         // interest's own keyexpr, which it does not carry.
         let aggregate = aggregate && target.is_some();
@@ -28812,6 +28826,44 @@ mod tests {
             DeclareOwnedVariant::CodecZenohDeclFinal(_)
         ));
         assert_eq!(sink_h.frame_count(), 0, "the holder is told nothing");
+    }
+
+    /// A subscriber on the router's multicast group is held by no face and no hat, and a face
+    /// that asks is told of it as of any other: a peer that joins after the group's member is
+    /// told nothing unasked (the answer to its interest is its whole picture), so a dump that
+    /// leaves the group out leaves the member unknown to every face that comes later.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn a_group_subscriber_is_dumped_to_a_current_interest() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (asker, sink_a) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &asker);
+        fwd.set_mcast_group_subs(&["demo/mcreach/**".to_string()]);
+        sink_a.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_msg(42, "demo/mcreach/put", true, false, true),
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "one DeclareSubscriber reply for the group's subscription and the DeclareFinal"
+        );
+        let reply = forwarded_declare(&sink_a.frame_bytes(0));
+        assert_eq!(reply.interest_id, Some(42));
+        match &reply.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => assert_eq!(
+                wire_keyexpr!(&d.keyexpr),
+                (0, Some("demo/mcreach/put".to_owned())),
+                "an aggregate reply is keyed on the interest keyexpr"
+            ),
+            other => panic!("expected a DeclSubscriber reply, got {other:?}"),
+        }
+        assert!(matches!(
+            forwarded_declare(&sink_a.frame_bytes(1)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
     }
 
     /// The queryable twin: a complete queryable held by a client face is dumped
