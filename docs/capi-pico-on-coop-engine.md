@@ -854,7 +854,7 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   tokio peer that races it (the two keep different rules, and a race can close both links until the
   next redial).
 
-- **L6. `tls/`, both roles. Designed; T1 to T3 built.** pico's `tls/` and zenohd's are TLS with a CA
+- **L6. `tls/`, both roles. Designed; T1 to T3 built, T4 built in part.** pico's `tls/` and zenohd's are TLS with a CA
   chain, and the cooperative engine has no such link; a build with `tls/` selects the tokio
   engine (rustls) by its own feature. What stands in the way is not a missing composition, which
   the first reading of the tree suggests (`wz-tls-mbedtls` already is a `StreamSocket` and a
@@ -959,6 +959,32 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     is not a refusal at the handshake: the session reports it (`peer_identity_verified`) for the
     lifecycle verbs, and the engine's port does not expose it, so T3 asserts what the engine can
     show, not a refusal that does not exist.
+  - T4, built in part (the ABI; the real pico's TLS programs are not yet run). Four moves, each
+    proved alone. (1) The PEM that a `Z_CONFIG_TLS_*` key names, from a path or a base64 token, is
+    read by one crate, `wz-tls-pem`, that the tokio engine re-exports at its old paths and the pico
+    ABI calls directly: the edge that holds the key spellings resolves them once, and an engine
+    carries no key-encoding knowledge. (It is not `wz-host-net`, whose charter is the network.)
+    (2) The resolved material, `CapiTlsConfig`, is the port's value and `wz-capi-core` re-exports
+    it; the rule that a client pair is whole or absent is the port's, and core wraps it for rustls.
+    (3) `wz-capi-coop`'s `tls-mbedtls` feature gives `tls::HostTls`, the dial and the listen of a
+    host stack made from that material. The channel was built for an image, and a host program that
+    opens sessions over its life has none of what an image fixes, so the provider settles three
+    things: the library starts on an arena of its own on first use (4 MiB, reserved and untouched
+    until used, not yet measured against a count of sessions); an identity and a set of roots are
+    made once for each distinct PEM and lent for the program; and the time of each dial and accept
+    is stated to the roots (`Trust::set_now`, new in this step), so a certificate that lapsed while
+    the program ran is refused at the next handshake. A pico program dials with its `connect_*`
+    pair and listens with its `listen_*` pair, and the channel's policy holds one identity, so the
+    value holds a dial for each role. (4) pico's `tls-mbedtls` feature resolves the keys, gives the
+    stack `HostTls` and selects the cooperative engine. Features add and the engines add with them
+    (`engine-tokio` on is the tokio engine, as `engine-coop` beside it always was), so the choice
+    is not a `compile_error!`: that was tried, and it broke `--all-features` and the gates built on
+    it. What proves it: `tests/tls_provider.rs` (8, the provider against itself, among them that a
+    dial states the time, which fails when the call is removed) and `tests/tls_coop_roundtrip.rs`
+    (2, through the exported `z_*` symbols: a put each way over `tls/`, and a dial that trusts
+    another certificate does not open; both fail when the stack is built without the link). Not
+    yet run: the two real zenoh-pico TLS programs against the cooperative engine (Layer E), which
+    is where the negotiated version and the real certificates' key types are read.
   - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: zenohd's
     rustls speaks it, but the real zenoh-pico's own Mbed TLS may offer 1.2 only, and then the
     channel needs 1.2 as well (read from the negotiated version of the two TLS programs in T4,
@@ -989,4 +1015,4 @@ dial role's face stands by when its node is held.
 Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
 history is when two faces hold the same token key (L2 hands it every face's tokens, and each
 face's loss deletes its own); UDP faces by source address; `tls/` on the cooperative engine
-(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 to T3 are built).
+(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 to T3 are built and T4 in part).
