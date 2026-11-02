@@ -9432,7 +9432,7 @@ impl Dissection {
         cursor: &mut CaptureCursor,
         bytes: &[u8],
     ) -> Result<usize, FollowError> {
-        self.follow_bytes(cursor, bytes, false)
+        self.follow_bytes(cursor, bytes, None)
     }
 
     /// [`Self::follow_container`] over a container this dissection is LENT
@@ -9448,13 +9448,21 @@ impl Dissection {
     ///
     /// Every answer is the one [`Self::follow_container`] over the same bytes
     /// gives; what differs is what the dissection holds.
+    ///
+    /// A container refused as [`FollowError::Shrank`] is not lent: the flows
+    /// keep reading the one lent before, which still holds their bytes. Lending
+    /// it first and refusing it after left every flow pointed at a container
+    /// shorter than the bytes its lists name, and the next read of one of them
+    /// panicked across the C ABI (found by the `live` fuzz target of
+    /// `crates/wz-fuzz` on its seed of `zenoh-v1-10-0-tcp-full.pcap` read
+    /// through `wz_dissect_live_follow_lent`, which `scripts/fuzz.sh regress`
+    /// replays).
     pub fn follow_lent(
         &mut self,
         cursor: &mut CaptureCursor,
         capture: alloc::sync::Arc<dyn LentCapture>,
     ) -> Result<usize, FollowError> {
-        self.lend(&capture);
-        self.follow_bytes(cursor, capture.bytes(), true)
+        self.follow_bytes(cursor, capture.bytes(), Some(&capture))
     }
 
     /// Lend this dissection `capture`, for every flow it holds and every flow
@@ -9476,13 +9484,15 @@ impl Dissection {
         }
     }
 
-    /// The walk both doors above share; `located` says the bytes are the
-    /// container this dissection is lent, so a packet's place in them is kept.
+    /// The walk both doors above share. `lent` is the container `bytes` are,
+    /// when the dissection is lent it: it is lent only once the bytes are
+    /// admitted, so a refusal leaves the dissection as it was, and a packet's
+    /// place in them is kept.
     fn follow_bytes(
         &mut self,
         cursor: &mut CaptureCursor,
         bytes: &[u8],
-        located: bool,
+        lent: Option<&alloc::sync::Arc<dyn LentCapture>>,
     ) -> Result<usize, FollowError> {
         if bytes.len() < cursor.consumed() {
             return Err(FollowError::Shrank {
@@ -9490,6 +9500,10 @@ impl Dissection {
                 given: bytes.len(),
             });
         }
+        if let Some(capture) = lent {
+            self.lend(capture);
+        }
+        let located = lent.is_some();
         let before = cursor.packets_produced();
         // R311y607 — a pcapng gets its ledger as soon as the format is known, as
         // `from_pcapng_declaring_bounded` holds one. The ledger is EMPTY, and an

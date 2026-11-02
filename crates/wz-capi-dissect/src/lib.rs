@@ -3476,7 +3476,10 @@ fn follow_answer(walked: Result<usize, wz_capture::FollowError>) -> c_int {
 ///
 /// # Errors
 ///
-/// As for [`wz_dissect_live_follow`].
+/// As for [`wz_dissect_live_follow`]. A container refused as
+/// [`WZ_DISSECT_ERR_CONTAINER_SHRANK`] is not lent: the handle keeps reading
+/// the one it was lent before, and the refused bytes are the caller's again
+/// when the call returns.
 ///
 /// # Safety
 /// As for [`wz_dissect_live_follow`], and the `len` bytes at `bytes` must stay

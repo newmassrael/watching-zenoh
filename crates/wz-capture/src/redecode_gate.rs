@@ -1180,6 +1180,60 @@ fn a_lent_datagram_keeps_no_copy_of_its_payload() {
     let _ = flow.frames().row(0);
 }
 
+/// A CONTAINER REFUSED AS SHRUNK IS NOT LENT: after a shorter prefix is refused,
+/// every flow still reads its rows from the container lent before, exactly as a
+/// dissection that was never handed the shorter one. Lending it before the
+/// refusal pointed the flows at bytes that no longer held their units, and the
+/// next read panicked (the `live` fuzz target of `crates/wz-fuzz` found it
+/// through `wz_dissect_live_follow_lent`).
+#[test]
+fn a_container_refused_as_shrunk_is_not_lent() {
+    let rows = |d: &Dissection| -> Vec<String> {
+        let streams = d
+            .flows()
+            .iter()
+            .flat_map(|flow| flow.frames().iter().map(|row| format!("{row:?}")));
+        let datagrams = d
+            .datagram_flows()
+            .iter()
+            .flat_map(|flow| flow.frames().iter().map(|row| format!("{row:?}")));
+        streams.chain(datagrams).collect()
+    };
+    let mut compared = 0usize;
+    for (name, file) in tracked_captures() {
+        let whole: alloc::sync::Arc<dyn crate::LentCapture> = alloc::sync::Arc::new(file.to_vec());
+        let shorter: alloc::sync::Arc<dyn crate::LentCapture> =
+            alloc::sync::Arc::new(file[..file.len() / 2].to_vec());
+        let mut control = Dissection::new();
+        control
+            .follow_lent(&mut crate::CaptureCursor::new(), whole.clone())
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let mut refused = Dissection::new();
+        let mut cursor = crate::CaptureCursor::new();
+        refused
+            .follow_lent(&mut cursor, whole)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert!(
+            matches!(
+                refused.follow_lent(&mut cursor, shorter),
+                Err(crate::FollowError::Shrank { .. })
+            ),
+            "{name}: a prefix shorter than what was consumed is refused"
+        );
+        control.finish();
+        refused.finish();
+        let read = rows(&control);
+        compared += read.len();
+        assert_eq!(
+            rows(&refused),
+            read,
+            "{name}: the refused container changed what the flows read"
+        );
+    }
+    // A capture of scouting alone has no rows; the set as a whole must have.
+    assert!(compared > 0, "the captures carry messages to compare");
+}
+
 /// Read every unit of every stream and datagram flow of `file` again. A stream
 /// flow's messages are compared twice: the first reading against each unit read
 /// again from its bytes ([`redecode_unit`]), and a dissection that keeps entries
