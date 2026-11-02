@@ -1004,6 +1004,77 @@ async fn a_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
     );
 }
 
+/// The same batch, read where it lies (`dispatch_datagram`, the receive path of the fixed-memory
+/// profile): the walk of the first frame's records stops at the second Frame header, and the
+/// rest of the datagram is the next unit, read on from there. A heap build parks it, so the
+/// driver reads it before the link, and the records of the second and third frames are
+/// delivered after the first's, in order.
+#[cfg(feature = "codec-push")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
+    use wz_codecs::push::Push;
+    use wz_session_core::drive::{dispatch_datagram, dispatch_pending, DatagramPath};
+    use wz_session_core::driver_loop::IterationEvent;
+    use wz_session_core::network_message::new_record_buf;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let push = || {
+        let push = Push {
+            header: 0x1D,
+            ..Push::default()
+        };
+        wz_codecs_test_support::with_empty_inline_put(push)
+            .encode_to_vec()
+            .expect("a fixture Push encodes")
+    };
+    // [Frame(reliable, sn 1) Push][Frame(best-effort, sn 0) Push][Frame(reliable, sn 2) Push]
+    let mut unit = vec![0x25, 0x01];
+    unit.extend(push());
+    unit.extend([0x05, 0x00]);
+    unit.extend(push());
+    unit.extend([0x25, 0x02]);
+    unit.extend(push());
+
+    let mut record = new_record_buf();
+    let mut seen: Vec<(bool, u64)> = Vec::new();
+    let mut sink = |event: IterationEvent<'_>| match event {
+        IterationEvent::InPlace(rec) => seen.push((rec.reliable(), rec.sn())),
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        }) if !messages.is_empty() => seen.push((*reliable, *sn)),
+        _ => {}
+    };
+    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+    assert!(
+        matches!(path, DatagramPath::InPlace),
+        "the datagram begins with an admissible Frame; got {path:?}"
+    );
+    assert_eq!(
+        seen,
+        vec![(true, 1)],
+        "the first frame's record, and nothing of the frames behind it"
+    );
+    // The rest is parked for the driver, which reads it before the link.
+    while let Some(outcome) = dispatch_pending(&actions, &mut engine) {
+        if let DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        } = outcome
+        {
+            assert_eq!(messages.len(), 1, "one Push for each frame");
+            seen.push((reliable, sn));
+        }
+    }
+    assert_eq!(seen, vec![(true, 1), (false, 0), (true, 2)]);
+}
+
 /// A transport message behind the last record of a Frame is the next unit of the batch as well,
 /// where a frame used to take it for a record it could not read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1261,6 +1261,19 @@ pub(crate) fn for_each_record(
         each(one);
         Ok(())
     })
+    .map(|_| ())
+}
+
+/// Whether `mid` names a TRANSPORT message (OAM, INIT, OPEN, CLOSE, KEEPALIVE, FRAME, FRAGMENT
+/// or JOIN) and not a network one. A Frame's records are network messages, and the next
+/// transport message of a batch (a second Frame header: the sender puts a message of the other
+/// reliability behind one) begins where the last record ends. The walk of a Frame stops there
+/// and leaves what follows to the reader of the batch.
+#[cfg(feature = "codec-frame")]
+// Read by the record walk and by the heap profile's frame; a build with neither reads nothing.
+#[allow(dead_code)]
+pub(crate) fn is_transport_mid(mid: u8) -> bool {
+    mid <= wire_const::T_MID_JOIN
 }
 
 /// [`for_each_record`] whose consumer may END the walk: an `Err` from `each`
@@ -1280,7 +1293,7 @@ pub(crate) fn try_for_each_record(
     record: &mut RecordBuf,
     form: RecordForm,
     mut each: impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
-) -> Result<(), crate::parse_error::InboundParseError> {
+) -> Result<usize, crate::parse_error::InboundParseError> {
     // Without a lendable codec there is nothing to lend, and every form is owned.
     #[cfg(not(any(
         all(
@@ -1297,6 +1310,16 @@ pub(crate) fn try_for_each_record(
     let mut cursor = SceCursor::new(payload);
     while cursor.remaining() > 0 {
         record.clear();
+        // A transport message is not a record of this frame: the walk ends before it, and the
+        // caller, who is told how far the walk got, goes on from there.
+        if is_transport_mid(
+            cursor
+                .peek_slice(1)
+                .map_err(crate::parse_error::InboundParseError::Codec)?[0]
+                & 0x1F,
+        ) {
+            break;
+        }
         // The slot profile's form lends every kind, so there is no owned decode
         // left for the rest of the loop to do on its behalf.
         #[cfg(all(feature = "session-slot", feature = "alloc"))]
@@ -1349,7 +1372,9 @@ pub(crate) fn try_for_each_record(
         }
     }
     record.clear();
-    Ok(())
+    // How much of the payload the walk read: all of it, or up to the transport message that
+    // ended it.
+    Ok(payload.len() - cursor.remaining())
 }
 
 /// The lent half of [`try_for_each_record`]: when the record at the cursor is of
@@ -2566,9 +2591,20 @@ mod record_walk_tests {
         Vec<(char, u64)>,
         Result<(), crate::parse_error::InboundParseError>,
     ) {
+        let (seen, result) = walk_read(payload);
+        (seen, result.map(|_| ()))
+    }
+
+    /// [`walk`], with how much of the payload the walk read.
+    fn walk_read(
+        payload: &[u8],
+    ) -> (
+        Vec<(char, u64)>,
+        Result<usize, crate::parse_error::InboundParseError>,
+    ) {
         let mut record = new_record_buf();
         let mut seen = Vec::new();
-        let result = for_each_record(payload, &mut record, RecordForm::Owned, |one| {
+        let result = try_for_each_record(payload, &mut record, RecordForm::Owned, |one| {
             // Without a lendable codec the owned form is the only one there is.
             #[cfg(any(
                 feature = "codec-push",
@@ -2593,6 +2629,7 @@ mod record_walk_tests {
                 NetworkMessage::Unknown { mid, .. } => ('u', u64::from(*mid)),
                 other => panic!("unexpected record {other:?}"),
             });
+            Ok(())
         });
         assert!(record.is_empty(), "the buffer is handed back empty");
         (seen, result)
@@ -3100,17 +3137,42 @@ mod record_walk_tests {
 
     #[test]
     fn an_unknown_mid_is_handed_over_with_the_rest_and_ends_the_walk() {
-        // MID 0x01 has no envelope decoder: its length is unknowable, so it
-        // and the OAM after it are one absorbed record, as in the batch decode.
-        let payload = [oam_record(4), vec![0x01, 0xAB], oam_record(5)].concat();
+        // MID 0x18 is neither a network MID nor a transport one and has no envelope decoder: its
+        // length is unknowable, so it and the OAM after it are one absorbed record, as in the
+        // batch decode.
+        let payload = [oam_record(4), vec![0x18, 0xAB], oam_record(5)].concat();
         let (seen, result) = walk(&payload);
         assert!(result.is_ok());
-        assert_eq!(seen, vec![('o', 4), ('u', 1)]);
+        assert_eq!(seen, vec![('o', 4), ('u', 0x18)]);
         let batch = parse_frame_payload(&payload).expect("the batch decodes");
         assert!(
-            matches!(&batch[1], NetworkMessage::Unknown { mid: 1, body } if body.len() == payload.len() - oam_record(4).len()),
+            matches!(&batch[1], NetworkMessage::Unknown { mid: 0x18, body } if body.len() == payload.len() - oam_record(4).len()),
             "the batch decode absorbs the same tail: {batch:?}"
         );
+    }
+
+    /// A transport message is not a record of the frame: the walk ends before it, hands over
+    /// nothing for it, and says how far it read, so the caller goes on from there. This is the
+    /// batch of a sender that puts a message of the other reliability behind a second Frame
+    /// header.
+    #[test]
+    fn a_transport_mid_ends_the_walk_before_it_and_the_walk_says_where() {
+        let first = oam_record(4);
+        for transport in [0x00_u8, 0x01, 0x04, 0x05, 0x06, 0x07] {
+            let payload = [first.clone(), vec![transport, 0x00], oam_record(5)].concat();
+            let (seen, read) = walk_read(&payload);
+            assert_eq!(seen, vec![('o', 4)], "transport id {transport}");
+            assert_eq!(read, Ok(first.len()), "up to the header and no further");
+        }
+        // A payload that opens with one has no record of its own.
+        let (seen, read) = walk_read(&[0x05, 0x00]);
+        assert_eq!(seen, vec![]);
+        assert_eq!(read, Ok(0));
+        // Without one, the walk reads to the end.
+        let payload = [first.clone(), oam_record(5)].concat();
+        let (seen, read) = walk_read(&payload);
+        assert_eq!(seen, vec![('o', 4), ('o', 5)]);
+        assert_eq!(read, Ok(payload.len()));
     }
 }
 
