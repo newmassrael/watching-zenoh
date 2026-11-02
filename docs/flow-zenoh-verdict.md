@@ -1120,3 +1120,109 @@ concentration of 2.
   (`publisher-priority-encoding-timestamp.pcap`); a flow of keep-alives alone
   never reaches `yes`; generated flows of six other protocols read neither
   `yes` nor `no` at any length.
+
+### 6.9 Model 4: a `no` from what the wire allows (2026-11-02)
+
+Model 4 ships: `model` reads 4, the field document moves to revision 50 and
+the session table to revision 8. It takes three decisions, under the owner's
+criterion of section 6.7, and corrects the reasoning of D6.
+
+**Why model 3 cannot say `no`, and why D6's remedy was incomplete.** The `no`
+sum is `log2` of the other hypothesis's chance of the flow over the likeliest
+chance a member of zenoh gives it (D1). Every check of model 3 measures the
+zenoh side on 22 groups, and with no group failing, the region lets a new
+group fail all of its outcomes with chance up to 0.127 (concentration to
+zero). So a flow every outcome of which fails still has a zenoh chance of at
+least about 0.127 per check, and its `no` sum stays within a few bits of
+zero whatever the numerator is. D6 put the remedy in the numerator: recognise
+the flow as a null protocol. A better numerator cannot lower a denominator
+that stays above 0.127, so that is not what makes a `no`. What makes one is an
+observation whose zenoh chance is DERIVED from what the wire allows, and is
+therefore not a rate that a group of zenoh captures could have that the corpus
+has not seen. A likelihood per null protocol would still say WHICH protocol a
+flow is; it is not part of the zenoh test.
+
+**D9. Model 4 comes before the freeze.** D5 freezes the model once, before a
+validation corpus is read, and the validation corpus is read once. Model 4
+changes the `no` sum, so freezing model 3 first would spend the validation
+corpus on a model about to change. The order is model 4, then the freezing
+entry, then the validation corpus.
+
+**D10. The `no` sum rejects zenoh of this wire.** The hypothesis the `no` sum
+rejects is that the flow's datagrams were written by an implementation of the
+wire this reader reads (protocol version `0x09`: every release of the corpus,
+from 1.0.0-alpha.6 to 1.10.2, zenoh-c and zenoh-pico), and reached the capture
+each altered with chance at most `epsilon`. A zenoh of another wire (a 0.x
+release, a later version that changes the ids) is outside it, so a `no` reads
+"not zenoh of this wire". The version header check measures the wire version
+where a handshake shows it.
+
+**D11. The first derived observation: the wire's front** (`wire_front`). A
+zenoh sender writes a batch at the first byte of a datagram the link delimits
+(UDP, raweth). That byte is a transport message's header, whose low five bits
+are one of the eight transport message ids `0x00` to `0x07`, or a
+`BatchHeader`, whose only value bit is bit 0, so its low five bits are one of
+them as well. A front whose low five bits are `0x08` to `0x1F` is therefore an
+alteration on the way.
+
+- `epsilon` is `2^-24` when the transport checksum verified: Stone and
+  Partridge (2000, "When the CRC and TCP checksum disagree") estimate that
+  between one in sixteen million and one in ten billion packets pass the TCP
+  checksum with their data altered, and the high end is taken. It is `2^-10`
+  when no checksum verified (none carried, raweth, a transmit offload's
+  field): the same study found up to one in 1,100 packets failing the TCP
+  checksum after the link's CRC had passed. A datagram whose checksum failed is
+  not weighed.
+- The `no` sum's zenoh side is `epsilon` for a foreign front and one for a
+  front of the wire. Its null side is a Beta prior of weight one outcome over
+  the flow's own share of foreign fronts, centred on the null members' average
+  Jeffreys share.
+- The `yes` sum's null side is the members' bound, as for the other measured
+  checks, and its zenoh side a prior of weight one outcome centred on
+  `epsilon`, so that a flow of fronts of the wire costs the `yes` sum a few
+  millionths of a bit.
+- A datagram whose front is foreign is not weighed again by `unit_reading`: it
+  can read only `undecoded`, and the front already says so. Its reading is
+  still counted, and the measured null side of `unit_reading` is now counted
+  over the units that are weighed.
+- On a stream the length chain from a held start gives one front per
+  direction before the framing check judges it, so `stream_framing` covers it.
+  Deriving the stream checks is a later step.
+
+The derivation is put to the corpus by
+`no_zenoh_file_shows_a_foreign_front`: 27067 fronts of the zenoh files are
+weighed and none is foreign. The parameters model 4 adds or moves:
+
+| measured null | `yes` bound per outcome | `no` mean per outcome |
+|---|---|---|
+| unit readings | 7.9425e-1, 1.0000e0, 8.9950e-1 | 1.5685e-1, 5.9949e-1, 2.4366e-1 |
+
+| check | `yes` bound: of the wire, foreign | `no` prior mean of a foreign front |
+|---|---|---|
+| wire front | 1.0000e0, 1.0000e0 | 4.5363e-1 |
+
+**What model 4 reads on the corpus**
+(`the_corpus_holds_both_error_rates_and_every_files_tally`):
+
+| | `yes` | `no` | `undecided` |
+|---|---|---|---|
+| zenoh flows, model 3 | 619 | 0 | 2 |
+| zenoh flows, model 4 | 619 | 0 | 2 |
+| null flows, model 3 | 0 | 0 | 653 |
+| null flows, model 4 | 0 | 187 | 466 |
+
+- No zenoh word moves, and leaving any group out of the parameters moves no
+  word of its own flows.
+- The 187 `no` are DNS 148, mDNS 15, RTPS 10, WS-Discovery 8, SOME/IP 4 and
+  SSDP 2. A DNS flow whose id's first byte has its low five bits at most 7
+  (about one in four) shows a front of the wire and stays `undecided`; the
+  other 148 cross on their first verified datagram.
+- NTP, DHCP, CoAP, MQTT and QUIC write an id of the wire at their first byte
+  (or are read as QUIC and not as zenoh), and the TCP protocols are streams:
+  their 466 flows stay `undecided`, which is what the derived checks so far
+  can say about them.
+- Generated flows: SSDP and syslog read `no` from three datagrams (no checksum
+  vouches for them, about ten bits each), and mDNS, whose id is zero, never
+  does. DNS's random id, NTP version 3's first byte and CoAP's eight-byte
+  token length are foreign some of the time, so their share of `no` grows with
+  the flow; NTP version 4, as the corpus's NTP is, writes an id of the wire.
