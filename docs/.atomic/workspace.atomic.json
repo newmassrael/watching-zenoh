@@ -306466,6 +306466,36 @@
         "Open: the 19,104-byte spawn_pump frame (build the pump's future in its task cell; it gives about 19 KB of main stack back to every image that reaches it, and the admin image's stack could fall to the reading's quarter); the admin image's stack bound with the calls through a register followed (it has no bound row; the chain's 12 calls through a register are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the GET medians of the asking and secure-channel clients against 1.10.2."
       ]
     },
+    "Round 4137": {
+      "decision_summary": "Repays the residue round 4132 carried: a Response or a ResponseFinal that arrived in fragments named no request, its above_transport.carried entry writing null where its unfragmented twin writes the pairing. The exchange plane already folds a completed chain's records at the fragment that completed it, so the pairing existed and only the renderer withheld it. Those entries now carry closes and answers from the same pairing, keyed by the completing row and the record's place in the joined batch; a fragment row carries no records of its own, so the places do not collide. A request that arrived in a chain is named by that row's seq and its place in that row's above_transport.carried. Fields 52 moves values under stationary keys; both subtrees there are revisable cells, held by a scenario that trims the request ahead of a fragmented reply and final.",
+      "changes_bullets": [
+        "wz-capture: fields_json passes the row's pairing to push_above_transport, which writes closes and answers on each reassembled entry, and names both subtrees there among the revisable cells; doc_revision adds fields 52; closes_tests holds a reply and a final that each arrived in two fragments (575000 ns and 900000 ns on the completing rows, the census agreeing); e2e_row_tests shares its fragment builder. wz-capi-dissect: the header's pairing text and revisable cells, a fixture whose reply and final arrive in fragments and the scenario that trims its request, the C consumer's fields 52. scripts/pico-compare.sh: nodrop-c reads the zenoh-c release at install-zenoh-c.sh's own default prefix and ref, which the oracle-arms gate requires (a peer's red, fixed with its owner's agreement)."
+      ],
+      "verification_bullets": [
+        "On a build machine (hkl002): wz-capture with lz4 1646 pass, without 1634 pass; clippy clean for wz-capture in both builds and for wz-capi-dissect; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) linked the release cdylib and passed. A reply and a final that each arrived in two fragments read 575000 ns and 900000 ns on the rows that completed them, as the census does. The static gate array was red on zenoh_c_oracle_arms at round 4135 (a peer's bench default prefix no installer owns); after the bench fix it passes 125 of 125, and the citation form gate passes. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Replaces the carry of round 4132. The consumer is told fields 52 and the commit. What stays by design and is stated in the field note: the census counts completed exchanges a selector admits, so over a capture with unclosed exchanges the rows' round trips add up to more than first_reply.total_ns. The flow zenoh test's carry of round 4125 stands."
+      ],
+      "publishable_decision_summary": "Repays the residue round 4132 carried: a Response or a ResponseFinal that arrived in fragments named no request, its above_transport.carried entry writing null where its unfragmented twin writes the pairing. The exchange plane already folds a completed chain's records at the fragment that completed it, so the pairing existed and only the renderer withheld it. Those entries now carry closes and answers from the same pairing, keyed by the completing row and the record's place in the joined batch; a fragment row carries no records of its own, so the places do not collide. A request that arrived in a chain is named by that row's seq and its place in that row's above_transport.carried. Fields 52 moves values under stationary keys; both subtrees there are revisable cells, held by a scenario that trims the request ahead of a fragmented reply and final.",
+      "publishable_changes_bullets": [
+        "wz-capture: fields_json passes the row's pairing to push_above_transport, which writes closes and answers on each reassembled entry, and names both subtrees there among the revisable cells; doc_revision adds fields 52; closes_tests holds a reply and a final that each arrived in two fragments (575000 ns and 900000 ns on the completing rows, the census agreeing); e2e_row_tests shares its fragment builder. wz-capi-dissect: the header's pairing text and revisable cells, a fixture whose reply and final arrive in fragments and the scenario that trims its request, the C consumer's fields 52. scripts/pico-compare.sh: nodrop-c reads the zenoh-c release at install-zenoh-c.sh's own default prefix and ref, which the oracle-arms gate requires (a peer's red, fixed with its owner's agreement)."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine (hkl002): wz-capture with lz4 1646 pass, without 1634 pass; clippy clean for wz-capture in both builds and for wz-capi-dissect; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) linked the release cdylib and passed. A reply and a final that each arrived in two fragments read 575000 ns and 900000 ns on the rows that completed them, as the census does. The static gate array was red on zenoh_c_oracle_arms at round 4135 (a peer's bench default prefix no installer owns); after the bench fix it passes 125 of 125, and the citation form gate passes. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Replaces the carry of round 4132. The consumer is told fields 52 and the commit. What stays by design and is stated in the field note: the census counts completed exchanges a selector admits, so over a capture with unclosed exchanges the rows' round trips add up to more than first_reply.total_ns. The flow zenoh test's carry of round 4125 stands."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
