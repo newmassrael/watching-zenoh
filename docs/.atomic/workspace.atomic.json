@@ -306308,6 +306308,36 @@
         "The fuzz-regress job and the nightly fuzz.yml have not run on a hosted runner: their time, the floor of the job's budget margin and the size of the fuzz-corpus cache class are to be measured from the first runs. Inputs a nightly run finds are fixed as their own rounds, each with its reproducer pinned in fuzz_seeds.py or copied to crates/wz-fuzz/regressions/. The fuzz targets' build is not cached: the cache budget has no room for another rust-cache class."
       ]
     },
+    "Round 4132": {
+      "decision_summary": "A consumer claim, forwarded by a peer session: the census gives a query's first-reply and completion intervals only as aggregates, and a consumer that needs per-step percentiles would have to pair Request and Response again. The exchange plane's pairing is now put on the rows that end each interval: a Response entry's answers names its request (as closes does for a final), says whether it is the first reply and carries the round trip on the first; closes gains completion_ns. Both are measured by the one rule the census's distributions use, so over exchanges that all closed under an admitting selector the rows add up to the census. The first reply is now the first Response even without a usable clock, so a later reply never stands in for it. Fields 51; both keys are revisable cells.",
+      "changes_bullets": [
+        "wz-capture: exchange.rs measures every interval through Measured::between, records an Answer for each Response the capture holds the request of (first reply and round trip) and a completion interval on each Closing, and takes the first reply to be the first Response; fields_json writes answers on every carried entry and completion_ns inside closes, and names answers among the revisable cells; doc_revision adds fields 51; closes_tests holds the consumer's fixture (575000 ns on the reply row), the rows adding up to the census, a later reply, the orphan against a first reply with no round trip, and the live door's continuing walk. wz-capi-dissect: the header's pairing text and revisable cells, the trimmed-request cells, the C consumer's fields 51."
+      ],
+      "verification_bullets": [
+        "On a build machine (pc2 refused admission), before rebasing onto round 4131: wz-capture with lz4 1644 pass, without 1632 pass; clippy clean for wz-capture in both builds and for wz-capi-dissect; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) linked the release cdylib and passed. On the rebased tree: wz-capture with lz4 and wz-capi-dissect again. The consumer's fixture reads 575000 ns on the reply row and 900000 on the final, and the census's first_reply.total_ns is the rows' sum. Static gate array and the citation form gate pass. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told fields 51 and the commit. Open: a reply inside a reassembled chain (above_transport.carried) names no request, as a final there does not; the census counts only completed exchanges the selector admits, so a consumer summing rows over a capture with unclosed exchanges reads more than the census, which the field note states. The flow zenoh test's carry of round 4125 stands."
+      ],
+      "publishable_decision_summary": "A consumer claim, forwarded by a peer session: the census gives a query's first-reply and completion intervals only as aggregates, and a consumer that needs per-step percentiles would have to pair Request and Response again. The exchange plane's pairing is now put on the rows that end each interval: a Response entry's answers names its request (as closes does for a final), says whether it is the first reply and carries the round trip on the first; closes gains completion_ns. Both are measured by the one rule the census's distributions use, so over exchanges that all closed under an admitting selector the rows add up to the census. The first reply is now the first Response even without a usable clock, so a later reply never stands in for it. Fields 51; both keys are revisable cells.",
+      "publishable_changes_bullets": [
+        "wz-capture: exchange.rs measures every interval through Measured::between, records an Answer for each Response the capture holds the request of (first reply and round trip) and a completion interval on each Closing, and takes the first reply to be the first Response; fields_json writes answers on every carried entry and completion_ns inside closes, and names answers among the revisable cells; doc_revision adds fields 51; closes_tests holds the consumer's fixture (575000 ns on the reply row), the rows adding up to the census, a later reply, the orphan against a first reply with no round trip, and the live door's continuing walk. wz-capi-dissect: the header's pairing text and revisable cells, the trimmed-request cells, the C consumer's fields 51."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine (pc2 refused admission), before rebasing onto round 4131: wz-capture with lz4 1644 pass, without 1632 pass; clippy clean for wz-capture in both builds and for wz-capi-dissect; wz-capi-dissect 227 pass and its memory gate 4; the C consumer (C1bo) linked the release cdylib and passed. On the rebased tree: wz-capture with lz4 and wz-capi-dissect again. The consumer's fixture reads 575000 ns on the reply row and 900000 on the final, and the census's first_reply.total_ns is the rows' sum. Static gate array and the citation form gate pass. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The consumer is told fields 51 and the commit. Open: a reply inside a reassembled chain (above_transport.carried) names no request, as a final there does not; the census counts only completed exchanges the selector admits, so a consumer summing rows over a capture with unclosed exchanges reads more than the census, which the field note states. The flow zenoh test's carry of round 4125 stands."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
