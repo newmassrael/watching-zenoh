@@ -603,6 +603,45 @@ fn a_frame_that_breaks_after_two_records_is_reported_after_what_was_dispatched()
     );
 }
 
+/// A batch of two `Frame`s in one datagram: what follows the second frame's header is the second
+/// frame's records and not the remainder of the first. A frame's payload used to be read as the
+/// tail of the unit, so a second `Frame` header ended the walk of the first as an unknown message
+/// and everything after it was lost. On both loops all five Puts reach the subscriber, in order,
+/// and nothing is reported but the data.
+#[test]
+fn what_follows_a_second_frame_header_in_a_batch_is_dispatched() {
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let mut pair = Pair::establish(&link, 7509);
+
+    let sn = pair.next_sn();
+    let (mut wire, first) = frame_of(sn, 2);
+    let (second_wire, second) = frame_of(sn + 1, 3);
+    wire.extend_from_slice(&second_wire);
+    let mut expected = decoded_puts(&first);
+    expected.extend(decoded_puts(&second));
+    assert_eq!(expected.len(), 5, "the batch holds five Puts");
+
+    let (_, polls, _) = pair.turn(&wire);
+    // The copying loop parks what follows the first frame and reads it as the next unit, before it
+    // reaches for the link: the iteration after the datagram's. The in-place loop has dispatched
+    // both frames by now, and the iteration after finds nothing.
+    pair.idle_turn();
+    let delivered: Vec<(Vec<u8>, String)> = pair
+        .delivered
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .map(delivery_of)
+        .collect();
+    assert_eq!(delivered, expected, "every Put of both frames, in order");
+    assert_eq!(
+        (polls.sn_rejected, polls.parse_error),
+        (0, 0),
+        "nothing but the data was reported"
+    );
+}
+
 /// A unit the in-place path does not read in place goes down the copying path
 /// and is COUNTED, by why: here a `Fragment` on a session that does not
 /// reassemble, so has no slot to stage it into. The pump's counts say so; the

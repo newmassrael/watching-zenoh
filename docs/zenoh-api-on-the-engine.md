@@ -500,9 +500,12 @@ Each lands whole with its surface lines, tests and faults in one round.
     that offset on the in-place path (round 4103). The best-effort parse that the capture tools
     use keeps reporting the id as unknown, on purpose. The differential still sends its best-effort
     put last: it was moved among the others and the scenario did not finish on this tree, for a
-    reason that is not the reception (the control with the old order did not finish either; see
-    the gaps of the node engine). Not run here: a datagram of several frames through the loop of
-    a build with no allocator.
+    reason that is not the reception (the control with the old order did not finish either; that
+    hang was a deadlock of the node, repaired below). A datagram of two frames through the loops
+    of the profile with no allocator is held by
+    `what_follows_a_second_frame_header_in_a_batch_is_dispatched` (`wz-session-lwip`), on the
+    copying loop, the in-place loop and the in-place loop on the fixed backing: the copying loop
+    parks what follows the first frame and reads it as the next unit, one iteration later.
   - **Found in round 4109: the differential of the session (Layer E18, `zenoh_api_session`) was
     red from round 3928, when a listening peer began to open as a node, and nothing ran it.**
     Twelve of its twenty-five tests failed and one did not finish; they compare the API on the
