@@ -306070,6 +306070,36 @@
         "Open: D14's open by zid and the read of sessions[] on the kit (the node would dial a second peer by a declared hint), a stack gate row, text row and resource row for zephyr-admin-fixed-tls (the stack is the build's default 32,768 bytes), a hosted build of this image in Layer Qzk, and the commander list holding more than one key per verb on the kit. The lab host's router is zenohd 1.10.0, not the pinned 1.10.2."
       ]
     },
+    "Round 4124": {
+      "decision_summary": "The node vocabulary states what a commander may be granted and what it is held to, so a consumer can write a commander from the vocabulary alone (decision D12, asked by the analyzer's lab). The commander's verbs key is the new value words: its choices are open, close, reset and status in the order the generator emits their lists, each with a line of what it lets the commander do, status among them because it reveals which peers a node holds. The conditions are a table, COMMANDER_CONDITIONS: a secure channel (a tls router or peer), a pair of a zid and a verb declared once, and no locator, each an id, what must hold and its refusal. validate takes its refusals from that table and vocabulary prints it, so the two cannot drift. A value kind was renamed, so vocabulary_schema moves to 3.",
+      "changes_bullets": [
+        "scripts/lib/wz_node.py: COMMANDER_VERB_MEANS (COMMANDER_VERBS derived from it), the words value and its check in value_problems, COMMANDER_CONDITIONS with the endpoint role's conditions, an absent key refused by its condition's own refusal, the conditions in the vocabulary, VOCABULARY_SCHEMA 3, and the selftest of the commander's vocabulary. docs/target-build-contract.md: shape 3 and the commander's vocabulary."
+      ],
+      "verification_bullets": [
+        "wz_node.py --selftest passes: every verb alone is valid, hold, a wildcard and an empty list are refused by name, and a declaration breaking each condition is refused by that condition's refusal and by no other's; the set of conditions tested equals the set the vocabulary states. A mutation that writes the pair refusal by hand fails the selftest at one_pair. wz_node.py --check: 7 of 7 valid and current. The 124 static gates of the hook's array pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The analyzer's lab reads vocabulary_schema 3 and writes commanders from it. The condition a node of commanders alone breaks is the general one of a node with no endpoint and is not in the commander's table."
+      ],
+      "publishable_decision_summary": "The node vocabulary states what a commander may be granted and what it is held to, so a consumer can write a commander from the vocabulary alone (decision D12, asked by the analyzer's lab). The commander's verbs key is the new value words: its choices are open, close, reset and status in the order the generator emits their lists, each with a line of what it lets the commander do, status among them because it reveals which peers a node holds. The conditions are a table, COMMANDER_CONDITIONS: a secure channel (a tls router or peer), a pair of a zid and a verb declared once, and no locator, each an id, what must hold and its refusal. validate takes its refusals from that table and vocabulary prints it, so the two cannot drift. A value kind was renamed, so vocabulary_schema moves to 3.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_node.py: COMMANDER_VERB_MEANS (COMMANDER_VERBS derived from it), the words value and its check in value_problems, COMMANDER_CONDITIONS with the endpoint role's conditions, an absent key refused by its condition's own refusal, the conditions in the vocabulary, VOCABULARY_SCHEMA 3, and the selftest of the commander's vocabulary. docs/target-build-contract.md: shape 3 and the commander's vocabulary."
+      ],
+      "publishable_verification_bullets": [
+        "wz_node.py --selftest passes: every verb alone is valid, hold, a wildcard and an empty list are refused by name, and a declaration breaking each condition is refused by that condition's refusal and by no other's; the set of conditions tested equals the set the vocabulary states. A mutation that writes the pair refusal by hand fails the selftest at one_pair. wz_node.py --check: 7 of 7 valid and current. The 124 static gates of the hook's array pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The analyzer's lab reads vocabulary_schema 3 and writes commanders from it. The condition a node of commanders alone breaks is the general one of a node with no endpoint and is not in the commander's table."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
