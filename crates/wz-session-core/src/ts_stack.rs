@@ -261,8 +261,10 @@ pub fn record_on_chain_stamped<S: CodecStorage, const MAX: usize>(
     at: u8,
     timestamp: impl FnOnce() -> Option<(Vec<u8>, bool)>,
 ) -> bool {
-    crate::held_list::edit_chain(chain, |chain| record_interception_stamped(chain, at, timestamp))
-        .unwrap_or(false)
+    crate::held_list::edit_chain(chain, |chain| {
+        record_interception_stamped(chain, at, timestamp)
+    })
+    .unwrap_or(false)
 }
 
 /// [`record_on_chain`] on the message a node is about to send: a Push, a Request or a Response.

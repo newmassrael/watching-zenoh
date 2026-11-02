@@ -295,13 +295,18 @@ impl ReplyArrival {
     /// not when the session's thread gets to it. A response that carries no stack is left as it is.
     #[cfg(feature = "codec-response")]
     pub fn arrive_on_response(&self, response: &mut crate::wire::ResponseOwned, routed: bool) {
-        let Some(mut stack) =
-            crate::ts_stack::read_ts_stack(response.extensions.as_deref().unwrap_or(&[]).iter())
-        else {
+        let Some(mut stack) = crate::ts_stack::read_ts_stack(
+            crate::held_list::HeldList::entries(&response.extensions)
+                .unwrap_or(&[])
+                .iter(),
+        ) else {
             return;
         };
         self.record(&mut stack, routed);
-        crate::ts_stack::set_ts_stack(&mut response.extensions, Some(&stack));
+        // The stack replaces the entry that held it, so the chain stays within its bound.
+        let _ = crate::held_list::edit_chain(&mut response.extensions, |chain| {
+            crate::ts_stack::set_ts_stack(chain, Some(&stack));
+        });
     }
 
     /// Hand `deliver` the reply as it is once its arrival is recorded: a reply that carries a
