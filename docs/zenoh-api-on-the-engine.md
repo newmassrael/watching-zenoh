@@ -551,9 +551,11 @@ Each lands whole with its surface lines, tests and faults in one round.
     application's, as upstream's runtime does, and it records none on a query the session asked
     of its own queryable or on the reply to it, which upstream answers without a router between
     them. The differential of the timestamp stack of messages, queries and replies is equal to
-    upstream's. Open: the receive of a reply to a query the session asked of itself is
-    recorded on the thread of the node's face, after the next reply may have been sent, where
+    upstream's. The receive of a reply is recorded as the node hands the reply to the session,
+    on the thread that hands it (`ReplyIngress`, run by the sink of the node's face), where it
+    had been recorded on the thread of the face after the next reply could have been sent;
     upstream records it as the reply arrives (`a_reply_a_query_holds_back_is_received_...`).
+    The hook runs under the lock of the router, so it must not re-enter the session.
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

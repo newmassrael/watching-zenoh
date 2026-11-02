@@ -26,8 +26,9 @@ use wz_runtime_tokio::session_open::DialConfig;
 use super::*;
 
 mod local_face;
+use local_face::QueryHold;
 pub use local_face::{
-    FinalHandler, LivelinessHandler, LocalLiveliness, MatchHandler, ReplyHandler,
+    FinalHandler, LivelinessHandler, LocalLiveliness, MatchHandler, ReplyHandler, ReplyIngress,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::locality::Locality;
@@ -151,11 +152,13 @@ impl RouterState {
     /// that holds one on `keyexpr`, and each reply is handed to `on_reply` on the face's thread,
     /// then `on_final` is called once, whether the queryables ended, the query timed out or none
     /// was asked. `options` carry what the query asks (its parameters, target, timeout, value and
-    /// attachment), as for a get over a link.
+    /// attachment), as for a get over a link. `ingress`, when given, is run on each reply as the
+    /// router hands it to the face, before the face's thread reads it.
     pub fn get(
         &self,
         keyexpr: &str,
         options: &QueryOptions,
+        ingress: Option<ReplyIngress>,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     ) -> Result<(), String> {
@@ -171,14 +174,15 @@ impl RouterState {
         .map_err(|error| format!("the query could not be built: {error:?}"))?;
         // Held before the router is asked: the face's thread reads its commands in the order they
         // were sent, and the router tells the face its replies through the same queue.
-        self.liveliness.hold_query(
+        self.liveliness.hold_query(QueryHold {
             rid,
-            keyexpr,
-            options.effective_accept_replies(),
-            options.effective_timeout_ms(),
+            keyexpr: keyexpr.to_owned(),
+            accept: options.effective_accept_replies(),
+            timeout_ms: options.effective_timeout_ms(),
+            ingress,
             on_reply,
             on_final,
-        );
+        });
         self.forwarder.local_get(&request);
         Ok(())
     }

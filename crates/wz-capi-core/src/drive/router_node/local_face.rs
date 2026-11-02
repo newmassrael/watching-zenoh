@@ -46,6 +46,29 @@ pub type ReplyHandler = Box<dyn for<'a> FnMut(&'a dyn ReplyView) + Send + 'stati
 /// What a query of the face is told its end by, on the face's thread: once, after the last reply.
 pub type FinalHandler = Box<dyn FnMut() + Send + 'static>;
 
+/// What is done to a reply as the router hands it to the face, before the face's thread reads it:
+/// the arrival of a reply is recorded as it is handed over, as upstream's session records it when
+/// the dispatcher gives it the reply, and not when the thread of the face gets to it.
+pub type ReplyIngress =
+    std::sync::Arc<dyn Fn(&mut wz_session_core::wire::ResponseOwned) + Send + Sync + 'static>;
+
+/// The hooks of the queries the face holds, by request id.
+type Ingresses = std::sync::Arc<Mutex<HashMap<u64, ReplyIngress>>>;
+
+/// A query the face is asked to hold: what it asks, how its replies are accepted and when it runs
+/// out of time, the hook its replies pass through as the router hands them over, and the
+/// handlers it is told its replies and its end with.
+pub(super) struct QueryHold {
+    /// The request id the router is asked under.
+    pub(super) rid: u64,
+    pub(super) keyexpr: String,
+    pub(super) accept: ReplyKeyExpr,
+    pub(super) timeout_ms: u32,
+    pub(super) ingress: Option<ReplyIngress>,
+    pub(super) on_reply: ReplyHandler,
+    pub(super) on_final: FinalHandler,
+}
+
 /// What a watch of the face is called with when its verdict moves, on the face's thread.
 pub type MatchHandler = Box<dyn FnMut(bool) + Send + 'static>;
 
@@ -439,6 +462,8 @@ impl State {
 /// The face of a router node for liveliness: the program's side of it.
 pub struct LocalLiveliness {
     commands: mpsc::Sender<Command>,
+    /// What is done to the reply of a held query as the router hands it over.
+    ingresses: Ingresses,
     /// The router the subscribers ask for the tokens they are told: each subscriber is an
     /// interest of the face in the router's tables, as the session of a client sends one for each
     /// liveliness subscriber it declares. Gone when the node is.
@@ -496,12 +521,31 @@ impl LocalLiveliness {
                 }
             })?;
         let told = commands.clone();
+        let ingresses = Ingresses::default();
+        let ingressing = std::sync::Arc::clone(&ingresses);
         let sink: LocalFaceSink = std::sync::Arc::new(move |event| {
+            // A reply of a query that asked for it is completed here, on the thread that hands it
+            // over, before it waits in the queue of the face.
+            let event = match event {
+                LocalFaceEvent::Reply(mut response) => {
+                    let hook = ingressing
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&response.request_id)
+                        .cloned();
+                    if let Some(hook) = hook {
+                        hook(&mut response);
+                    }
+                    LocalFaceEvent::Reply(response)
+                }
+                other => other,
+            };
             let _ = told.send(Command::Told(event));
         });
         Ok((
             Self {
                 commands,
+                ingresses,
                 router: asked,
                 next_subscriber: AtomicU64::new(1),
                 thread: Mutex::new(Some(thread)),
@@ -612,18 +656,38 @@ impl LocalLiveliness {
     /// Hold a query under the request id `rid`, to be handed the replies the router tells the
     /// face for it and told their end. Called before the router is asked, so that no reply finds
     /// the query missing: the face's thread reads its commands in the order they were sent.
-    pub(super) fn hold_query(
-        &self,
-        rid: u64,
-        keyexpr: &str,
-        accept: ReplyKeyExpr,
-        timeout_ms: u32,
-        on_reply: ReplyHandler,
-        on_final: FinalHandler,
-    ) {
+    pub(super) fn hold_query(&self, hold: QueryHold) {
+        let QueryHold {
+            rid,
+            keyexpr,
+            accept,
+            timeout_ms,
+            ingress,
+            on_reply,
+            mut on_final,
+        } = hold;
+        // The hook is held from here to the end of the query, and is in place before the router
+        // is asked, so that no reply is handed over without it.
+        let on_final: FinalHandler = match ingress {
+            Some(ingress) => {
+                self.ingresses
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(rid, ingress);
+                let ingresses = std::sync::Arc::clone(&self.ingresses);
+                Box::new(move || {
+                    ingresses
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&rid);
+                    on_final();
+                })
+            }
+            None => on_final,
+        };
         let _ = self.commands.send(Command::Get {
             rid,
-            keyexpr: keyexpr.to_owned(),
+            keyexpr,
             accept,
             timeout_ms,
             on_reply,
@@ -685,6 +749,47 @@ mod tests {
         sink(down(6));
         settle(&face);
         assert_eq!(*told.lock().unwrap(), ["Put k 5", "Delete k 5"]);
+        face.stop();
+    }
+
+    /// The hook of a query runs on the thread that hands the reply over, ahead of the face's
+    /// thread reading it, and goes with the query's end: a reply the router tells afterwards is
+    /// not passed through it.
+    #[test]
+    fn a_reply_is_completed_on_the_thread_that_hands_it_over_until_the_query_ends() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        let log = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let caller = std::thread::current().id();
+        let hooked = log.clone();
+        let ingress: ReplyIngress = Arc::new(move |_response| {
+            hooked.lock().unwrap().push(format!(
+                "hook on the caller: {}",
+                std::thread::current().id() == caller
+            ));
+        });
+        let replied = log.clone();
+        let finished = log.clone();
+        face.hold_query(QueryHold {
+            rid: 7,
+            keyexpr: "demo/q".to_owned(),
+            accept: ReplyKeyExpr::MatchingQuery,
+            timeout_ms: 0,
+            ingress: Some(ingress),
+            on_reply: Box::new(move |_view| replied.lock().unwrap().push("reply".to_owned())),
+            on_final: Box::new(move || finished.lock().unwrap().push("final".to_owned())),
+        });
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(7, "demo/q", b"hi")
+                .expect("build a response");
+        sink(LocalFaceEvent::Reply(Box::new(response.clone())));
+        sink(LocalFaceEvent::ReplyFinal { request_id: 7 });
+        settle(&face);
+        sink(LocalFaceEvent::Reply(Box::new(response)));
+        settle(&face);
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["hook on the caller: true", "reply", "final"]
+        );
         face.stop();
     }
 

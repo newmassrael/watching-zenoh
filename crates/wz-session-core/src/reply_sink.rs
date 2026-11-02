@@ -290,6 +290,20 @@ impl ReplyArrival {
         (self.0)(stack, routed);
     }
 
+    /// Complete the stack of a `Response` that is being handed to the node's own session: the
+    /// arrival of a reply is recorded as it is handed over, on the thread that hands it, and
+    /// not when the session's thread gets to it. A response that carries no stack is left as it is.
+    #[cfg(feature = "codec-response")]
+    pub fn arrive_on_response(&self, response: &mut crate::wire::ResponseOwned, routed: bool) {
+        let Some(mut stack) =
+            crate::ts_stack::read_ts_stack(response.extensions.as_deref().unwrap_or(&[]).iter())
+        else {
+            return;
+        };
+        self.record(&mut stack, routed);
+        crate::ts_stack::set_ts_stack(&mut response.extensions, Some(&stack));
+    }
+
     /// Hand `deliver` the reply as it is once its arrival is recorded: a reply that carries a
     /// timestamp stack, with the stack completed, and any other as it is.
     pub fn arrive(&self, reply: &dyn ReplyView, deliver: &mut dyn FnMut(&dyn ReplyView)) {

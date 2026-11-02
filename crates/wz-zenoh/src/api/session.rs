@@ -2748,21 +2748,24 @@ mod tokio_engine {
         let mut leg = leg_minter(callback, fan, consolidation);
         let mut on_reply = leg();
         drop(leg);
-        // A reply of an instrumented query is completed as it reaches this crate, ahead of the
-        // consolidation, as the engine of the registry of faces does at its own sink.
+        // A reply of an instrumented query is completed as the node hands it to the session, on
+        // the thread that hands it and ahead of the consolidation: upstream's session records the
+        // receive of a reply as it arrives, so the first of two replies is received before the
+        // second is sent. The node recorded its routing already, so none is added here.
         #[cfg(feature = "unstable")]
-        let arrival = options.reply_arrival().cloned();
+        let ingress: Option<wz_capi_core::drive::ReplyIngress> =
+            options.reply_arrival().cloned().map(|arrival| {
+                std::sync::Arc::new(move |response: &mut wz_session_core::wire::ResponseOwned| {
+                    arrival.arrive_on_response(response, false)
+                }) as wz_capi_core::drive::ReplyIngress
+            });
+        #[cfg(not(feature = "unstable"))]
+        let ingress = None;
         node.get(
             key,
             &options,
-            Box::new(move |view: &dyn ReplyView| {
-                #[cfg(feature = "unstable")]
-                if let Some(arrival) = &arrival {
-                    arrival.arrive(view, &mut |arrived| on_reply(arrived));
-                    return;
-                }
-                on_reply(view)
-            }),
+            ingress,
+            Box::new(move |view: &dyn ReplyView| on_reply(view)),
             Box::new(|| {}),
         )
         .map_err(|error| zerror!("{error}").into())
