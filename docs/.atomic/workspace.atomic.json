@@ -305814,6 +305814,42 @@
         "The C1ay router_forward guards are nine exact counts that every router commit moves, and four reds of this round were that or a sibling (the ip_stack count, a wire_const path, a dead for_each_record, the guards) fixed twice over by two sessions at once; a guard read off the build and a rule that a commit which adds a router test moves them are open. C1bnl shard 1 was not re-run whole after this change."
       ]
     },
+    "Round 4116": {
+      "decision_summary": "The timestamp stacks of a node's queries, replies and messages are repaired, the last open defects of the differential of the session (E18) that are not the burst. The node records its routing on the stack of each face it hands a message to, and the session recorded its own routing too, so a stack carried the node twice; a session over a node now leaves the routing to it. The node recorded with the clock of the node where the session had a callback of its own; it now records with the callback, flagged as the application's, as upstream's runtime does. A query the session asked of its own queryable, and the reply to it, are not routed, as upstream answers them without a router between them. The receive of a reply was stamped on the thread of the node's face, after the next reply could have been sent; the face's sink now runs a hook of the query on the reply as the router hands it over. Open: the burst of an upstream publisher, which does not finish.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/ts_stack.rs and reply_sink.rs: record_interception_stamped and record_on_message_stamped (a record may be flagged custom), ReplyArrival::arrive_on_response; tests.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: set_interception_source, route_stamp, tell_local_face and send_hosted_reply (no routing on the session's own query or reply); two tests.",
+        "crates/wz-capi-core/src/drive/router_node.rs and router_node/local_face.rs: ReplyIngress, QueryHold, the sink runs the hook of a held query on its replies; a test.",
+        "crates/wz-zenoh/src/api/session.rs and timestamp_stack.rs: the session records no routing over a node, gives the node its callback, and builds the hook of a query from its arrival record.",
+        "docs/zenoh-api-on-the-engine.md: the repair and what is open."
+      ],
+      "verification_bullets": [
+        "Locally: the differential tests of the timestamp stack of messages, of queries and replies, and of the reply a query holds back pass where they failed (23 of the 24 tests that finish passed in one run, and the one that did not, a querier test, passes alone three times: its upstream transcript showed a duplicate timeout under load); the 360 tests of the forwarder with the router, token, clock and stack features, 13 of the node's face and the new ones of the session core pass; clippy with warnings denied passes for wz-runtime-tokio, wz-session-core, wz-capi-core with the router node, and the top crate with unstable; format passes. Not run: the hosted run, the pico and zenohd interop layers, the burst."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the differential of the session: the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. A querier test of that file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ],
+      "publishable_decision_summary": "The timestamp stacks of a node's queries, replies and messages are repaired, the last open defects of the differential of the session (E18) that are not the burst. The node records its routing on the stack of each face it hands a message to, and the session recorded its own routing too, so a stack carried the node twice; a session over a node now leaves the routing to it. The node recorded with the clock of the node where the session had a callback of its own; it now records with the callback, flagged as the application's, as upstream's runtime does. A query the session asked of its own queryable, and the reply to it, are not routed, as upstream answers them without a router between them. The receive of a reply was stamped on the thread of the node's face, after the next reply could have been sent; the face's sink now runs a hook of the query on the reply as the router hands it over. Open: the burst of an upstream publisher, which does not finish.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/ts_stack.rs and reply_sink.rs: record_interception_stamped and record_on_message_stamped (a record may be flagged custom), ReplyArrival::arrive_on_response; tests.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: set_interception_source, route_stamp, tell_local_face and send_hosted_reply (no routing on the session's own query or reply); two tests.",
+        "crates/wz-capi-core/src/drive/router_node.rs and router_node/local_face.rs: ReplyIngress, QueryHold, the sink runs the hook of a held query on its replies; a test.",
+        "crates/wz-zenoh/src/api/session.rs and timestamp_stack.rs: the session records no routing over a node, gives the node its callback, and builds the hook of a query from its arrival record.",
+        "docs/zenoh-api-on-the-engine.md: the repair and what is open."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the differential tests of the timestamp stack of messages, of queries and replies, and of the reply a query holds back pass where they failed (23 of the 24 tests that finish passed in one run, and the one that did not, a querier test, passes alone three times: its upstream transcript showed a duplicate timeout under load); the 360 tests of the forwarder with the router, token, clock and stack features, 13 of the node's face and the new ones of the session core pass; clippy with warnings denied passes for wz-runtime-tokio, wz-session-core, wz-capi-core with the router node, and the top crate with unstable; format passes. Not run: the hosted run, the pico and zenohd interop layers, the burst."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the differential of the session: the burst of an upstream publisher that is not received to the end; E18 has no gate before a push, so it can go red again unseen. A querier test of that file showed a duplicate timeout reply in its upstream transcript under load. Also owed: the write-lane overtaking of Data by Control, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
