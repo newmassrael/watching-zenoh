@@ -305186,6 +305186,34 @@
         "Owed, still: the hosted run of round 4088 and after (the run of its tip was cancelled by later pushes; the next uncancelled one is the verdict), the capability cost of the nine pico coop builds, Layer E whole."
       ]
     },
+    "Round 4099": {
+      "decision_summary": "The open of a link the node refused in its handshake no longer fails the node's connect. Since the link admission commit (c4e9a65195) a dial asks the node at the InitAck, and when a restarted peer dials a node whose old dialler dials it back at the same moment, the admission refuses one of the two links with MaxLinks; if the refused one was the open's own dial, session_open answered LinkRefused, which no caller read, so the C ABI mapped it to DriveFailed and the OnceThenFail arm failed the whole open, though the node was already linked to the one it dialled. The hosted wz-capi-pico mutual_dial test failed this way about one run in twenty. Dialer::open_or_held answers None for it and the first walk's arms read that as the connect met by the link the node holds; the redial of a lost link and every other caller still read it as a dial that did not open.",
+      "changes_bullets": [
+        "wz-capi-core drive.rs: private DialFailure (Failed or Held) as the result of Dialer::open_with; Dialer::open and open_scouted map it back to OpenError (Held is DriveFailed); new Dialer::open_or_held; the OnceThenFail, OnceThenSkip and RetryThenFail arms of the node's walk use it and take None as met. New test a_link_the_node_refuses_is_not_a_connect_that_failed against a handcrafted far end and an admission that refuses every link."
+      ],
+      "verification_bullets": [
+        "On the build host: the new test passes (the dial is held, the far end is sent a Close carrying MAX_LINKS and no OpenSyn); wz-capi-core lib tests 149 passed with router-node and scout; clippy of wz-capi-core clean; cargo fmt clean. wz-capi-pico mutual_dial passed 60 of 60 runs with the fix, against about 1 in 20 failing before it (1 of 6 and 0 of 14 on the build host, 1 hosted)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "A node that is refused its only dial and whose other link then fails to come up is not redialled by the walk; the peer on the other end redials it, and a redial of its own is not made for a held dial. The router node's open still counts a dial for each connect endpoint, so a held dial there waits for the other link's face; not exercised here."
+      ],
+      "publishable_decision_summary": "The open of a link the node refused in its handshake no longer fails the node's connect. Since the link admission commit (c4e9a65195) a dial asks the node at the InitAck, and when a restarted peer dials a node whose old dialler dials it back at the same moment, the admission refuses one of the two links with MaxLinks; if the refused one was the open's own dial, session_open answered LinkRefused, which no caller read, so the C ABI mapped it to DriveFailed and the OnceThenFail arm failed the whole open, though the node was already linked to the one it dialled. The hosted wz-capi-pico mutual_dial test failed this way about one run in twenty. Dialer::open_or_held answers None for it and the first walk's arms read that as the connect met by the link the node holds; the redial of a lost link and every other caller still read it as a dial that did not open.",
+      "publishable_changes_bullets": [
+        "wz-capi-core drive.rs: private DialFailure (Failed or Held) as the result of Dialer::open_with; Dialer::open and open_scouted map it back to OpenError (Held is DriveFailed); new Dialer::open_or_held; the OnceThenFail, OnceThenSkip and RetryThenFail arms of the node's walk use it and take None as met. New test a_link_the_node_refuses_is_not_a_connect_that_failed against a handcrafted far end and an admission that refuses every link."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: the new test passes (the dial is held, the far end is sent a Close carrying MAX_LINKS and no OpenSyn); wz-capi-core lib tests 149 passed with router-node and scout; clippy of wz-capi-core clean; cargo fmt clean. wz-capi-pico mutual_dial passed 60 of 60 runs with the fix, against about 1 in 20 failing before it (1 of 6 and 0 of 14 on the build host, 1 hosted)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A node that is refused its only dial and whose other link then fails to come up is not redialled by the walk; the peer on the other end redials it, and a redial of its own is not made for a held dial. The router node's open still counts a dial for each connect endpoint, so a held dial there waits for the other link's face; not exercised here."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
