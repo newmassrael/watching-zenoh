@@ -891,3 +891,113 @@ What this does not settle:
 - Together with the units of section 6.5 it changes what a consumer sees: null
   flows that read `no` read `undecided`. The zenoh words do not change. The
   zenoh-analyzer session reads that.
+
+### 6.7 The rule of model 3, and the decisions behind it (2026-11-02)
+
+The owner left these decisions to this session on 2026-11-02, with one
+criterion: the structure that is right in the long term and stands in the
+textbooks, whatever it costs. They are recorded as decisions, each with its
+reason, and a ledger entry moves them.
+
+**D1. Each sum is an e-process against the hypothesis it rejects.** The `yes`
+sum rejects the null and the `no` sum rejects zenoh (section 2). Each hypothesis
+is composite: it leaves rates unknown. What the REJECTED hypothesis leaves
+unknown is taken at its likeliest over what the corpus allows of it, the
+region of its parameters at 95%; what the OTHER hypothesis leaves unknown is
+mixed over a prior. That is universal inference (Wasserman, Ramdas and
+Balakrishnan, 2020) inside the frame of testing by betting (Ramdas, Grünwald,
+Vovk and Shafer, 2023): for every member `p` of the rejected hypothesis, the
+ratio against its likeliest member is at most the ratio against `p`, which is a
+martingale under `p`, so Ville's bound holds at every moment whatever `p` is.
+The prior on the other side moves only how soon a word is reached, never the
+chance that it is wrong, so it may be fitted on the corpus freely. Model 2
+already follows the rule for single outcomes (the `yes` sum's largest null
+probability, the `no` sum's upper bound on a zenoh failure); what it does not
+follow is that the outcomes of one flow share a rate. Sections 6.5 and 6.6 are
+that defect, and D1 is its repair.
+
+- A zenoh failure rate (units, framing, cookie echo, Init roles, version) is a
+  property of zenoh, of its release, implementation and workload, so it is a
+  rate per GROUP (section 6.3) with a Beta spread. On the `no` sum it is taken
+  at its likeliest over the concentrations from all-or-nothing groups to
+  independent outcomes, and over the means the 22 groups leave in their 95%
+  region at each. The concentration the corpus cannot identify (section 6.5) is
+  therefore not chosen: it is the worst case, which is what an unidentified
+  nuisance of the rejected hypothesis must be.
+- An SN break rate is a property of the LINK and not of zenoh, so the zenoh
+  hypothesis does not restrict it: on the `no` sum the zenoh side takes the
+  rate likeliest for the flow's own steps, and broken steps are never evidence
+  against zenoh. On the `yes` sum the zenoh side mixes it over the prior of
+  section 6.6.
+- A null protocol's rates are its own (section 6.5), and on the `yes` sum they
+  are taken at their likeliest over the members and the spreads.
+
+**D2. The acceptance levels of section 6.4 are confirmed**: a group fails with
+chance at most 10% (interim), 5% (first target), 1% (final target), shown by
+29, 59 and 299 independent groups on each side. They are the levels at which
+the second layer of section 6.4 is reported, and they move only by a ledger
+entry.
+
+**D3. Model 3 is the whole rule in one step.** Units, SN steps and the zenoh
+side of the other checks change together, on both sums. The SN mixture alone
+would move no word (section 6.6) and could ship sooner, but it is half a model:
+the model is frozen once, before a validation corpus is read (D5), and two
+consumer-visible model numbers for one rule would put a frozen state between
+them that nothing tests. The integer arithmetic rounds every term TOWARD the
+hypothesis its sum rejects (down for the `yes` sum, up for the `no` sum), so
+that the integer e-process is never above the real one; rounding to the
+nearest, which `zenoh_mixture.rs` and the generated weights do now, can raise a
+sum by half a millibit per term, and a flow has thousands of terms.
+
+**D4. The verdict latches at the first crossing, and the reader reports when.**
+Ville's inequality bounds the chance that the process EVER crosses, so the word
+of a flow is the first crossing and the moment of it, not the sum at the end;
+the reader also reports the model number. Both change the consumer, and the
+zenoh-analyzer session takes them with model 3.
+
+**D5. The model is frozen by a ledger entry before a validation corpus is
+read**, and the validation corpus is evaluated once (section 6.4, two corpora).
+The entry names the rule, the region level, the priors and the group
+definition; the corpus is of the workloads, implementations and links section
+6.4 lists as absent.
+
+**D6. A `no` comes from recognising what the flow is.** Under D1 a flow whose
+units fail is evidence against zenoh only as far as a new zenoh group could
+fail them, which 22 groups bound at about 13%: a few bits, never twenty. The
+`no` sum grows when its numerator is a model that reads the flow well, that is
+when the flow is recognised as a null protocol and not only as a failed zenoh
+reading. That is model 4: a likelihood per null protocol in the `no` sum's
+numerator, in wz, as the frame wz extends past the zenoh presets.
+
+**What the rule reads on the corpus**
+(`the_corpus_read_by_the_rule_of_model_three`, nothing shipped, `MODEL` stays
+2). Every flow's units, SN steps and the zenoh side of its other checks are
+replaced by the rule's; the checks are taken as independent within a zenoh
+group, the generous side for `no`. The region's two ends are the bounds already
+stated (`the_region_of_a_zenoh_failure_rate_ends_at_the_two_known_bounds`): at a
+concentration of 10^-3 a group fails with chance at most 0.126 (the 22-group
+bound 0.127), at 10^7 a unit fails with chance at most 6.05e-5 (the 49505-unit
+bound).
+
+| | `yes` | `no` | `undecided` |
+|---|---|---|---|
+| zenoh flows, model 2 | 619 | 0 | 2 |
+| zenoh flows, the rule | 619 | 0 | 2 |
+| null flows, model 2 | 0 | 345 | 308 |
+| null flows, the rule | 0 | 0 | 653 |
+
+- No zenoh word moves. The two `undecided` are the two flows of the 20% loss
+  link, two units and a handshake without a cookie, as in model 2.
+- Every null `no` goes: DNS 174, NTP 89, CoAP 25, DHCP 21, RTPS 9, WSD 8,
+  SOME/IP 5, MQTT 4, PostgreSQL 3, and two or fewer from SSDP, QUIC, SSH and
+  mDNS. No null flow reads `yes`.
+- A flow whose units all failed weighs -2.8 bits on the `no` sum at 2 units and
+  -1.7 at 531: the bound on a new group failing, and no more. A flow whose units
+  all read whole weighs about 1.1 bits on the `yes` sum at 10 to 400 units, the
+  units of a null protocol whose flows read whole all at once. The `yes` of a
+  zenoh flow rests on the cookie echo and the SN steps that follow, whose null
+  chances are derived from field widths.
+
+So the 345 `no` of model 2 rest entirely on outcomes of one flow being
+independent, and the corpus does not support that at `2^-20`. Model 3 reads
+them `undecided` until model 4 recognises them (D6).

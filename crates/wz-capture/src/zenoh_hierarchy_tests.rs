@@ -41,7 +41,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::zenoh_calibration_tests::{read_corpus, File};
+use crate::zenoh_calibration_tests::{read_corpus, Counts, File};
 use crate::zenoh_evidence::model;
 use crate::zenoh_evidence::tests as fit;
 
@@ -751,5 +751,342 @@ fn the_corpus_read_with_the_candidate_against_the_shipped_words() {
         for ((group, was, now), flows) in &moved {
             std::println!("    {group}: {was} -> {now} in {flows} flow(s)");
         }
+    }
+}
+
+// THE RULE OF MODEL 3 (`docs/flow-zenoh-verdict.md` §6.7), read on the corpus.
+//
+// Each sum is an e-process against the hypothesis it rejects: the `yes` sum
+// against the null, the `no` sum against zenoh. What the rejected hypothesis
+// leaves unknown is taken at its likeliest over what the corpus allows of it
+// (universal inference: for every member `p` of the hypothesis the ratio with the
+// likeliest member below is at most the ratio with `p`, a martingale under `p`,
+// so the sum is valid at every moment). What the other hypothesis leaves unknown
+// is mixed over a prior, which moves how soon a word is reached and never the
+// chance that it is wrong.
+
+/// One check's outcomes in a flow's or a file's counts: how many, how many failed.
+type Kind = fn(&Counts) -> (u64, u64);
+
+fn kind_units(c: &Counts) -> (u64, u64) {
+    (c.units.iter().sum(), c.units[1] + c.units[2])
+}
+
+fn kind_framing(c: &Counts) -> (u64, u64) {
+    (c.framing[0] + c.framing[1], c.framing[1])
+}
+
+fn kind_cookie(c: &Counts) -> (u64, u64) {
+    (c.cookie[0] + c.cookie[1], c.cookie[1])
+}
+
+fn kind_roles(c: &Counts) -> (u64, u64) {
+    (c.roles[0] + c.roles[1], c.roles[1])
+}
+
+fn kind_versions(c: &Counts) -> (u64, u64) {
+    (c.versions[0] + c.versions[1], c.versions[1])
+}
+
+/// The checks whose zenoh failure rate is a property of zenoh (of its release,
+/// implementation and workload), and so of the group. The units come first; the
+/// SN steps are not here, since how often they break is the link's.
+const KINDS: [(&str, Kind); 5] = [
+    ("units", kind_units),
+    ("framing", kind_framing),
+    ("cookie", kind_cookie),
+    ("roles", kind_roles),
+    ("versions", kind_versions),
+];
+
+/// The zenoh groups' outcomes of one check, the groups that saw none left out.
+fn kind_groups(files: &[File], kind: Kind) -> Vec<GroupUnits> {
+    let mut groups: BTreeMap<&str, GroupUnits> = BTreeMap::new();
+    for f in files.iter().filter(|f| f.zenoh) {
+        let (n, k) = kind(&f.counts);
+        let slot = groups.entry(f.group.as_str()).or_default();
+        slot.0 += n;
+        slot.1 += k;
+    }
+    groups.into_values().filter(|g| g.0 > 0).collect()
+}
+
+/// The concentrations a zenoh group's failure rate is taken at its worst over,
+/// from groups that fail every outcome or none (10^-3) to independent outcomes
+/// (10^7), four to a decade.
+fn worst_kappas() -> Vec<f64> {
+    (0..=40)
+        .map(|i| 10f64.powf(-3.0 + i as f64 / 4.0))
+        .collect()
+}
+
+/// The top of the one-sided 95% region of the mean failure rate of a zenoh group
+/// at a concentration, when no group failed: the mean at which the chance that
+/// every group reads clean falls to 5%. It is the Clopper-Pearson bound of a
+/// Beta-binomial, and both of its ends are known: the bound on groups when the
+/// groups are all-or-nothing, and the bound on outcomes when they are independent.
+fn mean_bound(kappa: f64, groups: &[GroupUnits]) -> f64 {
+    let ln_clean = |m: f64| -> f64 {
+        groups
+            .iter()
+            .map(|&(n, _)| ln_member(m, Some(kappa), 0, n))
+            .sum()
+    };
+    let target = 0.05f64.ln();
+    let (mut lo, mut hi) = (1e-15f64.ln(), (1.0f64 - 1e-12).ln());
+    if ln_clean(hi.exp()) >= target {
+        return hi.exp();
+    }
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if ln_clean(mid.exp()) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo.exp()
+}
+
+/// What the zenoh groups allow of one check: at each concentration, the largest
+/// mean failure rate left in the region.
+struct ZenohWorst {
+    region: Vec<(f64, f64)>,
+}
+
+impl ZenohWorst {
+    fn of(groups: &[GroupUnits]) -> ZenohWorst {
+        assert!(
+            groups.iter().all(|g| g.1 == 0),
+            "a zenoh group failed this check: the region needs the general form"
+        );
+        let region = worst_kappas()
+            .into_iter()
+            .map(|c| (c, mean_bound(c, groups)))
+            .collect();
+        ZenohWorst { region }
+    }
+
+    /// `ln` of the likeliest probability the region gives one sequence of `n`
+    /// outcomes, `k` of which failed.
+    fn ln_sup(&self, k: u64, n: u64) -> f64 {
+        if k == 0 {
+            // A mean of zero is in every region, and it fails nothing.
+            return 0.0;
+        }
+        let mut best = f64::NEG_INFINITY;
+        for &(c, top) in &self.region {
+            for j in 0..=80 {
+                let m = top * 10f64.powf(-(j as f64) / 8.0);
+                best = best.max(ln_member(m, Some(c), k, n));
+            }
+        }
+        best
+    }
+}
+
+/// The concentrations the zenoh side of the `yes` sum mixes its units over, with
+/// equal weight: the prior over what the corpus cannot identify.
+const MIXED_KAPPAS: [f64; 7] = [0.1, 1.0, 10.0, 100.0, 1_000.0, 10_000.0, 1.0e6];
+
+/// A flow's units under the rule, in millibits on the `yes` and the `no` sum.
+fn units_by_rule(
+    mixed: &[Hierarchy],
+    members: &[NullMember],
+    worst: &ZenohWorst,
+    k: u64,
+    n: u64,
+) -> (i64, i64) {
+    if n == 0 {
+        return (0, 0);
+    }
+    let each: Vec<f64> = mixed.iter().map(|h| h.ln_predictive(k, n)).collect();
+    let zenoh_mixed = log_sum_exp(&each) - (mixed.len() as f64).ln();
+    let null_worst = members
+        .iter()
+        .flat_map(|m| {
+            KAPPAS
+                .iter()
+                .map(move |&c| ln_member(m.yes_share, Some(c), k, n))
+                .chain(core::iter::once(ln_member(m.yes_share, None, k, n)))
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    let each: Vec<f64> = members
+        .iter()
+        .map(|m| ln_member(m.no_share, m.kappa, k, n))
+        .collect();
+    let null_mixed = log_sum_exp(&each) - (members.len() as f64).ln();
+    (
+        millibits((zenoh_mixed - null_worst) / core::f64::consts::LN_2),
+        millibits((worst.ln_sup(k, n) - null_mixed) / core::f64::consts::LN_2),
+    )
+}
+
+/// A flow's SN steps on the `no` sum under the rule: the link's break rate is not
+/// zenoh's, so the zenoh side takes the rate likeliest for the flow's own steps,
+/// against the null's chance of a step that follows (2^-8).
+fn sn_no_by_rule(follows: u64, breaks: u64) -> i64 {
+    let n = follows + breaks;
+    if n == 0 {
+        return 0;
+    }
+    let part = |c: u64| {
+        if c == 0 {
+            0.0
+        } else {
+            c as f64 * (c as f64 / n as f64).log2()
+        }
+    };
+    let null = -8.0 * follows as f64 + breaks as f64 * (1.0 - 2f64.powi(-8)).log2();
+    millibits(part(follows) + part(breaks) - null)
+}
+
+/// The region's two ends are the bounds the corpus already states: on groups when
+/// they are all-or-nothing, on outcomes when they are independent.
+#[test]
+fn the_region_of_a_zenoh_failure_rate_ends_at_the_two_known_bounds() {
+    let files = read_corpus();
+    for (name, kind) in KINDS {
+        let groups = kind_groups(&files, kind);
+        let outcomes: u64 = groups.iter().map(|g| g.0).sum();
+        let (small, large) = (mean_bound(1e-3, &groups), mean_bound(1e7, &groups));
+        let by_groups = 1.0 - 0.05f64.powf(1.0 / groups.len() as f64);
+        let by_outcomes = fit::upper_bound(0, outcomes);
+        std::println!(
+            "{name}: {} groups, {outcomes} outcomes; bound {small:.4e} at kappa 1e-3 (groups: {by_groups:.4e}), {large:.4e} at 1e7 (outcomes: {by_outcomes:.4e})",
+            groups.len()
+        );
+        assert!(
+            (small / by_groups - 1.0).abs() < 0.01,
+            "{name}: all-or-nothing end"
+        );
+        assert!(
+            (large / by_outcomes - 1.0).abs() < 0.05,
+            "{name}: independent end"
+        );
+        let worst = ZenohWorst::of(&groups);
+        // A flow that failed every one of its outcomes is at most as likely as a
+        // new group failing, whatever the concentration.
+        for n in [1u64, 10, 1000] {
+            let p = worst.ln_sup(n, n).exp();
+            assert!(p <= by_groups * 1.01, "{name}: {n} failed, {p}");
+        }
+    }
+}
+
+/// THE CORPUS READ BY THE RULE OF MODEL 3. Every flow's units, SN steps and the
+/// zenoh side of its other checks are replaced by the rule's; the null side of
+/// the other checks and the cookie's match stay the shipped ones. The zenoh flows
+/// use the SN prior fitted without their own group. The checks are taken as
+/// independent of each other within a zenoh group, which is the generous side for
+/// `no` (a group that fails one check and the next together makes a `no` rarer
+/// still). Printed; the words are not asserted.
+#[test]
+fn the_corpus_read_by_the_rule_of_model_three() {
+    let files = read_corpus();
+    let members = null_members(&files);
+    let unit_groups = zenoh_groups(&files);
+    let mixed: Vec<Hierarchy> = MIXED_KAPPAS
+        .iter()
+        .map(|&c| Hierarchy::fit(c, &unit_groups))
+        .collect();
+    let worst: Vec<(Kind, ZenohWorst, f64)> = KINDS
+        .iter()
+        .map(|&(_, kind)| {
+            let groups = kind_groups(&files, kind);
+            let outcomes: u64 = groups.iter().map(|g| g.0).sum();
+            (kind, ZenohWorst::of(&groups), fit::upper_bound(0, outcomes))
+        })
+        .collect();
+    let steps_of = |skip: Option<&str>| -> Vec<(u64, u64)> {
+        files
+            .iter()
+            .filter(|f| f.zenoh && skip.is_none_or(|g| f.group != g))
+            .flat_map(|f| f.flows.iter().map(|fl| (fl.counts.sn[0], fl.counts.sn[1])))
+            .collect()
+    };
+    let all = fit_sn(&steps_of(None));
+    let mut left_out: BTreeMap<&str, SnPrior> = BTreeMap::new();
+    for f in files.iter().filter(|f| f.zenoh) {
+        left_out
+            .entry(f.group.as_str())
+            .or_insert_with(|| fit_sn(&steps_of(Some(&f.group))));
+    }
+    let mut cache: BTreeMap<(u64, u64), (i64, i64)> = BTreeMap::new();
+    let mut moved: BTreeMap<(String, &str, &str), u64> = BTreeMap::new();
+    let mut tally = [[0u64; 3]; 4];
+    let slot = |w: &str| match w {
+        "yes" => 0,
+        "no" => 1,
+        _ => 2,
+    };
+    for f in &files {
+        let prior = if f.zenoh {
+            &left_out[f.group.as_str()]
+        } else {
+            &all
+        };
+        for flow in &f.flows {
+            let c = &flow.counts;
+            let (n, k) = kind_units(c);
+            let (uy, un) = *cache
+                .entry((k, n))
+                .or_insert_with(|| units_by_rule(&mixed, &members, &worst[0].1, k, n));
+            let (sy, sn) = shipped_unit_part(&c.units);
+            let (fol, brk) = (c.sn[0], c.sn[1]);
+            let (sn_yes, sn_no) = (sn_mixture(prior, fol, brk), sn_no_by_rule(fol, brk));
+            let y = flow.yes - sy + uy - sn_shipped(fol, brk) + sn_yes;
+            // The other checks: only the zenoh side of the `no` sum moves.
+            let mut other_no = 0i64;
+            for (kind, region, pooled) in worst.iter().skip(1) {
+                let (n, k) = kind(c);
+                if n == 0 {
+                    continue;
+                }
+                let shipped_zenoh = k as f64 * pooled.ln() + (n - k) as f64 * (1.0 - pooled).ln();
+                other_no +=
+                    millibits((region.ln_sup(k, n) - shipped_zenoh) / core::f64::consts::LN_2);
+            }
+            let no = flow.no - sn + un - sn_shipped(fol, brk) + sn_no + other_no;
+            let (was, now) = (word(flow.yes, flow.no), word(y, no));
+            let side = if f.zenoh { 0 } else { 2 };
+            tally[side][slot(was)] += 1;
+            tally[side + 1][slot(now)] += 1;
+            if was != now {
+                *moved.entry((f.group.clone(), was, now)).or_default() += 1;
+            }
+            if (f.zenoh && now != "yes") || (!f.zenoh && now != "undecided") {
+                std::println!(
+                    "  {} FLOW READ {now} in {}: units {:?}, framing {:?}, cookie {:?}, roles {:?}, versions {:?}, SN {fol}/{brk}; shipped {} / {}, rule {y} / {no} (units {uy} / {un}, SN {sn_yes} / {sn_no}, other checks' zenoh side {other_no})",
+                    if f.zenoh { "ZENOH" } else { "NULL" },
+                    f.name,
+                    c.units,
+                    c.framing,
+                    c.cookie,
+                    c.roles,
+                    c.versions,
+                    flow.yes,
+                    flow.no
+                );
+            }
+        }
+    }
+    std::println!(
+        "rule of model 3: zenoh flows shipped {:?} rule {:?} | null flows shipped {:?} rule {:?}  (yes, no, undecided)",
+        tally[0], tally[1], tally[2], tally[3]
+    );
+    for ((group, was, now), flows) in &moved {
+        std::println!("    {group}: {was} -> {now} in {flows} flow(s)");
+    }
+    for n in [2u64, 10, 40, 531] {
+        let (y, no) = units_by_rule(&mixed, &members, &worst[0].1, n, n);
+        std::println!(
+            "  every one of {n} units failed: {y} / {no} {}",
+            word(y, no)
+        );
+    }
+    for n in [10u64, 40, 400] {
+        let (y, no) = units_by_rule(&mixed, &members, &worst[0].1, 0, n);
+        std::println!("  {n} units read whole: {y} / {no} {}", word(y, no));
     }
 }

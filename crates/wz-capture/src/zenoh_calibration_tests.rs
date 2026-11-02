@@ -52,13 +52,13 @@ pub(crate) struct Counts {
     /// Framing units read whole, residual, undecoded.
     pub(crate) units: [u64; 3],
     /// Stream directions whose framing held, or was lost first.
-    framing: [u64; 2],
+    pub(crate) framing: [u64; 2],
     /// Cookie echoes matched, differing.
-    cookie: [u64; 2],
+    pub(crate) cookie: [u64; 2],
     /// Init pairs of opposite kinds, of one kind.
-    roles: [u64; 2],
+    pub(crate) roles: [u64; 2],
     /// Version headers of this reader's version, of another.
-    versions: [u64; 2],
+    pub(crate) versions: [u64; 2],
     /// SN steps that followed, that broke.
     pub(crate) sn: [u64; 2],
 }
