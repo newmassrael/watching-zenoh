@@ -306496,6 +306496,48 @@
         "Replaces the carry of round 4132. The consumer is told fields 52 and the commit. What stays by design and is stated in the field note: the census counts completed exchanges a selector admits, so over a capture with unclosed exchanges the rows' round trips add up to more than first_reply.total_ns. The flow zenoh test's carry of round 4125 stands."
       ]
     },
+    "Round 4138": {
+      "decision_summary": "The hosted run of 55df79c93 (round 4119) was red in 17 jobs from several independent causes. By the time this round was ready the session that owns the neighbouring work had repaid most of them (count guards, six coop text budgets, the multicast text, the frt chain, the reduced-feature build of wz-capi-core and three doc links). This round repays what was still red after that and nothing else.\n\nThe stack-bound gate of the four Zephyr client images counted 38 sites for the rule engine-host where the contract pins 39. Since the SCE pin 955774d15a the line table of the image gives the call that Turn::run makes on its machine no file, so the rule that claims sites by the file microstep.rs no longer reaches it. Turn holds the machine as a reference to the MainLoop trait, and the callee is the same trait method the rule engine-host already names, so the repair is a second rule that claims the site by the function (Turn::run) and a pin of one beside it. The two pins sum to the 39 of before, so no site is left unclaimed and none is claimed twice; the self-test of the gate (23 controls) passes.\n\nBefore this round the same working tree carried a full repair set (round 4121 follow-up). It was rebased onto the repairs above, found to be the same edits in all other files, and dropped in favour of the peer's commits, which are the ones the hosted run will grade.",
+      "changes_bullets": [
+        "deploy/stack_call_contracts.json: site_pins engine-host 39 to 38 for the four Zephyr client images, new site_pins engine-turn 1 for each, and a new rule engine-turn (where function engine::Turn>::run$, callees engine::MainLoop>::) after engine-host, with the reason written in the rule.",
+        "No other file changes: the count guards, the cost, text, frt and footprint budgets, the reduced-feature build of wz-capi-core and the doc links were already repaired on main by the commits that preceded this round."
+      ],
+      "verification_bullets": [
+        "stack_bound_gate.py --selftest passes (23 controls); the JSON parses; the pins sum to the 39 of before the SCE pin 955774d15a.",
+        "The image-level count (38 plus 1) is read by the hosted Zephyr lane only: the Zephyr toolchain is absent on the build machines, so the gate verdict of that lane is the proof and is not yet in hand.",
+        "The reduced-configuration docs gate was run on the build machine for wz-session-core and wz-runtime-tokio with the doc-link edits: both exit 0. Those edits are on main from the preceding repair, not from this round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the hosted verdict of the Zephyr stack-bound lane on the engine-turn rule (if the count is still not 39 in total, read the lane's own sentence and re-claim the site by its function). The Zephyr text and resource budgets of the neighbouring repair are likewise graded only by the hosted lane.",
+        "Owed: regions scenario 7 still fails about 0.3 percent of runs (repeated timestamp and an equality assertion of a queque test, not attributed); two links dialled at the same time are not barriered against each other; the accepting side still decides a second link without a barrier.",
+        "Owed: the replacement of a face by a second link of the same node retracts a token before the replacement replays it, so a subscriber sees a Delete then a Put (upstream liveliness test regression_1); the repair belongs in the admission of the replacement, before declarations flow.",
+        "Owed, still: the alias table that only allocates, a whole-process stop in about 1 of 30 runs, the re-dial with no upper bound, the aggregate reply retraction of peer-hat faces that waits for the last backer, the configured endpoint dial a guard refuses and retries on schedule, the router loop and the cooperative engine that still decide a second link after it is up."
+      ],
+      "publishable_decision_summary": "The hosted run of 55df79c93 (round 4119) was red in 17 jobs from several independent causes. By the time this round was ready the session that owns the neighbouring work had repaid most of them (count guards, six coop text budgets, the multicast text, the frt chain, the reduced-feature build of wz-capi-core and three doc links). This round repays what was still red after that and nothing else.\n\nThe stack-bound gate of the four Zephyr client images counted 38 sites for the rule engine-host where the contract pins 39. Since the SCE pin 955774d15a the line table of the image gives the call that Turn::run makes on its machine no file, so the rule that claims sites by the file microstep.rs no longer reaches it. Turn holds the machine as a reference to the MainLoop trait, and the callee is the same trait method the rule engine-host already names, so the repair is a second rule that claims the site by the function (Turn::run) and a pin of one beside it. The two pins sum to the 39 of before, so no site is left unclaimed and none is claimed twice; the self-test of the gate (23 controls) passes.\n\nBefore this round the same working tree carried a full repair set (round 4121 follow-up). It was rebased onto the repairs above, found to be the same edits in all other files, and dropped in favour of the peer's commits, which are the ones the hosted run will grade.",
+      "publishable_changes_bullets": [
+        "deploy/stack_call_contracts.json: site_pins engine-host 39 to 38 for the four Zephyr client images, new site_pins engine-turn 1 for each, and a new rule engine-turn (where function engine::Turn>::run$, callees engine::MainLoop>::) after engine-host, with the reason written in the rule.",
+        "No other file changes: the count guards, the cost, text, frt and footprint budgets, the reduced-feature build of wz-capi-core and the doc links were already repaired on main by the commits that preceded this round."
+      ],
+      "publishable_verification_bullets": [
+        "stack_bound_gate.py --selftest passes (23 controls); the JSON parses; the pins sum to the 39 of before the SCE pin 955774d15a.",
+        "The image-level count (38 plus 1) is read by the hosted Zephyr lane only: the Zephyr toolchain is absent on the build machines, so the gate verdict of that lane is the proof and is not yet in hand.",
+        "The reduced-configuration docs gate was run on the build machine for wz-session-core and wz-runtime-tokio with the doc-link edits: both exit 0. Those edits are on main from the preceding repair, not from this round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the hosted verdict of the Zephyr stack-bound lane on the engine-turn rule (if the count is still not 39 in total, read the lane's own sentence and re-claim the site by its function). The Zephyr text and resource budgets of the neighbouring repair are likewise graded only by the hosted lane.",
+        "Owed: regions scenario 7 still fails about 0.3 percent of runs (repeated timestamp and an equality assertion of a queque test, not attributed); two links dialled at the same time are not barriered against each other; the accepting side still decides a second link without a barrier.",
+        "Owed: the replacement of a face by a second link of the same node retracts a token before the replacement replays it, so a subscriber sees a Delete then a Put (upstream liveliness test regression_1); the repair belongs in the admission of the replacement, before declarations flow.",
+        "Owed, still: the alias table that only allocates, a whole-process stop in about 1 of 30 runs, the re-dial with no upper bound, the aggregate reply retraction of peer-hat faces that waits for the last backer, the configured endpoint dial a guard refuses and retries on schedule, the router loop and the cooperative engine that still decide a second link after it is up."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
