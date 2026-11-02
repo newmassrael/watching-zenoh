@@ -12355,9 +12355,10 @@ layer_c1m_session_lwip() {
     # The links of the slot profile's IP stack (`ip_stack`): a dial opens the link of the protocol it
     # names, a refusal gives its buffers back, a secure channel is the stream link over it; and the
     # connections a listener hands the stack are the same stream link (one that finds no buffer is
-    # closed and counted, a poll that finds none claims none, a broken listener is said as it is):
-    # 8 = what that command PRINTED, four of them the accepting side.
-    _runci_guarded_test "C1m coop ip stack links" 8 \
+    # closed and counted, a poll that finds none claims none, a broken listener is said as it is), and
+    # the connections a secure listener completes are the stack's `tls/` link, not its `tcp/` one:
+    # 9 = what that command PRINTED, five of them the accepting side.
+    _runci_guarded_test "C1m coop ip stack links" 9 \
         cargo test -p wz-runtime-coop --features session-slot \
         --lib ip_stack:: --quiet || return 1
     # The host's TCP seam (`wz_runtime_posix::stream`): the connection a dial makes and the port a

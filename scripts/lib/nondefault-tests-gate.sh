@@ -360,6 +360,11 @@ transport-link-unixpipe,transport-link-ws|"
     # is built only with `router-node`, which no leg named, so its six tests were compiled by
     # none. The filter is the module path, so a test added there is covered.
     "wz-capi-core|hook|router-node|drive::router_node::"
+    # Whether a peer that scouts is a forwarding node (`open_plan::peer_fits_node`): it is one only
+    # when it holds a gateway. The test is compiled only with `router-node` and `scout` together,
+    # which no leg named, so the census reported it as claimed by nothing. The filter is the module
+    # path, so a test added there is covered.
+    "wz-capi-core|hook|router-node,scout|open_plan::"
     # The cooperative engine's two ends of a query, against a router stand-in on its own thread:
     # the queryable answers outside the session's lock and a kept query holds its Final; a get's
     # leg ends with its Final, its deadline, its cancelled token or its lost link. Their tests
