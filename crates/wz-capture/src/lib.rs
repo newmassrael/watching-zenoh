@@ -264,6 +264,9 @@ mod zenoh_corpus_tests;
 pub mod zenoh_evidence;
 #[cfg(test)]
 mod zenoh_hierarchy_tests;
+/// The SN steps of a flow as a mixture over its link's break rate, in integers:
+/// staged for a later model, and wired into none yet.
+pub mod zenoh_mixture;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.

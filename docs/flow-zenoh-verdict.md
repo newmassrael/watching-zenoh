@@ -868,14 +868,26 @@ What this does not settle:
 - The null side of the steps is still derived and not measured: a flow of a null
   protocol with a counter in its frames would follow often. The corpus has none
   that parse as frames.
-- Shipping it needs a logarithm and a gamma function in a crate that is `no_std`
-  with no third-party dependency and no float maths outside its tests. The weights
-  are computed from the counts when the evidence is asked for
-  (`sn_steps_weight` takes the counts), so the change is local, but it takes
-  either a fixed-point logarithm of its own or a decision to depend on one. With
-  the Beta parameters chosen as simple fractions the gamma ratio is a product of
-  fractions, and a table of logarithms of the integers up to the steps a flow
-  can hold would do.
+- The arithmetic it needs now exists and is checked (`zenoh_mixture.rs`, public
+  and wired into nothing). The crate is `no_std`, with no third-party dependency
+  and no float maths outside its tests, and the weights are integers a C header
+  pins to the unit, so the mixture is computed in integers. The Beta parameters
+  are fractions of one denominator, so that a rising factorial is a product of
+  integers over it and its logarithm is the logarithm of an integer; that
+  logarithm is found to 64 fractional bits by squaring a 128-bit mantissa
+  (`log2_q64`, exact for the powers of two and within 10^-12 bits of the
+  floating-point logarithm elsewhere); a rising factorial of many factors is a
+  ratio of gamma functions, taken by shifting the argument up to 16 and
+  finishing with Stirling's series, so the cost does not grow with the steps a
+  flow holds. Tests hold it to a direct floating-point sum over three priors and
+  64 step counts (within the rounding), to the rising factorial for arguments
+  either side of the point where Stirling takes over and up to 10^5 factors
+  (within 3 * 10^-9 bits), and to eleven values computed apart from it, to the
+  unit. Counts above 2^36 are counted as 2^36. What is left is not arithmetic:
+  the prior as parameters (88 / 19912 over 10000 is the fit rounded; a generated
+  constant, like the rest of the calibration), `sn_steps_weight` taking the
+  mixture in place of the two constants it multiplies, the pinned examples that
+  move with it, and the model number.
 - Together with the units of section 6.5 it changes what a consumer sees: null
   flows that read `no` read `undecided`. The zenoh words do not change. The
   zenoh-analyzer session reads that.
