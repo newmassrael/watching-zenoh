@@ -527,6 +527,13 @@ Each lands whole with its surface lines, tests and faults in one round.
     `demo/q/**`. A peer node now numbers what it leaves for its north, as the client of a router
     already did (`numbers_every_declaration_to`), and the differential of the queryable is
     equal to upstream's. wz peers among themselves hold with the numbers (the peer mesh tests).
+  - **Repaired after round 4109: a token a peer undeclared stayed in the node's liveliness
+    history.** A peer of the pin retracts a declaration by its id and sends the extension with the
+    null key (`ext_wire_expr: WireExprType::null()`), which the node read as the empty string:
+    a key, so the retraction of the empty key withdrew nothing and the id the peer declared the
+    token under was never consulted. An empty key now names nothing and the retraction is
+    resolved by the id, on the three planes (a subscriber and a queryable were held the same
+    way). The differential of the liveliness tells the same as upstream's.
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

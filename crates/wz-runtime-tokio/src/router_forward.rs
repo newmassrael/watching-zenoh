@@ -6119,8 +6119,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         stored: impl FnOnce(&BrokerHat) -> Option<String>,
     ) -> Option<Declared> {
         match self.tables.hats.get(&region)? {
+            // A peer of the pin names a retraction by its id and sends the extension with the null
+            // key (`zenoh/src/net/routing/hat/peer/token.rs` @ `ext_wire_expr: WireExprType::null(),`):
+            // id 0 and no suffix, which reads as the empty string. The empty string is no key,
+            // so that retraction is resolved by the id, as one with no extension is.
             Hat::Mesh(_) => self
-                .resolve_sourced(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
+                .resolve_sourced(inbound, region, declare, |t| {
+                    resolve_ext_keyexpr(exts, t).filter(|keyexpr| !keyexpr.is_empty())
+                })
                 .or_else(|| {
                     let keyexpr = self.tables.mesh_ids.recall(plane, inbound, decl_id)?;
                     self.resolve_sourced(inbound, region, declare, |_| Some(keyexpr))
@@ -22616,6 +22622,72 @@ mod tests {
                 .interested("live/data")
                 .is_empty(),
             "no native peer token entry (derive-not-store; this is a Router-tier source)"
+        );
+    }
+
+    /// A peer of the pin retracts a declaration by its id and sends the extension with the null
+    /// key (id 0, no suffix), which reads as the empty string and names nothing. The node
+    /// resolves it by the id the peer declared it under: a token the peer undeclared stays held,
+    /// and so told, if it does not.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_peers_retraction_with_a_null_key_withdraws_by_its_id() {
+        let fwd = RouterForwarder::peer(zid(0x01));
+        let (peer, _sink) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &peer);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_token(7, 0, Some("live/data")).expect("declare token"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(8, 0, Some("live/sub")).expect("declare subscriber"),
+            )),
+        );
+        assert_eq!(
+            fwd.on_tables()
+                .mesh(NORTH_REGION)
+                .tokens
+                .interested("live/data"),
+            vec![zid(0xBB)],
+            "the token is held"
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_undeclare_token_on_wire(7, 0, "")
+                    .expect("undeclare token"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_undeclare_subscriber_on_wire(8, 0, "")
+                    .expect("undeclare subscriber"),
+            )),
+        );
+        assert!(
+            fwd.on_tables()
+                .mesh(NORTH_REGION)
+                .tokens
+                .interested("live/data")
+                .is_empty(),
+            "the token the peer undeclared by its id is gone"
+        );
+        assert!(
+            fwd.on_tables()
+                .mesh(NORTH_REGION)
+                .subs
+                .interested("live/sub")
+                .is_empty(),
+            "so is the subscriber"
         );
     }
 
