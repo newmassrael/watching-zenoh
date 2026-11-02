@@ -725,8 +725,8 @@ one unit, and a failure always costs the same. That is a model of one population
 of units. The corpus has 22 zenoh groups, and the units of a group share what
 makes them read well or badly.
 
-`crates/wz-capture/src/zenoh_hierarchy_tests.rs` holds a candidate, and ships
-nothing (`model::MODEL` stays 2). Each group has its own failure rate, drawn from
+`crates/wz-capture/src/zenoh_hierarchy_tests.rs` held a candidate (until model 3
+shipped, section 6.8, which removed the report). Each group has its own failure rate, drawn from
 a Beta distribution whose mean has the Jeffreys prior and the posterior the 22
 groups give it, none of which failed a unit, and whose spread is a
 concentration `kappa`: a Beta-binomial over the units of a group. A flow of `n`
@@ -871,8 +871,8 @@ What this does not settle:
 - The null side of the steps is still derived and not measured: a flow of a null
   protocol with a counter in its frames would follow often. The corpus has none
   that parse as frames.
-- The arithmetic it needs now exists and is checked (`zenoh_mixture.rs`, public
-  and wired into nothing). The crate is `no_std`, with no third-party dependency
+- The arithmetic it needs now exists and is checked (`zenoh_mixture.rs`; model 3
+  reads the same mixture one step at a time, section 6.8). The crate is `no_std`, with no third-party dependency
   and no float maths outside its tests, and the weights are integers a C header
   pins to the unit, so the mixture is computed in integers. The Beta parameters
   are fractions of one denominator, so that a rising factorial is a product of
@@ -949,7 +949,7 @@ consumer-visible model numbers for one rule would put a frozen state between
 them that nothing tests. The integer arithmetic rounds every term TOWARD the
 hypothesis its sum rejects (down for the `yes` sum, up for the `no` sum), so
 that the integer e-process is never above the real one; rounding to the
-nearest, which `zenoh_mixture.rs` and the generated weights do now, can raise a
+nearest, which `zenoh_mixture.rs` and model 2's generated weights did, can raise a
 sum by half a millibit per term, and a flow has thousands of terms.
 
 **D4. The verdict latches at the first crossing, and the reader reports when.**
@@ -991,8 +991,9 @@ reading. That is model 4: a likelihood per null protocol in the `no` sum's
 numerator, in wz, as the frame wz extends past the zenoh presets.
 
 **What the rule reads on the corpus**
-(`the_corpus_read_by_the_rule_of_model_three`, nothing shipped, `MODEL` stays
-2). Every flow's units, SN steps and the zenoh side of its other checks are
+(`the_corpus_read_by_the_rule_of_model_three`, a report in floating point that
+was removed when model 3 shipped; section 6.8 has what the reader itself
+reads). Every flow's units, SN steps and the zenoh side of its other checks are
 replaced by the rule's; the checks are taken as independent within a zenoh
 group, the generous side for `no`. The region's two ends are the bounds already
 stated (`the_region_of_a_zenoh_failure_rate_ends_at_the_two_known_bounds`): at a
@@ -1022,3 +1023,100 @@ bound).
 So the 345 `no` of model 2 rest entirely on outcomes of one flow being
 independent, and the corpus does not support that at `2^-20`. Model 3 reads
 them `undecided` until model 4 recognises them (D6).
+
+### 6.8 How model 3 is computed, and what it reads (2026-11-02)
+
+Model 3 ships the rule of section 6.7: `model` reads 3, the field document
+moves to revision 49 and the session table to revision 7. Implementing it took
+two more decisions, recorded here with their reasons.
+
+**D7. A row of a pair is a test of its own.** The test is of a flow's bytes. A
+session row groups the flows whose handshakes named the same two nodes, and
+which flows those are is learned from the bytes as they arrive. Adding a
+flow's earlier sum to a row at the moment the flow names the pair is not a
+step of a supermartingale (the value it brings is known when it is added), and
+the packet that names the pair is selected by its own observations (an Init
+names a node only out of a unit read whole). So a row's evidence is an
+e-process over what its flows observe FROM THE PACKET AFTER each named the
+pair: the group-rate checks as one stream (one implementation), the SN steps
+per link (the break rate is the link's). A flow that comes to name another
+pair stops adding to the first row there, which stops that part of the
+process, and starts in the new row after that packet. A row of one flow that
+names no pair is that flow's evidence. A row and its only flow can therefore
+differ by the handshake's own observations; the cookie echo comes after the
+InitAck and counts in both.
+
+**D8. Every bound is computed in closed form, on the safe side.**
+
+- The rejected hypothesis is taken outcome by outcome: each step multiplies by
+  the largest PREDICTIVE chance any of its members gives the outcome after the
+  flow's past. The product is at least the largest chance any member gives the
+  whole sequence, so the e-process is below the one universal inference
+  defines, and valid with it. Its forms:
+  - a null member of a measured check (unit readings, stream framing), on the
+    `yes` sum: the larger of the outcome's bound over the members (model 2's)
+    and the flow's own share of it so far. A member's flows spread around its
+    share with a concentration the corpus does not bound, and the predictive
+    chance is an average of the two, largest at one end;
+  - a zenoh failure rate (unit readings, stream framing, cookie echo, Init
+    roles, version header), on the `no` sum: a success weighs nothing (a rate
+    of zero is in every region), and a failure after `k` failures in `t`
+    outcomes takes the largest `(k + kappa mu(kappa)) / (t + kappa)` over the
+    region, `mu(kappa)` its top. `mu` falls as `kappa` grows, so a grid of eight
+    concentrations a decade from 10^-3 to 10^7 bounds every cell, and the ends
+    are the bounds on groups and on outcomes
+    (`the_generated_regions_bound_every_concentration`);
+  - the SN steps, on the `no` sum: the link's likeliest break rate for its steps
+    so far, a function of the counts.
+- The other hypothesis is mixed over a prior fixed before the flow: the SN
+  steps over the Beta of section 6.6, fitted again on the corpus's links; each
+  group-rate check over a prior of weight one outcome centred on the zenoh
+  files' Jeffreys estimate; the measured nulls of the `no` sum over the
+  members' average Jeffreys share, as in model 2.
+- The arithmetic is in integers (`crates/wz-capture/src/zenoh_eprocess.rs`):
+  logarithms to 64 fractional bits, each value carrying a bound on its error,
+  and each check's part rounded to millibits toward the side its sum rejects
+  past that bound. A sum is its checks' parts added. The word latches after the
+  observation that first crosses a threshold, and the extremes include the
+  starting zero.
+
+The parameters are generated from the corpus with the counts
+(`zenoh_calibration_generated.rs`, held by
+`the_generated_calibration_is_current`):
+
+| measured null | `yes` bound per outcome | `no` mean per outcome |
+|---|---|---|
+| unit readings | 5.1168e-1, 1.0000e0, 1.0000e0 | 8.5591e-2, 3.7417e-1, 5.4024e-1 |
+| stream framing | 1.3911e-1, 1.0000e0 | 1.1353e-2, 9.8865e-1 |
+
+| check | zenoh prior failure mean | region top as kappa goes to 0 | at 10^7 |
+|---|---|---|---|
+| unit readings | 2.0200e-5 | 1.2731e-1 | 6.0536e-5 |
+| stream framing | 8.5470e-4 | 1.2731e-1 | 5.1166e-3 |
+| cookie echo | 8.1967e-4 | 1.2731e-1 | 4.9070e-3 |
+| Init roles | 8.1699e-4 | 1.2731e-1 | 4.8910e-3 |
+| version header | 4.0883e-4 | 1.2731e-1 | 2.4485e-3 |
+
+SN prior: Beta(89/10000, 19911/10000), a mean break rate of 0.0044 at a
+concentration of 2.
+
+**What model 3 reads on the corpus**
+(`the_corpus_holds_both_error_rates_and_every_files_tally`):
+
+| | `yes` | `no` | `undecided` |
+|---|---|---|---|
+| zenoh flows, model 2 | 619 | 0 | 2 |
+| zenoh flows, model 3 | 619 | 0 | 2 |
+| null flows, model 2 | 0 | 345 | 308 |
+| null flows, model 3 | 0 | 0 | 653 |
+
+- The floating-point reading of section 6.7 holds in the reader: no zenoh word
+  moves, and every null `no` becomes `undecided`.
+- Leaving any group out of the parameters moves no word of its own flows
+  (`leaving_a_group_out_of_the_parameters_moves_its_own_flows_by_this_much`).
+- Fixtures and the repository's captures that rested on units being added
+  moved: a handshake whose capture holds no cookie echo and no SN step weighs
+  about eighteen bits and is `undecided`
+  (`publisher-priority-encoding-timestamp.pcap`); a flow of keep-alives alone
+  never reaches `yes`; generated flows of six other protocols read neither
+  `yes` nor `no` at any length.
