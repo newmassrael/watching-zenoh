@@ -6,20 +6,28 @@
 //! Each of the test's two sums is the logarithm of an e-process against the
 //! hypothesis it rejects: the `yes` sum against "not zenoh", the `no` sum against
 //! "zenoh". Each step multiplies it by the chance the OTHER hypothesis gives the
-//! outcome, read off a prior fixed in advance ([`Prior`]), over a bound on the
-//! largest chance any member of the REJECTED hypothesis gives it, given what the
-//! flow showed before ([`log2_null_sup`], [`Region::log2_sup_failure`],
-//! [`log2_sn_sup`]). For every member `p` of the rejected hypothesis the product
-//! is at most the ratio against `p`, a martingale under `p`, so Ville's
-//! inequality bounds the chance that the sum EVER crosses its threshold.
+//! outcome, read off a prior fixed in advance
+//! ([`crate::zenoh_eprocess::Prior`]), over a bound on the largest chance any
+//! member of the REJECTED hypothesis gives it, given what the flow showed before
+//! ([`crate::zenoh_eprocess::log2_null_sup`],
+//! [`crate::zenoh_eprocess::Region::log2_sup_failure`],
+//! [`crate::zenoh_eprocess::log2_sn_sup`]). For every member `p` of the rejected
+//! hypothesis the product is at most the ratio against `p`, a martingale under
+//! `p`, so Ville's inequality bounds the chance that the sum EVER crosses its
+//! threshold.
 //!
 //! Every value is a logarithm in base 2 to 64 fractional bits (`Q64`), from
 //! [`crate::zenoh_mixture::log2_q64`], whose error is below `2^-60`. A value
-//! carries a bound on its error, [`LOG_ERR_Q64`] for each ratio of logarithms
-//! that went into it, and [`floor_millibits`] and [`ceil_millibits`] round it
-//! toward the hypothesis its sum rejects past that bound: the integer e-process
-//! is never above the real one. A check counts at most [`MAX_COUNT`] outcomes, so
+//! carries a bound on its error, [`crate::zenoh_eprocess::LOG_ERR_Q64`] for each
+//! ratio of logarithms that went into it, and
+//! [`crate::zenoh_eprocess::floor_millibits`] and
+//! [`crate::zenoh_eprocess::ceil_millibits`] round it toward the hypothesis its
+//! sum rejects past that bound: the integer e-process is never above the real
+//! one. A check counts at most [`crate::zenoh_eprocess::MAX_COUNT`] outcomes, so
 //! the bound stays below a tenth of a millibit.
+//!
+//! Every link in this doc is fully qualified: it is merged with the `pub mod`
+//! doc in `lib.rs` and resolved in the crate root.
 
 use crate::zenoh_mixture::{log2_q64, mul_wide};
 
