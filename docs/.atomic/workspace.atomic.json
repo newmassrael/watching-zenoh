@@ -306436,6 +306436,36 @@
         "Mutation::apply (the allocating form, which the replay tool and the driver use) still builds a payload of output_len: their counts come from declarations whose bounds the vocabulary states, not from a caller of the C ABI. The nightly fuzz.yml and the hosted fuzz-regress job are still to be measured from their first runs."
       ]
     },
+    "Round 4136": {
+      "decision_summary": "The admin image of decision D14 has its rows and a hosted build. The stack gate read its worst chain of direct calls at 35,272 bytes against the 32,768-byte stack the witness had been run on, which the kit's reading (22,189 and 22,949 bytes) had not shown: the chain is a path the node takes when it accepts or dials, and 19,104 bytes of it is one frame, spawn_pump, which builds a session pump's future on the stack before it moves it into its task cell. The stack is now 47,104 bytes (a quarter free over the chain, in units of 64) and not the reading's, because the chain is what a path the run did not take can still use; the frame is the thing to remove, and is not removed by this entry. The image has a stack-chain row, a text row (326,088 bytes by owner) and a resource row. The resource gate gains a kind of row for an image that makes no claim about a round trip: latency_source none leaves the two median keys out, and a run is held to its stack alone. The kit lane's build step now applies the stack gate and the text gate to the admin image and its run is held to its row, and Layer Qzk builds the image beside the client images, so a frame, a limit or a text that grows is seen in the push that grows it. Three runs on the kit held the row.",
+      "changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: the admin image's chain. scripts/lib/resource_budget_gate.py: latency_source none and its selftest cases. deploy/resource_budget.json and deploy/text_budget.json: the image's rows. deploy/zephyr-admin-node/overlays/t2g_admin_fixed_tls.conf: the stack. scripts/kit-lane.sh: the gates on the admin image, the budget at the end of its run, the images command. scripts/run-ci.sh: Layer Qzk's comment. docs/session-lifecycle-intent.md: D14's rows."
+      ],
+      "verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: three runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls after a build on the lab host, each inside its row (stack reading 22,949) with every step of the witness held and no wz: FAIL line; the build's stack-chain gate (35,272 against 47,104) and text gate (326,088, 51 owners) hold. Layer Qzk run locally with WZ_QZ_REQUIRE=1 builds all six images. The resource gate's selftest, its check, the stack gate's population, the text gate's selftest and the kit lane's selftest pass. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the 19,104-byte spawn_pump frame (build the pump's future in its task cell; it gives about 19 KB of main stack back to every image that reaches it, and the admin image's stack could fall to the reading's quarter); the admin image's stack bound with the calls through a register followed (it has no bound row; the chain's 12 calls through a register are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the GET medians of the asking and secure-channel clients against 1.10.2."
+      ],
+      "publishable_decision_summary": "The admin image of decision D14 has its rows and a hosted build. The stack gate read its worst chain of direct calls at 35,272 bytes against the 32,768-byte stack the witness had been run on, which the kit's reading (22,189 and 22,949 bytes) had not shown: the chain is a path the node takes when it accepts or dials, and 19,104 bytes of it is one frame, spawn_pump, which builds a session pump's future on the stack before it moves it into its task cell. The stack is now 47,104 bytes (a quarter free over the chain, in units of 64) and not the reading's, because the chain is what a path the run did not take can still use; the frame is the thing to remove, and is not removed by this entry. The image has a stack-chain row, a text row (326,088 bytes by owner) and a resource row. The resource gate gains a kind of row for an image that makes no claim about a round trip: latency_source none leaves the two median keys out, and a run is held to its stack alone. The kit lane's build step now applies the stack gate and the text gate to the admin image and its run is held to its row, and Layer Qzk builds the image beside the client images, so a frame, a limit or a text that grows is seen in the push that grows it. Three runs on the kit held the row.",
+      "publishable_changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: the admin image's chain. scripts/lib/resource_budget_gate.py: latency_source none and its selftest cases. deploy/resource_budget.json and deploy/text_budget.json: the image's rows. deploy/zephyr-admin-node/overlays/t2g_admin_fixed_tls.conf: the stack. scripts/kit-lane.sh: the gates on the admin image, the budget at the end of its run, the images command. scripts/run-ci.sh: Layer Qzk's comment. docs/session-lifecycle-intent.md: D14's rows."
+      ],
+      "publishable_verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: three runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls after a build on the lab host, each inside its row (stack reading 22,949) with every step of the witness held and no wz: FAIL line; the build's stack-chain gate (35,272 against 47,104) and text gate (326,088, 51 owners) hold. Layer Qzk run locally with WZ_QZ_REQUIRE=1 builds all six images. The resource gate's selftest, its check, the stack gate's population, the text gate's selftest and the kit lane's selftest pass. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the 19,104-byte spawn_pump frame (build the pump's future in its task cell; it gives about 19 KB of main stack back to every image that reaches it, and the admin image's stack could fall to the reading's quarter); the admin image's stack bound with the calls through a register followed (it has no bound row; the chain's 12 calls through a register are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the GET medians of the asking and secure-channel clients against 1.10.2."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
