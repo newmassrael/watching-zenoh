@@ -305786,6 +305786,34 @@
         "deploy/text_budget.json and the footprint rows may move on the hosted run; they were not measured locally."
       ]
     },
+    "Round 4115": {
+      "decision_summary": "The open of a link the other end refused no longer fails the node's connect. Round 4099 made a link the node itself refuses in its handshake (LinkAdmission) read as the node held by another link; the hosted wz-capi-pico mutual_dial test still failed on hkl002 afterwards, with the same -128. The other path is the accepting end's refusal: when a restarted peer and an old dialler cross, the end that holds the other link answers the InitSyn or the OpenSyn with Close(MAX_LINKS), which the dialling end read as a plain terminal handshake and the C ABI as DriveFailed. A Close with that reason before Established now ends the drive as LinkRefused, after the FSM has taken it, so the same Dialer::open_or_held answers None for it, as upstream's open.rs and accept.rs treat MAX_LINKS (a debug log, not a fault). A Close in an Established session is unchanged.",
+      "changes_bullets": [
+        "wz-session-core drive.rs: before the admitted event is stored, an inbound Close whose reason is MaxLinks, on a session not yet Established, is processed by the FSM and the drive returns LinkRefused (alloc and codec-close builds). wz-capi-core drive.rs: new test a_link_the_peer_refuses_with_max_links_is_not_a_connect_that_failed, a handcrafted far end that answers the InitAck and the OpenSyn with Close(MAX_LINKS). docs/reason-review-pins.md: the session-close-ingress row of wz-session-core drive.rs moved to the new hash, R4115."
+      ],
+      "verification_bullets": [
+        "On the build host (hkl001, the tree at origin/main plus this change): the three refusal tests pass (the node's own, the peer's, and the one that sends MAX_LINKS), wz-capi-core lib tests 150 passed with router-node and scout, clippy of wz-capi-core and wz-session-core clean, cargo fmt clean, wz-capi-pico mutual_dial 30 of 30. Before this change it also passed 50 of 50 on hkl002 and 50 of 50 on pc2 with the first fix alone, and failed once in the C1bnl shard 1 on hkl002. C1ay, C1m, C1cn and C1bnl shard 0 passed on pc2, pc3, pc5 and hkl002 on the tree before the last rebase."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The C1ay router_forward guards are nine exact counts that every router commit moves, and four reds of this round were that or a sibling (the ip_stack count, a wire_const path, a dead for_each_record, the guards) fixed twice over by two sessions at once; a guard read off the build and a rule that a commit which adds a router test moves them are open. C1bnl shard 1 was not re-run whole after this change."
+      ],
+      "publishable_decision_summary": "The open of a link the other end refused no longer fails the node's connect. Round 4099 made a link the node itself refuses in its handshake (LinkAdmission) read as the node held by another link; the hosted wz-capi-pico mutual_dial test still failed on hkl002 afterwards, with the same -128. The other path is the accepting end's refusal: when a restarted peer and an old dialler cross, the end that holds the other link answers the InitSyn or the OpenSyn with Close(MAX_LINKS), which the dialling end read as a plain terminal handshake and the C ABI as DriveFailed. A Close with that reason before Established now ends the drive as LinkRefused, after the FSM has taken it, so the same Dialer::open_or_held answers None for it, as upstream's open.rs and accept.rs treat MAX_LINKS (a debug log, not a fault). A Close in an Established session is unchanged.",
+      "publishable_changes_bullets": [
+        "wz-session-core drive.rs: before the admitted event is stored, an inbound Close whose reason is MaxLinks, on a session not yet Established, is processed by the FSM and the drive returns LinkRefused (alloc and codec-close builds). wz-capi-core drive.rs: new test a_link_the_peer_refuses_with_max_links_is_not_a_connect_that_failed, a handcrafted far end that answers the InitAck and the OpenSyn with Close(MAX_LINKS). docs/reason-review-pins.md: the session-close-ingress row of wz-session-core drive.rs moved to the new hash, R4115."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host (hkl001, the tree at origin/main plus this change): the three refusal tests pass (the node's own, the peer's, and the one that sends MAX_LINKS), wz-capi-core lib tests 150 passed with router-node and scout, clippy of wz-capi-core and wz-session-core clean, cargo fmt clean, wz-capi-pico mutual_dial 30 of 30. Before this change it also passed 50 of 50 on hkl002 and 50 of 50 on pc2 with the first fix alone, and failed once in the C1bnl shard 1 on hkl002. C1ay, C1m, C1cn and C1bnl shard 0 passed on pc2, pc3, pc5 and hkl002 on the tree before the last rebase."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The C1ay router_forward guards are nine exact counts that every router commit moves, and four reds of this round were that or a sibling (the ip_stack count, a wire_const path, a dead for_each_record, the guards) fixed twice over by two sessions at once; a guard read off the build and a rule that a commit which adds a router test moves them are open. C1bnl shard 1 was not re-run whole after this change."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
