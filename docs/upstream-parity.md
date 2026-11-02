@@ -53,30 +53,40 @@ cell without a same-condition measurement makes no claim.
 | MCU GET (wz node asking) | 76.0 us | pico 80.4, zenoh 99.9, zenoh-c 96.3 | storage doc 5.2, ranges overlap |
 | host no-drop rate, pico ABI, puts batched per 1 ms slot, 8 / 64 / 1024 B | at least 5.12 M / 4.64 M / 570 k msg/s | pico 4.80 M / 4.16 M / 355 k | `pico-compare.sh nodrop`, pc3, TCP loopback peer, median of 2, 2026-11-02, with `write_bound` and the lane of 8; 2026-10-31 read at least 5.12 M / 4.48 M / 160 k against pico 4.48 M / 4.00 M / 310 k |
 | host no-drop rate, pico ABI, puts one by one, 8 / 64 / 1024 B | 4.96 M / 4.32 M / 310 k msg/s | pico 370 k / 380 k / 360 k | the same, with `write_bound` only; 1 KiB was 190 k before it, and 560 k with the lane of 8 (below) |
-| host no-drop rate, zenoh-c ABI (`wz-capi-c`), puts one by one, 64 B / 1024 B | at least 5.12 M / 3.52 M msg/s | zenoh-c 1.10.2 4.00 M / 2.24 M | `pico-compare.sh nodrop-c`, pc3 idle, TCP loopback peer, default pinning, median of 3, 2026-11-02; the three readings of 1 KiB are 3.52 M each |
-| the same, 8 B | not stated | zenoh-c 4.16 M | wz to wz read 145 k, 1.08 M and 2.24 M: each stopped by a loss of 150 to 1100 puts at the end, not by the rate (below) |
+| host no-drop rate, zenoh-c ABI (`wz-capi-c`), puts one by one, 64 B / 1024 B | at least 5.12 M / 3.52 M msg/s | zenoh-c 1.10.2 4.00 M and 4.32 M (two runs) / 2.24 M | `pico-compare.sh nodrop-c`, pc3 idle, TCP loopback peer, default pinning, median of 3, 2026-11-02 and 2026-11-03; the three readings of 1 KiB are 3.52 M each, from the first run |
+| the same, 8 B | at least 5.12 M | zenoh-c 4.16 M and 4.80 M (two runs; one of three readings valid in the second) | wz to wz, three readings of at least 5.12 M after the close change (below); before it each was stopped by a loss at the end, not by the rate |
 
 **The zenoh-c family** (`pico-compare.sh nodrop-c`) runs the same publisher and subscriber sources
 (`scripts/host-bench/bench_api.h` is the one place where the two C APIs differ) against the zenoh-c
 release and against `wz-capi-c`. In the pairs, P is zenoh-c and W is wz, so PW is the zenoh-c
-publisher with the wz subscriber. The medians of three at 64 B are PP 4.00 M, PW 4.00 M, WP 4.96 M
-and WW at least 5.12 M (the search stopped there with nothing lost), and at 1 KiB PP 2.24 M, PW
-2.24 M, WP 3.12 M and WW 3.52 M. The caveats stand: one host, loopback, and the default pinning
-gives each process one SMT pair, which is two CPUs for a zenoh-c that runs several threads; a
-pinning with more CPUs is not measured. A first run on a busy host (other builds on the same
-CPUs) was rejected by the trial's own check of foreign CPU use and is not used.
+publisher with the wz subscriber. The medians of three at 64 B, first run then second, are PP
+4.00 M and 4.32 M, PW 4.00 M and 4.16 M, WP 4.96 M and at least 5.12 M, and WW at least 5.12 M
+twice ("at least": the search doubles from 20 k, nothing was lost at 5.12 M, and the next step,
+10.24 M, is past its cap of 8 M, so no higher rate was tried). The second run, after the close change below,
+also read 8 B: PP 4.80 M (one reading of three valid), PW 4.48 M, WP and WW at least 5.12 M. At
+1 KiB, from the first run, PP 2.24 M, PW 2.24 M, WP 3.12 M and WW 3.52 M. A zenoh-c pair differs by
+about 8 percent between the two runs at 64 B, which is the host's, not the library's. The caveats
+stand: one host, loopback, and the default pinning gives each process one SMT pair, which is two
+CPUs for a zenoh-c that runs several threads. A pinning with four CPUs a side read PP 4.00 M at
+64 B, the same as with two, and PW 3.68 M; its other cells were rejected by the trial's check of
+foreign CPU use, so 1 KiB at that pinning is not measured. Runs on a busy host (other builds on the same
+CPUs) were rejected by that check and are not used.
 
-**A loss that is not the rate.** At 8 B a wz publisher that closes right after its last put loses
-the last 500 to 1100 puts in some runs (a zenoh-c subscriber loses the same ones). The cause was
-found by changing one thing at a time, 20 runs each at 400 k/s: dropping the publisher before the
-session, 4 to 16 runs lose; leaving it to the session drop, none; waiting 5 ms before the close,
-none. `z_drop` of a publisher sends the undeclare of its key (Control priority), and the writer's
-lanes serve Control before Data, so the undeclare reaches the peer before the queued puts and the
-peer, which has unregistered the alias, drops them. This is the defect carried as the Control
-frame overtaking staged Data. The unlanded barrier in the lanes (`fence-wip`) was applied
-uncommitted to the same tree and the same test lost nothing in 20 runs; it is not landed because
-of an unrelated race its owner is reading. The 8 B cells with wz in them wait for it. A close that
-flushes the open batch frame before the seal was tried first and made no difference.
+**A loss that is not the rate, found and fixed.** At 8 B a wz publisher that closed right after
+its last put lost the last 400 to 1100 puts in some runs (a zenoh-c subscriber lost the same ones,
+and a zenoh-c publisher into a wz subscriber lost none, so the loss is on the sending side). It
+had two causes, found by changing one thing at a time, 20 runs each at 400 k/s. First, `z_drop` of
+a publisher sends the undeclare of its key (Control priority) and the writer's lanes served
+Control before Data, so the undeclare reached the peer before the queued puts and the peer, which
+had unregistered the alias, dropped them; the barrier in the lanes (ledger round 4142) now holds a
+Control frame behind the frames queued before it. Second, a session that closed while its data
+plane held an open frame dropped the frame: the writer puts it on the wire when it falls idle,
+through a hook that holds the session weakly, and the close let go of the session first. Closing
+the session without dropping the publisher lost puts in 13 of 20 runs wz to wz and 15 of 20 wz to
+zenoh-c; the close now hands the open frame to the writer first (ledger round 4148), and both
+paths, and the publisher dropped first, lose none in 20 runs. An earlier version of this
+paragraph said a close left to the session loses nothing; that was a reading of timing on the
+tree before, and is withdrawn. The 8 B cells with wz in them above are from after both changes.
 
 **The no-drop rate** (`scripts/host-bench/`, RFC 2544): the publisher OFFERS a stated rate and the
 subscriber counts what it is delivered; a rate stands when every message arrived and the rate was
