@@ -78,9 +78,97 @@ impl Owed {
     }
 }
 
+/// A delivery to a subscriber of the node's own session that the publish owes: the handler, and
+/// the sample it is to be handed.
+pub(super) struct OwedDelivery {
+    pub(super) handler: Arc<super::Hosted<super::HostedSubscriberHandler>>,
+    pub(super) sample: wz_session_core::sample::Sample,
+}
+
 thread_local! {
     /// The sends the publish running on this thread owes, or `None` outside a [`Scope`].
     static OWED: RefCell<Option<Vec<Owed>>> = const { RefCell::new(None) };
+    /// The deliveries to the node's own subscribers that the route running on this thread owes, or
+    /// `None` outside a [`DeliveryScope`].
+    static DELIVERIES: RefCell<Option<Vec<OwedDelivery>>> = const { RefCell::new(None) };
+}
+
+/// Owe the delivery of `sample` to `handler` instead of making it, and say whether it is owed:
+/// `false` outside a [`DeliveryScope`], where the caller makes the delivery itself.
+///
+/// A handler of the node's own session is the program's callback, and a callback may use the
+/// session: declare a subscriber, undeclare one, publish. Each of those needs the tables for
+/// writing, which a delivery made inside the route, with the tables held for reading, would wait
+/// for from inside the read it holds (the recursive read of the thread does not let a writer in,
+/// and the writer does not let the read go). The delivery is made once the tables are released.
+pub(super) fn owe_delivery(
+    handler: &Arc<super::Hosted<super::HostedSubscriberHandler>>,
+    sample: impl FnOnce() -> wz_session_core::sample::Sample,
+) -> bool {
+    if DELIVERIES.with(|owed| owed.borrow().is_none()) {
+        return false;
+    }
+    let sample = sample();
+    DELIVERIES.with(|owed| {
+        if let Some(owed) = owed.borrow_mut().as_mut() {
+            owed.push(OwedDelivery {
+                handler: Arc::clone(handler),
+                sample,
+            });
+        }
+    });
+    true
+}
+
+/// The span of one route, in which the deliveries to the subscribers of the node's own session are
+/// owed instead of made. Declare it BEFORE the guard of the tables the route takes, so that it
+/// ends after the guard is released: the deliveries are made then, by [`DeliveryScope::finish`] or,
+/// when the span ends any other way (a message the route skipped), by the drop.
+pub(super) struct DeliveryScope {
+    /// Whether this scope opened the span: a route begun from inside a callback joins the outer
+    /// one, which makes what is owed.
+    outermost: bool,
+}
+
+impl DeliveryScope {
+    /// Open the span on this thread, or join the one that is open.
+    pub(super) fn enter() -> Self {
+        DELIVERIES.with(|owed| {
+            let mut owed = owed.borrow_mut();
+            let outermost = owed.is_none();
+            if outermost {
+                *owed = Some(Vec::new());
+            }
+            Self { outermost }
+        })
+    }
+
+    /// Close the span and make the deliveries it owes. The span is closed first, so that a
+    /// callback that publishes opens one of its own.
+    pub(super) fn finish(mut self) {
+        self.deliver();
+    }
+
+    fn deliver(&mut self) {
+        if !std::mem::take(&mut self.outermost) {
+            return;
+        }
+        let owed = DELIVERIES.with(|owed| owed.borrow_mut().take().unwrap_or_default());
+        super::RouterForwarder::deliver_owed(owed);
+    }
+}
+
+impl Drop for DeliveryScope {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // A route that unwinds leaves no span open, and calls no callback while it does.
+            if self.outermost {
+                DELIVERIES.with(|owed| *owed.borrow_mut() = None);
+            }
+            return;
+        }
+        self.deliver();
+    }
 }
 
 /// The span of one local publish in which a send that would have to wait is owed instead.

@@ -3846,11 +3846,42 @@ impl RouterForwarder {
         publish: impl FnOnce(OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>>) -> R,
     ) -> R {
         let scope = local_publish::Scope::enter();
+        // Declared before the tables are taken, so that it ends after they are let go.
+        let deliveries = local_publish::DeliveryScope::enter();
         let result = publish(self.on_tables());
+        // The subscribers of the node's own session are handed what they were owed first: they
+        // are the program's callbacks, which may use the session, and no send that waits for room
+        // holds them up.
+        deliveries.finish();
         for owed in scope.finish() {
             owed.send();
         }
         result
+    }
+
+    /// Hand the subscribers of the node's own session the samples a route owed them, now that its
+    /// tables are released. A subscriber that is already running on this thread (a callback that
+    /// publishes into its own pattern) is handed its sample once it is out, as
+    /// [`deliver_to_hosted_subscribers`](OnTables::deliver_to_hosted_subscribers) does.
+    fn deliver_owed(deliveries: Vec<local_publish::OwedDelivery>) {
+        if deliveries.is_empty() {
+            return;
+        }
+        let inside = HostedDispatch::enter();
+        for local_publish::OwedDelivery { handler, sample } in deliveries {
+            if handler.is_retracted() {
+                continue;
+            }
+            if handler.call(|h| h(&sample as &dyn SampleView)).is_none() {
+                OnTables::<crate::sync::PlainReadGuard<'_, Tables>>::enqueue_self_echo(
+                    &handler, &sample,
+                );
+            }
+        }
+        if inside.is_outermost() {
+            drop(inside);
+            OnTables::<crate::sync::PlainReadGuard<'_, Tables>>::drain_self_echo();
+        }
     }
 
     /// The router's `publish`, with the sends it must wait for made after its tables are released.
@@ -10245,6 +10276,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             } else {
                 full
             };
+            // Inside a route that opened a span for them the deliveries are handed over when its
+            // tables are released ([`local_publish::owe_delivery`]); anywhere else, here.
+            if local_publish::owe_delivery(handler, || Sample::from_view(view)) {
+                continue;
+            }
             if handler.call(|h| h(view)).is_none() {
                 Self::enqueue_self_echo(handler, view);
             }
@@ -13064,6 +13100,10 @@ impl RouterForwarder {
                     _ => {}
                 }
             } else {
+                // The subscribers of the node's own session are the program's callbacks, which may
+                // use the session and so write the tables: they are handed what this message
+                // brings once the guard below is let go. Declared before it, so it ends after it.
+                let _deliveries = local_publish::DeliveryScope::enter();
                 let on = self.on_tables_for_a_frame();
                 if !on.admits_ingress(id, message) {
                     continue;
@@ -22788,6 +22828,67 @@ mod tests {
                 .is_empty(),
             "no native peer token entry (derive-not-store; this is a Router-tier source)"
         );
+    }
+
+    /// A subscriber of the node's own session is the program's callback, and a callback may use
+    /// the session: declare a subscriber, undeclare it, publish. A put of the session is called
+    /// back on the thread that made it, and the route it made held the tables for reading, so a
+    /// callback that declared waited for the write lock from inside the read it held: the put never
+    /// returned and nothing else could declare on the node again. The callback is called once the
+    /// tables are released.
+    #[test]
+    fn a_callback_of_the_nodes_own_subscriber_may_declare_while_its_session_publishes() {
+        use wz_session_core::sink::SampleView;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let done = std::sync::Mutex::new(done);
+        let inner = Arc::clone(&fwd);
+        fwd.register_local_subscriber(
+            "demo/outer/**",
+            Box::new(move |_sample: &dyn SampleView| {
+                inner.register_local_subscriber("demo/inner/**", Box::new(|_: &dyn SampleView| {}));
+                let _ = done.lock().unwrap().send(());
+            }),
+        );
+        let publisher = Arc::clone(&fwd);
+        let put = std::thread::spawn(move || publisher.publish("demo/outer/x", b"1"));
+        assert!(
+            finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the callback came back from declaring on the session that called it"
+        );
+        assert!(put.join().expect("the put").is_ok());
+    }
+
+    /// The same for what a face sends: the callback of a subscriber of the session is called once
+    /// the guard the route of the message held is let go, and not inside it.
+    #[test]
+    fn a_callback_of_the_nodes_own_subscriber_may_declare_while_a_face_routes_to_it() {
+        use wz_session_core::sink::SampleView;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let done = std::sync::Mutex::new(done);
+        let inner = Arc::clone(&fwd);
+        fwd.register_local_subscriber(
+            "demo/outer/**",
+            Box::new(move |_sample: &dyn SampleView| {
+                inner.register_local_subscriber("demo/inner/**", Box::new(|_: &dyn SampleView| {}));
+                let _ = done.lock().unwrap().send(());
+            }),
+        );
+        let routing = Arc::clone(&fwd);
+        let routed = std::thread::spawn(move || {
+            let push = wz_session_core::push_build::build_push_literal("demo/outer/x", b"1")
+                .expect("build push");
+            forward_one(&routing, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the callback came back from declaring on the node that called it"
+        );
+        routed.join().expect("the route");
     }
 
     /// A peer of the pin retracts a declaration by its id and sends the extension with the null

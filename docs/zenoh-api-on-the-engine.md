@@ -518,7 +518,8 @@ Each lands whole with its surface lines, tests and faults in one round.
     session's custom one, for the route point; a token undeclared by a peer stays in the node's
     liveliness history; the matching status of a querier says there is a remote queryable when
     there is none; and the burst of an upstream publisher is not received to the end (the
-    scenario does not finish, and the control with the old order does not either).
+    scenario does not finish, and the control with the old order does not either). Each of
+    these is repaired below.
   - **Repaired after round 4109: a queryable of the node did not answer an upstream get.** A
     peer node sent every declaration to its peers as id 0 with the key inline, and a peer of the
     pin's peer hat keeps a face's queryables by the id they carry: for an id it already holds it
@@ -556,6 +557,20 @@ Each lands whole with its surface lines, tests and faults in one round.
     had been recorded on the thread of the face after the next reply could have been sent;
     upstream records it as the reply arrives (`a_reply_a_query_holds_back_is_received_...`).
     The hook runs under the lock of the router, so it must not re-enter the session.
+  - **Repaired after round 4109: the burst of an upstream publisher did not finish.** The
+    scenario has a subscriber callback that uses the session that calls it (it declares a key
+    and a subscriber, publishes, undeclares). A subscriber of the node's own session was called
+    inside the route that found it, with the tables held for reading: the read of the thread is
+    recursive and so does not let a writer in, and the declaration the callback made was a
+    writer, so the callback waited for the read it held, and every later declaration on the node
+    waited behind it. The hang was in `close`, `declare_subscriber` and anything else that writes
+    the tables, once the callback had run. The callbacks of the subscribers of the node's own
+    session are now called once the guard of the message or the publish that found them is
+    let go (`DeliveryScope`, opened before the guard so that it ends after it), whichever way
+    the message came: from the session's own put or from a link. The differential of the
+    subscriptions is equal to upstream's. The queryables of the session are called inside the
+    route of the query as they were, and a query callback that declares on the node is not held
+    by a test here.
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on
