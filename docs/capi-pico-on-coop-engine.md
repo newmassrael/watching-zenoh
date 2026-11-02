@@ -854,7 +854,7 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   tokio peer that races it (the two keep different rules, and a race can close both links until the
   next redial).
 
-- **L6. `tls/`, both roles. Designed; T1 to T3 built, T4 built in part.** pico's `tls/` and zenohd's are TLS with a CA
+- **L6. `tls/`, both roles. Designed; T1 to T4 built.** pico's `tls/` and zenohd's are TLS with a CA
   chain, and the cooperative engine has no such link; a build with `tls/` selects the tokio
   engine (rustls) by its own feature. What stands in the way is not a missing composition, which
   the first reading of the tree suggests (`wz-tls-mbedtls` already is a `StreamSocket` and a
@@ -959,7 +959,7 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     is not a refusal at the handshake: the session reports it (`peer_identity_verified`) for the
     lifecycle verbs, and the engine's port does not expose it, so T3 asserts what the engine can
     show, not a refusal that does not exist.
-  - T4, built in part (the ABI; the real pico's TLS programs are not yet run). Four moves, each
+  - T4, built (the ABI, then the real pico's TLS programs, below it). Four moves, each
     proved alone. (1) The PEM that a `Z_CONFIG_TLS_*` key names, from a path or a base64 token, is
     read by one crate, `wz-tls-pem`, that the tokio engine re-exports at its old paths and the pico
     ABI calls directly: the edge that holds the key spellings resolves them once, and an engine
@@ -982,16 +982,36 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     it. What proves it: `tests/tls_provider.rs` (8, the provider against itself, among them that a
     dial states the time, which fails when the call is removed) and `tests/tls_coop_roundtrip.rs`
     (2, through the exported `z_*` symbols: a put each way over `tls/`, and a dial that trusts
-    another certificate does not open; both fail when the stack is built without the link). Not
-    yet run: the two real zenoh-pico TLS programs against the cooperative engine (Layer E), which
-    is where the negotiated version and the real certificates' key types are read.
-  - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: zenohd's
-    rustls speaks it, but the real zenoh-pico's own Mbed TLS may offer 1.2 only, and then the
-    channel needs 1.2 as well (read from the negotiated version of the two TLS programs in T4,
-    not guessed). The clock: validity dates need a wall time a device may not have, and pico's
-    own handling of that is read from pico before T4 wires the time in (T1 took the caller's time
-    or none). The arena a chain needs beyond a two-link chain and the lengths real certificates
-    have.
+    another certificate does not open; both fail when the stack is built without the link).
+  - T4, the real programs (Layer E: upstream's `z_pub_tls` and `z_sub_tls` against the
+    cooperative engine, the two legs the lane skipped by name while the engine had no `tls/`
+    link). Measured, in this order. (1) The certificates those examples carry are RSA-2048: a
+    minica root, an end certificate signed `sha256WithRSAEncryption`, its key a PKCS#1 `RSA
+    PRIVATE KEY`. The channel's Mbed TLS built P-256 and ECDSA only, so both legs failed in
+    `z_open` at once, which the example reports as "Unable to open session!" and nothing more.
+    (2) The crate's `rsa` feature gives the host RSA keys, RSA signatures read to verify a chain
+    and RSA-PSS, and a public-key buffer of 600 bytes in place of 160 (an RSA-2048 key is 294).
+    It is the host's: the kit image configures the channel by Kconfig and never sets it, so the
+    kit is what it was; `wz-capi-coop`'s `tls-mbedtls` turns it on. (3) With that, both legs
+    failed again, now in the handshake, and the zenoh-pico example said as little. OpenSSL, run
+    against the same chain in both directions, named it: the cooperative engine dialling got `no
+    suitable signature algorithm` and accepting ended with alert 40. TLS 1.3 signs a handshake
+    with an RSA key by RSA-PSS, and the TLS layer of Mbed TLS puts `rsa_pss_rsae_sha256` in its
+    signature algorithms only when `MBEDTLS_X509_RSASSA_PSS_SUPPORT` is defined, which the
+    crypto side's `PSA_WANT_ALG_RSA_PSS` does not do; that macro in turn is refused by Mbed TLS's
+    own configuration check without `PSA_WANT_ALG_RSA_OAEP`, which the channel does not use and
+    now carries for that reason. (4) After it OpenSSL negotiated TLSv1.3 with
+    `TLS_AES_128_GCM_SHA256` and verified the chain both ways, and the two legs pass (`2 passed`).
+    The lane's count is 32 and its library is built with `tls-mbedtls`, in Layer E and in Layer
+    Z, which build the same artifact path.
+  - Open, to be measured by the step that meets it. Whether TLS 1.3 alone suffices: it does
+    against upstream's examples as built here (Mbed TLS 3.6.4 with 1.2 and 1.3 both on; the legs
+    pass against a channel that speaks 1.3 only, so they negotiated it), and zenohd's rustls
+    speaks it. A pico built on an Mbed TLS with no 1.3 (2.28, or a board's) would need 1.2, and
+    none was measured. The clock: the provider states the host's wall time at each dial, and how
+    pico itself settles a certificate's dates was not read. The arena a chain needs, RSA included,
+    beyond a two-link chain is not measured against a count of sessions (the host's is 4 MiB,
+    reserved and untouched until used), nor is the cost of the RSA handshake in it.
 
 ### What is decided and what is open
 
@@ -1015,4 +1035,4 @@ dial role's face stands by when its node is held.
 Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
 history is when two faces hold the same token key (L2 hands it every face's tokens, and each
 face's loss deletes its own); UDP faces by source address; `tls/` on the cooperative engine
-(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 to T3 are built and T4 in part).
+(designed as L6: a `Chain` trust policy beside `Pinned`, built by the steps T1 to T5; T1 to T4 are built).
