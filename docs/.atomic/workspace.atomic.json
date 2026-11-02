@@ -305426,6 +305426,36 @@
         "Open: the query transport through a real session to the verbs of the product image (a GET carrying the requester), D14's witness on the kit with a real router, SO_REUSEADDR on the Zephyr listener, the cost of the client's loop arena (3 times what it was; the RAM rows of the kit images) and a hosted lane that builds the fixed client so that an outgrown arena is seen where it happens. The stock-client probe holds the handshake and the key binding only."
       ]
     },
+    "Round 4105": {
+      "decision_summary": "The batched row of the host table (puts batched per 1 ms slot, the upstream throughput example's way of reaching its highest rate) is read again with the write bound of round 4057 and the lane of 8 batches of round 4074. It was the one cell where wz lost by half: 160 k at 1 KiB against pico's 310 k on 2026-10-31.\n\nMedian of two on the bench host, wz to wz / wz to pico against pico to pico: 8 B at least 5.12 M / 4.80 M against 4.80 M (the wz to wz figure is the search's cap, a lower bound); 64 B 4.64 M / 4.32 M against 4.16 M; 1 KiB 570 k / 960 k against 355 k. The cell that lost by half now wins by 60 percent from wz to wz (570 k against 355 k), and the two small sizes stay ahead. Pico to wz reads 5.12 M, 4.64 M and 345 k, ties with pico to pico because the pico publisher is what bounds it.\n\nTwo repetitions per cell, one host and one session; the 1 KiB reading of pico to pico differs by one search step between its two repetitions (350 k and 360 k). The row of the one-by-one puts is unchanged except for a pointer to the lane of 8.",
+      "changes_bullets": [
+        "docs/upstream-parity.md: the row of the batched puts of the host table is replaced by the 2026-11-02 reading (the 2026-10-31 one is kept in its last column), the row of the one-by-one puts points at the lane of 8, and the sentence that said the batched row was not re-measured now points at the reading. No code changed in this round."
+      ],
+      "verification_bullets": [
+        "On pc3 through bx: PICO_CMP_BATCH=1 scripts/pico-compare.sh nodrop 2 8,64,1024 (the paced publisher with a batch per 1 ms slot, publisher on CPUs 6,7 and subscriber on 10,11, trials of 3 s, resolution 5 percent), the working tree being the landed one. Four pairs per size, two repetitions per pair; the run took 3,230 s. One host; the bx log showed another session's lock held on it and no trial was marked invalid by the foreign-CPU check."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Not measured: the batched row at 2048 B and at the physical-core pinning, the round trip at sizes other than 8 B, a host other than pc3, and a zenoh or zenoh-c counterpart of the host table. Open: where the wz subscriber's 1.85 microseconds a message go (one drive thread saturated at 540,000 a second); a user-mode profile is needed and perf_event_paranoid is 4 on the bench host."
+      ],
+      "publishable_decision_summary": "The batched row of the host table (puts batched per 1 ms slot, the upstream throughput example's way of reaching its highest rate) is read again with the write bound of round 4057 and the lane of 8 batches of round 4074. It was the one cell where wz lost by half: 160 k at 1 KiB against pico's 310 k on 2026-10-31.\n\nMedian of two on the bench host, wz to wz / wz to pico against pico to pico: 8 B at least 5.12 M / 4.80 M against 4.80 M (the wz to wz figure is the search's cap, a lower bound); 64 B 4.64 M / 4.32 M against 4.16 M; 1 KiB 570 k / 960 k against 355 k. The cell that lost by half now wins by 60 percent from wz to wz (570 k against 355 k), and the two small sizes stay ahead. Pico to wz reads 5.12 M, 4.64 M and 345 k, ties with pico to pico because the pico publisher is what bounds it.\n\nTwo repetitions per cell, one host and one session; the 1 KiB reading of pico to pico differs by one search step between its two repetitions (350 k and 360 k). The row of the one-by-one puts is unchanged except for a pointer to the lane of 8.",
+      "publishable_changes_bullets": [
+        "docs/upstream-parity.md: the row of the batched puts of the host table is replaced by the 2026-11-02 reading (the 2026-10-31 one is kept in its last column), the row of the one-by-one puts points at the lane of 8, and the sentence that said the batched row was not re-measured now points at the reading. No code changed in this round."
+      ],
+      "publishable_verification_bullets": [
+        "On pc3 through bx: PICO_CMP_BATCH=1 scripts/pico-compare.sh nodrop 2 8,64,1024 (the paced publisher with a batch per 1 ms slot, publisher on CPUs 6,7 and subscriber on 10,11, trials of 3 s, resolution 5 percent), the working tree being the landed one. Four pairs per size, two repetitions per pair; the run took 3,230 s. One host; the bx log showed another session's lock held on it and no trial was marked invalid by the foreign-CPU check."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Not measured: the batched row at 2048 B and at the physical-core pinning, the round trip at sizes other than 8 B, a host other than pc3, and a zenoh or zenoh-c counterpart of the host table. Open: where the wz subscriber's 1.85 microseconds a message go (one drive thread saturated at 540,000 a second); a user-mode profile is needed and perf_event_paranoid is 4 on the bench host."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
