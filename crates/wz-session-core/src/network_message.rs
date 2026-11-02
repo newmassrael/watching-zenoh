@@ -1250,7 +1250,8 @@ pub(crate) enum WalkedRecord<'r> {
 /// (`judge_push_chains`, `judge_request_chains`, `judge_response_chains`), so an
 /// extension a participant must refuse ends the walk at the same record on both
 /// forms.
-#[cfg(all(feature = "codec-frame", test))]
+// Read only by the lent-walk test, which needs a Push record to lend.
+#[cfg(all(feature = "codec-frame", feature = "codec-push", test))]
 pub(crate) fn for_each_record(
     payload: &[u8],
     record: &mut RecordBuf,
