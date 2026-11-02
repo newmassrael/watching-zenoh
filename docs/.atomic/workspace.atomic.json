@@ -306218,6 +306218,36 @@
         "Open: whether a wz-native listening peer that declares a publisher before a router dials it reaches a client behind the router; Session::declare_publisher in wz-runtime-tokio emits the matching Interest at declare time, and the cache that replays it after a reconnect is not known to replay it to a link accepted later (the C-ABI registry replays write filters that ask, which a pico peer's does not). A handshake the arena or the key store has no room for is dropped and reported to the caller as nothing to accept, with no log; a count of such drops would let a program see its limit. Not read: how pico itself settles a certificate's dates. Not rebuilt: the Zephyr kit image (Layer Qzk builds it hosted; this change cannot reach it). The hosted runs of rounds 4110 to 4122 are mostly cancelled while queued, so the new Layer Z lines of T5 have no hosted verdict yet."
       ]
     },
+    "Round 4129": {
+      "decision_summary": "A router answers the current interest of a face with the subscribers it holds, and the answer left out those of its multicast group. A peer of the peer hat is sent nothing unasked when it comes up, so a peer that joined after the group's member was told nothing, and a publisher there never learned the member: a stock pico subscriber on the group stayed unknown to the mesh and the Layer M test of that reach failed in 15 s. The answer lists the group's subscribers beside those of the hats now. The Z8 harness measures a flake of one test of any file (isolated runs, the line of a failed assertion, the failed run printed), and a note on the client node stops linking an item built by a feature.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: dump_interest_subs lists the group's subscribers; test a_group_subscriber_is_dumped_to_a_current_interest; the note of as_client_of_north names broker_current_interest in code text.",
+        "scripts/lib/z8_upstream_suite.py: Z8_ISOLATE, Z8_PLACES and Z8_SHOW_FAILS, and the self-test of the place form."
+      ],
+      "verification_bullets": [
+        "Locally: the new test fails without the change (one frame, the Final, where two are expected) and passes with it; the router_forward tests with router-multicast-faces pass (391), clippy of the crate with that feature is clean, and the Layer M test of the pico subscriber's reach fails on the tree before the change and on the tree of round 4112, and passes with it. The harness self-test passes. Not run: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: a fence on the writer lanes that keeps a Control frame behind the frames queued before it is built and tested (branch fence-wip) but not landed: with it the upstream liveliness regression_1 test fails about 4 times in 100 on the build host (0 in 105 without), every failure after the two nodes resolve crossing dials and replace a face; that race is the link admission work. Also owed: the hosted verdicts of rounds 4113 to this one."
+      ],
+      "publishable_decision_summary": "A router answers the current interest of a face with the subscribers it holds, and the answer left out those of its multicast group. A peer of the peer hat is sent nothing unasked when it comes up, so a peer that joined after the group's member was told nothing, and a publisher there never learned the member: a stock pico subscriber on the group stayed unknown to the mesh and the Layer M test of that reach failed in 15 s. The answer lists the group's subscribers beside those of the hats now. The Z8 harness measures a flake of one test of any file (isolated runs, the line of a failed assertion, the failed run printed), and a note on the client node stops linking an item built by a feature.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: dump_interest_subs lists the group's subscribers; test a_group_subscriber_is_dumped_to_a_current_interest; the note of as_client_of_north names broker_current_interest in code text.",
+        "scripts/lib/z8_upstream_suite.py: Z8_ISOLATE, Z8_PLACES and Z8_SHOW_FAILS, and the self-test of the place form."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the new test fails without the change (one frame, the Final, where two are expected) and passes with it; the router_forward tests with router-multicast-faces pass (391), clippy of the crate with that feature is clean, and the Layer M test of the pico subscriber's reach fails on the tree before the change and on the tree of round 4112, and passes with it. The harness self-test passes. Not run: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: a fence on the writer lanes that keeps a Control frame behind the frames queued before it is built and tested (branch fence-wip) but not landed: with it the upstream liveliness regression_1 test fails about 4 times in 100 on the build host (0 in 105 without), every failure after the two nodes resolve crossing dials and replace a face; that race is the link admission work. Also owed: the hosted verdicts of rounds 4113 to this one."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
