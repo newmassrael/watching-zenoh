@@ -388,6 +388,9 @@ pub struct SessionPolicy {
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
     pub entity_timestamp_opt_in: bool,
+    /// `reply-auto-timestamp`. Upstream: Sends a reply with the timestamp its handler gave
+    /// it and with none when the handler gave none.
+    pub reply_auto_timestamp: bool,
     /// `subscriber-overload`. Upstream: Hands a sample to a channel handler that blocks its
     /// sender when the handler is full, so a slow consumer applies backpressure into the
     /// session and no sample is lost.
@@ -427,6 +430,7 @@ impl SessionPolicy {
         let tx_expiry_keeps_session = policy_bool(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"));
         let declaration_sync_pacing = policy_bool(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
+        let reply_auto_timestamp = policy_bool(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP"));
         let subscriber_overload = SubscriberOverload::stated();
         let key_set = KeySet::stated();
         let sn_resolution = SnResolution::stated();
@@ -440,6 +444,7 @@ impl SessionPolicy {
             tx_expiry_keeps_session,
             declaration_sync_pacing,
             entity_timestamp_opt_in,
+            reply_auto_timestamp,
             subscriber_overload,
             key_set,
             sn_resolution,

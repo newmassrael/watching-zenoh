@@ -719,6 +719,19 @@ impl NodeHlc {
     }
 }
 
+/// The node's clock is what stamps a reply its handler gave no timestamp (the
+/// `reply-auto-timestamp` policy): the same [`NodeHlc::stamp`] a publisher's auto-stamp takes, so
+/// a node with no clock, or whose clock does not know the date or is not trusted to stamp, stamps
+/// nothing, and a node's replies and its puts are ordered by one clock.
+impl wz_session_core::reply_stage::ReplyClock for NodeHlc {
+    fn next_stamp(&self) -> Option<wz_session_core::reply_stage::ReplyStamp> {
+        let hint = self.stamp()?;
+        // A node whose identity is longer than a Timestamp carries has none to stamp with, as it
+        // has none to send a Timestamp with.
+        wz_session_core::reply_stage::ReplyStamp::new(hint.time, &hint.zid)
+    }
+}
+
 impl core::fmt::Debug for NodeHlc {
     /// Prints the OBSERVABLE state (does this node stamp) rather than the
     /// clock's interior, which is a word that live stamping is advancing.

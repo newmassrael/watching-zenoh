@@ -383,6 +383,19 @@ impl OwnedQueryEvent {
     }
 }
 
+/// The clock a queryable's plain replies are stamped with, by the `reply-auto-timestamp` policy:
+/// the node's `clock` when the policy is on and the queryable stamps (`stamps`, its declaration's
+/// choice, whose default is the `entity-timestamp-opt-in` policy's), and none otherwise. One place
+/// decides it, so the two ways a queryable is declared cannot answer differently.
+#[cfg(feature = "query-queryable")]
+fn reply_clock_for(
+    policy: &wz_session_core::policy::SessionPolicy,
+    stamps: bool,
+    clock: &crate::node_clock::NodeHlc,
+) -> Option<crate::node_clock::NodeHlc> {
+    (policy.reply_auto_timestamp && stamps).then(|| clock.clone())
+}
+
 impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
     /// R311li — build the deferred cell + the staging sink one
     /// `declare_queryable{_aliased}` call installs in the registry: the
@@ -403,9 +416,16 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// producer. It used to take the unicast actions and live on the unicast block alone, so a
     /// multicast session had no deferred queryable; the route is the only part that differs, and
     /// both transports now build this one sink (open-debt item 913).
+    ///
+    /// `stamps` is the declaration's choice about stamping
+    /// ([`QueryableOptions::stamp_timestamp`]). Under the `reply-auto-timestamp` policy a
+    /// queryable that stamps has its plain replies stamped with this node's clock as they are
+    /// staged ([`wz_session_core::query::QueryResponder::with_reply_clock`]); one that does not
+    /// stamp, and every queryable with the policy off, has none stamped.
     #[cfg(feature = "query-queryable")]
     pub(super) fn deferred_query_sink(
         &self,
+        stamps: bool,
         handler: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
     ) -> (
         QueryHandlerCell<R>,
@@ -424,6 +444,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let cell_for_sink = cell.clone();
         let observer = self.observer.clone();
         let session = self.downgrade();
+        // The clock a reply is stamped with: this session's own, shared with every other
+        // consumer of it (`Session::node_hlc`), and held only where the policy asks for it.
+        let reply_clock = reply_clock_for(
+            &wz_session_core::policy::SessionPolicy::from_build(),
+            stamps,
+            &self.node_hlc,
+        );
         let sink = move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
             // The registry-provided responder (`_out`, bound to the
             // observer's pending_replies) is deliberately unused: the
@@ -434,6 +461,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             let cell = cell_for_sink.clone();
             let observer = observer.clone();
             let route = route.clone();
+            let reply_clock = reply_clock.clone();
             // A local GET's Final must follow this job's replies whichever
             // thread runs the job: taken here, inside the query's own loopback
             // window, and released when the job ends. See `HandlerJobHold`.
@@ -479,6 +507,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         owned.qos,
                         &mut replies,
                     );
+                    if let Some(clock) = &reply_clock {
+                        responder.with_reply_clock(clock);
+                    }
                     handler(view, &mut responder);
                 }
                 if owned.is_local {
@@ -970,6 +1001,23 @@ mod tests {
             kept.attachment.map(<[u8]>::as_ptr),
             Some(attachment.as_ptr())
         );
+    }
+
+    /// The clock reaches a queryable only when the policy is on AND the queryable stamps: the
+    /// policy says the node may stamp what a handler left unstamped, and the declaration says
+    /// whether this queryable takes part in stamping at all.
+    #[test]
+    fn a_queryable_gets_the_nodes_clock_only_when_the_policy_is_on_and_it_stamps() {
+        let mut on = wz_session_core::policy::SessionPolicy::default();
+        on.reply_auto_timestamp = true;
+        let mut off = on;
+        off.reply_auto_timestamp = false;
+        let clock = crate::node_clock::NodeHlc::disabled();
+
+        assert!(reply_clock_for(&on, true, &clock).is_some());
+        assert!(reply_clock_for(&on, false, &clock).is_none());
+        assert!(reply_clock_for(&off, true, &clock).is_none());
+        assert!(reply_clock_for(&off, false, &clock).is_none());
     }
 
     /// The two are independent: a view that lends only the attachment yields an

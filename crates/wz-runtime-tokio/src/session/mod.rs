@@ -3697,7 +3697,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
     ) -> Queryable<R, T> {
         let keyexpr_string = keyexpr.into();
-        let (cell, sink) = self.deferred_query_sink(callback);
+        let (cell, sink) = self.deferred_query_sink(options.stamp_timestamp(), callback);
         let id = R::with_mutex_mut(&self.observer, |observer| {
             observer
                 .queryables
@@ -6424,7 +6424,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SessionLinkActions for the wire-reply leg, and no
             // `declare_queryable` — a compile error, not a runtime reject).
             // Thread the resolved bundle into the sink builder.
-            let (cell, sink) = self.deferred_query_sink(callback);
+            let (cell, sink) = self.deferred_query_sink(options.stamp_timestamp(), callback);
             // R311df — observer access via R::with_mutex_mut closure form.
             let id = R::with_mutex_mut(&self.observer, |observer| {
                 // Full-fidelity registration through the `register_sink` SSOT:

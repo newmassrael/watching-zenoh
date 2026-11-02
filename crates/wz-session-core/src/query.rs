@@ -1085,6 +1085,9 @@ pub struct QueryResponder<'a> {
     /// query, and the interception of the node that replies. Set by [`Self::with_ts_stack`].
     #[cfg(feature = "pubsub-ts-stack")]
     ts_stack: Option<crate::ts_stack::TsStack>,
+    /// The clock that stamps a reply the handler gave no timestamp, under the
+    /// `reply-auto-timestamp` policy. Set by [`Self::with_reply_clock`]; `None` stamps nothing.
+    reply_clock: Option<&'a dyn crate::reply_stage::ReplyClock>,
 }
 
 /// The query's keyexpr as a responder holds it: a `Cow`, so a caller that hands one
@@ -1167,6 +1170,7 @@ impl<'a> QueryResponder<'a> {
             qos,
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,
+            reply_clock: None,
         }
     }
 
@@ -1190,6 +1194,7 @@ impl<'a> QueryResponder<'a> {
             qos,
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,
+            reply_clock: None,
         }
     }
 
@@ -1234,6 +1239,7 @@ impl<'a> QueryResponder<'a> {
     /// ([`ReplyError::PayloadTooLarge`], [`ReplyError::StagingFull`]) and
     /// counted, and nothing is staged. The growable backing refuses nothing.
     pub fn send_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
+        let stamp = self.auto_stamp();
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
             keyexpr: key_str(&self.keyexpr_literal),
@@ -1244,7 +1250,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
-                timestamp: None,
+                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
                 attachment: None,
                 source_info: None,
             },
@@ -1265,6 +1271,7 @@ impl<'a> QueryResponder<'a> {
     /// `_anyke`, and nothing is staged — as for every keyed method here.
     pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
+        let stamp = self.auto_stamp();
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
             keyexpr,
@@ -1275,7 +1282,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
-                timestamp: None,
+                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
                 attachment: None,
                 source_info: None,
             },
@@ -1464,6 +1471,7 @@ impl<'a> QueryResponder<'a> {
     /// (the inner `MsgDel` body carries only a header + optional
     /// timestamp). Fallible for the reason [`Self::send_reply`] is.
     pub fn send_reply_del(&mut self) -> Result<(), ReplyError> {
+        let stamp = self.auto_stamp();
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
             keyexpr: key_str(&self.keyexpr_literal),
@@ -1474,7 +1482,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
-                timestamp: None,
+                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
                 attachment: None,
                 source_info: None,
             },
@@ -1505,6 +1513,7 @@ impl<'a> QueryResponder<'a> {
     /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
     pub fn send_reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
+        let stamp = self.auto_stamp();
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
             keyexpr,
@@ -1515,7 +1524,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
-                timestamp: None,
+                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
                 attachment: None,
                 source_info: None,
             },
@@ -1781,6 +1790,35 @@ impl<'a> QueryResponder<'a> {
     pub fn with_ts_stack(&mut self, stack: &crate::ts_stack::TsStack) -> &mut Self {
         self.ts_stack = Some(stack.clone());
         self
+    }
+
+    /// Let this responder stamp a reply its handler gave no timestamp, with the next stamp of
+    /// `clock` (the `reply-auto-timestamp` policy: the host hands the node's clock to a queryable
+    /// that stamps, and nothing otherwise). It reaches the four plain reply forms:
+    /// [`Self::send_reply`], [`Self::send_reply_keyed`], [`Self::send_reply_del`] and
+    /// [`Self::send_reply_keyed_del`]. A form that carries its own timestamp keeps it, and a
+    /// form that is deliberately unstamped (an introspection reply, a reply a recovering
+    /// subscriber orders by its own metadata, an error) stays without one. Calling it again
+    /// replaces the clock (last-wins).
+    pub fn with_reply_clock(&mut self, clock: &'a dyn crate::reply_stage::ReplyClock) -> &mut Self {
+        self.reply_clock = Some(clock);
+        self
+    }
+
+    /// The stamp for a plain reply: the next one of the clock this responder was given, or `None`
+    /// when it was given none or the clock stamps nothing.
+    #[cfg(feature = "pubsub-timestamp")]
+    fn auto_stamp(&self) -> Option<crate::reply_stage::ReplyStamp> {
+        self.reply_clock.and_then(|clock| clock.next_stamp())
+    }
+
+    /// A build without `pubsub-timestamp` puts no timestamp on a reply's wire
+    /// ([`crate::response_build`] drops it), so a stamp minted for one would be discarded: it
+    /// mints none, and a build that cannot carry one pays nothing for the policy.
+    #[cfg(not(feature = "pubsub-timestamp"))]
+    fn auto_stamp(&self) -> Option<crate::reply_stage::ReplyStamp> {
+        let _ = self.reply_clock;
+        None
     }
 
     /// Inbound Request id this Responder is replying to. Exposed for
@@ -4100,6 +4138,145 @@ mod tests {
         );
     }
 
+    /// A clock that stamps the zid `[0x2a]` and counts up from `next`, or stamps nothing.
+    struct CountingClock {
+        next: core::cell::Cell<u64>,
+        stamps: bool,
+    }
+
+    impl crate::reply_stage::ReplyClock for CountingClock {
+        fn next_stamp(&self) -> Option<crate::reply_stage::ReplyStamp> {
+            if !self.stamps {
+                return None;
+            }
+            let time = self.next.get();
+            self.next.set(time + 1);
+            crate::reply_stage::ReplyStamp::new(time, &[0x2a])
+        }
+    }
+
+    /// What each staged reply of `stage` carries as its value timestamp, in staging order.
+    fn staged_timestamps(stage: &ReplyStage) -> Vec<Option<(u64, Vec<u8>)>> {
+        (0..stage.len())
+            .map(|index| match stage.nth(index).expect("a staged reply") {
+                QueryReply::Reply { timestamp, .. } => {
+                    timestamp.map(|stamp| (stamp.time, stamp.zid.as_slice().to_vec()))
+                }
+                other => panic!("a reply was expected, found {other:?}"),
+            })
+            .collect()
+    }
+
+    fn responder_over<'a>(stage: &'a mut ReplyStage) -> QueryResponder<'a> {
+        QueryResponder::new(
+            7,
+            "demo/a".into(),
+            ReplyKeyExpr::MatchingQuery,
+            crate::sample::QosLevel::DEFAULT,
+            stage,
+        )
+    }
+
+    #[cfg(feature = "pubsub-timestamp")]
+    #[test]
+    fn a_responder_with_a_reply_clock_stamps_each_plain_reply_with_a_later_time() {
+        let clock = CountingClock {
+            next: core::cell::Cell::new(100),
+            stamps: true,
+        };
+        let mut stage = ReplyStage::new();
+        {
+            let mut responder = responder_over(&mut stage);
+            responder.with_reply_clock(&clock);
+            responder.send_reply(b"v").unwrap();
+            responder.send_reply_keyed("demo/a", b"w").unwrap();
+            responder.send_reply_del().unwrap();
+            responder.send_reply_keyed_del("demo/a").unwrap();
+        }
+        assert_eq!(
+            staged_timestamps(&stage),
+            [
+                Some((100, vec![0x2a])),
+                Some((101, vec![0x2a])),
+                Some((102, vec![0x2a])),
+                Some((103, vec![0x2a])),
+            ],
+            "the four plain forms, put and delete, keyed and bound, each take the next stamp"
+        );
+    }
+
+    #[test]
+    fn a_responder_without_a_reply_clock_or_with_a_clock_that_stamps_nothing_stamps_nothing() {
+        let silent = CountingClock {
+            next: core::cell::Cell::new(100),
+            stamps: false,
+        };
+        let mut stage = ReplyStage::new();
+        {
+            let mut responder = responder_over(&mut stage);
+            responder.send_reply(b"v").unwrap();
+            responder.with_reply_clock(&silent);
+            responder.send_reply(b"w").unwrap();
+            responder.send_reply_del().unwrap();
+        }
+        assert_eq!(staged_timestamps(&stage), [None, None, None]);
+        assert_eq!(
+            silent.next.get(),
+            100,
+            "a clock that stamps nothing mints no time"
+        );
+    }
+
+    #[cfg(feature = "pubsub-timestamp")]
+    #[test]
+    fn a_reply_that_carries_its_own_timestamp_keeps_it_under_a_reply_clock() {
+        let clock = CountingClock {
+            next: core::cell::Cell::new(100),
+            stamps: true,
+        };
+        let own = TimestampHint {
+            time: 0x1234,
+            zid: alloc::vec![0x07],
+        };
+        let mut stage = ReplyStage::new();
+        {
+            let mut responder = responder_over(&mut stage);
+            responder.with_reply_clock(&clock);
+            responder
+                .send_reply_keyed_stamped("demo/a", b"v", None, &own)
+                .unwrap();
+            responder.send_reply(b"w").unwrap();
+        }
+        assert_eq!(
+            staged_timestamps(&stage),
+            [Some((0x1234, vec![0x07])), Some((100, vec![0x2a]))],
+            "the stamped reply is the handler's, and only the unstamped one takes the clock"
+        );
+        assert_eq!(
+            clock.next.get(),
+            101,
+            "the clock was asked once, for the unstamped reply"
+        );
+    }
+
+    #[test]
+    fn a_reply_form_that_is_deliberately_unstamped_stays_unstamped_under_a_reply_clock() {
+        let clock = CountingClock {
+            next: core::cell::Cell::new(100),
+            stamps: true,
+        };
+        let mut stage = ReplyStage::new();
+        {
+            let mut responder = responder_over(&mut stage);
+            responder.with_reply_clock(&clock);
+            responder
+                .send_reply_keyed_attached("demo/a", b"v", None, b"meta")
+                .unwrap();
+        }
+        assert_eq!(staged_timestamps(&stage), [None]);
+        assert_eq!(clock.next.get(), 100);
+    }
+
     #[test]
     fn responder_reply_keyed_stamped_carries_the_value_timestamp() {
         // A History::All version reply: the per-key keyexpr AND the value
@@ -6091,6 +6268,7 @@ mod tests {
             qos: QosLevel::DEFAULT,
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,
+            reply_clock: None,
         };
         let fired = reg.dispatch_borrowed(
             &BorrowedQuery {

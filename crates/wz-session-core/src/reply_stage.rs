@@ -97,6 +97,47 @@ impl<'a> TimestampParts<'a> {
     }
 }
 
+/// A timestamp a node minted for a reply its handler did not stamp: the time and the node's
+/// identity, held inline (a zid is at most 16 bytes on the wire), so minting one allocates nothing
+/// and a build without a heap can mint it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyStamp {
+    /// The timestamp's time value.
+    pub time: u64,
+    /// The identity of the node's clock, as the wire carries it.
+    pub zid: heapless::Vec<u8, 16>,
+}
+
+impl ReplyStamp {
+    /// A stamp of `time` under the identity `zid`, or `None` for an identity longer than the 16
+    /// bytes a Timestamp carries on the wire.
+    pub fn new(time: u64, zid: &[u8]) -> Option<Self> {
+        Some(Self {
+            time,
+            zid: heapless::Vec::from_slice(zid).ok()?,
+        })
+    }
+
+    /// The stamp as the borrowed parts a staged reply carries.
+    pub fn parts(&self) -> TimestampParts<'_> {
+        TimestampParts {
+            time: self.time,
+            zid: &self.zid,
+        }
+    }
+}
+
+/// What mints the timestamp of a reply whose handler gave it none, under the
+/// `reply-auto-timestamp` policy: the node's own clock.
+///
+/// An answer of `None` is a node that does not stamp (no clock, a clock that does not know the
+/// date, a clock its quality policy does not trust), and the reply goes out as it would with the
+/// policy off. Each `Some` is a new time, so two replies never carry the same stamp.
+pub trait ReplyClock {
+    /// The next stamp of this node's clock, or `None` when the node stamps nothing.
+    fn next_stamp(&self) -> Option<ReplyStamp>;
+}
+
 /// The body of a staged data reply, borrowed.
 #[derive(Clone, Copy)]
 pub enum PartsBody<'a> {

@@ -2307,6 +2307,24 @@ own node identity, so a caller cannot sign a sample as another node.
 '''
 
 [[policy]]
+id = "reply-auto-timestamp"
+kind = "bool"
+kconfig = "WZ_POLICY_REPLY_AUTO_TIMESTAMP"
+default = "off"
+upstream = "Sends a reply with the timestamp its handler gave it and with none when the handler gave none."
+since = 2
+help = '''
+What a queryable's reply carries when its handler gave it no timestamp. Off, it
+carries none. On, the node stamps it with the next time of its own clock and its
+own identity as the reply is staged, so a querier that orders replies by time
+can order those of a handler that never read a clock. A reply the handler
+stamped keeps its stamp, an error reply carries none, and a queryable declared
+not to stamp (see entity-timestamp-opt-in) sends none. A node with no clock, or
+whose clock does not know the date or is not trusted to stamp, stamps nothing
+and its replies go out as they would with this off.
+'''
+
+[[policy]]
 id = "subscriber-overload"
 kind = "choice"
 kconfig = "WZ_POLICY_SUBSCRIBER_OVERLOAD"

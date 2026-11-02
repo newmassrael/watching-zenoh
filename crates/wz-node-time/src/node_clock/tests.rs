@@ -58,6 +58,46 @@ fn a_stamping_node_mints_strictly_increasing_stamps_carrying_its_zid() {
     }
 }
 
+#[test]
+fn a_node_that_does_not_stamp_gives_a_reply_no_stamp() {
+    use wz_session_core::reply_stage::ReplyClock;
+    let off = NodeHlc::for_node(&[0x01], WhatAmI::Peer, TimestampingEnabled::default());
+    assert!(off.next_stamp().is_none());
+    assert!(NodeHlc::disabled().next_stamp().is_none());
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_stamping_node_stamps_a_reply_with_its_own_identity_and_a_later_time_each_time() {
+    use wz_session_core::reply_stage::ReplyClock;
+    let zid = [0xDE, 0xAD, 0xBE, 0xEF];
+    let node = NodeHlc::for_node(&zid, WhatAmI::Router, TimestampingEnabled::default());
+    let first = node.next_stamp().expect("a router-role node stamps");
+    let second = node.next_stamp().expect("and again");
+    assert_eq!(first.zid.as_slice(), &zid);
+    assert!(
+        second.time > first.time,
+        "one clock, so a later reply is a later time"
+    );
+    assert_eq!(
+        first.parts().zid,
+        &zid,
+        "the borrowed parts a staged reply carries are the stamp's"
+    );
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_node_whose_identity_is_longer_than_a_timestamp_carries_stamps_no_reply() {
+    use wz_session_core::reply_stage::ReplyClock;
+    let node = NodeHlc::for_node(&[7; 17], WhatAmI::Router, TimestampingEnabled::default());
+    assert!(
+        node.stamp().is_some(),
+        "its data is still stamped as it was"
+    );
+    assert!(node.next_stamp().is_none());
+}
+
 /// A physical clock that never moves, so the only remaining source of
 /// increase is the HLC's logical counter. See `build_clock` for why the
 /// discriminating tests below cannot use the real one.

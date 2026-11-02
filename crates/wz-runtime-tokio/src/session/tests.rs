@@ -7207,6 +7207,79 @@ fn a_queryable_declared_not_to_stamp_refuses_a_stamped_reply_and_stages_nothing(
     assert!(seen.is_empty(), "no reply reached the querier");
 }
 
+/// What a local query sees of a plain reply, `out.reply(..)` with no time given, from a queryable
+/// declared with `options` on a node that holds a clock: the identity of its stamp, if it has one.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp",
+    feature = "time-hlc"
+))]
+fn plain_reply_stamp_seen_by(options: QueryableOptions) -> (Option<Vec<u8>>, Vec<u8>) {
+    let (session, _driver) = build_session();
+    let zid = session.zid().to_vec();
+    let hlc = crate::node_clock::NodeHlc::for_node(
+        &zid,
+        wz_codecs::whatami::WhatAmI::Router,
+        crate::node_clock::TimestampingEnabled::default(),
+    );
+    let session = session.with_node_clock(hlc);
+    let _queryable = session.declare_queryable("home/temp", options, |_query, out| {
+        out.reply(b"v");
+    });
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = seen.clone();
+    session
+        .query(
+            "home/temp",
+            get_opts_in_arrival_order()
+                .with_expose_timestamp(true)
+                .with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                writer
+                    .lock()
+                    .unwrap()
+                    .push(reply.timestamp().map(|t| t.zid.clone()));
+            },
+            |_| {},
+        )
+        .expect("query-get is on");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "the one reply reached the querier");
+    (seen.into_iter().next().unwrap(), zid)
+}
+
+/// `reply-auto-timestamp`: a plain reply of a stamping queryable on a node with a clock carries the
+/// node's stamp exactly when the build asks for it, and none when it does not, which is upstream's
+/// behaviour. The expectation is the build's own policy, so the test holds in both builds.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp",
+    feature = "time-hlc"
+))]
+#[test]
+fn a_plain_reply_is_stamped_by_the_node_exactly_when_the_build_asks() {
+    let asked = wz_session_core::policy::SessionPolicy::from_build().reply_auto_timestamp;
+    let (stamp, zid) =
+        plain_reply_stamp_seen_by(QueryableOptions::new().with_stamp_timestamp(true));
+    assert_eq!(stamp, asked.then_some(zid));
+}
+
+/// The pair: a queryable declared not to stamp is not stamped by the node whatever the build asks.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp",
+    feature = "time-hlc"
+))]
+#[test]
+fn a_plain_reply_of_a_queryable_declared_not_to_stamp_is_never_stamped_by_the_node() {
+    let (stamp, _zid) =
+        plain_reply_stamp_seen_by(QueryableOptions::new().with_stamp_timestamp(false));
+    assert_eq!(stamp, None);
+}
+
 #[cfg(feature = "pubsub-timestamp")]
 #[test]
 fn a_queryable_that_says_nothing_gets_the_builds_default() {
