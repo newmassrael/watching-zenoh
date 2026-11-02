@@ -305304,6 +305304,36 @@
         "Owed: the same split in the in-place path of the fixed-memory profile (frame_in_place and the record walk that lends records where they lie: a transport id ends the frame there and the unit goes on from that offset), the plain-put lane, and the best-effort walk; the differential test of the upstream publisher still sends its best-effort put last and can send it first once those are done. Also owed: the Control frame that overtakes the Data staged before it on the writer lanes, the routing three-node flake, a client hat of its own in the forwarder, Windows and a margin gate for the Z8 lane."
       ]
     },
+    "Round 4101": {
+      "decision_summary": "The zenoh-analyzer session answered the model 3 notice: nothing blocks it, on two conditions, both taken. The model number goes in the model key zenoh_evidence already has (a second key with the same meaning would be two sources of truth). The latch is reported as crossed_at_packet on the axis of a row's packet, which the consumer joins rows on (a time can repeat), null only while no threshold is crossed, beside each sum's extremes in millibits; the side that crossed is the latched word and gets no key. The sums stay the sums now, so a latched yes can stand beside a sum below its threshold; the consumer's sentence is its design rule's to change, and the design session was told, as was the loss of the null no. Fields and session_table move one revision each, numbered when model 3 ships. Nothing shipped; MODEL stays 2.",
+      "changes_bullets": [
+        "`docs/flow-zenoh-verdict.md` 6.7 D4: the keys and their meaning as agreed with the consumer, and the order of the change (wz ships, the design answers, the consumer moves its pin and expectations in one change)."
+      ],
+      "verification_bullets": [
+        "A document change only. The keys named were read against the current document shapes: zenoh_evidence and its model key sit in fields revision 47 and session_table revision 6, and packet is the capture-global packet index rows carry. Static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open, in order: the design session's answer on the flow sentence and the null no; model 3 in the reader (the region and priors generated, the units and SN steps by the rule in integers rounded toward the rejected side, the other checks per group, the latch with crossed_at_packet and the four extremes, model 3 in the existing key, the pinned examples, fields and session_table one revision each, the revision numbers told to the consumer); then the freezing entry, the validation corpus, model 4."
+      ],
+      "publishable_decision_summary": "The zenoh-analyzer session answered the model 3 notice: nothing blocks it, on two conditions, both taken. The model number goes in the model key zenoh_evidence already has (a second key with the same meaning would be two sources of truth). The latch is reported as crossed_at_packet on the axis of a row's packet, which the consumer joins rows on (a time can repeat), null only while no threshold is crossed, beside each sum's extremes in millibits; the side that crossed is the latched word and gets no key. The sums stay the sums now, so a latched yes can stand beside a sum below its threshold; the consumer's sentence is its design rule's to change, and the design session was told, as was the loss of the null no. Fields and session_table move one revision each, numbered when model 3 ships. Nothing shipped; MODEL stays 2.",
+      "publishable_changes_bullets": [
+        "`docs/flow-zenoh-verdict.md` 6.7 D4: the keys and their meaning as agreed with the consumer, and the order of the change (wz ships, the design answers, the consumer moves its pin and expectations in one change)."
+      ],
+      "publishable_verification_bullets": [
+        "A document change only. The keys named were read against the current document shapes: zenoh_evidence and its model key sit in fields revision 47 and session_table revision 6, and packet is the capture-global packet index rows carry. Static gate array: 123 of 123 pass, failed=0, and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open, in order: the design session's answer on the flow sentence and the null no; model 3 in the reader (the region and priors generated, the units and SN steps by the rule in integers rounded toward the rejected side, the other checks per group, the latch with crossed_at_packet and the four extremes, model 3 in the existing key, the pinned examples, fields and session_table one revision each, the revision numbers told to the consumer); then the freezing entry, the validation corpus, model 4."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
