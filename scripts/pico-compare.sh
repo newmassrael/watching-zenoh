@@ -98,13 +98,15 @@ build_bench() {
 }
 
 # build_zenoh_c_family: the zenoh-c counterpart of the pico family, for `nodrop-c`. Variant P is the zenoh-c
-# release (its headers and libzenohc.so at the pinned version, provisioned under this tree's target/), variant W
-# the wz library that stands in for it (wz-capi-c built for the features of that release's zenoh_configure.h,
-# the way Layer C1cc builds it). The benches are the same source (scripts/host-bench, BENCH_ZENOHC) built against
-# each, into $out/bin-c under the names the search program looks for.
+# release (its headers and libzenohc.so at the pinned version), variant W the wz library that stands in for it
+# (wz-capi-c built for the features of that release's zenoh_configure.h, the way Layer C1cc builds it). The
+# release is install-zenoh-c.sh's, at that installer's own default prefix: it is the published archive's arm,
+# which Layer C1cc already reads there, and a second install of one arm elsewhere is what
+# scripts/lib/zenoh_c_oracle_arms.py refuses. The benches are the same source (scripts/host-bench, BENCH_ZENOHC)
+# built against each, into $out/bin-c under the names the search program looks for.
 build_zenoh_c_family() {
-    local prefix="${WZ_ZENOH_C_PREFIX:-$root/target/zenoh-c-prefix}"
-    local ref="${WZ_ZENOH_C_REF:-$root/target/zenoh-c-ref}"
+    local prefix="${WZ_ZENOH_C_PREFIX:-$HOME/.local}"
+    local ref="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
     local wz_c_lib="$root/crates/target/release" args bench variant lib libname
     mkdir -p "$out/bin-c"
     WZ_ZENOH_C_PREFIX="$prefix" WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c.sh >"$out/build-zenoh-c.log" 2>&1 \
