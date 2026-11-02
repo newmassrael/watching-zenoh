@@ -128,19 +128,15 @@ fn kind_roles(c: &Counts) -> (u64, u64) {
     (c.roles[0] + c.roles[1], c.roles[1])
 }
 
-fn kind_versions(c: &Counts) -> (u64, u64) {
-    (c.versions[0] + c.versions[1], c.versions[1])
-}
-
 /// The checks whose zenoh failure rate is a property of zenoh (of its release,
 /// implementation and workload), and so of the group. The SN steps are not here,
-/// since how often they break is the link's.
-pub(crate) const KINDS: [(&str, Kind); 5] = [
+/// since how often they break is the link's, nor the wire's front and the
+/// version header, whose zenoh side is derived from the wire (models 4 and 5).
+pub(crate) const KINDS: [(&str, Kind); 4] = [
     ("units", kind_units),
     ("framing", kind_framing),
     ("cookie", kind_cookie),
     ("roles", kind_roles),
-    ("versions", kind_versions),
 ];
 
 /// The zenoh groups' outcomes of one check, the groups that saw none left out.
@@ -314,7 +310,6 @@ fn the_generated_regions_bound_every_concentration() {
         PARAMS.framing.region,
         PARAMS.cookie.region,
         PARAMS.roles.region,
-        PARAMS.versions.region,
     ];
     let fine: Vec<f64> = (0..=1_000)
         .map(|j| 10f64.powf(-3.5 + j as f64 / 90.0))

@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use wz_session_core::byte_log::ByteLog;
 use wz_session_core::column_log::{ColumnLog, Kind};
 
-use crate::link::Segment;
+use crate::link::{Integrity, Segment};
 
 /// A contiguous run of stream bytes contributed by one packet, as the run map
 /// keeps it.
@@ -124,6 +124,12 @@ struct RunMap {
     log: ColumnLog<4>,
     /// One past the last run's last byte.
     end: u64,
+    /// `(stream_offset, integrity)` at each run whose packet's checksums said
+    /// something other than the run before it said, in stream order: the runs
+    /// from that offset on are of that integrity, until the next. `None` is a
+    /// packet whose checksum failed. A flow's packets nearly always say one
+    /// thing, so this holds one entry, or a few.
+    vouched: VecDeque<(u64, Option<Integrity>)>,
     /// `(stream_offset, segment_offset)` of the runs whose `segment_offset` is not
     /// zero, in stream order.
     skipped: VecDeque<(u64, u32)>,
@@ -138,6 +144,7 @@ impl Default for RunMap {
             log: ColumnLog::new([Kind::Rising; 4]),
             end: 0,
             skipped: VecDeque::new(),
+            vouched: VecDeque::new(),
             last_hit: AtomicUsize::new(0),
         }
     }
@@ -162,11 +169,39 @@ impl RunMap {
 
     /// Bytes the map holds on the heap.
     fn allocated_bytes(&self) -> usize {
-        self.log.allocated_bytes() + wz_session_core::heap_account::vec_deque_bytes(&self.skipped)
+        self.log.allocated_bytes()
+            + wz_session_core::heap_account::vec_deque_bytes(&self.skipped)
+            + wz_session_core::heap_account::vec_deque_bytes(&self.vouched)
+    }
+
+    /// How far the bytes `start..end` are known to be their sender's: the
+    /// weaker over every run that holds one of them, `None` when one of those
+    /// came in a packet whose checksum failed or when a byte of the range is
+    /// in no run.
+    fn integrity_of(&self, start: u64, end: u64) -> Option<Integrity> {
+        let first = self.log.column(0, 0)?;
+        if start < first || end <= start || end > self.end {
+            return None;
+        }
+        let at = self
+            .vouched
+            .partition_point(|(offset, _)| *offset <= start)
+            .checked_sub(1)?;
+        let mut out = Integrity::Verified;
+        for (offset, integrity) in self.vouched.iter().skip(at) {
+            if *offset >= end {
+                break;
+            }
+            out = out.and((*integrity)?);
+        }
+        Some(out)
     }
 
     /// Append the run that begins where the last one ended.
-    fn push_back(&mut self, run: Run) {
+    fn push_back(&mut self, run: Run, integrity: Option<Integrity>) {
+        if self.vouched.back().map(|(_, held)| *held) != Some(integrity) {
+            self.vouched.push_back((run.stream_offset, integrity));
+        }
         debug_assert!(
             self.log.is_empty() || run.stream_offset == self.end,
             "runs tile the stream"
@@ -202,6 +237,15 @@ impl RunMap {
             .is_some_and(|(offset, _)| *offset == run.stream_offset)
         {
             let _ = self.skipped.pop_front();
+        }
+        // The entry in force at the new first run stays; the ones before it go.
+        let first = run.end() as u64;
+        while self
+            .vouched
+            .get(1)
+            .is_some_and(|(offset, _)| *offset <= first)
+        {
+            let _ = self.vouched.pop_front();
         }
         Some(run)
     }
@@ -283,6 +327,8 @@ struct HeldSegment {
     /// segment released by a hole being filled, or stepped over, is stamped with
     /// the instant it was captured at and not the instant it was released.
     at_ns: Option<u64>,
+    /// What its packet's checksums said, kept for the run it will become.
+    integrity: Option<Integrity>,
 }
 
 /// The payload of a [`HeldSegment`].
@@ -308,6 +354,15 @@ impl HeldBytes {
             HeldBytes::Container { at, len } => Payload::Container { at: *at, len: *len },
         }
     }
+}
+
+/// Where a payload came from: its packet, that packet's instant and what its
+/// checksums said, which travel with the bytes into the run they become.
+#[derive(Debug, Clone, Copy)]
+struct Origin {
+    packet_index: usize,
+    at_ns: Option<u64>,
+    integrity: Option<Integrity>,
 }
 
 /// A payload as the assembler takes it in: the bytes, or where the lent
@@ -862,6 +917,17 @@ impl StreamAssembler {
         self.run_at(stream_offset).and_then(|run| run.at_ns())
     }
 
+    /// How far the bytes `start..end` of the stream are known to be the ones
+    /// their sender wrote, by the checksums of the packets that carried them:
+    /// the weakest of those packets'. `None` when one of them failed its
+    /// checksum, and when a byte of the range was trimmed or has not arrived.
+    pub fn integrity_of(&self, start: usize, end: usize) -> Option<Integrity> {
+        if start < self.discarded {
+            return None;
+        }
+        self.runs.integrity_of(start as u64, end as u64)
+    }
+
     /// Feed one segment belonging to THIS direction, stating no instant for it.
     pub fn push(&mut self, seg: &Segment) -> SegmentOutcome {
         self.push_at(seg, None)
@@ -929,7 +995,16 @@ impl StreamAssembler {
                 len: seg.payload.len(),
             },
         };
-        let outcome = self.absorb(next, seg.seq, payload, seg.packet_index, at_ns);
+        let outcome = self.absorb(
+            next,
+            seg.seq,
+            payload,
+            Origin {
+                packet_index: seg.packet_index,
+                at_ns,
+                integrity: seg.checksums.integrity(),
+            },
+        );
         match outcome {
             SegmentOutcome::Duplicate => self.retransmits += 1,
             SegmentOutcome::HeldOutOfOrder => self.out_of_order += 1,
@@ -1004,9 +1079,13 @@ impl StreamAssembler {
         next: u32,
         seq: u32,
         payload: Payload<'_>,
-        packet_index: usize,
-        at_ns: Option<u64>,
+        origin: Origin,
     ) -> SegmentOutcome {
+        let Origin {
+            packet_index,
+            at_ns,
+            integrity,
+        } = origin;
         // Sequence-space distance, wrapping: how far this segment starts
         // AHEAD of what the stream expects. Read as a signed delta so a
         // retransmission (which starts behind) is distinguishable from a
@@ -1019,6 +1098,7 @@ impl StreamAssembler {
                 payload: payload.hold(),
                 held_at: self.segments_pushed,
                 at_ns,
+                integrity,
             });
             return SegmentOutcome::HeldOutOfOrder;
         }
@@ -1048,14 +1128,17 @@ impl StreamAssembler {
             Payload::Container { at, .. } => (at + already) as u64 | IN_CONTAINER,
         };
         self.end += fresh;
-        self.runs.push_back(Run {
-            stream_offset: stream_offset as u64,
-            place,
-            packet_index: packet_index as u64,
-            at_ns: at_ns.unwrap_or(NO_INSTANT),
-            len: u32::try_from(fresh).unwrap_or(u32::MAX),
-            segment_offset: u32::try_from(already).unwrap_or(u32::MAX),
-        });
+        self.runs.push_back(
+            Run {
+                stream_offset: stream_offset as u64,
+                place,
+                packet_index: packet_index as u64,
+                at_ns: at_ns.unwrap_or(NO_INSTANT),
+                len: u32::try_from(fresh).unwrap_or(u32::MAX),
+                segment_offset: u32::try_from(already).unwrap_or(u32::MAX),
+            },
+            integrity,
+        );
         self.next_seq = Some(next.wrapping_add(fresh as u32));
         SegmentOutcome::Appended {
             len: fresh,
@@ -1083,8 +1166,11 @@ impl StreamAssembler {
                         next,
                         held.seq,
                         held.payload.payload(),
-                        held.packet_index,
-                        held.at_ns,
+                        Origin {
+                            packet_index: held.packet_index,
+                            at_ns: held.at_ns,
+                            integrity: held.integrity,
+                        },
                     );
                 }
                 None => return,
@@ -1593,5 +1679,43 @@ mod tests {
             s.packets_in(cut, cut + 12).expect("held"),
             alloc::vec![10 + cut / 5, 11 + cut / 5, 12 + cut / 5]
         );
+    }
+
+    /// WHAT THE CHECKSUMS SAID TRAVELS WITH THE BYTES. A range is as vouched
+    /// for as the weakest packet that carried a byte of it; a failed checksum
+    /// in it, or a byte not held, answers nothing; a segment held ahead of a
+    /// hole keeps its own verdict; and a trim keeps the verdict of what stays.
+    #[test]
+    fn a_range_is_as_vouched_for_as_the_weakest_packet_that_carried_it() {
+        use crate::link::{Checksums, TransportChecksum};
+        let said = |transport| Checksums {
+            ip: Some(true),
+            transport: Some(transport),
+            tunnel: None,
+        };
+        let pushed = |seq: u32, payload: &[u8], packet: usize, transport| {
+            let mut s = seg(seq, 0x18, payload, packet);
+            s.checksums = said(transport);
+            s
+        };
+        let mut s = StreamAssembler::new();
+        s.push(&pushed(100, b"aaaa", 0, TransportChecksum::Valid));
+        s.push(&pushed(104, b"bbbb", 1, TransportChecksum::Valid));
+        // Ahead of a hole at 108..112, then the hole filled.
+        s.push(&pushed(112, b"dddd", 3, TransportChecksum::Invalid));
+        s.push(&pushed(108, b"cccc", 2, TransportChecksum::Partial));
+        s.push(&pushed(116, b"eeee", 4, TransportChecksum::Valid));
+        assert_eq!(s.integrity_of(0, 8), Some(Integrity::Verified));
+        assert_eq!(s.integrity_of(6, 9), Some(Integrity::Unchecked));
+        assert_eq!(s.integrity_of(8, 12), Some(Integrity::Unchecked));
+        assert_eq!(s.integrity_of(11, 13), None, "a failed packet");
+        assert_eq!(s.integrity_of(16, 20), Some(Integrity::Verified));
+        assert_eq!(s.integrity_of(16, 21), None, "not arrived");
+        let cut = s.trim(6);
+        assert_eq!(cut, 14);
+        assert_eq!(s.integrity_of(12, 16), None, "trimmed");
+        assert_eq!(s.integrity_of(14, 16), None, "the failed packet stays");
+        assert_eq!(s.integrity_of(17, 18), Some(Integrity::Verified));
+        assert!(s.runs.vouched.len() <= 2, "{:?}", s.runs.vouched);
     }
 }

@@ -2996,13 +2996,15 @@ impl FlowDissection {
 
     /// What this flow's session observed that the zenoh test weighs
     /// ([`session_table::SessionObservations`]), its framing judged in the
-    /// directions the capture holds from their SYN.
+    /// directions the capture holds from their SYN, except one whose first
+    /// front was weighed foreign: its framing follows from that front
+    /// ([`session_table::LinkIngest::weighs_framing`]).
     pub fn session_observations(&self) -> session_table::SessionObservations {
         session_table::SessionObservations::of(
             &self.session,
             [
-                self.low_to_high.synced_from_syn(),
-                self.high_to_low.synced_from_syn(),
+                self.low_to_high.synced_from_syn() && self.ingest.weighs_framing(Direction::A),
+                self.high_to_low.synced_from_syn() && self.ingest.weighs_framing(Direction::B),
             ],
         )
     }
@@ -4090,7 +4092,12 @@ impl FlowDissection {
             for frame in &mut unit.frames {
                 frame.wire_end = Some(end);
             }
-            self.ingest.observe_unit(&unit.frames);
+            // The message's bytes stand in the TCP stream from its first
+            // frame's first byte to its last frame's end, so the packets that
+            // carried them vouch for them.
+            let integrity = self.assembler(direction).integrity_of(offset, end);
+            self.ingest
+                .observe_unit_weighed(&unit.frames, true, integrity);
             match self.keep {
                 // Open-debt item 924, step 4c — a payload is not copied: it
                 // stands in the stream, as its frame's bytes (or those bytes
@@ -4152,6 +4159,7 @@ impl FlowDissection {
             lent,
             ..
         } = self;
+        let start_held = [low_to_high.synced_from_syn(), high_to_low.synced_from_syn()];
         let streams = Streams {
             low_to_high,
             high_to_low,
@@ -4172,6 +4180,12 @@ impl FlowDissection {
                     #[cfg(test)]
                     Keep::Whole => None,
                 },
+                vouching: Some(Vouching {
+                    start_held,
+                    integrity_of: &|dir, start, end| {
+                        streams.assembler(dir).integrity_of(start, end)
+                    },
+                }),
             },
         );
     }
@@ -4225,6 +4239,7 @@ impl FlowDissection {
                     #[cfg(test)]
                     Keep::Whole => None,
                 },
+                vouching: None,
             },
         );
     }
@@ -4304,6 +4319,37 @@ struct Fed<'a> {
     /// entries, or `None` when the bytes are in no stream the flow keeps and
     /// the messages are kept whole.
     entries_from: Option<&'a dyn messages::UnitBytes>,
+    /// What the source knows of its streams' bytes, or `None` for one that
+    /// knows nothing of them (a decrypted plaintext, whose offsets are its own):
+    /// its fronts are not weighed and its units are of the weaker integrity.
+    vouching: Option<Vouching<'a>>,
+}
+
+/// What a stream source knows of its bytes that the zenoh test weighs
+/// (`docs/flow-zenoh-verdict.md` §6.10): where each direction began, and how
+/// far its bytes are known to be their sender's.
+#[derive(Clone, Copy)]
+struct Vouching<'a> {
+    /// Per direction, `A` then `B`: the capture holds the stream's first byte
+    /// (its SYN), so the reader's first unit is the sender's first.
+    start_held: [bool; 2],
+    /// How far the bytes `start..end` of a direction's stream are known to be
+    /// their sender's ([`tcp::StreamAssembler::integrity_of`]).
+    integrity_of: &'a dyn Fn(Direction, usize, usize) -> Option<link::Integrity>,
+}
+
+impl Vouching<'_> {
+    /// The integrity of the unit `frames` were read out of: from its length
+    /// prefix to its last byte.
+    fn unit(&self, direction: Direction, frames: &[PassiveFrame]) -> Option<link::Integrity> {
+        let first = frames.first()?;
+        let start = first.stream_offset;
+        (self.integrity_of)(
+            direction,
+            start,
+            start + first.prefix_width + first.unit_len,
+        )
+    }
 }
 
 /// The body both stream feeds share: push the bytes, then drain every frame
@@ -4325,6 +4371,7 @@ fn stream_into_session(
         bytes,
         instant_of,
         entries_from,
+        vouching,
     } = fed;
     // R311y709 — reaches a decoder. This is also the entry point decrypted
     // PLAINTEXT arrives at, which is why `unfed` saturates: a TLS flow
@@ -4339,9 +4386,24 @@ fn stream_into_session(
                 // by side with the context it was read in (open-debt item 924).
                 // The order is the order one message at a time gave: a
                 // direction is drained before the other is asked.
-                match session.next_unit_with(dir, &|offset| instant_of(dir, offset)) {
+                let read = session.next_unit_with(dir, &|offset| instant_of(dir, offset));
+                // The front this read judged, weighed before its unit: where the
+                // capture holds the direction's start, it is where the sender
+                // wrote a batch's first byte (model 5).
+                let front = session.take_chain_front(dir);
+                if let (Some(front), Some(v)) = (front, vouching) {
+                    if v.start_held[usize::from(dir == Direction::B)] {
+                        let integrity = (v.integrity_of)(dir, front.offset, front.offset + 1);
+                        ingest.observe_stream_front(dir, front.byte, integrity);
+                    }
+                }
+                match read {
                     Ok(unit) => {
-                        ingest.observe_unit(&unit.frames);
+                        let integrity = match vouching {
+                            Some(v) => v.unit(dir, &unit.frames),
+                            None => Some(link::Integrity::Unchecked),
+                        };
+                        ingest.observe_unit_weighed(&unit.frames, true, integrity);
                         match entries_from {
                             Some(source) => frames.push_unit(unit, source),
                             None => frames.append(unit.frames),
@@ -8964,7 +9026,8 @@ impl Dissection {
             let read = parse_scouting_observed(d.payload);
             let whole = matches!(&read, Ok((_, n)) if *n == d.payload.len());
             let frame = read.map(|(frame, _)| frame);
-            flow.ingest.observe_scouting(&frame, whole, d.payload.len());
+            flow.ingest
+                .observe_scouting(&frame, whole, d.payload.len(), d.checksums.integrity());
             // Open-debt item 924, step 4c — the payload is logged (or named by
             // its place in the container) and the message is read again from
             // it. The clock was advanced for this datagram above, before the
@@ -8992,13 +9055,14 @@ impl Dissection {
         let handshake = link.handshake(&d);
         // Model 4 — the link delimits the datagram, so its first byte is where
         // a zenoh sender writes its batch's first header.
-        let weigh_reading = flow.ingest.observe_datagram_front(d.payload, &d.checksums);
+        let integrity = d.checksums.integrity();
+        let weigh_reading = flow.ingest.observe_datagram_front(d.payload, integrity);
         if let Some(unit) =
             flow.session
                 .next_datagram_unit_on(direction, d.payload, d.packet_index, handshake)
         {
             flow.ingest
-                .observe_unit_weighed(&unit.frames, weigh_reading);
+                .observe_unit_weighed(&unit.frames, weigh_reading, integrity);
             match flow.keep {
                 // Open-debt item 924, step 4c — read again from the list's log,
                 // or from the container where the payload sits in one.

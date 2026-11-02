@@ -2644,23 +2644,23 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":8},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":9},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
         "\"frames\":3,\"bytes\":3,\"zenoh\":\"undecided\","
         "\"announced_version\":\"none\","
-        "\"zenoh_evidence\":{\"log2_lr_millibits\":329,"
-        "\"log2_lr_no_millibits\":9498,"
-        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":4,"
+        "\"zenoh_evidence\":{\"log2_lr_millibits\":362,"
+        "\"log2_lr_no_millibits\":11045,"
+        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":5,"
         "\"crossed_at_packet\":null,"
-        "\"log2_lr_max_millibits\":330,\"log2_lr_min_millibits\":-2,"
-        "\"log2_lr_no_max_millibits\":9498,\"log2_lr_no_min_millibits\":0,"
+        "\"log2_lr_max_millibits\":363,\"log2_lr_min_millibits\":-2,"
+        "\"log2_lr_no_max_millibits\":11045,\"log2_lr_no_min_millibits\":0,"
         "\"checks\":[{\"check\":\"unit_reading\",\"strength\":\"unit\","
-        "\"confirmed\":3,\"violated\":0,\"millibits\":332,\"no_millibits\":8018,"
+        "\"confirmed\":3,\"violated\":0,\"millibits\":365,\"no_millibits\":9504,"
         "\"q_basis\":\"measured\",\"eps_basis\":\"measured\"},"
         "{\"check\":\"wire_front\",\"strength\":\"header\","
-        "\"confirmed\":3,\"violated\":0,\"millibits\":-3,\"no_millibits\":1480,"
+        "\"confirmed\":3,\"violated\":0,\"millibits\":-3,\"no_millibits\":1541,"
         "\"q_basis\":\"measured\",\"eps_basis\":\"derived\"}]},"
         "\"unit_readings\":{\"explained\":{\"units\":3,\"bytes\":3},"
         "\"residual\":{\"units\":0,\"bytes\":0},"
@@ -4016,8 +4016,11 @@ int main(void) {
      * trip on the first reply) and a final's `completion_ns`. Keys arrive;
      * nothing retires.
      * 52: a reply or a final that arrived in fragments carries the same
-     * pairing. Values move under stationary keys. */
-    revisioned[2].revision = 52;
+     * pairing. Values move under stationary keys.
+     * 53: model 5 of the zenoh test: `wire_front` on stream chains and on
+     * the network ids, and `version_header`'s zenoh side derived. Values and
+     * words move under stationary keys. */
+    revisioned[2].revision = 53;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4169,9 +4172,10 @@ int main(void) {
      * basis. `zenoh` keeps its words and its values move; nothing retires.
      * 7: model 3, as the field document's 49, and a row of a pair is a test
      * of its own over what its flows observed after each named the pair.
-     * 8: model 4, as the field document's 50. */
+     * 8: model 4, as the field document's 50.
+     * 9: model 5, as the field document's 53. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 8;
+    revisioned[12].revision = 9;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

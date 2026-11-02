@@ -65,7 +65,7 @@ use wz_session_core::passive::{
 };
 use wz_session_core::scouting_message::ScoutingFrame;
 
-use crate::link::{FlowKey, LinkKind};
+use crate::link::{FlowKey, Integrity, LinkKind};
 use crate::zenoh_evidence::{Observation, ZenohEvidence};
 use crate::{Dissection, Framing};
 
@@ -123,6 +123,10 @@ pub struct LinkIngest {
     named_pair: Option<(PairKey, u64)>,
     /// The number the row's evidence knows this flow's link by.
     row_link: Option<u64>,
+    /// Per stream direction (`A` then `B`): `None` until the first front of its
+    /// chain is handed over, then whether that front was weighed and foreign,
+    /// which settles the direction's framing ([`Self::weighs_framing`]).
+    framing_settled_by_front: [Option<bool>; 2],
 }
 
 /// Two zids, in order: the key of a session row.
@@ -406,7 +410,7 @@ impl LinkIngest {
     /// LATEST Init of a kind wins, as it does for a link there: a flow reused by
     /// another node names the new one, and remembering the node that has gone is
     /// the failure.
-    fn observe_frame(&mut self, frame: &PassiveFrame) {
+    fn observe_frame(&mut self, frame: &PassiveFrame, integrity: Option<Integrity>) {
         if matches!(&frame.frame, Ok(decoded) if !matches!(decoded, InboundFrame::Unknown { .. })) {
             self.understood = true;
         }
@@ -421,7 +425,7 @@ impl LinkIngest {
             return;
         }
         if let Ok(Some(version)) = announced {
-            self.observe_version(version);
+            self.observe_version(version, integrity);
         }
         let seat = usize::from(frame.direction == Direction::B);
         match &frame.frame {
@@ -487,9 +491,17 @@ impl LinkIngest {
     /// unit read whole: this reader's confirms the check and any other
     /// violates it. Both are weighed, because an observation that could only
     /// confirm would raise the `yes` sum's expectation under the null.
-    fn observe_version(&mut self, version: u8) {
+    ///
+    /// `integrity` is how far the unit's bytes are known to be their sender's:
+    /// a sender of this wire writes its version there, so another one is an
+    /// alteration on the way, of chance at most what the integrity allows
+    /// (model 5). Bytes known to be altered (`None`) are not weighed.
+    fn observe_version(&mut self, version: u8, integrity: Option<Integrity>) {
+        let Some(integrity) = integrity else {
+            return;
+        };
         let own = version == wz_codecs::wire_const::PROTOCOL_VERSION;
-        self.record(Observation::VersionHeader { own });
+        self.record(Observation::VersionHeader { own, integrity });
     }
 
     /// One framing unit's reading, as evidence of the test.
@@ -504,17 +516,30 @@ impl LinkIngest {
     /// [`wz_session_core::passive::ReadUnit`] hands them out. The messages and
     /// the unit are told together because the unit's class is stamped on its
     /// messages: a caller that told only the messages would lose the count.
+    ///
+    /// For a unit whose bytes no checksum the reader holds vouches for (a
+    /// QUIC or WebSocket payload, a serial frame): the weaker integrity, which
+    /// holds whatever happened to them.
     pub(crate) fn observe_unit(&mut self, frames: &[PassiveFrame]) {
-        self.observe_unit_weighed(frames, true);
+        self.observe_unit_weighed(frames, true, Some(Integrity::Unchecked));
     }
 
-    /// [`Self::observe_unit`] for the unit of a datagram whose front was weighed
-    /// first ([`Self::observe_datagram_front`]): `weigh_reading` is `false` when
-    /// that front was foreign, because such a unit cannot read but `undecoded`
-    /// and the front already said so. Its reading is still counted.
-    pub(crate) fn observe_unit_weighed(&mut self, frames: &[PassiveFrame], weigh_reading: bool) {
+    /// [`Self::observe_unit`] for a unit whose bytes the caller can vouch for:
+    /// `integrity` is the weakest of the packets that carried them, `None`
+    /// when one of them failed its checksum.
+    ///
+    /// `weigh_reading` is `false` for the unit of a datagram whose front was
+    /// weighed foreign first ([`Self::observe_datagram_front`]), because such a
+    /// unit cannot read but `undecoded` and the front already said so. Its
+    /// reading is still counted.
+    pub(crate) fn observe_unit_weighed(
+        &mut self,
+        frames: &[PassiveFrame],
+        weigh_reading: bool,
+        integrity: Option<Integrity>,
+    ) {
         for frame in frames {
-            self.observe_frame(frame);
+            self.observe_frame(frame, integrity);
         }
         self.readings.observe_frames(frames);
         // An lz4 batch a build without lz4 cannot open reads `undecoded`
@@ -539,48 +564,75 @@ impl LinkIngest {
     /// read out of it. Answers whether that unit's reading is to be weighed:
     /// not when the front was foreign.
     ///
-    /// A zenoh sender writes a batch at the datagram's first byte, and that
-    /// byte is a transport message's header (its low five bits the message id,
-    /// one of the wire's eight, `0x00` to `0x07`) or a `BatchHeader`, whose only
-    /// value bit is bit 0 (`io/zenoh-transport/src/common/batch.rs` @
-    /// `const COMPRESSION: u8 = 1; // 1 << 0`), so its low five bits are an id
-    /// of the wire as well. A datagram whose checksum failed is not weighed: its
-    /// bytes are known to be altered.
+    /// A zenoh sender writes a batch at the datagram's first byte, and what it
+    /// may write there is [`wz_codecs::wire_const::is_wire_front`]: a transport
+    /// message's header, a batch header, or on a lowlatency link a network
+    /// message's header. `integrity` is what the datagram's checksums said
+    /// ([`crate::link::Checksums::integrity`]); a datagram whose checksum failed
+    /// (`None`) is not weighed: its bytes are known to be altered.
     pub(crate) fn observe_datagram_front(
         &mut self,
         payload: &[u8],
-        checksums: &crate::link::Checksums,
+        integrity: Option<Integrity>,
     ) -> bool {
-        use crate::link::TransportChecksum;
-        use crate::zenoh_evidence::Integrity;
-        let Some(&first) = payload.first() else {
+        let (Some(&first), Some(integrity)) = (payload.first(), integrity) else {
             return true;
         };
-        let integrity = match (checksums.ip, checksums.transport) {
-            (Some(false), _) | (_, Some(TransportChecksum::Invalid)) => return true,
-            (_, Some(TransportChecksum::Valid)) => Integrity::Verified,
-            (_, Some(TransportChecksum::Partial) | None) => Integrity::Unchecked,
-        };
-        // `T_MID_JOIN` is the highest of the eight.
-        let own = first & 0x1F <= wz_codecs::wire_const::T_MID_JOIN;
+        let own = wz_codecs::wire_const::is_wire_front(first);
         self.record(Observation::WireFront { own, integrity });
         own
+    }
+
+    /// The front of a stream unit on a chain unbroken since the direction's
+    /// first byte, where the capture holds the stream's start
+    /// ([`wz_session_core::passive::PassiveSession::take_chain_front`]): the
+    /// first byte past a length prefix, where a zenoh sender writes a batch's
+    /// first byte as it does at a datagram's. `integrity` is that byte's
+    /// packet's, `None` when its checksum failed, and then it is not weighed.
+    ///
+    /// The first front of a direction's chain is the one its framing was first
+    /// judged at, and a foreign front is never one the reader frames a unit
+    /// behind: when that front is weighed and foreign, the framing it lost
+    /// follows from it and is not weighed again ([`Self::weighs_framing`]).
+    pub(crate) fn observe_stream_front(
+        &mut self,
+        direction: Direction,
+        byte: u8,
+        integrity: Option<Integrity>,
+    ) {
+        let own = wz_codecs::wire_const::is_wire_front(byte);
+        let seat = usize::from(direction == Direction::B);
+        if self.framing_settled_by_front[seat].is_none() {
+            self.framing_settled_by_front[seat] = Some(!own && integrity.is_some());
+        }
+        if let Some(integrity) = integrity {
+            self.record(Observation::WireFront { own, integrity });
+        }
+    }
+
+    /// Whether `direction`'s first framing is weighed: not when the first front
+    /// of its chain was weighed and foreign
+    /// ([`Self::observe_stream_front`]).
+    pub fn weighs_framing(&self, direction: Direction) -> bool {
+        self.framing_settled_by_front[usize::from(direction == Direction::B)] != Some(true)
     }
 
     /// One scouting datagram's decode, for the evidence alone: a Scout or a
     /// Hello names a node in the census, never a session. `whole` is whether the
     /// message took the whole datagram, which is `datagram_len` bytes. A scouting
-    /// datagram is a framing unit of one message.
+    /// datagram is a framing unit of one message. `integrity` is what the
+    /// datagram's checksums said, as for [`Self::observe_unit_weighed`].
     pub(crate) fn observe_scouting(
         &mut self,
         frame: &Result<ScoutingFrame, InboundParseError>,
         whole: bool,
         datagram_len: usize,
+        integrity: Option<Integrity>,
     ) {
         let announced = frame.as_ref().map(ScoutingFrame::announced_version);
         self.versions.observe(announced, whole);
         if let (true, Ok(Some(version))) = (whole, announced) {
-            self.observe_version(version);
+            self.observe_version(version, integrity);
         }
         let reading = UnitReading::of_scouting(frame, whole);
         self.readings.observe(reading, datagram_len);
@@ -1271,15 +1323,16 @@ pub struct SessionObservations {
 }
 
 impl SessionObservations {
-    /// One session's, with its framing judged in the directions whose start
-    /// the capture holds (`start_held`, `A` then `B`).
-    pub fn of(session: &wz_session_core::passive::PassiveSession, start_held: [bool; 2]) -> Self {
+    /// One session's, with its framing judged in the directions `weighed`
+    /// (`A` then `B`): those whose start the capture holds, and whose framing
+    /// does not follow from a front already weighed.
+    pub fn of(session: &wz_session_core::passive::PassiveSession, weighed: [bool; 2]) -> Self {
         let mut out = Self {
             steps: session_sn_steps(session),
             ..Self::default()
         };
-        for (direction, held) in [Direction::A, Direction::B].into_iter().zip(start_held) {
-            match session.first_framing(direction).filter(|_| held) {
+        for (direction, weigh) in [Direction::A, Direction::B].into_iter().zip(weighed) {
+            match session.first_framing(direction).filter(|_| weigh) {
                 Some(true) => out.framing_held += 1,
                 Some(false) => out.framing_lost += 1,
                 None => {}

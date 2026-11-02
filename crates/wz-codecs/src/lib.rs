@@ -1100,6 +1100,33 @@ pub mod wire_const {
             None => None,
         }
     }
+
+    /// May a sender of this wire write `byte` as the first byte of a batch:
+    /// the first byte of a datagram the link delimits, or the first byte past
+    /// a stream unit's length prefix?
+    ///
+    /// A question about the message ID alone (the low five bits), asked of
+    /// every sender of the wire and every configuration of it, so it is wider
+    /// than the credibility tests above, which ask what may begin a unit on a
+    /// link whose configuration the reader holds:
+    ///
+    /// - a transport message's header, whose ID is one of the eight,
+    ///   `T_MID_OAM` to `T_MID_JOIN`;
+    /// - a batch header, whose only value bit is bit 0
+    ///   (`io/zenoh-transport/src/common/batch.rs` @
+    ///   `const COMPRESSION: u8 = 1; // 1 << 0`), so its ID reads `0x00` or
+    ///   `0x01`;
+    /// - on a lowlatency link, a network message's header, written with no
+    ///   frame around it (`io/zenoh-transport/src/unicast/lowlatency/link.rs`
+    ///   @ `pub(crate) async fn send_with_link(`), whose ID is one of
+    ///   `N_MID_INTEREST` to `N_MID_OAM`.
+    ///
+    /// The IDs `0x08` to `0x18` are in neither space, so a front that reads
+    /// one is not a byte such a sender wrote.
+    pub const fn is_wire_front(byte: u8) -> bool {
+        let id = byte & 0x1F;
+        id <= T_MID_JOIN || (id >= N_MID_INTEREST && id <= N_MID_OAM)
+    }
 }
 
 /// R311y609 — the ungated transport header space, checked against the gated
@@ -1170,6 +1197,22 @@ mod transport_header_space {
             credible, 42,
             "8 INIT + 8 OPEN + 4 CLOSE + 2 KEEP_ALIVE + 4 FRAME + 8 FRAGMENT + 8 JOIN"
         );
+    }
+
+    /// A batch's first byte is one of fifteen IDs whatever its flags: the eight
+    /// transport IDs and the seven network IDs a lowlatency link writes bare.
+    /// Every header the stream reader resumes on, on either kind of link, and
+    /// every batch header, is among them.
+    #[test]
+    fn a_wire_front_is_one_of_fifteen_ids() {
+        let fronts = (0u8..=255).filter(|b| is_wire_front(*b)).count();
+        assert_eq!(fronts, 15 * 8);
+        for b in 0u8..=255 {
+            if is_credible_lowlatency_header(b) || b & !0x01 == 0 {
+                assert!(is_wire_front(b), "{b:#04x}");
+            }
+        }
+        assert!(!is_wire_front(0x08) && !is_wire_front(0x18) && !is_wire_front(0xF0));
     }
 
     /// A MID outside the space is rejected whatever its flags, and a MID

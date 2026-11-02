@@ -142,7 +142,7 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
     let b = wz_session_core::zid_hex::zid_to_zenoh_hex(&ZID_B);
     assert!(
         doc.starts_with(&format!(
-            "{{\"document\":{{\"name\":\"session_table\",\"revision\":8}},\"ok\":true,\
+            "{{\"document\":{{\"name\":\"session_table\",\"revision\":9}},\"ok\":true,\
              \"sessions\":[{{\"initiator\":\"{a}\",\"acceptor\":\"{b}\",\"link\":\"udp\",\
              \"phase\":\"init_complete\",\"encrypted\":\"clear\","
         )),
@@ -159,17 +159,17 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
         doc.contains(&format!(
             "\"frames\":6,\"bytes\":{want_bytes},\"zenoh\":\"undecided\",\
              \"announced_version\":\"own\",\"zenoh_evidence\":{{\
-             \"log2_lr_millibits\":329,\"log2_lr_no_millibits\":12345,\
+             \"log2_lr_millibits\":362,\"log2_lr_no_millibits\":14392,\
              \"yes_at_millibits\":20000,\
-             \"no_at_millibits\":-20000,\"model\":4,\"crossed_at_packet\":null,\
-             \"log2_lr_max_millibits\":330,\"log2_lr_min_millibits\":-2,\
-             \"log2_lr_no_max_millibits\":12345,\"log2_lr_no_min_millibits\":0,\
+             \"no_at_millibits\":-20000,\"model\":5,\"crossed_at_packet\":null,\
+             \"log2_lr_max_millibits\":363,\"log2_lr_min_millibits\":-2,\
+             \"log2_lr_no_max_millibits\":14392,\"log2_lr_no_min_millibits\":0,\
              \"checks\":[\
              {{\"check\":\"unit_reading\",\"strength\":\"unit\",\"confirmed\":4,\
-             \"violated\":0,\"millibits\":332,\"no_millibits\":10691,\
+             \"violated\":0,\"millibits\":365,\"no_millibits\":12672,\
              \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}},\
              {{\"check\":\"wire_front\",\"strength\":\"header\",\"confirmed\":4,\
-             \"violated\":0,\"millibits\":-3,\"no_millibits\":1654,\
+             \"violated\":0,\"millibits\":-3,\"no_millibits\":1720,\
              \"q_basis\":\"measured\",\"eps_basis\":\"derived\"}}]}},\
              \"unit_readings\":{{\"explained\":{{\"units\":6,\"bytes\":{want_bytes}}},\
              \"residual\":{{\"units\":0,\"bytes\":0}},\
@@ -335,7 +335,7 @@ fn a_bad_container_is_a_refusal_and_a_callers_bug_is_a_code() {
         let doc = call_pcap(bytes, WZ_DISSECT_LIMITS_NONE).expect("a refusal is answered");
         assert!(
             doc.starts_with(&format!(
-                "{{\"document\":{{\"name\":\"session_table\",\"revision\":8}},\"ok\":false,\
+                "{{\"document\":{{\"name\":\"session_table\",\"revision\":9}},\"ok\":false,\
                  \"refusal\":\"{word}\",\"message\":"
             )),
             "{doc}"

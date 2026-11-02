@@ -979,6 +979,47 @@ impl Checksums {
             || self.transport == Some(TransportChecksum::Invalid)
             || self.tunnel == Some(false)
     }
+
+    /// How far the packet's payload is known to be the bytes its sender wrote:
+    /// `None` when a checksum failed ([`Self::any_invalid`]), the bytes known
+    /// to be altered; [`Integrity::Verified`] when the transport checksum,
+    /// which covers the payload, verified; [`Integrity::Unchecked`] when it
+    /// was absent or left to a transmit offload.
+    pub fn integrity(&self) -> Option<Integrity> {
+        if self.any_invalid() {
+            return None;
+        }
+        Some(match self.transport {
+            Some(TransportChecksum::Valid) => Integrity::Verified,
+            Some(TransportChecksum::Partial | TransportChecksum::Invalid) | None => {
+                Integrity::Unchecked
+            }
+        })
+    }
+}
+
+/// How far a payload's bytes are known to be the ones their sender wrote: what
+/// the chance that an alteration on the way made them read as they do is
+/// bounded by (`crate::zenoh_evidence::model::LOG2_ALTERED_VERIFIED`,
+/// `LOG2_ALTERED_UNCHECKED`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integrity {
+    /// The transport checksum verified.
+    Verified,
+    /// No checksum was verified: none was carried, the link carries none, a
+    /// transmit offload left the field to the card, or the reader holds no
+    /// verdict for the bytes. The weaker bound, which holds whatever happened.
+    Unchecked,
+}
+
+impl Integrity {
+    /// The weaker of two: what bytes of both are known to be.
+    pub fn and(self, other: Integrity) -> Integrity {
+        match (self, other) {
+            (Integrity::Verified, Integrity::Verified) => Integrity::Verified,
+            _ => Integrity::Unchecked,
+        }
+    }
 }
 
 /// What a TCP or UDP checksum said, when it said anything.

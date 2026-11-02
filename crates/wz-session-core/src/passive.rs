@@ -1904,6 +1904,13 @@ struct DirectionStream {
     /// before any desynchronisation this reader inferred, `Some(false)` when
     /// one was inferred first, `None` while neither has happened.
     first_framing: Option<bool>,
+    /// The front the reader judged last on a chain unbroken since the
+    /// direction's first byte, until it is taken
+    /// ([`PassiveSession::take_chain_front`]).
+    chain_front: Option<StreamFront>,
+    /// Where the last front so judged stood: a unit waiting for its body is
+    /// read again from its prefix, and its front is judged once.
+    judged_front: Option<usize>,
 }
 
 /// R311y609 — the live state of one direction's resynchronisation scan.
@@ -2700,6 +2707,18 @@ impl PassiveSession {
             return Err(PassiveStall::NeedMoreBytes);
         }
         let header = stream.buf[width];
+        // A front on a chain that has not broken since the direction's first
+        // byte stands where its sender wrote a batch's first byte, whatever the
+        // byte says: kept for the source, which knows whether that first byte
+        // is the stream's and how far the bytes are vouched for.
+        let front_at = stream_offset + width;
+        if stream.accounting.desyncs == 0 && stream.judged_front != Some(front_at) {
+            stream.judged_front = Some(front_at);
+            stream.chain_front = Some(StreamFront {
+                offset: front_at,
+                byte: header,
+            });
+        }
         // R2803 — a lean link carries `Close | KeepAlive | Network(..)`, so the
         // transport-only question refuses every data frame on one. Measured: a
         // real capture desynchronised on its first Declare (`header 0x9e`) and
@@ -2953,6 +2972,22 @@ impl PassiveSession {
     /// framing again is still one that lost it first.
     pub fn first_framing(&self, direction: Direction) -> Option<bool> {
         self.stream(direction).first_framing
+    }
+
+    /// The front of the unit the last read of `direction` judged, taken: the
+    /// first byte past a length prefix, on a chain of units that has not lost
+    /// its framing since the first byte this direction was handed. `None`
+    /// when that read judged no new front, and on every read after the
+    /// direction's first desynchronisation, a hole the source reported
+    /// included: a front a scan found was chosen for looking like one.
+    ///
+    /// The front is judged before its unit's body arrives, so a front that
+    /// ends the chain (its byte is not one this link may begin a unit with) is
+    /// handed out as well as one whose unit was read. One slot, overwritten by
+    /// the next read that judges a front: a source that weighs fronts takes it
+    /// after every read.
+    pub fn take_chain_front(&mut self, direction: Direction) -> Option<StreamFront> {
+        self.stream_mut(direction).chain_front.take()
     }
 
     /// R3054 — what is known of one direction's half of the session. See
@@ -3645,6 +3680,16 @@ pub struct UnitInput<'a> {
     pub prefix_width: usize,
     /// Whether the link the unit arrived on carries a handshake.
     pub handshake: LinkHandshake,
+}
+
+/// A stream unit's first byte past its length prefix, as
+/// [`PassiveSession::take_chain_front`] hands it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamFront {
+    /// The byte's offset in its direction's stream.
+    pub offset: usize,
+    /// The byte.
+    pub byte: u8,
 }
 
 /// Every record of one framing unit, as [`PassiveSession::next_unit_with`]
@@ -7770,6 +7815,57 @@ mod tests {
         gapped.note_gap(Direction::A, 0);
         assert_eq!(gapped.first_framing(Direction::A), None, "a reported hole");
         assert_eq!(gapped.first_framing(Direction::B), None);
+    }
+
+    /// THE FRONTS OF AN UNBROKEN CHAIN. Each unit's first byte past its prefix
+    /// is handed out once, a unit waiting for its body included; the front
+    /// that ends the chain is handed out too; and after the first loss no
+    /// front is, the reported hole included.
+    #[test]
+    fn a_chain_hands_out_each_front_once_until_it_breaks() {
+        let wire = frame_wire(1, &oam_record(1));
+        let unit = framed(&wire, 2);
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &unit[..3]);
+        assert!(matches!(
+            s.next_frame(Direction::A),
+            Err(PassiveStall::NeedMoreBytes)
+        ));
+        let first = StreamFront {
+            offset: 2,
+            byte: wire[0],
+        };
+        assert_eq!(s.take_chain_front(Direction::A), Some(first));
+        s.push(Direction::A, &unit[3..]);
+        s.next_frame(Direction::A).expect("the unit");
+        assert_eq!(s.take_chain_front(Direction::A), None, "judged once");
+        s.push(Direction::A, &unit);
+        s.next_frame(Direction::A).expect("the second unit");
+        let second = s.take_chain_front(Direction::A).expect("a front");
+        assert_eq!(second.offset, unit.len() + 2);
+        // A prefix whose front is no transport ID ends the chain, and is
+        // handed out.
+        s.push(Direction::A, &[4, 0, 0x0B, 0, 0, 0]);
+        assert!(matches!(
+            s.next_frame(Direction::A),
+            Err(PassiveStall::Desynchronised { .. })
+        ));
+        assert_eq!(
+            s.take_chain_front(Direction::A),
+            Some(StreamFront {
+                offset: 2 * unit.len() + 2,
+                byte: 0x0B
+            })
+        );
+        s.push(Direction::A, &unit);
+        while s.next_frame(Direction::A).is_ok() {}
+        assert_eq!(s.take_chain_front(Direction::A), None, "past the loss");
+
+        let mut gapped = PassiveSession::new();
+        gapped.note_gap(Direction::B, 5);
+        gapped.push(Direction::B, &unit);
+        while gapped.next_frame(Direction::B).is_ok() {}
+        assert_eq!(gapped.take_chain_front(Direction::B), None);
     }
 
     /// THE COMPRESSION READING AND ITS GROUNDS, where no Init was seen. A

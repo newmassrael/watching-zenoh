@@ -56,7 +56,8 @@ pub enum Check {
     /// ([`wz_session_core::passive::SnSteps`]).
     SnFollows,
     /// An admissible Init, Join, Scout or Hello, out of a framing unit read
-    /// whole, announced the version this reader reads.
+    /// whole, announced the version this reader reads. Every sender of this
+    /// wire writes it, so another version is an alteration (model 5).
     VersionHeader,
     /// How a framing unit read ([`wz_session_core::passive::UnitReading`]).
     UnitReading,
@@ -64,21 +65,17 @@ pub enum Check {
     /// the framing lost before one was
     /// ([`wz_session_core::passive::PassiveSession::first_framing`]).
     StreamFraming,
-    /// The first byte of a datagram the link delimits names a transport
-    /// message of this wire (model 4, `docs/flow-zenoh-verdict.md` §6.9).
+    /// A batch's first byte is one a sender of this wire may write there: of a
+    /// datagram the link delimits (model 4, `docs/flow-zenoh-verdict.md` §6.9),
+    /// or past a length prefix on a stream chain held from its start (model 5,
+    /// §6.10).
     WireFront,
 }
 
-/// How far a datagram's bytes are known to be the ones its sender wrote: what
-/// the zenoh side of [`Check::WireFront`] is derived from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Integrity {
-    /// The transport checksum verified.
-    Verified,
-    /// No checksum was verified: none was carried, the link carries none, or a
-    /// transmit offload left the field to the card.
-    Unchecked,
-}
+/// How far a payload's bytes are known to be the ones its sender wrote: what
+/// the zenoh side of the derived checks ([`Check::WireFront`],
+/// [`Check::VersionHeader`]) is bounded by.
+pub use crate::link::Integrity;
 
 /// How hard a check is to satisfy by chance, in the claim's terms: a handshake
 /// binds two directions to each other, a state invariant binds a message to the
@@ -157,15 +154,15 @@ impl Check {
     /// Where the chance that a zenoh flow fails the check comes from. The SN
     /// steps' break rate is the link's, so it is a prior fitted on the corpus's
     /// links for the `yes` sum and left free for the `no` sum; the wire's front
-    /// is derived from what the wire allows and what reaches the capture
-    /// altered (model 4); the others are a rate per group of zenoh captures.
+    /// (model 4) and the version header (model 5) are derived from what the
+    /// wire allows and what reaches the capture altered; the others are a rate
+    /// per group of zenoh captures.
     pub const fn eps_basis(self) -> Basis {
         match self {
-            Check::WireFront => Basis::Derived,
+            Check::WireFront | Check::VersionHeader => Basis::Derived,
             Check::SnFollows
             | Check::CookieEcho
             | Check::InitRoles
-            | Check::VersionHeader
             | Check::UnitReading
             | Check::StreamFraming => Basis::Measured,
         }
@@ -244,17 +241,18 @@ pub mod model {
 
     /// The model these sums are, written into the document so that a consumer
     /// can tell two models apart.
-    pub const MODEL: u32 = 4;
+    pub const MODEL: u32 = 5;
 
-    /// `log2` of the largest chance that a datagram whose transport checksum
-    /// verified reaches the capture with its first byte altered: `2^-24`, the
-    /// share of packets Stone and Partridge (2000) estimate pass the TCP
-    /// checksum with their data altered, at its high end (one in sixteen
-    /// million). Whatever an alteration does to the byte, it is at most this.
+    /// `log2` of the largest chance that a packet whose transport checksum
+    /// verified reaches the capture with a byte of its payload altered:
+    /// `2^-24`, the share of packets Stone and Partridge (2000) estimate pass
+    /// the TCP checksum with their data altered, at its high end (one in
+    /// sixteen million). Whatever an alteration does to the byte, it is at
+    /// most this.
     pub const LOG2_ALTERED_VERIFIED: i128 = -24;
 
-    /// `log2` of the largest chance that a datagram no checksum verified
-    /// reaches the capture with its first byte altered: `2^-10`, the share of
+    /// `log2` of the largest chance that a packet no checksum verified reaches
+    /// the capture with a byte of its payload altered: `2^-10`, the share of
     /// packets the same study found failing the TCP checksum after the link's
     /// CRC had passed, at its high end (one in 1,100).
     pub const LOG2_ALTERED_UNCHECKED: i128 = -10;
@@ -296,8 +294,10 @@ pub mod model {
         pub log2_null_mean: [i128; K],
     }
 
-    /// A check whose null chances are derived from field widths: the cookie
-    /// echo, the Init roles and the version header.
+    /// A check whose null chances are derived from field widths and whose
+    /// zenoh side is measured: the cookie echo and the Init roles. (The version
+    /// header's null chances are derived from its width as well, and its zenoh
+    /// side from the wire, so the corpus gives it nothing.)
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Derived {
         /// The zenoh side of the `yes` sum, as [`Measured::zenoh`].
@@ -331,13 +331,13 @@ pub mod model {
         pub cookie: Derived,
         /// Two Inits of opposite kinds, of one.
         pub roles: Derived,
-        /// A version header of this reader's version, of another.
-        pub versions: Derived,
         /// The zenoh side of the `yes` sum for the SN steps: a link's break rate
         /// as a Beta prior over the corpus's links (a step that follows is the
         /// first outcome).
         pub sn: Prior<2>,
-        /// A datagram's front of this wire, foreign.
+        /// A batch's front of this wire, foreign: a datagram's first byte, or
+        /// the first byte past a length prefix on a stream chain held from its
+        /// start.
         pub front: Front,
     }
 
@@ -365,10 +365,11 @@ pub mod model {
         // stream directions captured from their start, framing held or lost
         // (`ZENOH_FRAMING`); cookie echoes matched or differing (`ZENOH_COOKIE`);
         // Init pairs of opposite kinds or of one (`ZENOH_ROLES`); version headers
-        // of this reader's version or another (`ZENOH_VERSIONS`); datagram
-        // fronts of this wire or foreign (`ZENOH_FRONT`, which the model does
-        // not read: the zenoh side of the front is derived, and a foreign front
-        // in a zenoh file would refute the derivation). A null member that
+        // of this reader's version or another (`ZENOH_VERSIONS`), and fronts of
+        // this wire or foreign, of datagrams and of stream chains
+        // (`ZENOH_FRONT`), neither of which the model reads: their zenoh side is
+        // derived, and a zenoh file showing another version or a foreign front
+        // would refute the derivation. A null member that
         // shows no observation of a check is not counted for it. What each
         // null protocol does to the stream reader is in
         // `docs/flow-zenoh-verdict.md` section 6.1.
@@ -407,6 +408,8 @@ pub enum Observation {
     VersionHeader {
         /// It is this reader's.
         own: bool,
+        /// How far the unit's bytes are known to be the ones the sender wrote.
+        integrity: Integrity,
     },
     /// A framing unit read.
     UnitReading(wz_session_core::passive::UnitReading),
@@ -415,10 +418,12 @@ pub enum Observation {
         /// It framed a unit before it lost its framing.
         held: bool,
     },
-    /// The first byte of a datagram the link delimits, against the wire's
-    /// transport message ids.
+    /// A batch's first byte, against what the wire allows there: of a datagram
+    /// the link delimits, or past a length prefix on a stream chain held from
+    /// its start.
     WireFront {
-        /// Its low five bits are a transport message id of this wire.
+        /// It is a byte a sender of this wire may write there
+        /// ([`wz_codecs::wire_const::is_wire_front`]).
         own: bool,
         /// How far the byte is known to be the one the sender wrote.
         integrity: Integrity,
@@ -521,30 +526,31 @@ impl<const K: usize> RateCheck<K> {
     }
 }
 
-/// The wire's front: its counts (of this wire, foreign) and its two values.
+/// A check whose zenoh side is derived from what the wire allows (the wire's
+/// front, the version header): its counts (of the wire, not) and its two
+/// values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct FrontCheck {
+struct WireCheck {
     counts: [u64; 2],
     yes: Value,
     no: Value,
 }
 
-impl FrontCheck {
-    /// Outcome `o` (a front of this wire, foreign) of a datagram of
-    /// `integrity`.
+impl WireCheck {
+    /// Outcome `o` (of the wire, not) of bytes of `integrity`, with the null
+    /// side's `log2` chance of it in each sum, `null_yes` and `null_no`, each
+    /// within `err` of its value.
     ///
-    /// The zenoh side is derived: a zenoh sender writes a transport message id
-    /// of the wire there (or a batch header, whose value is one of them), so a
-    /// foreign front is an alteration on the way, of chance at most `2^-a`
-    /// whatever the sender, the release or the group ([`model::LOG2_ALTERED_VERIFIED`],
-    /// [`model::LOG2_ALTERED_UNCHECKED`]). The `no` sum's zenoh side is that
-    /// bound, and one for a front of the wire. The `yes` sum's is a prediction,
-    /// which moves only how soon a word comes: a prior of weight one outcome
-    /// centred on the bound, so that a flow of fronts of the wire costs the sum
-    /// a few millionths of a bit and not a share of a bit each. The null side
-    /// is the members' as measured: their largest share for the `yes` sum, a
-    /// prior over the flow's own share for the `no` sum.
-    fn step(&mut self, o: usize, integrity: Integrity, p: &model::Front) {
+    /// The zenoh side is derived: a sender of this wire writes a value of the
+    /// wire there, so another value is an alteration on the way, of chance at
+    /// most `2^-a` whatever the sender, the release or the group
+    /// ([`model::LOG2_ALTERED_VERIFIED`], [`model::LOG2_ALTERED_UNCHECKED`]).
+    /// The `no` sum's zenoh side is that bound, and one for a value of the
+    /// wire. The `yes` sum's is a prediction, which moves only how soon a word
+    /// comes: a prior of weight one outcome centred on the bound, so that a
+    /// flow of values of the wire costs the sum a few millionths of a bit and
+    /// not a share of a bit each.
+    fn step(&mut self, o: usize, integrity: Integrity, null_yes: i128, null_no: i128, err: i128) {
         let t: u64 = self.counts.iter().sum();
         if t >= MAX_COUNT {
             return;
@@ -563,13 +569,9 @@ impl FrontCheck {
             u128::from(self.counts[o]) * scale + weight,
             (u128::from(t) + 1) * scale,
         );
-        let null_yes = log2_null_sup(p.log2_null_bound[o], self.counts[o], t);
-        self.yes.add(zenoh - null_yes, 2 * LOG_ERR_Q64);
+        self.yes.add(zenoh - null_yes, LOG_ERR_Q64 + err);
         let zenoh_no = if o == 0 { 0 } else { log2_altered * ONE_Q64 };
-        self.no.add(
-            zenoh_no - p.null.log2_predictive(&self.counts, o),
-            LOG_ERR_Q64,
-        );
+        self.no.add(zenoh_no - null_no, err);
         self.counts[o] += 1;
     }
 
@@ -643,8 +645,8 @@ pub struct ZenohEvidence {
     framing: RateCheck<2>,
     cookie: RateCheck<2>,
     roles: RateCheck<2>,
-    versions: RateCheck<2>,
-    front: FrontCheck,
+    versions: WireCheck,
+    front: WireCheck,
     sn: Vec<SnLink>,
     crossing: Option<Crossing>,
     /// The largest and the smallest `yes` sum, then `no` sum, so far (the
@@ -712,16 +714,16 @@ impl ZenohEvidence {
                 let o = usize::from(!opposite);
                 self.roles.step(o, &p.zenoh, &p.region, -ONE_Q64, -ONE_Q64);
             }
-            Observation::VersionHeader { own } => {
-                // A byte equals the version with chance 2^-8.
+            Observation::VersionHeader { own, integrity } => {
+                // A byte equals the version with chance 2^-8, and the zenoh side
+                // is the wire's own (model 5).
                 let null = if own {
                     -8 * ONE_Q64
                 } else {
                     LOG2_BREAK_NULL_Q64
                 };
-                let p = &params.versions;
                 self.versions
-                    .step(usize::from(!own), &p.zenoh, &p.region, null, null);
+                    .step(usize::from(!own), integrity, null, null, LOG_ERR_Q64);
             }
             Observation::UnitReading(reading) => {
                 use wz_session_core::passive::UnitReading;
@@ -745,7 +747,16 @@ impl ZenohEvidence {
                     .step(o, &p.zenoh, &p.region, null_yes, p.log2_null_mean[o]);
             }
             Observation::WireFront { own, integrity } => {
-                self.front.step(usize::from(!own), integrity, &params.front);
+                // The null side is the members' as measured: their largest share
+                // for the `yes` sum, a prior over the flow's own share for the
+                // `no` sum.
+                let o = usize::from(!own);
+                let p = &params.front;
+                let t: u64 = self.front.counts.iter().sum();
+                let null_yes = log2_null_sup(p.log2_null_bound[o], self.front.counts[o], t);
+                let null_no = p.null.log2_predictive(&self.front.counts, o);
+                self.front
+                    .step(o, integrity, null_yes, null_no, LOG_ERR_Q64);
             }
             Observation::SnSteps {
                 link,
@@ -921,8 +932,14 @@ pub(crate) mod tests {
                 follows: 1,
                 breaks: 1,
             },
-            Observation::VersionHeader { own: true },
-            Observation::VersionHeader { own: false },
+            Observation::VersionHeader {
+                own: true,
+                integrity: Integrity::Verified,
+            },
+            Observation::VersionHeader {
+                own: false,
+                integrity: Integrity::Unchecked,
+            },
             Observation::UnitReading(UnitReading::Explained),
             Observation::UnitReading(UnitReading::Residual),
             Observation::StreamFraming { held: true },
@@ -972,7 +989,13 @@ pub(crate) mod tests {
     #[test]
     fn the_sums_are_the_checks_parts_added() {
         let mut e = ZenohEvidence::default();
-        e.observe(Observation::VersionHeader { own: true }, 0);
+        e.observe(
+            Observation::VersionHeader {
+                own: true,
+                integrity: Integrity::Verified,
+            },
+            0,
+        );
         e.observe(Observation::UnitReading(UnitReading::Explained), 0);
         e.observe(Observation::UnitReading(UnitReading::Undecoded), 1);
         e.observe(
@@ -1011,7 +1034,10 @@ pub(crate) mod tests {
         assert_eq!((crossed.packet, crossed.yes, crossed.no), (7, true, false));
         for (packet, observation) in [
             Observation::CookieEcho { matched: None },
-            Observation::VersionHeader { own: false },
+            Observation::VersionHeader {
+                own: false,
+                integrity: Integrity::Unchecked,
+            },
             Observation::InitRoles { opposite: false },
             Observation::UnitReading(UnitReading::Residual),
             Observation::StreamFraming { held: false },
@@ -1079,6 +1105,28 @@ pub(crate) mod tests {
         assert!(t.millibits <= 0 && t.millibits > -50, "{t:?}");
         assert!(t.no_millibits >= 0, "{t:?}");
         assert_eq!((t.confirmed, t.violated), (20_000, 0));
+    }
+
+    /// Another version weighs against zenoh by what the integrity of its bytes
+    /// allows, as a foreign front does: its null chance is nearly one, and its
+    /// zenoh chance is the bound (model 5). This reader's version is eight
+    /// bits for zenoh in both sums.
+    #[test]
+    fn another_version_weighs_what_its_integrity_allows() {
+        let version = |own, integrity| Observation::VersionHeader { own, integrity };
+        let no = |integrity| {
+            let mut e = ZenohEvidence::default();
+            e.observe(version(false, integrity), 0);
+            e.tally(Check::VersionHeader).no_millibits
+        };
+        let (v, u) = (no(Integrity::Verified), no(Integrity::Unchecked));
+        assert!((-24_000..-23_900).contains(&v), "{v}");
+        assert!((-10_000..-9_900).contains(&u), "{u}");
+        let mut own = ZenohEvidence::default();
+        own.observe(version(true, Integrity::Unchecked), 0);
+        let t = own.tally(Check::VersionHeader);
+        assert!((7_990..8_000).contains(&t.millibits), "{t:?}");
+        assert!(t.no_millibits >= 8_000, "{t:?}");
     }
 
     /// Steps of two links are two rates: each link's likeliest is its own.

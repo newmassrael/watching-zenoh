@@ -83,6 +83,8 @@ impl Counts {
 pub(crate) struct Flow {
     pub(crate) counts: Counts,
     pub(crate) evidence: ZenohEvidence,
+    /// It is a stream flow, not a datagram one.
+    pub(crate) stream: bool,
 }
 
 /// One file of the corpus, read.
@@ -98,7 +100,7 @@ fn flows_of(d: &Dissection) -> Vec<Flow> {
     let mut out = Vec::new();
     // The unit readings are the ones the test weighed: a datagram whose front
     // was foreign is weighed by its front, and its reading is not (model 4).
-    let mut push = |e: ZenohEvidence| {
+    let mut push = |e: ZenohEvidence, stream: bool| {
         let t = |check| e.tally(check);
         let pair = |check| [t(check).confirmed, t(check).violated];
         out.push(Flow {
@@ -112,13 +114,14 @@ fn flows_of(d: &Dissection) -> Vec<Flow> {
                 front: pair(Check::WireFront),
             },
             evidence: e,
+            stream,
         });
     };
     for f in d.flows() {
-        push(f.zenoh_evidence());
+        push(f.zenoh_evidence(), true);
     }
     for f in d.datagram_flows() {
-        push(f.zenoh_evidence());
+        push(f.zenoh_evidence(), false);
     }
     out
 }
@@ -334,10 +337,6 @@ fn calibrate<'a>(files: impl Iterator<Item = &'a File> + Clone) -> Calibration {
             zenoh: zenoh_prior(zenoh.roles),
             region: region(3),
         },
-        versions: Derived {
-            zenoh: zenoh_prior(zenoh.versions),
-            region: region(4),
-        },
         sn: Prior {
             num: [g, a],
             den: SN_DEN,
@@ -461,8 +460,8 @@ fn render(c: &Calibration) -> String {
          // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael\n\n\
          //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.\n\
          //!\n\
-         //! The counts of the corpus and model 4's parameters computed from them\n\
-         //! (`docs/flow-zenoh-verdict.md` sections 6.8 and 6.9), written by\n\
+         //! The counts of the corpus and model 5's parameters computed from them\n\
+         //! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.10), written by\n\
          //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which\n\
          //! fails when this file is not what the corpus gives. Regenerate with\n\
          //! `scripts/regen-calibration.sh` and commit the result with the capture\n\
@@ -499,12 +498,11 @@ fn render(c: &Calibration) -> String {
         &alloc::format!("pub const KAPPAS: [u64; {}] = ", kappas.len()),
         ";",
     ));
-    let regions: [(&str, &str, &Region); 5] = [
+    let regions: [(&str, &str, &Region); 4] = [
         ("UNITS_CELLS", "the unit readings", &p.units.region),
         ("FRAMING_CELLS", "the stream framing", &p.framing.region),
         ("COOKIE_CELLS", "the cookie echo", &p.cookie.region),
         ("ROLES_CELLS", "the Init roles", &p.roles.region),
-        ("VERSIONS_CELLS", "the version header", &p.versions.region),
     ];
     for (name, what, region) in regions {
         let cells: Vec<i128> = region.cells.iter().map(|&k| i128::from(k)).collect();
@@ -521,12 +519,11 @@ fn render(c: &Calibration) -> String {
     }
     let _ = writeln!(
         out,
-        "\n/// Model 4's parameters.\npub const PARAMS: Params = Params {{\n    units: {},\n    framing: {},\n    cookie: {},\n    roles: {},\n    versions: {},\n    sn: {},\n    front: {},\n}};",
+        "\n/// Model 5's parameters.\npub const PARAMS: Params = Params {{\n    units: {},\n    framing: {},\n    cookie: {},\n    roles: {},\n    sn: {},\n    front: {},\n}};",
         measured_lit(&p.units, "UNITS_CELLS"),
         measured_lit(&p.framing, "FRAMING_CELLS"),
         derived_lit(&p.cookie, "COOKIE_CELLS"),
         derived_lit(&p.roles, "ROLES_CELLS"),
-        derived_lit(&p.versions, "VERSIONS_CELLS"),
         prior_lit(&p.sn, 4),
         front_lit(&p.front),
     );
@@ -552,7 +549,7 @@ fn render(c: &Calibration) -> String {
          /// The zenoh files' cookie echoes: matched, differing.\npub const ZENOH_COOKIE: [u64; 2] = {};\n\n\
          /// The zenoh files' Init pairs: of opposite kinds, of one kind.\npub const ZENOH_ROLES: [u64; 2] = {};\n\n\
          /// The zenoh files' version headers: this reader's, another.\npub const ZENOH_VERSIONS: [u64; 2] = {};\n\n\
-         /// The zenoh files' datagram fronts: of this wire, foreign.\npub const ZENOH_FRONT: [u64; 2] = {};",
+         /// The zenoh files' batch fronts, of datagrams and of stream chains: of this wire, foreign.\npub const ZENOH_FRONT: [u64; 2] = {};",
         counts_literal(&c.zenoh.units),
         counts_literal(&c.zenoh.framing),
         counts_literal(&c.zenoh.cookie),
@@ -626,12 +623,6 @@ fn doc_rows(c: &Calibration) -> Vec<String> {
             &p.roles.zenoh.num[1..],
             p.roles.zenoh.den,
             &p.roles.region,
-        ),
-        (
-            "version header",
-            &p.versions.zenoh.num[1..],
-            p.versions.zenoh.den,
-            &p.versions.region,
         ),
     ];
     for (name, failures, den, region) in regions {
@@ -736,26 +727,44 @@ fn the_generated_calibration_is_current() {
     );
 }
 
-/// THE DERIVATION OF THE WIRE'S FRONT, put to the corpus: the zenoh side of
-/// [`Check::WireFront`] is not measured, it says a zenoh datagram's front is of
-/// the wire unless the bytes were altered on the way, and a foreign front in a
-/// zenoh file would refute it. Every zenoh file is read, with its datagrams of
-/// every integrity the check weighs.
+/// THE DERIVATIONS, put to the corpus: the zenoh side of [`Check::WireFront`]
+/// and of [`Check::VersionHeader`] is not measured, it says a zenoh batch's
+/// front is of the wire and its version this reader's unless the bytes were
+/// altered on the way, and a foreign front or another version in a zenoh file
+/// would refute it. Every zenoh file is read, with its bytes of every
+/// integrity the checks weigh, and fronts of both kinds are among them:
+/// datagrams' and stream chains'.
 #[test]
-fn no_zenoh_file_shows_a_foreign_front() {
+fn no_zenoh_file_refutes_a_derived_check() {
     let files = read_corpus();
     let mut fronts = [0u64; 2];
+    let mut versions = [0u64; 2];
+    let mut by_kind = [0u64; 2];
     let mut refuting = Vec::new();
     for f in files.iter().filter(|f| f.zenoh) {
-        fronts[0] += f.counts.front[0];
-        fronts[1] += f.counts.front[1];
-        if f.counts.front[1] > 0 {
-            refuting.push(alloc::format!("{}: {:?}", f.name, f.counts.front));
+        for (i, fl) in f.flows.iter().enumerate() {
+            let c = &fl.counts;
+            fronts[0] += c.front[0];
+            fronts[1] += c.front[1];
+            versions[0] += c.versions[0];
+            versions[1] += c.versions[1];
+            by_kind[usize::from(!fl.stream)] += c.front[0];
+            if c.front[1] > 0 || c.versions[1] > 0 {
+                refuting.push(alloc::format!(
+                    "{} flow {i}: fronts {:?}, versions {:?}",
+                    f.name,
+                    c.front,
+                    c.versions
+                ));
+            }
         }
     }
     assert!(refuting.is_empty(), "{}", refuting.join("\n"));
-    assert!(fronts[0] > 0, "the zenoh files weigh datagram fronts");
+    assert!(by_kind[0] > 0, "the zenoh files weigh stream fronts");
+    assert!(by_kind[1] > 0, "the zenoh files weigh datagram fronts");
+    std::println!("fronts of the wire: {by_kind:?} (stream, datagram)");
     assert_eq!(fronts, model::measured::ZENOH_FRONT);
+    assert_eq!(versions, model::measured::ZENOH_VERSIONS);
 }
 
 /// Every flow read again from its observations, with the parameters the reader

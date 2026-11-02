@@ -3,8 +3,8 @@
 
 //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.
 //!
-//! The counts of the corpus and model 4's parameters computed from them
-//! (`docs/flow-zenoh-verdict.md` sections 6.8 and 6.9), written by
+//! The counts of the corpus and model 5's parameters computed from them
+//! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.10), written by
 //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which
 //! fails when this file is not what the corpus gives. Regenerate with
 //! `scripts/regen-calibration.sh` and commit the result with the capture
@@ -438,91 +438,7 @@ pub const ROLES_CELLS: [u64; 80] = [
     210_068_428_946_615,
 ];
 
-/// The cells of the region of the failure rate of the version header.
-pub const VERSIONS_CELLS: [u64; 80] = [
-    726_735,
-    968_054,
-    1_289_037,
-    1_715_621,
-    2_281_911,
-    3_032_539,
-    4_025_550,
-    5_335_788,
-    7_058_671,
-    9_313_985,
-    12_249_008,
-    16_039_730,
-    20_888_325,
-    27_014_459,
-    34_638_032,
-    43_952_316,
-    55_090_074,
-    68_091_069,
-    82_885_302,
-    99_307_238,
-    117_147_618,
-    136_232_576,
-    156_505_104,
-    178_083_405,
-    201_285_352,
-    226_627_071,
-    254_814_102,
-    286_742_430,
-    323_519_386,
-    366_507_791,
-    417_394_122,
-    478_282_543,
-    551_819_738,
-    641_359_552,
-    751_181_280,
-    886_781_534,
-    1_055_267_356,
-    1_265_888_024,
-    1_530_755_638,
-    1_865_821_830,
-    2_292_202_724,
-    2_837_979_499,
-    3_540_647_755,
-    4_450_442_198,
-    5_634_820_370,
-    7_184_454_205,
-    9_221_168_808,
-    11_908_412_643,
-    15_465_068_811,
-    20_183_736_837,
-    26_455_033_050,
-    34_799_988_061,
-    45_913_298_518,
-    60_721_081_275,
-    80_457_967_949,
-    106_769_975_174,
-    141_851_726_684,
-    188_629_465_557,
-    251_005_114_630,
-    334_181_736_621,
-    445_097_539_081,
-    593_004_621_172,
-    790_240_738_785,
-    1_053_258_464_336,
-    1_403_997_588_438,
-    1_871_715_237_926,
-    2_495_426_384_603,
-    3_327_158_285_293,
-    4_436_290_411_350,
-    5_915_341_660_897,
-    7_887_688_165_980,
-    10_517_854_258_637,
-    14_025_237_321_235,
-    18_702_407_360_286,
-    24_939_514_505_051,
-    33_256_829_337_881,
-    44_348_149_484_774,
-    59_138_658_256_882,
-    78_862_119_563_601,
-    105_163_778_295_622,
-];
-
-/// Model 4's parameters.
+/// Model 5's parameters.
 pub const PARAMS: Params = Params {
     units: Measured {
         zenoh: Prior {
@@ -536,14 +452,14 @@ pub const PARAMS: Params = Params {
             top: 260_002,
         },
         log2_null_bound: [
-            -6_130_493_637_990_960_128,
+            -6_735_655_353_502_101_504,
             16_777_216,
-            -2_818_774_441_678_764_544,
+            -2_724_252_758_297_012_736,
         ],
         log2_null_mean: [
-            -49_299_475_123_159_515_136,
-            -13_617_169_904_051_277_824,
-            -37_577_438_385_722_433_536,
+            -58_435_973_103_104_688_128,
+            -18_821_106_475_409_842_176,
+            -24_672_175_692_875_108_352,
         ],
     },
     framing: Measured {
@@ -557,8 +473,8 @@ pub const PARAMS: Params = Params {
             cells: &FRAMING_CELLS,
             top: 21_975_519,
         },
-        log2_null_bound: [-52_494_253_256_703_483_904, 16_777_216],
-        log2_null_mean: [-119_180_471_507_999_080_448, -303_865_081_195_783_616],
+        log2_null_bound: [-74_651_017_169_384_521_728, 16_777_216],
+        log2_null_mean: [-128_352_659_058_872_614_912, -214_919_839_194_408_800],
     },
     cookie: Derived {
         zenoh: Prior {
@@ -584,18 +500,6 @@ pub const PARAMS: Params = Params {
             top: 21_006_800,
         },
     },
-    versions: Derived {
-        zenoh: Prior {
-            num: [999_591_169, 408_831],
-            den: 1_000_000_000,
-        },
-        region: Region {
-            groups_bound: 546_772_667,
-            kappas: &KAPPAS,
-            cells: &VERSIONS_CELLS,
-            top: 10_516_337,
-        },
-    },
     sn: Prior {
         num: [19_911, 89],
         den: 10_000,
@@ -603,7 +507,7 @@ pub const PARAMS: Params = Params {
     front: Front {
         log2_null_bound: [16_777_216, 16_777_216],
         null: Prior {
-            num: [546_373_292, 453_626_708],
+            num: [531_932_237, 468_067_763],
             den: 1_000_000_000,
         },
     },
@@ -613,15 +517,15 @@ pub const PARAMS: Params = Params {
 pub const NULL: [Member; 18] = [
     Member {
         file: "lan-dns.pcap",
-        units: [26, 32, 22],
+        units: [26, 32, 116],
         framing: [0, 0],
-        front: [80, 298],
+        front: [174, 204],
     },
     Member {
         file: "lan-mdns.pcap",
-        units: [13, 8, 0],
+        units: [13, 8, 15],
         framing: [0, 0],
-        front: [21, 15],
+        front: [36, 0],
     },
     Member {
         file: "lan-ssdp.pcap",
@@ -633,7 +537,7 @@ pub const NULL: [Member; 18] = [
         file: "stack-mqtt.pcap",
         units: [6, 28, 7],
         framing: [0, 84],
-        front: [25, 0],
+        front: [109, 0],
     },
     Member {
         file: "stack-rtps.pcap",
@@ -649,9 +553,9 @@ pub const NULL: [Member; 18] = [
     },
     Member {
         file: "stack-someip.pcap",
-        units: [0, 28, 0],
+        units: [0, 28, 57],
         framing: [0, 0],
-        front: [28, 278],
+        front: [87, 221],
     },
     Member {
         file: "stack-quic.pcap",
@@ -673,9 +577,9 @@ pub const NULL: [Member; 18] = [
     },
     Member {
         file: "busylan-wsd.pcap",
-        units: [5, 12, 14],
+        units: [5, 12, 97],
         framing: [0, 0],
-        front: [22, 141],
+        front: [105, 58],
     },
     Member {
         file: "stack-http.pcap",
@@ -692,32 +596,32 @@ pub const NULL: [Member; 18] = [
     Member {
         file: "stack-http-post.pcap",
         units: [0, 0, 0],
-        framing: [0, 50],
-        front: [0, 0],
+        framing: [0, 0],
+        front: [6, 50],
     },
     Member {
         file: "stack-redis.pcap",
         units: [0, 0, 0],
-        framing: [0, 120],
-        front: [0, 0],
+        framing: [0, 0],
+        front: [0, 120],
     },
     Member {
         file: "stack-postgres.pcap",
         units: [0, 531, 0],
         framing: [0, 48],
-        front: [0, 0],
+        front: [24, 0],
     },
     Member {
         file: "stack-ssh.pcap",
         units: [33, 20, 40],
-        framing: [0, 34],
-        front: [0, 0],
+        framing: [0, 0],
+        front: [0, 34],
     },
     Member {
         file: "stack-smtp.pcap",
         units: [0, 0, 0],
-        framing: [0, 20],
-        front: [0, 0],
+        framing: [0, 0],
+        front: [0, 20],
     },
 ];
 
@@ -736,5 +640,5 @@ pub const ZENOH_ROLES: [u64; 2] = [611, 0];
 /// The zenoh files' version headers: this reader's, another.
 pub const ZENOH_VERSIONS: [u64; 2] = [1_222, 0];
 
-/// The zenoh files' datagram fronts: of this wire, foreign.
-pub const ZENOH_FRONT: [u64; 2] = [27_067, 0];
+/// The zenoh files' batch fronts, of datagrams and of stream chains: of this wire, foreign.
+pub const ZENOH_FRONT: [u64; 2] = [49_326, 0];

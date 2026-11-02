@@ -458,10 +458,13 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // whose units fail is evidence against zenoh only as far as a new group of
     // zenoh captures could fail them, a few bits. Under model 4 (§6.9) 187 do,
     // each on datagrams whose first byte no zenoh sender writes there; the
-    // protocols whose first byte is an id of the wire stay `undecided`. No flow
-    // reads `yes` under any.
-    ("lan-dns.pcap", (0, 148, 39), (0, 148, 39)),
-    ("lan-mdns.pcap", (0, 15, 4), (0, 15, 4)),
+    // protocols whose first byte is an id of the wire stay `undecided`. Under
+    // model 5 (§6.10) 234 do: the network ids are of the wire too, so fewer
+    // datagram flows cross, and a TCP stream held from its SYN is weighed at
+    // the first byte past each length prefix, so streams cross as well. No
+    // flow reads `yes` under any.
+    ("lan-dns.pcap", (0, 102, 85), (0, 102, 85)),
+    ("lan-mdns.pcap", (0, 0, 19), (0, 0, 19)),
     ("lan-ssdp.pcap", (0, 2, 0), (0, 2, 0)),
     // The real implementations of three protocols that run beside zenoh, in
     // containers (2026-10-26). The forty MQTT connections that publish once and
@@ -472,7 +475,7 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("stack-coap.pcap", (0, 0, 25), (0, 0, 25)),
     // Upstream vsomeip between two containers: service discovery, a method
     // over UDP and TCP, and a field's notifications.
-    ("stack-someip.pcap", (0, 4, 3), (0, 4, 3)),
+    ("stack-someip.pcap", (0, 1, 6), (0, 1, 6)),
     // HTTP/3 on aioquic, QUIC versions 1 and 2. Every one of the 23 QUIC
     // connections is `undecided`, as it should be: zenoh runs over QUIC too,
     // and a protected flow carries nothing that tells the two apart. The other
@@ -483,7 +486,7 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // WS-Discovery between a file server and four askers.
     ("busylan-dhcp.pcap", (0, 0, 23), (0, 0, 23)),
     ("busylan-ntp.pcap", (0, 0, 94), (0, 0, 94)),
-    ("busylan-wsd.pcap", (0, 8, 0), (0, 8, 0)),
+    ("busylan-wsd.pcap", (0, 4, 4), (0, 4, 4)),
     // Structured TCP, the first stream protocols besides MQTT (2026-10-27):
     // HTTP/1.1, plain and over TLS 1.2 and 1.3, 34 connections each. The
     // reader frames no unit of them and loses no framing (neither is weighed),
@@ -491,14 +494,19 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // add no count to the weights.
     ("stack-http.pcap", (0, 0, 34), (0, 0, 34)),
     ("stack-tls.pcap", (0, 0, 34), (0, 0, 34)),
-    ("stack-http-post.pcap", (0, 0, 28), (0, 0, 28)),
+    // Under model 5 every POST flow reads `no`: the byte past what the reader
+    // takes for a length prefix is one no zenoh sender writes there.
+    ("stack-http-post.pcap", (0, 28, 0), (0, 28, 0)),
     // Stream protocols of databases (2026-10-28): neither opens with GET,
     // HTTP or a TLS ClientHello, so the stream reader takes their first two
-    // bytes for a length prefix. No flow reads `yes`.
-    ("stack-redis.pcap", (0, 0, 60), (0, 0, 60)),
+    // bytes for a length prefix. No flow reads `yes`. Under model 5 the byte
+    // past that prefix is foreign in every Redis, SSH and SMTP flow, which
+    // read `no`; PostgreSQL's is an id of the wire, and its flows stay
+    // `undecided`.
+    ("stack-redis.pcap", (0, 60, 0), (0, 60, 0)),
     ("stack-postgres.pcap", (0, 0, 24), (0, 0, 24)),
-    ("stack-ssh.pcap", (0, 0, 17), (0, 0, 17)),
-    ("stack-smtp.pcap", (0, 0, 10), (0, 0, 10)),
+    ("stack-ssh.pcap", (0, 17, 0), (0, 17, 0)),
+    ("stack-smtp.pcap", (0, 10, 0), (0, 10, 0)),
 ];
 
 #[test]
