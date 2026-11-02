@@ -305120,6 +305120,40 @@
         "L6 T4, the rest: the two real zenoh-pico TLS programs (z_pub_tls, z_sub_tls) against the cooperative engine in Layer E, built for it with tls-mbedtls, where the negotiated TLS version (whether the channel needs 1.2), the key and signature types of the real certificates and pico's time source are read. Then T5, zenohd in Layer Z, in both roles. Open: hostname locators for the name check; the arena (4 MiB, reserved and untouched until used) is not measured against a count of sessions; the identity cache keeps the PEM of each chain and key it made, as the config does; whether the engine port should expose the pinned zid binding. CapiTlsConfig derives Debug and so prints the private-key PEM it holds (it did before it moved); a redacting Debug is its own change. The hosted results of the pushes since round 4012 are unread."
       ]
     },
+    "Round 4097": {
+      "decision_summary": "The rule of model 3, decided by this session on the owner's delegation (2026-11-02: the long-term, textbook structure, whatever it costs). D1: each sum is an e-process against the hypothesis it rejects; that hypothesis's unknown rates are taken at their likeliest over its 95% corpus region (universal inference), the other side's are mixed over a prior. A zenoh failure rate is per group, its concentration the worst case; an SN break rate is the link's and unrestricted. D2: acceptance levels 10/5/1% confirmed. D3: model 3 is the whole rule in one step; integer terms round toward the rejected hypothesis. D4: the verdict latches at the first crossing, with the zenoh-analyzer session. D5: freeze by a ledger entry before a validation corpus. D6: a no comes from recognising a null protocol (model 4). Measured, nothing shipped: zenoh words unchanged (619/0/2); null no 345 to 0. MODEL stays 2.",
+      "changes_bullets": [
+        "`docs/flow-zenoh-verdict.md` 6.7 (new): decisions D1 to D6 with their reasons, and the corpus read by the rule (a table of words, model 2 against the rule).",
+        "`crates/wz-capture/src/zenoh_hierarchy_tests.rs`: the region of a zenoh failure rate per check (a Beta-binomial Clopper-Pearson bound at each concentration), its worst case, the units and SN steps under the rule, and two tests that read the corpus by it.",
+        "`crates/wz-capture/src/zenoh_calibration_tests.rs`: the counts of framing, cookie, roles and versions readable in the crate."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1633 pass with lz4 (two new tests), clippy clean with and without lz4. The region test holds both ends of each check's region to the bounds already stated (0.1265 against 0.1273 for 22 groups, 6.05e-5 against the 49505-unit bound). The corpus report printed its tallies: zenoh 619 yes, 0 no, 2 undecided as model 2; null 0 yes, 0 no, 653 undecided against 0, 345, 308. Static gate array: 123 of 123 pass, failed=0 (the runner exits with its verdict), and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open, in order: (1) the zenoh-analyzer session, through the owner: model 3 turns every null no into undecided, the verdict latches at the first crossing with its moment, and a model number field. (2) Model 3 in the reader: the region and the priors as generated parameters, the units and SN steps by the rule in integers rounded toward the rejected side, the other checks' zenoh side per group, the pinned examples and MODEL 3; then the freezing entry. (3) The validation corpus of section 6.4, read once. (4) Model 4: a likelihood per null protocol in the no sum. The checks are taken as independent within a group in the measurement; a joint group model would lower the no sum further."
+      ],
+      "publishable_decision_summary": "The rule of model 3, decided by this session on the owner's delegation (2026-11-02: the long-term, textbook structure, whatever it costs). D1: each sum is an e-process against the hypothesis it rejects; that hypothesis's unknown rates are taken at their likeliest over its 95% corpus region (universal inference), the other side's are mixed over a prior. A zenoh failure rate is per group, its concentration the worst case; an SN break rate is the link's and unrestricted. D2: acceptance levels 10/5/1% confirmed. D3: model 3 is the whole rule in one step; integer terms round toward the rejected hypothesis. D4: the verdict latches at the first crossing, with the zenoh-analyzer session. D5: freeze by a ledger entry before a validation corpus. D6: a no comes from recognising a null protocol (model 4). Measured, nothing shipped: zenoh words unchanged (619/0/2); null no 345 to 0. MODEL stays 2.",
+      "publishable_changes_bullets": [
+        "`docs/flow-zenoh-verdict.md` 6.7 (new): decisions D1 to D6 with their reasons, and the corpus read by the rule (a table of words, model 2 against the rule).",
+        "`crates/wz-capture/src/zenoh_hierarchy_tests.rs`: the region of a zenoh failure rate per check (a Beta-binomial Clopper-Pearson bound at each concentration), its worst case, the units and SN steps under the rule, and two tests that read the corpus by it.",
+        "`crates/wz-capture/src/zenoh_calibration_tests.rs`: the counts of framing, cookie, roles and versions readable in the crate."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1633 pass with lz4 (two new tests), clippy clean with and without lz4. The region test holds both ends of each check's region to the bounds already stated (0.1265 against 0.1273 for 22 groups, 6.05e-5 against the 49505-unit bound). The corpus report printed its tallies: zenoh 619 yes, 0 no, 2 undecided as model 2; null 0 yes, 0 no, 653 undecided against 0, 345, 308. Static gate array: 123 of 123 pass, failed=0 (the runner exits with its verdict), and the citation form gate OK. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open, in order: (1) the zenoh-analyzer session, through the owner: model 3 turns every null no into undecided, the verdict latches at the first crossing with its moment, and a model number field. (2) Model 3 in the reader: the region and the priors as generated parameters, the units and SN steps by the rule in integers rounded toward the rejected side, the other checks' zenoh side per group, the pinned examples and MODEL 3; then the freezing entry. (3) The validation corpus of section 6.4, read once. (4) Model 4: a likelihood per null protocol in the no sum. The checks are taken as independent within a group in the measurement; a joint group model would lower the no sum further."
+      ]
+    },
     "Round 41": {
       "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
       "changes_bullets": [
