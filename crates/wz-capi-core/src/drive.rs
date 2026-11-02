@@ -188,6 +188,27 @@ impl Dialer {
     /// is what `peers_connector_retry` re-attempts. A peer that is up but not
     /// yet serving therefore retries like one that is down.
     async fn open(&self, endpoint: &str) -> Result<OpenedSession, OpenError> {
+        self.open_endpoint(endpoint)
+            .await
+            .map_err(DialFailure::into_open_error)
+    }
+
+    /// [`Self::open`] for the first walk of a node's connect endpoints, which a link the node
+    /// refused does not fail: the node holds, or prefers, another link to the one it dialled
+    /// ([`wz_session_core::link_admission::LinkAdmission`]), so what the connect was for, being
+    /// linked to that node, is true without a session of this dial. `None` is that answer. A
+    /// dial that the walk repeats, or the re-dial of a lost link, still reads it as a dial that
+    /// did not open, which is retried on its schedule and refused again while the other link
+    /// stands.
+    async fn open_or_held(&self, endpoint: &str) -> Result<Option<OpenedSession>, OpenError> {
+        match self.open_endpoint(endpoint).await {
+            Ok(session) => Ok(Some(session)),
+            Err(DialFailure::Held) => Ok(None),
+            Err(DialFailure::Failed(why)) => Err(why),
+        }
+    }
+
+    async fn open_endpoint(&self, endpoint: &str) -> Result<OpenedSession, DialFailure> {
         let dial_cfg = self
             .dial_cfgs
             .iter()
@@ -213,19 +234,21 @@ impl Dialer {
         let expected = wz_session_core::credential_identity::zid_from_wire(expected)
             .ok_or(OpenError::LinkFailed)?;
         let dial_cfg = dial_config(&self.tls, locator).map_err(|_| OpenError::LinkFailed)?;
-        self.open_with(locator, &dial_cfg, Some(expected)).await
+        self.open_with(locator, &dial_cfg, Some(expected))
+            .await
+            .map_err(DialFailure::into_open_error)
     }
 
     /// Dial `endpoint` and open a session over the link: a link that cannot be dialled is
     /// named as [`OpenError::of_endpoint`] names it, a link another node answers than the one
     /// `expected` names is [`OpenError::LinkFailed`], and a handshake that does not complete is
-    /// [`OpenError::DriveFailed`].
+    /// [`OpenError::DriveFailed`]; a link the node refused in its handshake is [`DialFailure::Held`].
     async fn open_with(
         &self,
         endpoint: &str,
         dial_cfg: &DialConfig,
         expected: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
-    ) -> Result<OpenedSession, OpenError> {
+    ) -> Result<OpenedSession, DialFailure> {
         // The endpoint's own QoS band rides the node's offer, as upstream's
         // opener reads it off the endpoint it dials.
         let offer = offer_for_connect(self.offer, endpoint).map_err(|_| OpenError::LinkFailed)?;
@@ -269,9 +292,36 @@ impl Dialer {
         )
         .await
         .map_err(|e| match e {
-            wz_runtime_tokio::session_open::OpenError::InitAckPeerMismatch => OpenError::LinkFailed,
-            _ => OpenError::DriveFailed,
+            wz_runtime_tokio::session_open::OpenError::InitAckPeerMismatch => {
+                DialFailure::Failed(OpenError::LinkFailed)
+            }
+            wz_runtime_tokio::session_open::OpenError::LinkRefused => DialFailure::Held,
+            _ => DialFailure::Failed(OpenError::DriveFailed),
         })
+    }
+}
+
+/// Why a dial gave no session: it failed, or the node refused the link in its handshake because
+/// it holds or prefers another to the node it dialled.
+enum DialFailure {
+    Failed(OpenError),
+    Held,
+}
+
+impl From<OpenError> for DialFailure {
+    fn from(why: OpenError) -> Self {
+        Self::Failed(why)
+    }
+}
+
+impl DialFailure {
+    /// A link the node refused is a dial that did not open, to a caller that does not tell it
+    /// apart.
+    fn into_open_error(self) -> OpenError {
+        match self {
+            Self::Failed(why) => why,
+            Self::Held => OpenError::DriveFailed,
+        }
     }
 }
 
@@ -2147,18 +2197,22 @@ async fn drive_peer(
                 };
                 match arm {
                     PhaseArm::OnceThenFail | PhaseArm::OnceThenSkip => {
-                        match within(deadline, dialer.open(endpoint)).await {
+                        match within(deadline, dialer.open_or_held(endpoint)).await {
                             // The walk's budget ran out: upstream's outer
                             // timeout fails the whole connect.
                             None => {
                                 failed = true;
                                 break;
                             }
-                            Some(Ok(session)) => {
+                            Some(Ok(Some(session))) => {
                                 let (owed, registered) = FaceOwed::awaited_by_the_walk();
                                 registered_faces.push(registered);
                                 faces.push(spawn_leg(&gate, leg.run(Some(session), None, owed)))
                             }
+                            // The node refused the link: it holds, or prefers, another to the
+                            // node this endpoint reached, so the connect is met by that link,
+                            // which is a face of its own when its handshake ends.
+                            Some(Ok(None)) => {}
                             Some(Err(why)) if arm.ends_startup() => {
                                 cause = why;
                                 failed = true;
@@ -2174,14 +2228,16 @@ async fn drive_peer(
                                 ..policy
                             },
                             schedule,
-                            |_| dialer.open(endpoint),
+                            |_| dialer.open_or_held(endpoint),
                         );
                         match within(deadline, retried).await {
-                            Some(Ok(session)) => {
+                            Some(Ok(Some(session))) => {
                                 let (owed, registered) = FaceOwed::awaited_by_the_walk();
                                 registered_faces.push(registered);
                                 faces.push(spawn_leg(&gate, leg.run(Some(session), None, owed)))
                             }
+                            // A link the node refused is met by the one it holds (see above).
+                            Some(Ok(None)) => {}
                             // Unbounded, so only the walk's budget ends it.
                             _ => {
                                 failed = true;
@@ -4884,6 +4940,112 @@ mod tests {
             next.first().map(|h| h & 0x1f),
             Some(T_MID_OPEN),
             "the frame after the InitAck is the OpenSyn: {next:02x?}"
+        );
+    }
+
+    /// An admission that refuses every link at the zid, as a node does that holds, or prefers,
+    /// another link to the node on the other end.
+    struct RefusesEveryLink;
+
+    impl wz_session_core::link_admission::LinkAdmission for RefusesEveryLink {
+        fn open(&self, _dialled: bool) -> u64 {
+            1
+        }
+        fn reserve(&self, _token: u64, _remote_zid: &[u8]) -> bool {
+            false
+        }
+        fn confirm(&self, _token: u64) -> bool {
+            true
+        }
+        fn release(&self, _token: u64) {}
+    }
+
+    /// A link the node refuses in its handshake is the node being linked to the one it dialled
+    /// by another link, so the first walk of its connect endpoints reads it as that and not as a
+    /// connect that failed (a restarted peer that dials a node whose old dialler dials it back at
+    /// the same moment); the peer is told `MAX_LINKS` and no OpenSyn is sent.
+    #[test]
+    fn a_link_the_node_refuses_is_not_a_connect_that_failed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use wz_codecs::wire_const::T_MID_CLOSE;
+        use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let (held, next) = rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let endpoint = format!("tcp/{}", listener.local_addr().expect("local_addr"));
+            let far_end = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut len = [0u8; 2];
+                stream.read_exact(&mut len).await.expect("read prefix");
+                let mut body = vec![0u8; u16::from_le_bytes(len) as usize];
+                stream.read_exact(&mut body).await.expect("read InitSyn");
+                let init_ack = craft_initack_wire_with_caps(&[0xC0, 0x01], 2 | (2 << 2), 1024);
+                let mut wire = (init_ack.len() as u16).to_le_bytes().to_vec();
+                wire.extend_from_slice(&init_ack);
+                stream.write_all(&wire).await.expect("write InitAck");
+                stream.read_exact(&mut len).await.expect("read next prefix");
+                let mut next = vec![0u8; u16::from_le_bytes(len) as usize];
+                stream.read_exact(&mut next).await.expect("read next frame");
+                next
+            });
+            let dial_cfg = dial_config(&CapiTlsConfig::default(), &endpoint).expect("dial config");
+            let dialer = Dialer {
+                dial_cfgs: vec![(endpoint.clone(), dial_cfg)],
+                params: init_params(
+                    WhatAmI::Peer,
+                    vec![0xC1; 4],
+                    LinkConf {
+                        tx: LinkTx {
+                            queue: TxQueueConf::default(),
+                            batch_size: 1024,
+                            lease_ms: DEFAULT_LEASE_MS,
+                            keep_alive: KeepAliveConf::default(),
+                            sn_resolution: SnResolution::default(),
+                        },
+                        rx: LinkRxConf::default(),
+                        accept: AcceptBounds::default(),
+                    },
+                )
+                .expect("entropy"),
+                offer: SessionOffer::universal(),
+                clock: TokioTime::new(),
+                tls: CapiTlsConfig::default(),
+                auth: None,
+                #[cfg(feature = "routing-namespace")]
+                namespace: None,
+                admission: Some(Arc::new(RefusesEveryLink)),
+            };
+            let held = dialer
+                .open_or_held(&endpoint)
+                .await
+                .map(|opened| opened.is_some());
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), far_end)
+                .await
+                .expect("the dialler sent a frame after the InitAck")
+                .expect("the far end ran");
+            (held, next)
+        });
+        assert_eq!(
+            held,
+            Ok(false),
+            "a refused link is held by another, not failed"
+        );
+        assert_eq!(
+            next.first().map(|h| h & 0x1f),
+            Some(T_MID_CLOSE),
+            "the frame after the InitAck is a Close, not an OpenSyn: {next:02x?}"
+        );
+        assert_eq!(
+            next.get(1).copied(),
+            Some(wz_session_core::close_reason::CloseReason::MaxLinks as u8),
+            "and it carries MAX_LINKS: {next:02x?}"
         );
     }
 
