@@ -4963,6 +4963,93 @@ mod tests {
         fn release(&self, _token: u64) {}
     }
 
+    /// The same answer for a link the OTHER end refused: the node it dialled holds, or prefers,
+    /// another link to it and closes this one with `MAX_LINKS` where the OpenAck should come
+    /// (the accepting side of the same two links that cross).
+    #[test]
+    fn a_link_the_peer_refuses_with_max_links_is_not_a_connect_that_failed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let held = rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let endpoint = format!("tcp/{}", listener.local_addr().expect("local_addr"));
+            let far_end = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut len = [0u8; 2];
+                stream.read_exact(&mut len).await.expect("read prefix");
+                let mut body = vec![0u8; u16::from_le_bytes(len) as usize];
+                stream.read_exact(&mut body).await.expect("read InitSyn");
+                let init_ack = craft_initack_wire_with_caps(&[0xC0, 0x01], 2 | (2 << 2), 1024);
+                let mut wire = (init_ack.len() as u16).to_le_bytes().to_vec();
+                wire.extend_from_slice(&init_ack);
+                stream.write_all(&wire).await.expect("write InitAck");
+                stream
+                    .read_exact(&mut len)
+                    .await
+                    .expect("read OpenSyn prefix");
+                let mut open_syn = vec![0u8; u16::from_le_bytes(len) as usize];
+                stream
+                    .read_exact(&mut open_syn)
+                    .await
+                    .expect("read OpenSyn");
+                // A Close of the link, reason MAX_LINKS, where the OpenAck should be.
+                let close = [
+                    wz_codecs::wire_const::T_MID_CLOSE,
+                    wz_session_core::close_reason::CloseReason::MaxLinks as u8,
+                ];
+                let mut wire = (close.len() as u16).to_le_bytes().to_vec();
+                wire.extend_from_slice(&close);
+                stream.write_all(&wire).await.expect("write Close");
+            });
+            let dial_cfg = dial_config(&CapiTlsConfig::default(), &endpoint).expect("dial config");
+            let dialer = Dialer {
+                dial_cfgs: vec![(endpoint.clone(), dial_cfg)],
+                params: init_params(
+                    WhatAmI::Peer,
+                    vec![0xC1; 4],
+                    LinkConf {
+                        tx: LinkTx {
+                            queue: TxQueueConf::default(),
+                            batch_size: 1024,
+                            lease_ms: DEFAULT_LEASE_MS,
+                            keep_alive: KeepAliveConf::default(),
+                            sn_resolution: SnResolution::default(),
+                        },
+                        rx: LinkRxConf::default(),
+                        accept: AcceptBounds::default(),
+                    },
+                )
+                .expect("entropy"),
+                offer: SessionOffer::universal(),
+                clock: TokioTime::new(),
+                tls: CapiTlsConfig::default(),
+                auth: None,
+                #[cfg(feature = "routing-namespace")]
+                namespace: None,
+                admission: None,
+            };
+            let held = dialer
+                .open_or_held(&endpoint)
+                .await
+                .map(|opened| opened.is_some());
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), far_end).await;
+            held
+        });
+        assert_eq!(
+            held,
+            Ok(false),
+            "a link the peer closed with MAX_LINKS is held by another, not failed"
+        );
+    }
+
     /// A link the node refuses in its handshake is the node being linked to the one it dialled
     /// by another link, so the first walk of its connect endpoints reads it as that and not as a
     /// connect that failed (a restarted peer that dials a node whose old dialler dials it back at

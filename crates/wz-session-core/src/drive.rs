@@ -1154,6 +1154,22 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         }
                     }
                 }
+                // The peer refused the link in its handshake with `MaxLinks`: it holds, or prefers,
+                // another link to this node (`io/zenoh-transport/src/unicast/establishment/open.rs`
+                // and `accept.rs` log it at debug and go on, as it is not a fault of either end).
+                // The FSM takes the Close, and the open reports what it reports for a link its own
+                // node refused, [`DriverLoopOutcome::LinkRefused`], so that a connect whose link
+                // the other end refused is told apart from one that failed.
+                #[cfg(all(feature = "alloc", feature = "codec-close"))]
+                if matches!(
+                    &frame,
+                    InboundFrame::Close { reason, .. }
+                        if *reason == crate::close_reason::CloseReason::MaxLinks as u8
+                ) && !actions.is_established()
+                {
+                    engine.process_event(event);
+                    return DriverLoopOutcome::LinkRefused;
+                }
                 *admitted = Some(event);
                 DriverLoopOutcome::AdvancedFsm
             }
