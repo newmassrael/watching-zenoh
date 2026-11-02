@@ -1043,7 +1043,13 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     `interest_form` in `write_filter.rs`), and the publisher here declares before the router has
     dialed. So the arrangement is not a defect of wz's channel or of the drop-in's parity, it is
     the upstream pico's limit; no test pins it, because a test of "nothing is delivered" would hold
-    wz to pico where wz may do better.
+    wz to pico where wz may do better. And wz may: the same arrangement with wz's own session API
+    (`wz_zenoh`, a peer that listens and declares a publisher, zenohd dialing it after, an
+    upstream client subscribed behind the router, the publisher putting every 250 ms for 12 s)
+    delivered 47 samples to the client, as the upstream crate's peer did in the same run (47). The
+    measurement ran from a scratch test in `conformance/differential` and was not kept: that
+    lane's block in `scripts/run-ci.sh` (Layer E18) states no zenohd prerequisite and declines
+    nothing for want of one, so pinning it needs a lane that checks for the router first.
   - Whether TLS 1.3 alone suffices, measured. A client that offers 1.2 only (OpenSSL 3.0
     `s_client -tls1_2`) is refused with the `protocol_version` alert (70) and the listener sees
     nothing to accept. Against upstream's examples as built here (Mbed TLS 3.6.4 with 1.2 and 1.3
