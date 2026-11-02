@@ -1286,6 +1286,15 @@ the pinned OpenMetrics text describes a build without transport-stats' four coun
     # open-debt item 544, and this row is what must be deleted when 544 closes.
     "wz-runtime-tokio|unixpipe_pipeline::tests::two_dialers_get_distinct_dedicated_pairs|\
 an intermittent HANG in the two-dialer FIFO rendezvous (measured 1-in-3 alone, 719s in-suite); open-debt item 544"
+    # The `tls/` link of the COOPERATIVE engine through the pico ABI (`tests/tls_coop_roundtrip.rs`,
+    # `tls-mbedtls`). They are about the engine the build selects, and a build that has the tokio
+    # engine on selects that one, which is every build this table can spell (it has no
+    # `--no-default-features`). The cooperative engine runs them in `run-ci.sh`, the lane
+    # `C1co tls engine-coop`, with 2 passed guarded.
+    "wz-capi-pico|a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_put_each_way|\
+the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
+    "wz-capi-pico|a_dial_that_trusts_another_certificate_does_not_open|\
+the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then

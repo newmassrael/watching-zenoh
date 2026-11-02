@@ -395,11 +395,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     ),
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
-        "selects as its engine, with no path a C program names; its one feature that gates a "
-        "public items, `scout` and `listen`, are the blocking scouting window and the listening "
-        "role's `CoopEngine::listening`, and both are run by this crate's own tests over "
-        "loopback sockets",
-        frozenset({"scout", "listen"}),
+        "selects as its engine, with no path a C program names; its features that gate a "
+        "public items, `scout`, `listen` and `tls-mbedtls`, are the blocking scouting window, "
+        "the listening role's `CoopEngine::listening` and the host's `tls/` link "
+        "(`tls::HostTls`), and all three are run by this crate's own tests over loopback "
+        "sockets (`tests/tls_provider.rs` for the last, and again through the pico ABI's "
+        "`tls_coop_roundtrip`)",
+        frozenset({"scout", "listen", "tls-mbedtls"}),
     ),
     "wz-capi-port": (
         "the port between a wz C ABI and its engine: a workspace-internal rlib with no path a C "
