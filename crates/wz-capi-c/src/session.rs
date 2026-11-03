@@ -465,7 +465,7 @@ pub unsafe extern "C" fn z_session_loan_mut(
 }
 
 /// Drop an owned session (zenoh-c `z_session_drop`): closes if not already, then
-/// frees the [`SessionHandle`].
+/// frees the `SessionHandle` (a crate-private type, so not a link in this public documentation).
 ///
 /// # Safety
 /// `this_` must be null or a valid moved session whose handle is live.

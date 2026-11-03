@@ -723,8 +723,8 @@ impl OpenPlan {
     ///
     /// The preset places a remote by its role alone, which every open does. Subregions are a
     /// partition only a node holds (`gateway/south`, [`Self::gateway_south`]): a router is always
-    /// one, a peer or a client is one where [`Self::peer_fits_node`] or [`Self::client_fits_node`]
-    /// say so, and a build without `router-node` has none. The one place that decides this, for
+    /// one, a peer or a client is one where `peer_fits_node` or `client_fits_node` (both of a
+    /// `router-node` build, so not links here) say so, and a build without `router-node` has none. The one place that decides this, for
     /// every surface that opens a plan.
     pub fn carries_south(&self, role: WhatAmI, can_run_a_node: bool) -> bool {
         if !matches!(self.gateway_south, SouthPartition::Custom(_)) {
