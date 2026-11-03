@@ -6,6 +6,10 @@
 //! session takes four, so about 255 sessions fill the store. This binary starts an arena far
 //! larger than that many sessions need, so the store runs out first: the arena's own peak stays
 //! a fraction of it, which tells the two exhaustions apart (`arena_exhaustion.rs` is the other).
+//!
+//! It drives the channel's C side, which only `vendored` builds, as the other tests here that do.
+
+#![cfg(feature = "vendored")]
 
 #[path = "common/mod.rs"]
 mod common;
