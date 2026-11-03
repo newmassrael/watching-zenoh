@@ -5,6 +5,10 @@
 //! The arena of this binary is the shared 256 KiB of the other tests, so held sessions run it
 //! out; the listener counts each connection it took and ended (`TlsListener::dropped`) and keeps
 //! the code of the latest (`TlsListener::last_drop`).
+//!
+//! It drives the channel's C side, which only `vendored` builds, as the other tests here that do.
+
+#![cfg(feature = "vendored")]
 
 #[path = "common/mod.rs"]
 mod common;
