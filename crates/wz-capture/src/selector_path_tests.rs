@@ -7,6 +7,7 @@
 
 use alloc::string::ToString;
 
+use crate::field_path::RecordTree;
 use crate::filter::{Content, Filter, FilterErrorKind, RecordKind, RecordView, Selection, Truth};
 use wz_session_core::dissect::{dissect_network_message, Field};
 use wz_session_core::passive::Direction;
@@ -26,7 +27,7 @@ fn tree(bytes: &[u8]) -> Field {
 }
 
 /// A put on `demo/a` with the tree given, every other axis at its default.
-fn record(tree: Option<&Field>) -> RecordView<'_> {
+fn record(tree: Option<&RecordTree>) -> RecordView<'_> {
     RecordView {
         direction: Direction::A,
         keyexpr: Some("demo/a"),
@@ -46,7 +47,7 @@ fn record(tree: Option<&Field>) -> RecordView<'_> {
 
 fn judge(selector: &str, bytes: &[u8]) -> Truth {
     let filter = Filter::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
-    let t = tree(bytes);
+    let t = RecordTree::message(tree(bytes));
     filter.matches(&record(Some(&t)))
 }
 
@@ -293,4 +294,193 @@ fn the_payload_plane_judges_a_path_over_each_records_own_bytes() {
         (selection.matched, selection.rejected, selection.undecided),
         (1, 1, 0)
     );
+}
+
+/// A capture of `frames`, each `(sn, records)` one `Frame` of that `sn` carrying
+/// the records back to back, one UDP datagram per frame.
+#[cfg(feature = "network-codecs")]
+fn frames_of(frames: &[(u8, alloc::vec::Vec<alloc::vec::Vec<u8>>)]) -> crate::Dissection {
+    let mut d = crate::Dissection::new();
+    for (i, (sn, records)) in frames.iter().enumerate() {
+        let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, *sn];
+        for record in records {
+            wire.extend_from_slice(record);
+        }
+        let packet =
+            crate::datagram_tests::udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
+        d.push_packet_at(crate::link::LINKTYPE_ETHERNET, i, Some(i as u64), &packet);
+    }
+    d
+}
+
+/// ZA-side report: `Frame.sn == <v>` kept no row, because a record's tree was
+/// its network message alone. A RECORD READS THE FRAME THAT CARRIED IT: the
+/// `Frame`'s `sn` selects that frame's record, a path through `Frame.payload`
+/// names the record's own fields, and a frame's other records stay apart.
+#[cfg(feature = "network-codecs")]
+#[test]
+fn a_record_reads_the_frame_that_carried_it() {
+    use crate::payload::tests_support::push_declaring;
+    let d = frames_of(&[
+        (3, alloc::vec![push_declaring("a/json", 5, b"{}")]),
+        (
+            9,
+            alloc::vec![
+                push_declaring("a/text", 6, b"hello"),
+                push_declaring("a/bin", 7, b"xy"),
+            ],
+        ),
+    ]);
+    for (selector, expected) in [
+        ("Frame.sn == 9", (2, 1, 0)),
+        ("Frame.sn == 3", (1, 2, 0)),
+        ("Frame.sn == 4", (0, 3, 0)),
+        ("Frame.sn == 9 and put.encoding.id == 7", (1, 2, 0)),
+        ("Frame.payload.Push.put.encoding.id == 6", (1, 2, 0)),
+        // A record of the same frame is not part of this one's tree.
+        ("Frame.sn == 9 and not put.encoding.id == 6", (1, 2, 0)),
+        ("Frame.r", (3, 0, 0)),
+        ("Frame.qos", (0, 3, 0)),
+    ] {
+        let filter = Filter::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
+        let s = crate::payload::payloads_where(&d, &filter).selection();
+        assert_eq!(
+            (s.matched, s.rejected, s.undecided),
+            expected,
+            "{selector}: {s:?}"
+        );
+    }
+}
+
+/// A record whose `Frame` was not read keeps every answer its own message
+/// gives, and a path that could stand in the `Frame` is UNDECIDED, never `no`;
+/// a record no `Frame` stands around answers such a path `no`.
+#[cfg(feature = "network-codecs")]
+#[test]
+fn an_unread_frame_leaves_only_its_own_fields_undecided() {
+    use crate::field_path::{record_tree, Envelope, FrameEnvelope};
+    use crate::payload::tests_support::push_declaring;
+    use wz_session_core::passive::Carried;
+    let d = frames_of(&[(3, alloc::vec![push_declaring("a/json", 5, b"{}")])]);
+    let order = d.message_frames_in_capture_order();
+    let (_, list, _, row) = order.iter().next().expect("one message");
+    let Carried::Batch(batch) = &row.carried else {
+        panic!("a frame carrying a batch: {:?}", row.carried);
+    };
+    let (_, span) = batch.records().next().expect("one record");
+    let held = order
+        .held_message_bytes(&d, list, &row)
+        .expect("a datagram list reads its own units");
+
+    let read = record_tree(&row, &FrameEnvelope::of(&row, Some(&held)), span).expect("walks");
+    let unread = record_tree(&row, &FrameEnvelope::of(&row, None), span).expect("walks");
+    assert_eq!(read.envelope(), Envelope::Read);
+    assert_eq!(unread.envelope(), Envelope::Unread);
+    let alone = RecordTree::message(unread.root().clone());
+
+    for (selector, over_read, over_unread, over_alone) in [
+        ("Frame.sn == 3", Truth::Yes, Truth::Unknown, Truth::No),
+        ("Frame.sn != 3", Truth::No, Truth::Unknown, Truth::Yes),
+        ("put.encoding.id == 5", Truth::Yes, Truth::Yes, Truth::Yes),
+        ("put.encoding.id == 6", Truth::No, Truth::No, Truth::No),
+        (
+            "Push.put.encoding.id == 5",
+            Truth::Yes,
+            Truth::Yes,
+            Truth::Yes,
+        ),
+        (
+            "Frame.payload.Push.put.encoding.id == 5",
+            Truth::Yes,
+            Truth::Unknown,
+            Truth::No,
+        ),
+        // `qos.priority` ends the Push's and the Frame's: neither carries one,
+        // and only the read Frame says so.
+        ("qos.priority", Truth::No, Truth::Unknown, Truth::No),
+    ] {
+        let filter = Filter::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
+        for (tree, expected, which) in [
+            (&read, over_read, "read"),
+            (&unread, over_unread, "unread"),
+            (&alone, over_alone, "alone"),
+        ] {
+            assert_eq!(
+                filter.matches(&record(Some(tree))),
+                expected,
+                "{selector} over the {which} tree"
+            );
+        }
+    }
+}
+
+/// THE PATH A ROW SHOWS ON A NODE NAMES THAT NODE IN ITS RECORD'S TREE: for
+/// every node of a row's `fields` tree outside the row's other records, the
+/// record's tree holds a node at that path with the same span and value. What
+/// lets a consumer offer "filter on this field" off any row without building
+/// the normalised view itself.
+#[cfg(feature = "network-codecs")]
+#[test]
+fn a_rows_node_path_names_the_same_node_in_its_records_tree() {
+    use crate::field_path::{record_tree, FrameEnvelope};
+    use crate::payload::tests_support::push_declaring;
+    use wz_session_core::dissect::FieldValue;
+    use wz_session_core::passive::Carried;
+    let records = alloc::vec![
+        push_declaring("a/text", 6, b"hello"),
+        push_declaring("a/bin", 7, b"xy"),
+    ];
+    let d = frames_of(&[(9, records)]);
+    let order = d.message_frames_in_capture_order();
+    let (_, list, _, row) = order.iter().next().expect("one message");
+    let held = order.held_message_bytes(&d, list, &row).expect("held");
+    let shown = wz_session_core::dissect::dissect_transport_message(&held, 0).expect("walks");
+    let paths = wz_session_core::dissect_schema::node_paths(&shown);
+    let Carried::Batch(batch) = &row.carried else {
+        panic!("a batch");
+    };
+    let envelope = FrameEnvelope::of(&row, Some(&held));
+    let FieldValue::Nested(top) = &shown.value else {
+        panic!("a group");
+    };
+    let shown_records = match &top
+        .iter()
+        .find(|c| c.name == "payload")
+        .expect("payload")
+        .value
+    {
+        FieldValue::Nested(records) => records,
+        other => panic!("{other:?}"),
+    };
+    let mut checked = 0usize;
+    for (k, (_, span)) in batch.records().enumerate() {
+        let tree = record_tree(&row, &envelope, span).expect("walks");
+        // Every node of the row's tree but the other records'.
+        let mut stack: alloc::vec::Vec<&Field> = alloc::vec![&shown];
+        while let Some(node) = stack.pop() {
+            if shown_records
+                .iter()
+                .enumerate()
+                .any(|(j, r)| j != k && core::ptr::eq(r, node))
+            {
+                continue;
+            }
+            if let FieldValue::Nested(children) = &node.value {
+                stack.extend(children.iter());
+            }
+            let Some(path) = paths.of(node) else {
+                continue;
+            };
+            let segments: alloc::vec::Vec<&str> = path.split('.').collect();
+            let hits = wz_session_core::dissect_schema::matching(tree.root(), &segments);
+            assert!(
+                hits.iter().any(|h| h.span == node.span
+                    && (matches!(h.value, FieldValue::Nested(_)) || h.value == node.value)),
+                "record {k}: {path} at {:?} is not in the record's tree",
+                node.span
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 40, "{checked}");
 }

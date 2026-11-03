@@ -1288,11 +1288,51 @@ pub struct CaptureOrder<'a> {
     /// The lists, by their place in `Dissection::message_lists`, with the flow
     /// each stands under.
     lists: Vec<(FlowKey, messages::Messages<'a>)>,
+    /// Each list's producer, at the list's place: what
+    /// [`Self::held_message_bytes`] asks the dissection with.
+    origins: Vec<MessageListOrigin>,
     /// `(packet, list, position)` in capture order.
     keys: Vec<(usize, usize, usize)>,
 }
 
 impl<'a> CaptureOrder<'a> {
+    /// The bytes this crate can read of the transport message `row` of the
+    /// list at `list` was read from, from its first byte to the end of its
+    /// framing unit, or `None` where it can read none (bytes a retention
+    /// ceiling trimmed, a unit whose container is not lent to this call). What
+    /// a selector's path terms read the `Frame` around a record from, and a
+    /// row's own tree when the row carries no batch.
+    ///
+    /// [`Dissection::message_bytes_at`] first, the door a consumer is handed
+    /// bytes through. Where that answers that the caller holds the packet (a
+    /// datagram list), the list's own unit bytes: what the list reads the row
+    /// again from (open-debt item 924, D8), so the same bytes the row was
+    /// decoded from, read here and not handed out.
+    pub(crate) fn held_message_bytes<'d>(
+        &self,
+        dissection: &'d Dissection,
+        list: usize,
+        row: &messages::Row<'_>,
+    ) -> Option<alloc::borrow::Cow<'d, [u8]>>
+    where
+        'a: 'd,
+    {
+        let (flow, frames) = self.lists.get(list)?;
+        let origin = *self.origins.get(list)?;
+        let first = frames.produced() - frames.len() as u64;
+        let position = usize::try_from(row.produced().checked_sub(first)?).ok()?;
+        match dissection.message_bytes_at(*flow, origin, position) {
+            MessageBytes::Retained(bytes) => Some(bytes),
+            MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket) => {
+                match unit_message_bytes(*frames, position)? {
+                    MessageBytes::Retained(bytes) => Some(bytes),
+                    MessageBytes::Retired(_) | MessageBytes::NoSource(_) => None,
+                }
+            }
+            MessageBytes::Retired(_) => None,
+        }
+    }
+
     /// The walk, each message resolved as it is reached. Its length is the
     /// iterator's own (`ExactSizeIterator`), which is the one place a reader
     /// asks how many messages the walk holds.
@@ -7001,9 +7041,11 @@ impl Dissection {
     /// recompute it would be deriving this walk's own key a second time.
     pub fn message_frames_in_capture_order(&self) -> CaptureOrder<'_> {
         let mut lists = alloc::vec::Vec::new();
+        let mut origins = alloc::vec::Vec::new();
         let mut keys: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
-        for (list, (flow, _origin, frames)) in self.message_lists_with_origin().enumerate() {
+        for (list, (flow, origin, frames)) in self.message_lists_with_origin().enumerate() {
             lists.push((flow, frames));
+            origins.push(origin);
             // The stream lists occupy the first `self.flows.len()` positions of
             // the door above, by its own construction, so the run map is at the
             // same index. The key is compared rather than assumed — a door that
@@ -7030,7 +7072,11 @@ impl Dissection {
             }
         }
         keys.sort_unstable();
-        CaptureOrder { lists, keys }
+        CaptureOrder {
+            lists,
+            origins,
+            keys,
+        }
     }
 
     /// THE MESSAGES A FOLD HAS NOT SEEN, in capture order, or `None` when the
@@ -7104,9 +7150,11 @@ impl Dissection {
         // two order a list's messages the same way, as they differ by the list's
         // first produced-index only.
         let mut lists = alloc::vec::Vec::with_capacity(current.len());
+        let mut origins = alloc::vec::Vec::with_capacity(current.len());
         let mut keys: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
         for (list, (flow, origin, frames)) in current.iter().copied().enumerate() {
             lists.push((flow, frames));
+            origins.push(origin);
             let first_produced = frames.produced() - frames.len() as u64;
             let (start, mut last) = match (prev, continues[list]) {
                 (Some(p), Some(at)) => {
@@ -7170,7 +7218,11 @@ impl Dissection {
         }
         let last_key = keys.last().map(remembered).or(prev_last);
         Some((
-            CaptureOrder { lists, keys },
+            CaptureOrder {
+                lists,
+                origins,
+                keys,
+            },
             OrderMarks {
                 lists: marks,
                 last_key,

@@ -2442,7 +2442,8 @@ static int check_transport_build_door(void) {
     /* The reading door reads what was built, to the field that was given. */
     rc = wz_dissect_transport_message(body, body_len, 0, &json);
     CHECK(rc == WZ_DISSECT_OK, "reading the built body rc=%d", rc);
-    CHECK(strstr(json, "{\"name\":\"sn\",\"start\":1,\"end\":2,\"kind\":\"uint\","
+    CHECK(strstr(json, "{\"name\":\"sn\",\"start\":1,\"end\":2,"
+                       "\"selector_path\":\"Frame.sn\",\"kind\":\"uint\","
                        "\"value\":5}") != NULL,
           "the built body must read back to sn 5: %s", json);
     wz_dissect_string_free(json);
@@ -2461,7 +2462,8 @@ static int check_transport_build_door(void) {
     body[offset] = 9;
     rc = wz_dissect_transport_message(body, body_len, 0, &json);
     CHECK(rc == WZ_DISSECT_OK, "reading the replaced body rc=%d", rc);
-    CHECK(strstr(json, "\"name\":\"sn\",\"start\":1,\"end\":2,\"kind\":\"uint\","
+    CHECK(strstr(json, "\"name\":\"sn\",\"start\":1,\"end\":2,"
+                       "\"selector_path\":\"Frame.sn\",\"kind\":\"uint\","
                        "\"value\":9}") != NULL &&
               strstr(json, "\"name\":\"payload\"") != NULL,
           "the replacement must change the sn and nothing else: %s", json);
@@ -2566,7 +2568,8 @@ static int check_transport_layout_door(void) {
     /* The reading door agrees: only the sequence number changed. */
     rc = wz_dissect_transport_message(unit + 2, sizeof unit - 2, 0, &json);
     CHECK(rc == WZ_DISSECT_OK, "reading the mutated body rc=%d", rc);
-    CHECK(strstr(json, "\"name\":\"sn\",\"start\":1,\"end\":2,\"kind\":\"uint\","
+    CHECK(strstr(json, "\"name\":\"sn\",\"start\":1,\"end\":2,"
+                       "\"selector_path\":\"Frame.sn\",\"kind\":\"uint\","
                        "\"value\":9}") != NULL &&
               strstr(json, "\"name\":\"payload\"") != NULL,
           "the replacement must change the sn and nothing else: %s", json);
@@ -2765,6 +2768,7 @@ static int check_message_in_door(void) {
     CHECK(rc == WZ_DISSECT_OK && json != NULL, "lean ResponseFinal rc=%d", rc);
     CHECK(strstr(json, "\"name\":\"ResponseFinal\"") != NULL &&
               strstr(json, "\"name\":\"request_id\",\"start\":1,\"end\":2,"
+                           "\"selector_path\":\"ResponseFinal.request_id\","
                            "\"kind\":\"uint\",\"value\":7") != NULL,
           "a lowlatency ResponseFinal must be read in full: %s", json);
     wz_dissect_string_free(json);
@@ -4024,8 +4028,11 @@ int main(void) {
      * move under stationary keys.
      * 55: every `carried` entry's `payload_size`, the census's size of the
      * message's payload. Keys arrive and a family is declared; nothing
-     * retires. */
-    revisioned[2].revision = 55;
+     * retires.
+     * 56: every field object's `selector_path`, the name a selector gives
+     * the node, and a record a Frame carried judged inside that Frame. A key
+     * arrives and the `kind` shapes move; nothing retires. */
+    revisioned[2].revision = 56;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

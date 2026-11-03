@@ -1347,7 +1347,6 @@ pub fn interests_grouped(
     dissection: &crate::Dissection,
     grouping: &crate::node::SessionGrouping,
 ) -> InterestCensus {
-    use crate::ordered_fold::OrderedFold;
     // Round 2019 (item 270) — `.enumerate()`, exactly as `agg::aggregate_where`
     // does. The two walks must agree on the list index or their space tokens
     // are not comparable, and they agree by walking the same enumeration of the
@@ -1361,9 +1360,7 @@ pub fn interests_grouped(
     // capture that began after the `DeclKexpr`", said about a capture that read
     // the binding two packets earlier.
     let mut fold = InterestFold::begin();
-    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, &frame, grouping);
-    }
+    crate::ordered_fold::fold_whole_capture(&mut fold, dissection, grouping);
     fold.census()
 }
 
@@ -1399,12 +1396,18 @@ impl crate::ordered_fold::OrderedFold for InterestFold {
         false
     }
 
+    /// Under no selector, so it reads no record's tree either.
+    fn reads_tree(&self) -> bool {
+        false
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
         frame: &wz_session_core::passive::PassiveFrame,
+        _message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {
         self.spaces.enter_flow(grouping.owners(list));

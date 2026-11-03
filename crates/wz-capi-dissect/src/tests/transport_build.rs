@@ -79,13 +79,17 @@ fn a_built_message_reads_back_through_the_reading_door() {
         (
             r#"{"message":"frame","reliable":true,"sn":5,"payload":"dead"}"#,
             WZ_DISSECT_FRAMING_TCP_STREAM,
-            vec!["\"name\":\"sn\",\"start\":1,\"end\":2,\"kind\":\"uint\",\"value\":5"],
+            vec![
+                "\"name\":\"sn\",\"start\":1,\"end\":2,\"selector_path\":\"Frame.sn\",\
+                 \"kind\":\"uint\",\"value\":5",
+            ],
         ),
         (
             r#"{"message":"init_ack","version":5,"whatami":"client","zid":"a0a1","cookie":"c0c1c2"}"#,
             WZ_DISSECT_FRAMING_DATAGRAM,
             vec![
-                "\"name\":\"whatami\",\"start\":2,\"end\":3,\"kind\":\"bits\",\"value\":2",
+                "\"name\":\"whatami\",\"start\":2,\"end\":3,\"selector_path\":\"Init.whatami\",\
+                 \"kind\":\"bits\",\"value\":2",
                 "\"name\":\"cookie_len\"",
                 "\"name\":\"cookie\"",
             ],
@@ -94,24 +98,30 @@ fn a_built_message_reads_back_through_the_reading_door() {
             r#"{"message":"open_syn","lease_ms":10000,"initial_sn":7,"cookie":"01"}"#,
             WZ_DISSECT_FRAMING_LOWLATENCY_STREAM,
             vec![
-                "\"name\":\"lease\",\"start\":1,\"end\":2,\"kind\":\"uint\",\"value\":10",
-                "\"name\":\"initial_sn\",\"start\":2,\"end\":3,\"kind\":\"uint\",\"value\":7",
+                "\"name\":\"lease\",\"start\":1,\"end\":2,\"selector_path\":\"Open.lease\",\
+                 \"kind\":\"uint\",\"value\":10",
+                "\"name\":\"initial_sn\",\"start\":2,\"end\":3,\
+                 \"selector_path\":\"Open.initial_sn\",\"kind\":\"uint\",\"value\":7",
             ],
         ),
         (
             r#"{"message":"fragment","reliable":false,"more":true,"sn":300,"first":true,"payload":"beef"}"#,
             WZ_DISSECT_FRAMING_TCP_STREAM,
             vec![
-                "\"name\":\"m\",\"start\":0,\"end\":1,\"kind\":\"flag\",\"value\":true",
-                "\"name\":\"sn\",\"start\":1,\"end\":3,\"kind\":\"uint\",\"value\":300",
+                "\"name\":\"m\",\"start\":0,\"end\":1,\"selector_path\":\"Fragment.m\",\
+                 \"kind\":\"flag\",\"value\":true",
+                "\"name\":\"sn\",\"start\":1,\"end\":3,\"selector_path\":\"Fragment.sn\",\
+                 \"kind\":\"uint\",\"value\":300",
             ],
         ),
         (
             r#"{"message":"close","reason":7,"session":false}"#,
             WZ_DISSECT_FRAMING_DATAGRAM,
             vec![
-                "\"name\":\"s\",\"start\":0,\"end\":1,\"kind\":\"flag\",\"value\":false",
-                "\"name\":\"reason\",\"start\":1,\"end\":2,\"kind\":\"uint\",\"value\":7",
+                "\"name\":\"s\",\"start\":0,\"end\":1,\"selector_path\":\"Close.s\",\
+                 \"kind\":\"flag\",\"value\":false",
+                "\"name\":\"reason\",\"start\":1,\"end\":2,\"selector_path\":\"Close.reason\",\
+                 \"kind\":\"uint\",\"value\":7",
             ],
         ),
         (

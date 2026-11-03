@@ -33,6 +33,24 @@
 //! * The tree holds the path more than once: the term is `yes` when ANY of
 //!   them satisfies it, as a display filter reads a repeated field.
 //!
+//! # Which tree a record is
+//!
+//! The record's transport message with the record in it: a record a `Frame`
+//! carried is the `Frame` (its header, `sn`, extensions) with this record alone
+//! under its `payload`, which is the tree the field document's row shows less
+//! the row's other records. So `Frame.sn` and the transport `qos.priority` are
+//! fields of every record the frame carried, and a path copied off a row's node
+//! (its `selector_path`) names the same node in the record's tree. A record no transport
+//! message stands around (a bare network message of a lowlatency session, a
+//! record of a reassembled batch) is its message alone, and a path through a
+//! `Frame` is the decided `no` there.
+//!
+//! The `Frame` is walked from the bytes the capture holds for it. Where it
+//! holds none (a datagram whose packet the caller keeps, bytes trimmed past the
+//! retention window), the record's own message is still read, and a path term
+//! that could only be answered by the `Frame` around it is UNKNOWN rather than
+//! `no`: the frame was there and was not read.
+//!
 //! `len(p)` is the WIRE width of the field in bytes. For a text field that is
 //! its UTF-8 byte count, which is also what a display filter's `len` counts; a
 //! reader who wants characters of a multi-byte text has no term for it here.
@@ -57,6 +75,58 @@ pub type TreeNode = wz_session_core::dissect::Field;
 #[cfg(not(feature = "dissect"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TreeNode {}
+
+/// A record's dissection as a path term reads it: the tree, and what is known
+/// about the transport message around the record (the module's note, "Which
+/// tree a record is").
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordTree {
+    root: TreeNode,
+    envelope: Envelope,
+}
+
+/// What a [`RecordTree`] knows of the transport message its record was carried in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Envelope {
+    /// The root IS the transport message: a `Frame` holding this record alone
+    /// under its `payload`, or a message that is its own row (an `Init`, a
+    /// `KeepAlive`).
+    Read,
+    /// No transport message stands around the record: the root is the record,
+    /// and a path through a `Frame` is absent from it, which is a decided fact.
+    Absent,
+    /// A `Frame` carried the record and its bytes were not read here: the root
+    /// is the record, and a path through the `Frame` is undecided.
+    Unread,
+}
+
+impl RecordTree {
+    /// A tree whose root is a transport message read whole.
+    pub fn transport(root: TreeNode) -> Self {
+        Self {
+            root,
+            envelope: Envelope::Read,
+        }
+    }
+
+    /// A tree whose root is a record no transport message stands around.
+    pub fn message(root: TreeNode) -> Self {
+        Self {
+            root,
+            envelope: Envelope::Absent,
+        }
+    }
+
+    /// The tree.
+    pub fn root(&self) -> &TreeNode {
+        &self.root
+    }
+
+    /// What it knows of the transport message around the record.
+    pub fn envelope(&self) -> Envelope {
+        self.envelope
+    }
+}
 
 /// What a path's field holds, as `wz_session_core::dissect::FieldValue::kind_word`
 /// names it.
@@ -139,6 +209,11 @@ pub(crate) struct FieldPath {
     /// The words a label path can carry, when every field on it has a closed
     /// set: the union of them. `None` for every other kind.
     words: Option<Vec<&'static str>>,
+    /// Whether a field it names can stand in the `Frame` around a record and
+    /// not in the record: what makes it undecided over a record whose frame
+    /// was not read ([`Envelope::Unread`]).
+    #[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+    reads_envelope: bool,
 }
 
 /// Why a written path names no field.
@@ -207,10 +282,14 @@ impl FieldPath {
                 Some(union)
             })
             .flatten();
+        let reads_envelope = ends
+            .iter()
+            .any(|d| stands_in_the_envelope(&d.segments, segments.len()));
         Ok(Self {
             segments: segments.into_iter().map(String::from).collect(),
             kind: first.kind,
             words,
+            reads_envelope,
         })
     }
 
@@ -219,6 +298,29 @@ impl FieldPath {
     fn occurrences<'t>(&self, tree: &'t TreeNode) -> Vec<&'t TreeNode> {
         let segments: Vec<&str> = self.segments.iter().map(String::as_str).collect();
         wz_session_core::dissect_schema::matching(tree, &segments)
+    }
+}
+
+/// Whether the declared path `declared`, matched by a written path of `width`
+/// segments (a tail of it), reaches a node of the batch carrier outside the
+/// record its payload holds: the carrier itself, its header, `sn` and
+/// extensions, or its `payload` level.
+fn stands_in_the_envelope(declared: &[&str], width: usize) -> bool {
+    #[cfg(feature = "dissect")]
+    {
+        use wz_session_core::dissect_schema::{BATCH_CARRIER, BATCH_LEVEL};
+        if declared.first() != Some(&BATCH_CARRIER) {
+            return false;
+        }
+        // A match beginning at the record (index 2, under `Frame.payload`) or
+        // deeper reads the record alone.
+        let begins = declared.len().saturating_sub(width);
+        !(declared.get(1) == Some(&BATCH_LEVEL) && begins >= 2)
+    }
+    #[cfg(not(feature = "dissect"))]
+    {
+        let _ = (declared, width);
+        false
     }
 }
 
@@ -261,20 +363,30 @@ pub(crate) enum PathTest {
 
 /// Judge one path term over one record's tree.
 ///
-/// `Some(true)` when any field on the path satisfies the test, `Some(false)`
-/// when none does or there is none. The tree being absent is the caller's
-/// `Unknown` and never reaches here.
-pub(crate) fn judge(tree: &TreeNode, path: &FieldPath, test: &PathTest) -> bool {
+/// `Some(true)` when any field on the path satisfies the test. `Some(false)`
+/// when none does or there is none, unless the path can stand in a `Frame`
+/// the tree did not read ([`Envelope::Unread`]): then `None`, because the
+/// field the term asks about may be in the bytes that were not read. The tree
+/// being absent is the caller's `Unknown` and never reaches here.
+pub(crate) fn judge(tree: &RecordTree, path: &FieldPath, test: &PathTest) -> Option<bool> {
     #[cfg(feature = "dissect")]
     {
-        path.occurrences(tree)
+        if path
+            .occurrences(&tree.root)
             .into_iter()
             .any(|field| satisfies(field, test))
+        {
+            return Some(true);
+        }
+        match tree.envelope {
+            Envelope::Unread if path.reads_envelope => None,
+            _ => Some(false),
+        }
     }
     #[cfg(not(feature = "dissect"))]
     {
         let _ = (path, test);
-        match *tree {}
+        match tree.root {}
     }
 }
 
@@ -318,23 +430,184 @@ fn text_or_bytes(value: &wz_session_core::dissect::FieldValue) -> Option<&[u8]> 
     }
 }
 
-/// The dissection of the network message at `span` of the batch `frame`
-/// carried, for a plane whose selector reads a tree ([`crate::filter::Filter::reads_tree`]).
+/// The transport message a frame's records were carried in, walked once for
+/// all of them: what [`record_tree`] puts around each record.
 ///
-/// `None` where the bytes are not held whole (a frame that carried no batch,
-/// a fragment that did not complete one) or the message does not walk: the
-/// plane then hands its record no tree, and every path term over it is
-/// undecidable rather than false. The walk is the field document's own
-/// (`dissect_network_message`), so a path a selector names and the field a
-/// row shows are read by one walker.
-pub(crate) fn record_tree(
-    frame: &wz_session_core::passive::PassiveFrame,
-    span: Option<(usize, usize)>,
-) -> Option<TreeNode> {
+/// A build without `dissect` walks nothing and makes only [`Self::Absent`].
+#[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+pub(crate) enum FrameEnvelope {
+    /// The frame's `Frame` message, walked from the bytes the capture holds
+    /// for it: its root with every field but the `payload` group's records,
+    /// and those records apart, each with its span.
+    Walked {
+        /// The `Frame` root with its `payload` group EMPTY.
+        shell: TreeNode,
+        /// Index of the `payload` group among the root's children.
+        payload: usize,
+        /// The records the walk read under `payload`, in wire order.
+        records: Vec<TreeNode>,
+    },
+    /// No transport message stands around the frame's records.
+    Absent,
+    /// A `Frame` carried the records and its bytes are not held here, or do
+    /// not walk.
+    Unread,
+}
+
+impl FrameEnvelope {
+    /// The envelope of `frame`'s records, from `message`: the bytes the capture
+    /// holds for the transport message `frame` was read from, or `None` where
+    /// it holds none.
+    pub(crate) fn of(
+        frame: &wz_session_core::passive::PassiveFrame,
+        message: Option<&[u8]>,
+    ) -> Self {
+        #[cfg(feature = "dissect")]
+        {
+            use wz_session_core::dissect::FieldValue;
+            use wz_session_core::dissect_schema::{BATCH_CARRIER, BATCH_LEVEL};
+            if !carried_in_a_frame(frame) {
+                return Self::Absent;
+            }
+            let Some(mut root) = message
+                .and_then(|bytes| {
+                    wz_session_core::dissect::dissect_transport_message(bytes, 0).ok()
+                })
+                .filter(|root| root.name == BATCH_CARRIER)
+            else {
+                return Self::Unread;
+            };
+            let FieldValue::Nested(children) = &mut root.value else {
+                return Self::Unread;
+            };
+            let Some(payload) = children.iter().position(|c| c.name == BATCH_LEVEL) else {
+                return Self::Unread;
+            };
+            let records = match &mut children[payload].value {
+                FieldValue::Nested(records) => core::mem::take(records),
+                _ => return Self::Unread,
+            };
+            Self::Walked {
+                shell: root,
+                payload,
+                records,
+            }
+        }
+        #[cfg(not(feature = "dissect"))]
+        {
+            let _ = (frame, message);
+            Self::Absent
+        }
+    }
+}
+
+/// Where one record of a batch stands, for a plane that judges it: its span
+/// in the batch, and the transport message around it where the plane's
+/// selector reads a tree.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RecordAt<'e> {
+    /// `(offset, len)` of the record within the batch, as `BatchParse` gives it.
+    pub(crate) span: Option<(usize, usize)>,
+    /// `None` where the selector names no path ([`crate::filter::Filter::reads_tree`]).
+    envelope: Option<&'e FrameEnvelope>,
+}
+
+impl<'e> RecordAt<'e> {
+    /// The record at `span`, inside `envelope` (`None` for a selector that
+    /// reads no tree).
+    pub(crate) fn new(span: Option<(usize, usize)>, envelope: Option<&'e FrameEnvelope>) -> Self {
+        Self { span, envelope }
+    }
+
+    /// The record's tree, or `None` where the selector reads none or the
+    /// record does not walk ([`record_tree`]).
+    pub(crate) fn tree(
+        &self,
+        frame: &wz_session_core::passive::PassiveFrame,
+    ) -> Option<RecordTree> {
+        record_tree(frame, self.envelope?, self.span)
+    }
+}
+
+/// Whether `frame` carried a batch out of a `Frame`: the one transport message
+/// whose records have an envelope [`FrameEnvelope`] reads.
+pub(crate) fn carried_in_a_frame(frame: &wz_session_core::passive::PassiveFrame) -> bool {
     #[cfg(feature = "dissect")]
     {
         use wz_session_core::inbound::InboundFrame;
         use wz_session_core::passive::Carried;
+        matches!(
+            (&frame.carried, &frame.frame),
+            (Carried::Batch(_), Ok(InboundFrame::Frame { .. }))
+        )
+    }
+    #[cfg(not(feature = "dissect"))]
+    {
+        let _ = frame;
+        false
+    }
+}
+
+/// The envelope of `frame`'s records for a selector, or `None` for one that
+/// reads no tree: walked once per frame, before its records are judged.
+pub(crate) fn envelope_for(
+    filter: &crate::filter::Filter,
+    frame: &wz_session_core::passive::PassiveFrame,
+    ctx: crate::node::ListContext<'_>,
+) -> Option<FrameEnvelope> {
+    filter
+        .reads_tree()
+        .then(|| FrameEnvelope::of(frame, ctx.message()))
+}
+
+/// The tree of the record at `span` of the batch `frame` carried, inside the
+/// transport message around it ([`FrameEnvelope`]), for a plane whose selector
+/// reads a tree ([`crate::filter::Filter::reads_tree`]).
+///
+/// `None` where the record's bytes are not held whole (a frame that carried no
+/// batch, a fragment that did not complete one) or its message does not walk:
+/// the plane then hands its record no tree, and every path term over it is
+/// undecidable rather than false. The walks are the field document's own
+/// (`dissect_transport_message`, `dissect_network_message`), so a path a
+/// selector names and the field a row shows are read by one walker.
+///
+/// Inside a walked `Frame` the record is the one the walk read at the span the
+/// session gave it. A walk that read no record there disagrees with the session
+/// about where the record is, and the record is read alone with its `Frame`
+/// unread, which leaves a path through the `Frame` undecided and not wrong.
+pub(crate) fn record_tree(
+    frame: &wz_session_core::passive::PassiveFrame,
+    envelope: &FrameEnvelope,
+    span: Option<(usize, usize)>,
+) -> Option<RecordTree> {
+    #[cfg(feature = "dissect")]
+    {
+        use wz_session_core::dissect::FieldValue;
+        use wz_session_core::inbound::InboundFrame;
+        use wz_session_core::passive::Carried;
+        let (offset, len) = span?;
+        if let FrameEnvelope::Walked {
+            shell,
+            payload,
+            records,
+        } = envelope
+        {
+            let FieldValue::Nested(children) = &shell.value else {
+                return None;
+            };
+            let start = children[*payload].span.start.checked_add(offset)?;
+            if let Some(record) = records
+                .iter()
+                .find(|r| r.span.start == start && r.span.len() == len)
+            {
+                let mut root = shell.clone();
+                if let FieldValue::Nested(children) = &mut root.value {
+                    children[*payload].value = FieldValue::Nested(alloc::vec![record.clone()]);
+                }
+                return Some(RecordTree::transport(root));
+            }
+        }
         let batch: &[u8] = match (&frame.carried, &frame.frame) {
             (Carried::Batch(_), Ok(InboundFrame::Frame { payload, .. })) => payload,
             (Carried::Batch(_), Ok(InboundFrame::Network { payload })) => payload,
@@ -342,15 +615,21 @@ pub(crate) fn record_tree(
             (Carried::Reassembled { joined, .. }, _) => joined,
             _ => return None,
         };
-        let (offset, len) = span?;
         let bytes = batch.get(offset..offset.checked_add(len)?)?;
-        wz_session_core::dissect::dissect_network_message(bytes, offset)
+        let root = wz_session_core::dissect::dissect_network_message(bytes, offset)
             .ok()
-            .flatten()
+            .flatten()?;
+        Some(match envelope {
+            FrameEnvelope::Absent => RecordTree::message(root),
+            FrameEnvelope::Walked { .. } | FrameEnvelope::Unread => RecordTree {
+                root,
+                envelope: Envelope::Unread,
+            },
+        })
     }
     #[cfg(not(feature = "dissect"))]
     {
-        let _ = (frame, span);
+        let _ = (frame, envelope, span);
         None
     }
 }

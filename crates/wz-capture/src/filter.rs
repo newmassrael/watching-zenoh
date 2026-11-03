@@ -474,17 +474,19 @@ pub struct RecordView<'a> {
     /// one would put an identity on the wire that nobody sent, which is the
     /// line the consumer's own half-row rule draws from the other side.
     pub zid: Option<&'a [u8]>,
-    /// The record's message as the dissection walked it, for the terms that
-    /// name a field by its path ([`crate::field_path`]); `None` where this
-    /// plane did not walk it.
+    /// The record's message as the dissection walked it, inside the transport
+    /// message that carried it, for the terms that name a field by its path
+    /// ([`crate::field_path`]); `None` where this plane did not walk it.
     ///
     /// `None` is the plane's to answer for and never a statement about the
     /// message: the bytes were not kept whole (a batch this reader could not
     /// open), the message did not walk, or the selector holds no path term and
     /// the walk was not worth making ([`Filter::reads_tree`]). A path term over
     /// it is undecidable, which is the rule every other optional field here
-    /// keeps; a tree that was walked and lacks the field is the decided `no`.
-    pub tree: Option<&'a crate::field_path::TreeNode>,
+    /// keeps; a tree that was walked and lacks the field is the decided `no`,
+    /// except for a field of a `Frame` the tree did not read
+    /// ([`crate::field_path::Envelope::Unread`]), which is undecidable too.
+    pub tree: Option<&'a crate::field_path::RecordTree>,
     /// Where the record was carried: the messages around it, the packet, the
     /// flow and its endpoints. `None` where the plane was not given them, and
     /// then every term over them is undecidable.
@@ -1458,9 +1460,12 @@ impl Term {
             // The seventh undecidable case: a plane that did not walk the
             // record's message cannot say what is in it. A tree that WAS
             // walked answers for every path, the absent ones included.
-            Self::Path { path, test } => match record.tree {
+            Self::Path { path, test } => match record
+                .tree
+                .and_then(|tree| crate::field_path::judge(tree, path, test))
+            {
                 None => Truth::Unknown,
-                Some(tree) => Truth::of(crate::field_path::judge(tree, path, test)),
+                Some(answer) => Truth::of(answer),
             },
         }
     }

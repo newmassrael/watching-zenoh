@@ -292,6 +292,8 @@ impl FieldValue {
 ///
 /// R311y595. A consumer that RENDERS the tree needs none of this — the JSON
 /// shape is closed and a new walker cannot change it: `name`, `start`, `end`,
+/// `selector_path` (the selector's name for the node, or `null`: see
+/// [`to_json`]),
 /// `kind`, and then AT MOST ONE further key chosen by the `kind` word —
 /// `value` for the six scalar words, `fields` for `nested`, and none at all for
 /// `opaque`, whose span is the whole answer.
@@ -4278,13 +4280,29 @@ mod message_context_tests {
 ///
 /// Byte fields render as lowercase hex. String content routes through
 /// [`crate::json::escape_into`], the workspace's escaper SSOT.
+///
+/// # `selector_path`, the name a selector gives the node
+///
+/// Every field object carries `selector_path`: the dotted path a selector's
+/// path term names this node by, from the root of the tree rendered here, in
+/// the normalised view [`crate::dissect_schema`] defines (an extension entry is
+/// named by what it is, the `extensions` chain is not a level). `null` where
+/// that view names no such node: the `extensions` container, and a walked
+/// extension body named like its entry. A consumer reads the path and does not
+/// rebuild the view, so a filter written from a row and the field the row
+/// shows are not read by two decoders.
+///
+/// Not `path`: the field document already spells a decoded payload field's
+/// place in its schema with that key, and one key with two meanings in one
+/// document is a lookup that finds the wrong object.
 pub fn to_json(field: &Field) -> String {
+    let paths = crate::dissect_schema::node_paths(field);
     let mut out = String::new();
-    push_json(field, &mut out);
+    push_json(field, &paths, &mut out);
     out
 }
 
-fn push_json(field: &Field, out: &mut String) {
+fn push_json(field: &Field, paths: &crate::dissect_schema::NodePaths, out: &mut String) {
     use core::fmt::Write as _;
     out.push_str("{\"name\":");
     crate::json::escape_into(&field.name, out);
@@ -4293,6 +4311,12 @@ fn push_json(field: &Field, out: &mut String) {
         ",\"start\":{},\"end\":{},",
         field.span.start, field.span.end
     );
+    out.push_str("\"selector_path\":");
+    match paths.of(field) {
+        Some(path) => crate::json::escape_into(path, out),
+        None => out.push_str("null"),
+    }
+    out.push(',');
     // R2182 (open-debt item 555) — THE WORD COMES FROM THE VOCABULARY WALK,
     // written once here rather than once per arm. Eight arms each spelling
     // their own literal is eight places for the emitted word to differ from the
@@ -4359,7 +4383,7 @@ fn push_json(field: &Field, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                push_json(child, out);
+                push_json(child, paths, out);
             }
             out.push(']');
         }
@@ -4805,9 +4829,12 @@ mod tests {
         assert!(json.contains(r#""value":"0fff""#), "{json}");
         assert!(json.contains(r#""value":"a\"b""#), "{json}");
         assert!(
-            json.starts_with(r#"{"name":"m","start":0,"end":2,"kind":"nested""#),
+            json.starts_with(
+                r#"{"name":"m","start":0,"end":2,"selector_path":"m","kind":"nested""#
+            ),
             "{json}"
         );
+        assert!(json.contains(r#""selector_path":"m.suffix""#), "{json}");
     }
 
     #[test]

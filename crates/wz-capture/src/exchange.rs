@@ -459,7 +459,7 @@ pub struct OpenExchange {
     /// The REQUEST's tree, and the close's row answers with it: a
     /// `ResponseFinal` answers every record term as the request it closes, and
     /// a path into the record is a record term.
-    tree: Option<crate::field_path::TreeNode>,
+    tree: Option<crate::field_path::RecordTree>,
     /// The capture instant of the request, in nanoseconds: the packet that
     /// carried its first byte. Every instant this plane holds is in nanoseconds
     /// and is divided down only where a millisecond is wanted, so the two
@@ -759,8 +759,10 @@ impl ExchangeTable {
         }
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
+        let envelope = crate::field_path::envelope_for(filter, frame, ctx);
         for (record, (message, span)) in batch.records().enumerate() {
-            self.observe_message(spaces, open, ctx, frame, (record, message, span), filter);
+            let at = crate::field_path::RecordAt::new(span, envelope.as_ref());
+            self.observe_message(spaces, open, ctx, frame, (record, message, at), filter);
         }
     }
 
@@ -777,9 +779,10 @@ impl ExchangeTable {
         open: &mut OpenExchanges,
         ctx: crate::node::ListContext<'_>,
         frame: &PassiveFrame,
-        (record, message, span): (usize, &NetworkMessage, Option<(usize, usize)>),
+        (record, message, place): (usize, &NetworkMessage, crate::field_path::RecordAt<'_>),
         filter: &Filter,
     ) {
+        let span = place.span;
         let list = ctx.list();
         let direction = frame.direction;
         let at = frame.observed_at_ns;
@@ -815,11 +818,7 @@ impl ExchangeTable {
                         }
                         _ => None,
                     },
-                    tree: if filter.reads_tree() {
-                        crate::field_path::record_tree(frame, span)
-                    } else {
-                        None
-                    },
+                    tree: place.tree(frame),
                     requested_at_ns: at,
                     requested_unit_offset: crate::agg::record_unit_offset(frame, span),
                     requested_delay_ms: crate::agg::source_delay_ms(
@@ -1302,7 +1301,6 @@ pub fn exchanges_grouped(
     filter: &Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> ExchangeTable {
-    use crate::ordered_fold::OrderedFold;
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration, so
     // a producer that is not a flow at all still reaches this plane.
     // R2457 — `.enumerate()`, because the grouping is keyed by list index and
@@ -1312,9 +1310,7 @@ pub fn exchanges_grouped(
     // file a query as unattributed — with no row, so no latency either —
     // whenever its `DeclKexpr` had gone out on the session's other link.
     let mut fold = ExchangeFold::begin(dissection, filter, grouping);
-    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, &frame, grouping);
-    }
+    crate::ordered_fold::fold_whole_capture(&mut fold, dissection, grouping);
     fold.table()
 }
 
@@ -1389,12 +1385,17 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
         self.filter.reads_flow_word()
     }
 
+    fn reads_tree(&self) -> bool {
+        self.filter.reads_tree()
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
         frame: &wz_session_core::passive::PassiveFrame,
+        message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {
         self.spaces.enter_flow(grouping.owners(list));
@@ -1403,8 +1404,11 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
         self.table.observe_frame_where(
             frame,
             &self.filter,
-            // Placed: see `crate::payload`'s fold.
-            grouping.context(list).placed(*flow, Some(packet)),
+            // Placed and holding: see `crate::payload`'s fold.
+            grouping
+                .context(list)
+                .placed(*flow, Some(packet))
+                .holding(message),
             &mut self.open,
             &mut self.spaces,
         );

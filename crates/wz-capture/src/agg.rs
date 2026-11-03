@@ -1627,8 +1627,10 @@ impl ThroughputTable {
         }
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
+        let envelope = crate::field_path::envelope_for(filter, frame, ctx);
         for (message, span) in batch.records() {
-            self.observe_message(spaces, frame, message, span, filter, ctx);
+            let at = crate::field_path::RecordAt::new(span, envelope.as_ref());
+            self.observe_message(spaces, frame, message, at, filter, ctx);
         }
     }
 
@@ -1637,10 +1639,11 @@ impl ThroughputTable {
         spaces: &mut KeyexprSpaces,
         frame: &PassiveFrame,
         message: &NetworkMessage,
-        span: Option<(usize, usize)>,
+        at: crate::field_path::RecordAt<'_>,
         filter: &Filter,
         ctx: crate::node::ListContext<'_>,
     ) {
+        let span = at.span;
         // R2757 (open debt 790) — read from the FRAME rather than handed down.
         // It used to travel as a parameter, bound once in
         // `observe_frame_where` to exactly this expression and forwarded
@@ -1713,11 +1716,7 @@ impl ThroughputTable {
         // undecidable record leaves no trace either, except in the one counter
         // whose whole job is to say the totals are not the whole answer.
         // Walked only for a selector that names a path: see `Filter::reads_tree`.
-        let tree = if filter.reads_tree() {
-            crate::field_path::record_tree(frame, span)
-        } else {
-            None
-        };
+        let tree = at.tree(frame);
         let names = crate::filter::MessageNames::of(frame, Some(message.name()));
         let view = RecordView {
             tree: tree.as_ref(),
@@ -2697,11 +2696,8 @@ pub fn aggregate_grouped(
     // The fold itself is [`AggFold`], one value that a caller may also keep and
     // continue (see `crate::ordered_fold`), so this walk and a resumed one run the
     // SAME code over the same messages.
-    use crate::ordered_fold::OrderedFold;
     let mut fold = AggFold::begin(dissection, filter, grouping);
-    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, &frame, grouping);
-    }
+    crate::ordered_fold::fold_whole_capture(&mut fold, dissection, grouping);
     fold.table
 }
 
@@ -2754,12 +2750,17 @@ impl crate::ordered_fold::OrderedFold for AggFold {
         self.filter.reads_flow_word()
     }
 
+    fn reads_tree(&self) -> bool {
+        self.filter.reads_tree()
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
         frame: &wz_session_core::passive::PassiveFrame,
+        message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {
         // `enter_flow` moves with the frame, since consecutive frames need no
@@ -2775,7 +2776,10 @@ impl crate::ordered_fold::OrderedFold for AggFold {
             frame,
             &self.filter,
             // Placed: see `crate::payload`'s fold.
-            grouping.context(list).placed(*flow, Some(packet)),
+            grouping
+                .context(list)
+                .placed(*flow, Some(packet))
+                .holding(message),
             &mut self.spaces,
         );
     }

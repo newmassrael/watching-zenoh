@@ -26,10 +26,12 @@
 //! Judged here, beside the census planes, and NOT by a document renderer
 //! while it writes a row: the field document and the selection document must
 //! say the same word for one row, and only the first holds the capture's bytes.
-//! The tree of a row with no batch is walked from the bytes this crate keeps,
-//! which a stream flow keeps and a datagram flow does not (the caller holds the
-//! packet), so a path term over a datagram flow's transport message is
-//! undecided in every document alike.
+//! The tree of a row with no batch, and the `Frame` around a batch's records,
+//! are walked from the bytes this crate can read of the message
+//! (`CaptureOrder::held_message_bytes`): a stream flow's retained stream, and a
+//! datagram list's own unit bytes, which it reads its rows again from. Where
+//! neither holds them (trimmed, or a container this call was not lent) a path
+//! term over the transport message is undecided, in every document alike.
 //!
 //! # What stays unjudged
 //!
@@ -65,9 +67,20 @@ impl RowPlane {
     ) -> Self {
         let mut plane = Self::default();
         let origin = d.capture_origin_ms();
-        for (flow, list, packet, row) in d.message_frames_in_capture_order() {
+        let order = d.message_frames_in_capture_order();
+        for (flow, list, packet, row) in order.iter() {
             let frame: &PassiveFrame = &row;
-            let ctx = grouping.context(list).placed(flow, Some(packet));
+            // The transport message's bytes, where the capture keeps them and a
+            // path term reads them: a row with no batch is that message, and a
+            // batch's records stand inside it.
+            let held = filter
+                .reads_tree()
+                .then(|| order.held_message_bytes(d, list, &row))
+                .flatten();
+            let ctx = grouping
+                .context(list)
+                .placed(flow, Some(packet))
+                .holding(held.as_deref());
             let key = RowKey::of(list, frame);
             let base = Base {
                 filter,
@@ -79,17 +92,10 @@ impl RowPlane {
                 Carried::Batch(batch) => plane.batch(&base, key, batch, exchanges),
                 #[cfg(feature = "reassembly")]
                 Carried::Reassembled { batch, .. } => plane.batch(&base, key, batch, exchanges),
-                _ => {
-                    // A frame that carried no batch IS its row's message. The
-                    // bytes of a stream flow's message are kept; a datagram
-                    // flow's are the caller's.
-                    let bytes = d
-                        .flows()
-                        .get(list)
-                        .filter(|f| f.flow == flow)
-                        .and_then(|f| f.message_bytes(&row).ok());
-                    plane.whole(&base, key, bytes.as_deref());
-                }
+                // A frame that carried no batch IS its row's message, read from
+                // the bytes the capture keeps of it; a datagram's are the
+                // caller's.
+                _ => plane.whole(&base, key, held.as_deref()),
             }
         }
         plane
@@ -108,16 +114,13 @@ impl RowPlane {
         batch: &BatchParse,
         exchanges: &crate::exchange::ExchangeTable,
     ) {
+        let envelope = crate::field_path::envelope_for(base.filter, base.frame, base.ctx);
         for (record, (message, span)) in batch.records().enumerate() {
             if judged_by_a_census_plane(message, exchanges, &key, record) {
                 continue;
             }
             let names = MessageNames::of(base.frame, Some(message.name()));
-            let tree = if base.filter.reads_tree() {
-                crate::field_path::record_tree(base.frame, span)
-            } else {
-                None
-            };
+            let tree = crate::field_path::RecordAt::new(span, envelope.as_ref()).tree(base.frame);
             // A close the exchange plane could not pair answers its record
             // terms as the request it closes, which the capture does not hold:
             // they are undecided, never `no`. Every other message here is a
@@ -152,7 +155,9 @@ impl RowPlane {
         }
         let names = MessageNames::of(base.frame, None);
         let tree = if base.filter.reads_tree() {
-            bytes.and_then(|b| wz_session_core::dissect::dissect_transport_message(b, 0).ok())
+            bytes
+                .and_then(|b| wz_session_core::dissect::dissect_transport_message(b, 0).ok())
+                .map(crate::field_path::RecordTree::transport)
         } else {
             None
         };
@@ -207,7 +212,7 @@ impl Base<'_> {
         record: Record,
         direction: wz_session_core::passive::Direction,
         names: &MessageNames,
-        tree: Option<&crate::field_path::TreeNode>,
+        tree: Option<&crate::field_path::RecordTree>,
         unit_offset: Option<u64>,
     ) -> Truth {
         self.filter.matches(&RecordView {

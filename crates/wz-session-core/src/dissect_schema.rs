@@ -79,6 +79,13 @@ fn ext_label(entry: &Field) -> Option<&str> {
 /// The name of the level a named extension entry's header fields stand under.
 pub const EXT_HEADER_LEVEL: &str = "ext";
 
+/// The one transport message whose body is a batch of network messages, and
+/// the group of its tree that holds them: a record a `Frame` carried stands at
+/// `Frame.payload.<message>`.
+pub const BATCH_CARRIER: &str = "Frame";
+/// See [`BATCH_CARRIER`].
+pub const BATCH_LEVEL: &str = "payload";
+
 /// One child in the normalised view.
 #[derive(Clone, Copy)]
 pub enum Child<'t> {
@@ -181,6 +188,55 @@ pub fn paths_of(root: &Field) -> Vec<(String, &'static str)> {
         out.push((trail.join("."), kind));
     });
     out
+}
+
+/// THE PATH EACH NODE OF `root`'s TREE ANSWERS TO, as a selector names it:
+/// what a consumer offers as "filter on this field" without building the
+/// normalised view a second time.
+///
+/// Keyed by the node's address in `root`'s tree, and read through
+/// [`NodePaths::of`]. A node the view names is reached by exactly one chain of
+/// parent and child from `root`, so it has one path. A node the view does NOT
+/// name has none, and that is an answer of its own rather than a missing
+/// entry:
+///
+/// * the `extensions` container, whose entries are children of the message
+///   that carries it;
+/// * a walked extension body named like its entry (`source_info` inside the
+///   `source_info` entry), whose children are the entry's.
+///
+/// Both are one thing written twice, or a layout and not a field, so no path
+/// term can single them out; [`children`] is the rule that says so, and this is
+/// its walk, so the two cannot disagree. A named entry's header fields stand
+/// under its `ext` level and their paths say so (`Push.qos.ext.encoding`).
+pub fn node_paths(root: &Field) -> NodePaths {
+    let mut paths = alloc::collections::BTreeMap::new();
+    let mut trail: Vec<&str> = Vec::new();
+    walk(Child::Node(root), &mut trail, &mut |trail, field, _| {
+        // A named entry is visited twice, as itself and as the `ext` level
+        // its header fields stand under; the entry's own path is the first.
+        paths
+            .entry(field as *const Field as usize)
+            .or_insert_with(|| trail.join("."));
+    });
+    NodePaths { paths }
+}
+
+/// The paths [`node_paths`] found, by node.
+#[derive(Debug, Clone, Default)]
+pub struct NodePaths {
+    paths: alloc::collections::BTreeMap<usize, String>,
+}
+
+impl NodePaths {
+    /// The path `node` answers to, or `None` for a node the normalised view
+    /// does not name. `node` must be a node of the tree the paths were found
+    /// over; any other node has no path here.
+    pub fn of(&self, node: &Field) -> Option<&str> {
+        self.paths
+            .get(&(node as *const Field as usize))
+            .map(String::as_str)
+    }
 }
 
 /// The one depth-first walk of the normalised view: `visit` is handed the
@@ -912,12 +968,15 @@ const TRANSPORT_ROOTS: &[SchemaNode] = &[
         ],
     ),
     group(
-        "Frame",
+        BATCH_CARRIER,
         &[
             T_HEAD,
             &[leaf("r", F), leaf("sn", U)],
             EXTS_FRAME,
-            &[group("payload", &[NETWORK_ROOTS, &[leaf("unparsed", BY)]])],
+            &[group(
+                BATCH_LEVEL,
+                &[NETWORK_ROOTS, &[leaf("unparsed", BY)]],
+            )],
         ],
     ),
     group(
@@ -1087,6 +1146,82 @@ mod tests {
         ] {
             assert!(seen.contains(deep), "the walk never reached {deep}");
         }
+    }
+
+    /// THE PATH A NODE IS GIVEN IS ONE THE SELECTOR READS AS THAT NODE, and a
+    /// node is given none only where the normalised view names no node.
+    ///
+    /// Over the same seeded noise as the declaration test: for every node of
+    /// every walked tree, a path handed out is declared (so the selector's
+    /// parser accepts it) and [`matching`] over the root finds that very node
+    /// at it (so the term reads the field the row showed). A node with no path
+    /// is the `extensions` container or a walked body named like its entry,
+    /// and nothing else.
+    #[test]
+    fn every_node_path_is_declared_and_reaches_its_node() {
+        let declared = declared_kinds();
+        let mut unnamed: BTreeSet<String> = BTreeSet::new();
+        let mut named = 0usize;
+        for root in walked_roots(5_000) {
+            let paths = node_paths(&root);
+            let mut stack: Vec<(&Field, Option<&Field>)> = alloc::vec![(&root, None)];
+            while let Some((node, parent)) = stack.pop() {
+                match paths.of(node) {
+                    Some(path) => {
+                        named += 1;
+                        assert!(
+                            declared.contains(&(path.to_string(), node.value.kind_word())),
+                            "{path} ({}) is handed out and not declared",
+                            node.value.kind_word()
+                        );
+                        let segments: Vec<&str> = path.split('.').collect();
+                        assert!(
+                            matching(&root, &segments)
+                                .iter()
+                                .any(|hit| core::ptr::eq(*hit, node)),
+                            "{path} does not reach the node it was given to"
+                        );
+                    }
+                    None => {
+                        let collapsed = parent
+                            .is_some_and(|p| p.name == "ext" && ext_label(p) == Some(&*node.name));
+                        assert!(
+                            node.name == "extensions" || collapsed,
+                            "{} has no path and is neither the chain nor a collapsed body",
+                            node.name
+                        );
+                        unnamed.insert(node.name.to_string());
+                    }
+                }
+                if let FieldValue::Nested(children) = &node.value {
+                    stack.extend(children.iter().map(|c| (c, Some(node))));
+                }
+            }
+        }
+        // Not vacuous: both unnamed shapes were met, and most nodes are named.
+        assert!(unnamed.contains("extensions"), "{unnamed:?}");
+        assert!(
+            unnamed.len() >= 2,
+            "no collapsed body was walked: {unnamed:?}"
+        );
+        assert!(named > 100_000, "{named}");
+    }
+
+    /// The rendered field object carries the path, and `null` where there is none.
+    #[test]
+    fn the_rendered_tree_carries_each_nodes_path() {
+        let root = query_with_walked_body();
+        let json = crate::dissect::to_json(&root);
+        for path in [
+            r#""selector_path":"query""#,
+            r#""selector_path":"query.query_body""#,
+            r#""selector_path":"query.query_body.ext.encoding""#,
+            r#""selector_path":"query.query_body.encoding.packed_id""#,
+        ] {
+            assert!(json.contains(path), "{path} missing: {json}");
+        }
+        // The chain and the collapsed body, and nothing else.
+        assert_eq!(json.matches(r#""selector_path":null"#).count(), 2, "{json}");
     }
 
     /// A walked tree's label carries a word of its declared set.

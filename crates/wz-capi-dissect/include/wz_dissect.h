@@ -268,6 +268,34 @@
  * different document: on an interest row the word is `subscriber`, `queryable`
  * or `liveliness_token`.
  *
+ * AND THE NAME A SELECTOR GIVES EACH NODE, at field-document revision 56:
+ *
+ *     `selector_path`   "Frame.qos.priority",
+ *                       "Frame.payload.Push.keyexpr.suffix", ... or `null`
+ *
+ * Every field object carries it, beside `name`, `start` and `end`: the dotted
+ * path a selector's path term names this node by, from the root of the tree it
+ * is in. (Not `path`, which this document already gives a decoded payload
+ * field, a different thing.) Write a filter from a node by writing its
+ * `selector_path` (`<path> == <value>`, or the path alone for presence) and do
+ * not build it from the `name`s: the
+ * selector reads a NORMALISED view, in which an extension entry is named by
+ * what it is (`qos`, not `ext`), the `extensions` chain is not a level, and a
+ * named entry's header fields stand under `ext` (`Push.qos.ext.encoding`). A
+ * path built from the walked names is a second decoder of that view.
+ *
+ * `null` is an answer: the node is one no path term can single out -- the
+ * `extensions` container, or a walked extension body written a second time
+ * inside its entry. Offer no filter verb for it.
+ *
+ * A record a `Frame` carried is judged INSIDE that Frame, with the record alone
+ * under `payload`, so a row's node paths name the same nodes in the selection:
+ * `Frame.sn == 9` keeps the records of the frame whose `sn` is 9, and a bare
+ * tail like `qos.priority` is satisfied by the transport `qos` as well as the
+ * network one (write `Frame.qos.priority` or `Push.qos.priority` to mean one).
+ * Where the capture keeps no bytes of the Frame, a path that could stand in it
+ * is undecided, never `no`.
+ *
  * R2223 -- AND THE MESSAGE NAMES, at field-document revision 5. The third
  * near-namesake above used to end this paragraph as an exception -- "the
  * message kind on a record row travels under `name` and is not a member of
@@ -1340,9 +1368,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":55,"key":"kind","values":[...],
- *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
- *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
+ *     {"name":"fields","revision":56,"key":"kind","values":[...],
+ *      "carries":[{"word":"bits",
+ *                  "shapes":[["end","name","selector_path","start","value"]]},
+ *                 {"word":"opaque",
+ *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
  *     {"name":"census","revision":22,"key":"mode","values":[...],
  *      "carries":null}
@@ -5006,7 +5036,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":55,"key":"state",
+ *     "value_families":[{"name":"fields","revision":56,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

@@ -11367,6 +11367,7 @@ mod tests {
         assert!(
             json.contains(
                 "\"name\":\"ext_name\",\"start\":2,\"end\":3,\
+                           \"selector_path\":\"Frame.qos.ext.ext_name\",\
                            \"kind\":\"label\",\"value\":\"qos\""
             ),
             "the extension must reach the reader NAMED, aliasing its header \
@@ -11375,6 +11376,7 @@ mod tests {
         assert!(
             json.contains(
                 "\"name\":\"ext_id\",\"start\":2,\"end\":3,\
+                           \"selector_path\":\"Frame.qos.ext.ext_id\",\
                            \"kind\":\"bits\",\"value\":1"
             ),
             "and its id must be the four bits zenoh gives it, not five: {json}"
@@ -11382,6 +11384,7 @@ mod tests {
         assert!(
             json.contains(
                 "\"name\":\"m\",\"start\":2,\"end\":3,\
+                           \"selector_path\":\"Frame.qos.ext.m\",\
                            \"kind\":\"flag\",\"value\":true"
             ),
             "and the mandatory bit must be its own field: {json}"
@@ -11422,6 +11425,7 @@ mod tests {
         assert!(
             json.contains(
                 "\"name\":\"value\",\"start\":3,\"end\":4,\
+                 \"selector_path\":\"Frame.qos.value\",\
                  \"kind\":\"uint\",\"value\":3"
             ),
             "the z64 body must stay visible as the number it is: {json}"
@@ -11429,6 +11433,7 @@ mod tests {
         assert!(
             json.contains(
                 "\"name\":\"priority\",\"start\":3,\"end\":4,\
+                 \"selector_path\":\"Frame.qos.priority\",\
                  \"kind\":\"label\",\"value\":\"InteractiveLow\""
             ),
             "and its decoding must reach the reader, aliasing that same \

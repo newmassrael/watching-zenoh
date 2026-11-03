@@ -258,9 +258,27 @@ pub struct ListContext<'a> {
     /// context came out of held it: what a selector's `zenoh` term reads. `None`
     /// where the census named none (the same absence [`Self::zids`] has).
     zenoh: Option<crate::session_table::ZenohVerdict>,
+    /// The bytes the capture holds for the transport message of the frame
+    /// being walked, where the walk read them: what a selector's path terms
+    /// read the `Frame` around a record from
+    /// (`crate::field_path::FrameEnvelope`). `None` where the walk did not
+    /// read them, and then a path through the `Frame` is undecidable.
+    message: Option<&'a [u8]>,
 }
 
 impl<'a> ListContext<'a> {
+    /// This context, holding the bytes of the transport message of the frame
+    /// being walked. A walk whose selector names no path does not read them
+    /// ([`crate::filter::Filter::reads_tree`]).
+    pub fn holding(self, message: Option<&'a [u8]>) -> Self {
+        Self { message, ..self }
+    }
+
+    /// The bytes [`Self::holding`] gave.
+    pub fn message(self) -> Option<&'a [u8]> {
+        self.message
+    }
+
     /// The list index, which is what `Dissection::message_lists` is keyed by.
     pub fn list(self) -> usize {
         self.list
@@ -320,6 +338,7 @@ impl<'a> ListContext<'a> {
             zids: None,
             place: None,
             zenoh: None,
+            message: None,
         }
     }
 }
@@ -1432,6 +1451,7 @@ impl SessionGrouping {
             zids: self.zids(list),
             place: None,
             zenoh: self.words.get(list).copied().flatten(),
+            message: None,
         }
     }
 

@@ -1350,8 +1350,10 @@ impl PayloadCensus {
         }
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
+        let envelope = crate::field_path::envelope_for(filter, frame, ctx);
         for (message, span) in batch.records() {
-            self.observe_message(spaces, frame, message, span, filter, ctx);
+            let at = crate::field_path::RecordAt::new(span, envelope.as_ref());
+            self.observe_message(spaces, frame, message, at, filter, ctx);
         }
     }
 
@@ -1360,11 +1362,12 @@ impl PayloadCensus {
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &wz_session_core::passive::PassiveFrame,
         message: &wz_session_core::network_message::NetworkMessage,
-        span: Option<(usize, usize)>,
+        at: crate::field_path::RecordAt<'_>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
     ) {
         use wz_session_core::network_message::NetworkMessage;
+        let span = at.span;
 
         let direction = frame.direction;
         if let NetworkMessage::Declare(d) = message {
@@ -1391,11 +1394,7 @@ impl PayloadCensus {
         let keyexpr = spaces.resolve(direction, keyexpr_body).ok();
         let payload_bytes = crate::agg::sized_payload(&counts);
         // Walked only for a selector that names a path: see `Filter::reads_tree`.
-        let tree = if filter.reads_tree() {
-            crate::field_path::record_tree(frame, span)
-        } else {
-            None
-        };
+        let tree = at.tree(frame);
         let names = crate::filter::MessageNames::of(frame, Some(message.name()));
         // R311y618 — asked after resolution and before the bytes are inspected.
         let truth = filter.matches(&crate::filter::RecordView {
@@ -1652,7 +1651,6 @@ pub fn payloads_grouped(
     filter: &crate::filter::Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> PayloadCensus {
-    use crate::ordered_fold::OrderedFold;
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration.
     // R2457 — `.enumerate()`, because the grouping is keyed by list index.
     // R2510 (open-debt item 713) — and in CAPTURE order, which is the same
@@ -1661,9 +1659,7 @@ pub fn payloads_grouped(
     // against that publisher whenever the id was declared on the session's other
     // link; `crate::agg::aggregate_grouped` carries the whole argument.
     let mut fold = PayloadFold::begin(dissection, filter, grouping);
-    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, &frame, grouping);
-    }
+    crate::ordered_fold::fold_whole_capture(&mut fold, dissection, grouping);
     fold.census()
 }
 
@@ -1717,12 +1713,17 @@ impl crate::ordered_fold::OrderedFold for PayloadFold {
         self.filter.reads_flow_word()
     }
 
+    fn reads_tree(&self) -> bool {
+        self.filter.reads_tree()
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
         frame: &wz_session_core::passive::PassiveFrame,
+        message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {
         self.spaces.enter_flow(grouping.owners(list));
@@ -1732,8 +1733,13 @@ impl crate::ordered_fold::OrderedFold for PayloadFold {
             frame,
             &self.filter,
             // Placed, so the selector's row terms read this frame's flow and
-            // packet: the walk is in capture order and holds both.
-            grouping.context(list).placed(*flow, Some(packet)),
+            // packet: the walk is in capture order and holds both. Holding the
+            // transport message's bytes, so a path term reads the `Frame`
+            // around a record.
+            grouping
+                .context(list)
+                .placed(*flow, Some(packet))
+                .holding(message),
             &mut self.spaces,
         );
     }
