@@ -135,14 +135,15 @@ fn a_handshake_the_key_store_has_no_slot_for_is_dropped_counted_and_names_a_code
         "{} sessions held, not what a store of 1024 keys at four each gives",
         accepted.len()
     );
-    // Measured: Mbed TLS reports a full store from inside the handshake as its generic handshake
-    // failure (`MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE`, -0x6E00), not as PSA's insufficient-memory
-    // code, so the channel does not name it `OutOfMemory`. The count and the arena's peak above
-    // are what say it was the store.
+    // Measured: Mbed TLS itself reports a full store from inside the handshake as its generic
+    // handshake failure (`MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE`, -0x6E00), not as PSA's
+    // insufficient-memory code. The channel asks the store (`mbedtls_psa_get_stats`) when a
+    // handshake fails that way and names a store with no empty slot `OutOfMemory`; the count and
+    // the arena's peak above say it was the store and not the arena.
     assert_eq!(
         listener.last_drop(),
-        Some(TlsError::Code(-0x6E00)),
-        "a store with no free slot is Mbed TLS's generic handshake failure"
+        Some(TlsError::OutOfMemory),
+        "a store with no free slot is the channel's out-of-memory"
     );
 
     drop(accepted);

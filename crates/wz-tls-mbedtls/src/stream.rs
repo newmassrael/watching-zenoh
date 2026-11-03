@@ -506,9 +506,8 @@ struct Pending<S: StreamSocket + 'static> {
 /// inbound session and not a table of them, and a peer that stalls is dropped by the
 /// [`AcceptBudget`]. A handshake that fails (a peer that is not trusted, a plain TCP client, a
 /// reset) is dropped and is not the listener's failure, but it is counted: [`Self::dropped`] and
-/// [`Self::last_drop`] are how a program sees that the arena had no room for a handshake (or
-/// that the key store had none, which reports as a handshake failure), which the caller of
-/// `accept` otherwise sees only as nothing to accept.
+/// [`Self::last_drop`] are how a program sees that the arena or the key store had no room for a
+/// handshake, which the caller of `accept` otherwise sees only as nothing to accept.
 pub struct TlsListener<L: StreamListen>
 where
     L::Stream: 'static,
@@ -540,11 +539,10 @@ where
     }
 
     /// The channel's error for the latest drop, `None` when that drop had none (a stall past the
-    /// budget) or when there has been none. An arena with no room is [`TlsError::OutOfMemory`]
-    /// (measured, `tests/arena_exhaustion.rs`). A key store with no free slot is not: Mbed TLS
-    /// reports it from inside the handshake as its generic handshake failure, a
-    /// [`TlsError::Code`] of `-0x6E00` (measured, `tests/key_store_exhaustion.rs`), which a
-    /// refused peer also gives, so the code alone does not name it.
+    /// budget) or when there has been none. An arena or a key store with no room is
+    /// [`TlsError::OutOfMemory`] (measured, `tests/arena_exhaustion.rs` and
+    /// `tests/key_store_exhaustion.rs`). Mbed TLS itself reports a full key store as its generic
+    /// handshake failure, so the channel asks the store when a handshake fails that way.
     pub fn last_drop(&self) -> Option<TlsError> {
         self.last_drop.get()
     }

@@ -329,10 +329,10 @@ impl<S: StreamSocket + 'static> StreamListen for Timed<S> {
 
 impl<S: StreamSocket + 'static> Timed<S> {
     /// One event for each drop since the last accept: why the connection ended, and the
-    /// channel's own code. An arena with no room is `TLS_DROP_NO_ROOM`: it reaches the channel as
-    /// `OutOfMemory` (measured, `wz-tls-mbedtls/tests/arena_exhaustion.rs`). A key store with no
-    /// free slot does not: Mbed TLS reports it as its generic handshake failure (measured,
-    /// `wz-tls-mbedtls/tests/key_store_exhaustion.rs`), so it is `TLS_DROP_OTHER` with that code.
+    /// channel's own code. An arena or a key store with no room is `TLS_DROP_NO_ROOM`: both reach
+    /// the channel as `OutOfMemory` (measured, `wz-tls-mbedtls/tests/arena_exhaustion.rs` and
+    /// `tests/key_store_exhaustion.rs`; for the store the channel asks it, because Mbed TLS
+    /// reports a full store as its generic handshake failure).
     #[cfg(feature = "event-ring")]
     fn tell_the_log(&self) {
         use wz_capi_port::observation::events::{

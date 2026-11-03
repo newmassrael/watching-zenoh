@@ -577,9 +577,26 @@ void wz_tls_session_set_io_ctx(struct wz_tls_session *s, void *ctx)
 	s->io.ctx = ctx;
 }
 
+/* Whether PSA's key store has no empty slot left. Mbed TLS reports a handshake that could not get
+ * a key as its generic handshake failure, whatever PSA refused (MEASURED, `key_store_exhaustion`),
+ * so the caller learns the store was full by asking it. The session that failed still holds the
+ * keys it took, so a store its own handshake filled reads as full here. */
+static int key_store_is_full(void)
+{
+	mbedtls_psa_stats_t stats;
+
+	mbedtls_psa_get_stats(&stats);
+	return stats.MBEDTLS_PRIVATE(empty_slots) == 0;
+}
+
 int wz_tls_session_handshake(struct wz_tls_session *s)
 {
 	int rc = result(s, mbedtls_ssl_handshake(&s->ssl));
+
+	if (rc == MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE && key_store_is_full()) {
+		/* A refused peer gives the same code; with no slot free, a later try can still succeed. */
+		return PSA_ERROR_INSUFFICIENT_MEMORY;
+	}
 
 	if (rc == 0 && s->peer_cert_required && mbedtls_ssl_get_peer_cert(&s->ssl) == NULL) {
 		/* OPTIONAL lets a client finish without one; a channel without a key proves nobody. */
