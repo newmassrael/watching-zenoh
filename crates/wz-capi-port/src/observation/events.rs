@@ -25,6 +25,15 @@ pub const LEVEL_LIBRARY: u8 = library::LIBRARY_LEVEL;
 pub const SOURCE_LIBRARY: u16 = library::LIBRARY_SOURCE_BASE;
 /// A supervised checkpoint missed its deadline. One integer: the checkpoint's number.
 pub const SOURCE_SUPERVISION_EXPIRED: u16 = library::SUPERVISION_EXPIRED;
+/// A host's secure-channel listener ended a connection without a stream. Two integers: why
+/// ([`TLS_DROP_STALLED`], [`TLS_DROP_NO_ROOM`] or [`TLS_DROP_OTHER`]) and the channel's own code.
+pub const SOURCE_TLS_HANDSHAKE_DROPPED: u16 = library::TLS_HANDSHAKE_DROPPED;
+/// A peer that stalled past the accept budget.
+pub const TLS_DROP_STALLED: u64 = 0;
+/// The arena or the key store had no room for the handshake.
+pub const TLS_DROP_NO_ROOM: u64 = 1;
+/// Any other failure of the handshake, or a peer the policy did not accept.
+pub const TLS_DROP_OTHER: u64 = 2;
 
 /// What a read found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +110,18 @@ pub fn release(upto: u64) {
 /// How many events a full log refused under `drop-newest`. `0` under `overwrite-oldest`.
 pub fn dropped() -> u32 {
     global().dropped()
+}
+
+/// Write the event the library writes when a secure-channel listener ends a connection without a
+/// stream: `why` is one of the `TLS_DROP_*` words and `code` the channel's own, `0` where it has
+/// none. A full log under `drop-newest` refuses it and counts it, as for any event.
+pub fn emit_tls_handshake_dropped(why: u64, code: u32) {
+    global().emit_from(
+        &process_clock(),
+        LEVEL_LIBRARY,
+        SOURCE_TLS_HANDSHAKE_DROPPED,
+        &[why, u64::from(code)],
+    );
 }
 
 /// Write the event the library writes when a supervised checkpoint expires. A build without the

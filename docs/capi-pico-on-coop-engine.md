@@ -1095,10 +1095,22 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     Elliptic-curve keys in PKCS#8 were never affected.
   - A handshake the listener ends without a stream (a failed handshake, a peer the policy did
     not accept, a stall past the accept budget) was seen by the caller of `accept` only as
-    nothing to accept. `TlsListener::dropped` counts them and `TlsListener::last_drop` names the
-    channel's error of the latest that had one, which is how a program sees the arena or the
-    key store run out. The counters are on the typed listener; the C ABI's listener is boxed
-    behind `TlsDial::listen`, so a C program does not read them yet.
+    nothing to accept. `TlsListener::dropped` counts them (an arena with no room for the session
+    itself, which `accept` answers with an error, is counted too) and `TlsListener::last_drop`
+    names the channel's error of the latest drop, `None` for a stall. An arena that ran out was
+    measured to be `OutOfMemory` (`wz-tls-mbedtls/tests/arena_exhaustion.rs`: 11 sessions held in
+    the tests' 256 KiB, the next dropped); a key store with no free slot returns PSA's
+    insufficient-memory code, which the channel maps to the same (read, not measured).
+  - A C program reads them through the node's event log, not a new door. The host provider holds
+    the typed listener (`TlsDial::listen_counted`) and, in a build with `event-ring`, writes one
+    library event per drop: source `WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED` (0xFF01), level
+    255, two integers: why (`WZ_EXT_EVENT_TLS_DROP_STALLED`, `_NO_ROOM` or `_OTHER`) and the
+    channel's own code. `tests/tls_handshake_drop_event.rs` (lane `C1co tls handshake drop
+    event`, 1 passed guarded) sends a connection that is not TLS and reads the event back through
+    `wz_ext_event_read`; with the telling switched off it fails for want of the event (measured).
+    Only a failed handshake (`OTHER`) is exercised through the ABI; `NO_ROOM` is held by the
+    channel's test, not by an ABI one, because the provider's arena is 4 MiB, and `STALLED` by
+    neither beyond the channel's count of it (`stream_policy`).
   - The Zephyr kit images. The first cut of this step did not reach them; this one does: an image
     compiles `csrc/wz_tls.c` and `src/stream.rs` itself. The C side gained code only under
     `rsa`, which the image never sets, so its object is what it was; the Rust side gained two
@@ -1106,11 +1118,13 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     `scripts/kit-lane.sh build` (what Layer Qzk runs), west on the development host, whose
     `~/zephyrproject` and SDK are the only ones among the build hosts that were checked (pc2 and
     pc3 have none): `zephyr-client-fixed-tls` built (text 256,552 B, padded image sha256
-    1ab77ee5...; it has no stack-gate row yet) and `zephyr-admin-fixed-tls` built and held by
-    both gates (stack chain 35,312 B against a 47,104 B stack; text 326,184 B against the
-    committed 326,088 B, within the 1,024 B the gate allows). The 96 B of text over the committed
-    row was not attributed to this step: no image was built from the commit before it. Nothing
-    was flashed or booted.
+    0eb61ee1...; it has no stack-gate row yet) and `zephyr-admin-fixed-tls` built and held by
+    both gates (stack chain 35,312 B against a 47,104 B stack; text 326,208 B against the
+    committed 326,088 B, within the 1,024 B the gate allows). The text over the committed row
+    was 96 B in a build made before the listener counted a session that could not start and
+    wrote `last_drop` on every drop, and 120 B in this one, so those two changes cost 24 B; the
+    96 B before them are not attributed to this step, since no image was built from the commit
+    before it. Nothing was flashed or booted.
 
 ### What is decided and what is open
 

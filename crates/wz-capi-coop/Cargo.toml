@@ -164,6 +164,11 @@ listen = ["wz-runtime-coop/session-unicast-accept"]
 # engine's read tasks are threads and the library keeps process-wide state with no lock of its
 # own. Off, a `tls/` endpoint is the stack's `Unsupported`, and the text has none of it.
 tls-mbedtls = ["std", "dep:wz-tls-mbedtls", "wz-tls-mbedtls/vendored", "wz-tls-mbedtls/host-lock", "wz-tls-mbedtls/rsa"]
+# The node's event log (`wz-capi-port`'s `event-ring`), so that a `tls/` listener tells it when it
+# ended a connection without a stream (`tls::HostTls`): a handshake the arena or the key store had
+# no room for is otherwise a closed connection to the peer and nothing to the program. Without
+# `tls-mbedtls` there is no listener to tell it, and the feature adds only the log.
+event-ring = ["wz-capi-port/event-ring"]
 # Delivery of the session's own get to the session's own queryables (`Z_FEATURE_LOCAL_QUERYABLE`):
 # a get reaches the queryables of the session that made it, after it has gone out on the link,
 # and a querier's write filter or matching listener that counts the session's own entities counts

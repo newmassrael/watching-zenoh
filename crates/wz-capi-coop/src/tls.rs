@@ -22,15 +22,17 @@
 //! A dial and a listen present different material in one pico program (`connect_*` and `listen_*`
 //! keys), and the channel's policy holds one identity, so the value holds a dial for each role.
 
+#[cfg(feature = "event-ring")]
+use std::cell::Cell;
 use std::ffi::CString;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use wz_capi_port::tls_material::CapiTlsConfig;
 use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen};
+use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_tls_mbedtls::channel::{self, Identity, TlsError, Trust};
-use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial, TlsStream};
+use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial, TlsListener, TlsStream};
 
 /// The bytes the library's allocations come from on a host. The memory is zeroed and so reserved
 /// and not touched until the library uses it; a session's use is measured by
@@ -289,23 +291,29 @@ where
     ) -> Result<Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
         let listener = self.listener.as_ref().ok_or(LinkOpenError::Unsupported)?;
         state_the_time(self.listen_roots);
-        let inner = listener.listen(addr, port)?;
+        let inner = listener.listen_counted(addr, port)?;
         Ok(Box::new(Timed {
             inner,
             roots: self.listen_roots,
+            #[cfg(feature = "event-ring")]
+            told: Cell::new(0),
         }))
     }
 }
 
 /// A listener that states the time to its roots before each accept, so a client chain that
-/// lapsed while the program ran is refused at its handshake.
-struct Timed<L> {
-    inner: L,
+/// lapsed while the program ran is refused at its handshake, and that tells the node's event log
+/// of each connection the channel took and ended without a stream (`event-ring`).
+struct Timed<S: StreamSocket + 'static> {
+    inner: TlsListener<Box<dyn StreamListen<Stream = S>>>,
     roots: Option<&'static Trust>,
+    /// How many of the inner listener's drops the event log has been told of.
+    #[cfg(feature = "event-ring")]
+    told: Cell<u32>,
 }
 
-impl<L: StreamListen> StreamListen for Timed<L> {
-    type Stream = L::Stream;
+impl<S: StreamSocket + 'static> StreamListen for Timed<S> {
+    type Stream = TlsStream<S>;
 
     fn local(&self) -> ([u8; 4], u16) {
         self.inner.local()
@@ -313,6 +321,40 @@ impl<L: StreamListen> StreamListen for Timed<L> {
 
     fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError> {
         state_the_time(self.roots);
-        self.inner.accept()
+        let accepted = self.inner.accept();
+        self.tell_the_log();
+        accepted
     }
+}
+
+impl<S: StreamSocket + 'static> Timed<S> {
+    /// One event for each drop since the last accept: why the connection ended, and the
+    /// channel's own code. An arena or a key store with no room is `TLS_DROP_NO_ROOM`: both reach
+    /// the channel as `OutOfMemory` (an arena that ran out was measured to, in
+    /// `wz-tls-mbedtls/tests/arena_exhaustion.rs`; a key store with no free slot returns PSA's
+    /// insufficient-memory code, `psa_crypto_slot_management.c`, which the channel maps to it).
+    #[cfg(feature = "event-ring")]
+    fn tell_the_log(&self) {
+        use wz_capi_port::observation::events::{
+            emit_tls_handshake_dropped, TLS_DROP_NO_ROOM, TLS_DROP_OTHER, TLS_DROP_STALLED,
+        };
+
+        let dropped = self.inner.dropped();
+        let new = dropped.saturating_sub(self.told.get());
+        if new == 0 {
+            return;
+        }
+        self.told.set(dropped);
+        // At most one connection ends in an accept, so `last_drop` is the one just ended.
+        let (why, code) = match self.inner.last_drop() {
+            None => (TLS_DROP_STALLED, 0),
+            Some(TlsError::OutOfMemory) => (TLS_DROP_NO_ROOM, 0),
+            Some(TlsError::Code(code)) => (TLS_DROP_OTHER, code as u32),
+            Some(_) => (TLS_DROP_OTHER, 0),
+        };
+        emit_tls_handshake_dropped(why, code);
+    }
+
+    #[cfg(not(feature = "event-ring"))]
+    fn tell_the_log(&self) {}
 }

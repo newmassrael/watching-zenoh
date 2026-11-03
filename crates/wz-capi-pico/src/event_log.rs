@@ -38,6 +38,15 @@ pub const WZ_EXT_EVENT_LEVEL_LIBRARY: u8 = events::LEVEL_LIBRARY;
 pub const WZ_EXT_EVENT_SOURCE_LIBRARY: u16 = events::SOURCE_LIBRARY;
 /// A supervised checkpoint missed its deadline. One integer: the checkpoint's number.
 pub const WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED: u16 = events::SOURCE_SUPERVISION_EXPIRED;
+/// A host's secure-channel listener ended a connection without a stream. Two integers: why
+/// (`WZ_EXT_EVENT_TLS_DROP_*`) and the channel's own code.
+pub const WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED: u16 = events::SOURCE_TLS_HANDSHAKE_DROPPED;
+/// The first integer of a dropped handshake: a peer that stalled past the accept budget.
+pub const WZ_EXT_EVENT_TLS_DROP_STALLED: u64 = events::TLS_DROP_STALLED;
+/// The first integer of a dropped handshake: the arena or the key store had no room.
+pub const WZ_EXT_EVENT_TLS_DROP_NO_ROOM: u64 = events::TLS_DROP_NO_ROOM;
+/// The first integer of a dropped handshake: any other failure, or a peer the policy refused.
+pub const WZ_EXT_EVENT_TLS_DROP_OTHER: u64 = events::TLS_DROP_OTHER;
 
 /// One event, as `wz_ext_event_read` gives it.
 #[repr(C)]

@@ -510,8 +510,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-tls-mbedtls|hook|host-lock,vendored|"
     # The same tests with the host's RSA beside the P-256 (`rsa`, step T4 of L6): a host's chain is
     # RSA, and the configuration that carries it adds signature algorithms to every handshake, so
-    # the channel against rustls over P-256 is run again with it on. MEASURED: 31 passed, the 30
-    # of the row above and `tests/rsa_key_forms.rs` (an RSA key in PKCS#1 and in PKCS#8 opens an
+    # the channel against rustls over P-256 is run again with it on. MEASURED: 32 passed, the 31
+    # of the row above (`tests/arena_exhaustion.rs` among them: a handshake the arena has no room
+    # for is counted and names the channel's out-of-memory) and `tests/rsa_key_forms.rs` (an RSA
+    # key in PKCS#1 and in PKCS#8 opens an
     # identity of the same zid), which only this row compiles. The row above is the build the
     # kit's image is, which never sets `rsa`.
     "wz-tls-mbedtls|hook|host-lock,rsa,vendored|"
@@ -1304,6 +1306,11 @@ an intermittent HANG in the two-dialer FIFO rendezvous (measured 1-in-3 alone, 7
 the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
     "wz-capi-pico|a_dial_that_trusts_another_certificate_does_not_open|\
 the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
+    # The listener's event for a dropped handshake (`tests/tls_handshake_drop_event.rs`, needs
+    # `tls-mbedtls` and `event-ring`): the same cooperative engine, run by lane C1co tls handshake
+    # drop event, with 1 passed guarded.
+    "wz-capi-pico|a_client_that_is_not_speaking_tls_is_dropped_and_the_event_log_is_told|\
+the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then

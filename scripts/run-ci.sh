@@ -11120,6 +11120,15 @@ layer_c1co_pico_client_dials_a_listener() {
         cargo test -p wz-capi-pico --no-default-features \
         --features "tls-mbedtls,peer,multi-thread,link-udp" \
         --test tls_coop_roundtrip || return 1
+    # The same listener tells the node's event log when it ends a connection without a stream
+    # (`crates/wz-capi-pico/tests/tls_handshake_drop_event.rs`): a client that is not speaking TLS
+    # is dropped and a library event, source 0xFF01, follows with the channel's own code. With the
+    # telling left out of the listener's accept the connection is still dropped and the test fails
+    # for want of the event (measured).
+    _runci_guarded_test "C1co tls handshake drop event" 1 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features "tls-mbedtls,peer,multi-thread,link-udp,event-ring" \
+        --test tls_handshake_drop_event || return 1
     # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
     # one over the engine's own window, and finds nobody on a group nobody answers, which the
     # tokio engine's default build already runs; this is the same test with no tokio engine in

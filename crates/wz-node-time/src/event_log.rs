@@ -39,6 +39,12 @@ pub mod library {
     pub const LIBRARY_LEVEL: u8 = 255;
     /// A supervised checkpoint missed its deadline. One integer: the checkpoint's number.
     pub const SUPERVISION_EXPIRED: u16 = LIBRARY_SOURCE_BASE;
+    /// A host's secure-channel listener took a connection and ended it without a stream. Two
+    /// integers: why (`0` a peer that stalled past the accept budget, `1` the arena or the key
+    /// store had no room, `2` any other failure or refusal), and the channel's own code (`0` for
+    /// a stall, otherwise the negative Mbed TLS or PSA code as a 32-bit word, or `0` where the
+    /// failure has none).
+    pub const TLS_HANDSHAKE_DROPPED: u16 = LIBRARY_SOURCE_BASE + 1;
 }
 
 /// The ring type every event log has, sized by the build.

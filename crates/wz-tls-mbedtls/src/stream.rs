@@ -464,10 +464,28 @@ where
         addr: [u8; 4],
         port: u16,
     ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
+        Ok(alloc::boxed::Box::new(self.listen_counted(addr, port)?))
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<D: StreamDial> TlsDial<D>
+where
+    D::Stream: 'static,
+{
+    /// [`StreamDial::listen`] with the listener left typed, so its [`TlsListener::dropped`] and
+    /// [`TlsListener::last_drop`] can be read by the program that holds it (the boxed form of
+    /// `listen` hides them).
+    pub fn listen_counted(
+        &self,
+        addr: [u8; 4],
+        port: u16,
+    ) -> Result<TlsListener<alloc::boxed::Box<dyn StreamListen<Stream = D::Stream>>>, LinkOpenError>
+    {
         // Checked before the port is bound, so a dial that cannot accept does not take the port.
         self.accept.ok_or(LinkOpenError::Unsupported)?;
         let inner = self.inner.listen(addr, port)?;
-        Ok(alloc::boxed::Box::new(self.listener(inner)?))
+        self.listener(inner)
     }
 }
 
@@ -510,9 +528,7 @@ where
     fn drop_pending(&self, pending: Pending<L::Stream>, why: Option<TlsError>) {
         pending.lower.socket.shutdown();
         self.dropped.set(self.dropped.get().saturating_add(1));
-        if why.is_some() {
-            self.last_drop.set(why);
-        }
+        self.last_drop.set(why);
     }
 
     /// How many inbound connections this listener took and ended without a stream: a handshake
@@ -522,9 +538,9 @@ where
         self.dropped.get()
     }
 
-    /// The channel's error for the latest drop that had one (a stall past the budget has none).
-    /// An arena or a key store with no room is [`TlsError::OutOfMemory`] or a [`TlsError::Code`]
-    /// of PSA's refusal.
+    /// The channel's error for the latest drop, `None` when that drop had none (a stall past the
+    /// budget) or when there has been none. An arena or a key store with no room is
+    /// [`TlsError::OutOfMemory`] or a [`TlsError::Code`] of PSA's refusal.
     pub fn last_drop(&self) -> Option<TlsError> {
         self.last_drop.get()
     }
@@ -562,8 +578,11 @@ where
                     });
                 }
                 Err(e) => {
-                    // Taken off the port and not served: the peer sees the close.
+                    // Taken off the port and not served: the peer sees the close. The caller is
+                    // told by the error, and the drop is counted as any other is.
                     lower.socket.shutdown();
+                    self.dropped.set(self.dropped.get().saturating_add(1));
+                    self.last_drop.set(Some(e));
                     return Err(open_error(e));
                 }
             }

@@ -214,6 +214,7 @@ event-ring = [
     "wz-node-time/event-ring",
     "wz-capi-port/event-ring",
     "wz-capi-core?/event-ring",
+    "wz-capi-coop?/event-ring",
 ]
 # `supervision`: the node's supervisor and the doors that drive it (`wz_ext_supervision_*`).
 # wz's own, which zenoh-pico has not, so off as the reference build is, and part of the unstable
