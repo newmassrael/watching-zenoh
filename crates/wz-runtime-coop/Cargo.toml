@@ -176,6 +176,10 @@ session-unicast = [
 # copying receive loop does not.
 session-slot = ["session-unicast", "rx-in-place", "wz-session-core/session-slot"]
 
+# The high-water mark of the pump cells (`wz-session-core`'s `pool-monitor`, `docs/pool-monitor.md`).
+# Without it the table keeps no mark and is the size it was.
+pool-monitor = ["wz-session-core?/pool-monitor"]
+
 # The unicast drive loop reads each inbound datagram WHERE THE LINK HOLDS IT
 # and hands the session its records one at a time, instead of copying the
 # datagram onto the heap, copying the frame's payload out of that copy and

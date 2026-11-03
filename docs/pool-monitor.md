@@ -47,11 +47,30 @@ that keeps the mark.
 |---|---|---|
 | id-keyed tables a peer writes | `id_map::FixedIdMap` | rows, refusals |
 | session slots | `session_slot::SessionSlots` | taken slots, refusals |
+| pump cells | `session_drive::PumpSlots` (`wz-runtime-coop`) | taken cells, refusals |
+
+## Listing the pools
+
+An owner of pools implements `PoolList::visit_pools(&self, visit)`: it calls `visit` once per
+pool, in a fixed order, so a build with no heap lists its pools as one with a heap does, and
+nothing is collected. The MCU session host (`wz-session-mcu`'s `SessionHost`) is the first owner:
+it lists `session-slots`, then `pump-cells`.
+
+`write_pool_document(&owner, &mut writer)` writes what an owner lists as a document, in JSON
+without whitespace and without an allocator:
+
+```text
+{"version":1,"pools":[{"name":"session-slots","capacity":4,"in_use":1,"high_water":3,"refused":0}]}
+```
+
+`high_water` is `null` in a build that keeps no mark, which is not zero. A pool's name is lower-case
+letters, digits and `-`; the writer refuses any other name with an error, so a name never breaks
+the document. A reader that does not know `version` reads none of it.
 
 ## Not yet
 
-The reply stage's two tables, the reassembly slots, the pump and task cells, and the listener's
-lanes keep their own counters and do not yet answer as pools. Nothing lists a node's pools yet, and
-nothing serves them. The trait that lists them (an owner calls a visitor once per pool, so a build
-with no heap lists as one with a heap does) and the document a node publishes, with the resource
-snapshot's admin-space route, come with the first reader, so that neither exists without one.
+The reply stage's two tables, the reassembly slots, the task table and the listener's lanes keep
+their own counters and do not yet answer as pools. Nothing serves the document: a node's program
+calls `write_pool_document` on the host it holds and sends the text where it wants, and the
+admin-space route and a `wz_ext_*` door are for the first consumer that asks for one. No firmware
+image of the repository turns the mark on or prints the document yet.

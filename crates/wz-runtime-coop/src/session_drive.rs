@@ -1387,6 +1387,9 @@ pub struct PumpSlots<
 > {
     cells: [PumpCell<C, L, D>; N],
     refused: Mutex<Cell<u32>>,
+    /// The most cells the table has had taken at once: zero-sized unless the build keeps the mark
+    /// (`pool-monitor`), so the table is the size it was.
+    high: Mutex<Cell<wz_session_core::pool_gauge::HighWater>>,
 }
 
 // SAFETY: the profile's rule, stated on the type. The cell's pump is written by the
@@ -1415,6 +1418,7 @@ impl<
         Self {
             cells: [const { PumpCell::new() }; N],
             refused: Mutex::new(Cell::new(0)),
+            high: Mutex::new(Cell::new(wz_session_core::pool_gauge::HighWater::new())),
         }
     }
 
@@ -1470,6 +1474,17 @@ impl<
             });
             return Err(PumpsFull);
         };
+        // The cell is taken: the mark is what the table holds now, if that is the most so far.
+        #[cfg(feature = "pool-monitor")]
+        {
+            let held = self.in_use();
+            crate::cs::with(|cs| {
+                let high = self.high.borrow(cs);
+                let mut mark = high.get();
+                mark.note(held);
+                high.set(mark);
+            });
+        }
         #[cfg(feature = "reassembly")]
         let arena = {
             // SAFETY: the cell is `taken` by this call alone, and its pool is only
@@ -1507,6 +1522,27 @@ impl<
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The table says its state as a pool (`pool-monitor`, `docs/pool-monitor.md`): its cells, those
+/// taken, the most taken at once where the build keeps the mark, and the claims it refused.
+#[cfg(feature = "session-slot")]
+impl<
+        C: ClockSource,
+        L: SessionDatagramLink + 'static,
+        const N: usize,
+        D: BoxedLinkDriver + ?Sized + 'static,
+    > wz_session_core::pool_gauge::PoolGauge for PumpSlots<C, L, N, D>
+{
+    fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
+        wz_session_core::pool_gauge::PoolStat {
+            name,
+            capacity: u32::try_from(N).unwrap_or(u32::MAX),
+            in_use: u32::try_from(self.in_use()).unwrap_or(u32::MAX),
+            high_water: crate::cs::with(|cs| self.high.borrow(cs).get().get()),
+            refused: u64::from(self.refused()),
+        }
     }
 }
 

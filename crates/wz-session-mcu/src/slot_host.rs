@@ -112,6 +112,23 @@ where
     stack: T,
 }
 
+/// The host lists the tables its sessions live in (`pool-monitor`, `docs/pool-monitor.md`): the
+/// session slots, then the pump cells, in that order. The task table is the runtime's and is not
+/// listed yet.
+impl<C, T, E, const S: usize, const P: usize> wz_session_core::pool_gauge::PoolList
+    for SessionHost<C, T, E, S, P>
+where
+    C: ClockSource + 'static,
+    T: SlotStack,
+    E: EntropySource + Send + 'static,
+{
+    fn visit_pools(&self, visit: &mut dyn FnMut(wz_session_core::pool_gauge::PoolStat)) {
+        use wz_session_core::pool_gauge::PoolGauge;
+        visit(self.sessions.pool_stat("session-slots"));
+        visit(self.pumps.pool_stat("pump-cells"));
+    }
+}
+
 impl<C, T, E, const S: usize, const P: usize> SessionHost<C, T, E, S, P>
 where
     C: ClockSource + 'static,

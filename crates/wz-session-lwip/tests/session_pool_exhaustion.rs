@@ -466,6 +466,49 @@ fn fill_then_refuse<
         );
     }
 
+    // The host lists the tables its sessions live in, each as the table says it, session slots
+    // first; and the document a node would serve says the same.
+    let mut listed = Vec::new();
+    wz_session_core::pool_gauge::PoolList::visit_pools(&rig.acceptor, &mut |pool| {
+        listed.push(pool)
+    });
+    let (slots, cells) = (
+        wz_session_core::pool_gauge::PoolGauge::pool_stat(rig.sessions, "session-slots"),
+        wz_session_core::pool_gauge::PoolGauge::pool_stat(rig.pumps, "pump-cells"),
+    );
+    assert_eq!(listed, [slots, cells], "{why:?}: the host's pools");
+    assert_eq!(
+        cells.refused,
+        u64::from(pump),
+        "{why:?}: the pump cells' refusals"
+    );
+    assert_eq!(cells.in_use as usize, fill, "{why:?}: the pump cells held");
+    // The pump cells keep a mark of their own, taken when a cell is: at least what is held, at
+    // most the table, and none where the build keeps none.
+    assert_eq!(
+        cells.high_water.is_some(),
+        cfg!(feature = "pool-monitor"),
+        "{why:?}: the mark is kept exactly when the build asks"
+    );
+    if let Some(mark) = cells.high_water {
+        assert!(
+            (fill..=rig.pumps.capacity()).contains(&(mark as usize)),
+            "{why:?}: the pump cells' mark {mark}"
+        );
+    }
+    let mut document = String::new();
+    wz_session_core::pool_gauge::write_pool_document(&rig.acceptor, &mut document)
+        .expect("the document is written");
+    assert!(
+        document.starts_with("{\"version\":1,\"pools\":[{\"name\":\"session-slots\",")
+            && document.contains(&format!(
+                "{{\"name\":\"pump-cells\",\"capacity\":{},\"in_use\":{},",
+                cells.capacity, cells.in_use
+            ))
+            && document.contains(&format!("\"refused\":{pump}}}]}}")),
+        "{why:?}: the document {document}"
+    );
+
     // RELEASE AND REUSE: one session closes, which frees its lane, slot, pump cell
     // and task cell, and the next peer's InitSyn is admitted into them. The peer that
     // was refused is let go first (its InitSyn will not be sent again).

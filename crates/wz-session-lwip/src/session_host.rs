@@ -114,6 +114,20 @@ where
     }
 }
 
+/// The host lists the tables its sessions live in, as the stack-neutral host it holds does
+/// (`pool-monitor`, `docs/pool-monitor.md`).
+impl<C, L, E, const S: usize, const P: usize> wz_session_core::pool_gauge::PoolList
+    for SessionHost<C, L, E, S, P>
+where
+    C: ClockSource + 'static,
+    L: Deref<Target = LwipLink> + Clone + 'static,
+    E: EntropySource + Send + 'static,
+{
+    fn visit_pools(&self, visit: &mut dyn FnMut(wz_session_core::pool_gauge::PoolStat)) {
+        wz_session_core::pool_gauge::PoolList::visit_pools(&self.host, visit);
+    }
+}
+
 impl<C, L, E, const S: usize, const P: usize> SessionHost<C, L, E, S, P>
 where
     C: ClockSource + 'static,

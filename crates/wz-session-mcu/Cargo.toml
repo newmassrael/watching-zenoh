@@ -83,6 +83,9 @@ lifecycle-status = ["lifecycle-verbs"]
 # layer and no admin node, which is what every image on this profile is until then.
 session-slot = ["wz-runtime-coop/session-slot", "wz-session-core/session-slot"]
 
+# The high-water mark of the tables a host lists as pools (`docs/pool-monitor.md`).
+pool-monitor = ["wz-runtime-coop/pool-monitor", "wz-session-core/pool-monitor"]
+
 transport-keepalive = [
     "wz-session-core/transport-keepalive",
     "wz-runtime-coop/transport-keepalive",

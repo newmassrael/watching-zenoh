@@ -52,6 +52,66 @@ pub trait PoolGauge {
     fn pool_stat(&self, name: &'static str) -> PoolStat;
 }
 
+/// What owns pools and can list them: a node's host, which holds the tables its sessions live in.
+///
+/// The owner calls `visit` once per pool, in a fixed order, so a build with no heap lists its pools
+/// as one with a heap does, and nothing is collected: the reader decides what to do with each.
+pub trait PoolList {
+    /// Call `visit` with the state of each pool this owns.
+    fn visit_pools(&self, visit: &mut dyn FnMut(PoolStat));
+}
+
+/// The version of the document [`write_pool_document`] writes. A reader that does not know a
+/// version reads none of it.
+pub const POOL_DOCUMENT_VERSION: u32 = 1;
+
+/// Write the document that says a node's pools, as JSON without whitespace:
+///
+/// ```text
+/// {"version":1,"pools":[{"name":"sessions","capacity":4,"in_use":1,"high_water":3,"refused":0}]}
+/// ```
+///
+/// `high_water` is `null` where the build keeps no mark, which is not zero. A name is written as the
+/// owner gave it, and an owner gives a name of lower-case letters, digits and `-`: a name with
+/// anything else is not a name this document can carry, and is refused with an error, as is a
+/// writer that fails.
+pub fn write_pool_document(
+    pools: &dyn PoolList,
+    out: &mut dyn core::fmt::Write,
+) -> core::fmt::Result {
+    write!(out, "{{\"version\":{POOL_DOCUMENT_VERSION},\"pools\":[")?;
+    let mut first = true;
+    let mut result = Ok(());
+    pools.visit_pools(&mut |pool| {
+        if result.is_err() {
+            return;
+        }
+        result = write_pool(out, &pool, core::mem::take(&mut first));
+    });
+    result?;
+    out.write_str("]}")
+}
+
+fn write_pool(out: &mut dyn core::fmt::Write, pool: &PoolStat, first: bool) -> core::fmt::Result {
+    let plain = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    if pool.name.is_empty() || !pool.name.chars().all(plain) {
+        return Err(core::fmt::Error);
+    }
+    if !first {
+        out.write_char(',')?;
+    }
+    write!(
+        out,
+        "{{\"name\":\"{}\",\"capacity\":{},\"in_use\":{},\"high_water\":",
+        pool.name, pool.capacity, pool.in_use
+    )?;
+    match pool.high_water {
+        Some(mark) => write!(out, "{mark}")?,
+        None => out.write_str("null")?,
+    }
+    write!(out, ",\"refused\":{}}}", pool.refused)
+}
+
 /// The most entries a pool has held. Zero-sized without the `pool-monitor` feature.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HighWater {
@@ -130,6 +190,65 @@ mod tests {
         assert_eq!(mark.get(), Some(7));
         mark.note(usize::MAX);
         assert_eq!(mark.get(), Some(u32::MAX));
+    }
+
+    /// An owner that lists the pools it was given, in order.
+    struct Owner(std::vec::Vec<PoolStat>);
+
+    impl PoolList for Owner {
+        fn visit_pools(&self, visit: &mut dyn FnMut(PoolStat)) {
+            for pool in &self.0 {
+                visit(*pool);
+            }
+        }
+    }
+
+    const fn stat(name: &'static str, high_water: Option<u32>) -> PoolStat {
+        PoolStat {
+            name,
+            capacity: 4,
+            in_use: 1,
+            high_water,
+            refused: 2,
+        }
+    }
+
+    /// The document is exactly the one the module says, with a mark that is not kept written as
+    /// `null` and not as zero, and an owner with no pool written as an empty list.
+    #[test]
+    fn the_document_says_each_pool_in_order_and_a_missing_mark_as_null() {
+        let mut text = std::string::String::new();
+        write_pool_document(
+            &Owner(std::vec![
+                stat("sessions", Some(3)),
+                stat("pump-cells", None)
+            ]),
+            &mut text,
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            "{\"version\":1,\"pools\":[\
+             {\"name\":\"sessions\",\"capacity\":4,\"in_use\":1,\"high_water\":3,\"refused\":2},\
+             {\"name\":\"pump-cells\",\"capacity\":4,\"in_use\":1,\"high_water\":null,\"refused\":2}]}"
+        );
+
+        let mut none = std::string::String::new();
+        write_pool_document(&Owner(std::vec![]), &mut none).unwrap();
+        assert_eq!(none, "{\"version\":1,\"pools\":[]}");
+    }
+
+    /// A name the document cannot carry is an error, not a quotation mark let through.
+    #[test]
+    fn a_name_the_document_cannot_carry_is_refused() {
+        for name in ["", "Sessions", "a\"b", "a b"] {
+            let mut text = std::string::String::new();
+            let owner = Owner(std::vec![stat(name, None)]);
+            assert!(
+                write_pool_document(&owner, &mut text).is_err(),
+                "{name:?} was written"
+            );
+        }
     }
 
     #[test]

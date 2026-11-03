@@ -88,6 +88,13 @@ session-slot = [
     "wz-session-core/session-slot",
     "wz-session-mcu/session-slot",
 ]
+# The high-water mark of the tables a host lists as pools (`docs/pool-monitor.md`). Off by default:
+# a library crate never turns a capability on.
+pool-monitor = [
+    "wz-runtime-coop/pool-monitor",
+    "wz-session-core/pool-monitor",
+    "wz-session-mcu/pool-monitor",
+]
 # The drive loop dispatches each inbound datagram where the session socket
 # holds it, record by record (`wz-runtime-coop`'s `rx-in-place`), with this
 # crate's link lending the socket's queued datagram instead of copying it out.
