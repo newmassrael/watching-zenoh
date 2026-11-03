@@ -308470,6 +308470,34 @@
         "Stage three of the C ABI node: get, the queryable and the querier, then liveliness and matching, then shared memory, the advanced pair, the group, the info peers and routers, the transport and link events, the declared key expressions and the timestamp. A node opened through the C ABI answers Z_EUNAVAILABLE to those. The publisher (z_declare_publisher) is not carried either, so a program that publishes through a declared publisher still gets Z_EUNAVAILABLE; it is the next family with the put. A put of a payload in shared memory goes out as bytes on a node. A C ABI router that keeps no south is still the registry of faces, which forwards nothing; opening every router as the node is a parity decision of its own. Whether router-node belongs in a Kconfig switch and a footprint budget is not decided. A client that is told no router and keeps a south is refused even when it scouts nothing. The dialled-subregion cases are witnessed in process only; no stock zenohd witness. Open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 4199": {
+      "decision_summary": "Two more reds of the hosted run on the main tip, each read from its job log. The Zephyr client images were refused by the stack bound: the contract's exec-poll rule was pinned to line 450 of static_executor.rs and the task poll now stands on line 465, so the poll was claimed by the file-wide exec-drop rule (4 claims against 3 pinned) and the bound lost the frame of poll_erased (3,440 read, 3,472 held). The pin moves to line 465. The capability-cost gate refused capic-default at 9,463,502 bytes against 9,462,000; the budget moves to that hosted reading and 3,500, rounded up to the hundred, 9,467,100, with both hosted readings in the case's note.",
+      "changes_bullets": [
+        "deploy/stack_call_contracts.json: the line of the exec-poll rule, 450 to 465. scripts/lib/capability_cost_gate.py: the capic-default budget 9,462,000 to 9,467,100, and a sentence in its note with the two hosted readings."
+      ],
+      "verification_bullets": [
+        "The four fixed-memory Zephyr client images were built on this workstation with the kit lane and graded by the stack bound: zephyr-client-fixed 3,472 (154 register calls, all claimed), zephyr-client-fixed-batching 3,472 (164), zephyr-client-heap 3,472 (154) and zephyr-client-fixed-get 4,816 (185), each equal to its row, and the stack chain and text gates hold on all four. Before the pin moved, the same build reproduced the hosted refusal (4 claims against 3, bound 3,440). The capability-cost selftest passes 16 of 16; the capic-default build itself was not re-measured here, the new budget rests on the hosted reading of d46109c70a."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The feature-gate NEG lanes job ends at 91 to 93 percent of its 2,700 s budget on the hosted runs, which trips the margin step with every lane green; the prescribed remedy is to peel the heaviest lanes into their own job, which needs the lane timings of a hosted log first. An exec-poll pin by line number goes stale whenever the executor file gains lines above the poll; a rule keyed by function would not. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd."
+      ],
+      "publishable_decision_summary": "Two more reds of the hosted run on the main tip, each read from its job log. The Zephyr client images were refused by the stack bound: the contract's exec-poll rule was pinned to line 450 of static_executor.rs and the task poll now stands on line 465, so the poll was claimed by the file-wide exec-drop rule (4 claims against 3 pinned) and the bound lost the frame of poll_erased (3,440 read, 3,472 held). The pin moves to line 465. The capability-cost gate refused capic-default at 9,463,502 bytes against 9,462,000; the budget moves to that hosted reading and 3,500, rounded up to the hundred, 9,467,100, with both hosted readings in the case's note.",
+      "publishable_changes_bullets": [
+        "deploy/stack_call_contracts.json: the line of the exec-poll rule, 450 to 465. scripts/lib/capability_cost_gate.py: the capic-default budget 9,462,000 to 9,467,100, and a sentence in its note with the two hosted readings."
+      ],
+      "publishable_verification_bullets": [
+        "The four fixed-memory Zephyr client images were built on this workstation with the kit lane and graded by the stack bound: zephyr-client-fixed 3,472 (154 register calls, all claimed), zephyr-client-fixed-batching 3,472 (164), zephyr-client-heap 3,472 (154) and zephyr-client-fixed-get 4,816 (185), each equal to its row, and the stack chain and text gates hold on all four. Before the pin moved, the same build reproduced the hosted refusal (4 claims against 3, bound 3,440). The capability-cost selftest passes 16 of 16; the capic-default build itself was not re-measured here, the new budget rests on the hosted reading of d46109c70a."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The feature-gate NEG lanes job ends at 91 to 93 percent of its 2,700 s budget on the hosted runs, which trips the margin step with every lane green; the prescribed remedy is to peel the heaviest lanes into their own job, which needs the lane timings of a hosted log first. An exec-poll pin by line number goes stale whenever the executor file gains lines above the poll; a rule keyed by function would not. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
