@@ -13,8 +13,15 @@
 //! `WZ_EXT_EVENT_LEVEL_LIBRARY` follows, whose first integer is `WZ_EXT_EVENT_TLS_DROP_OTHER` and
 //! whose second is the channel's own code (not 0: a failed handshake has one).
 //!
+//! A client that connects and says nothing is dropped once the accept budget passes, and its
+//! event's first integer is `WZ_EXT_EVENT_TLS_DROP_STALLED` with the code 0 (a stall has none).
+//!
 //! The arena running out is held below the provider, where the arena can be made small
-//! (`wz-tls-mbedtls`'s `arena_exhaustion`): here it is the one the provider starts, 4 MiB.
+//! (`wz-tls-mbedtls`'s `arena_exhaustion`, `key_store_exhaustion`): here it is the one the
+//! provider starts, 4 MiB, so `WZ_EXT_EVENT_TLS_DROP_NO_ROOM` is not reached through the ABI.
+//!
+//! The two tests share the process's event log, so they run one at a time and each reads from the
+//! log's end as it was when the test began.
 //!
 //! RED reproduction: with `Timed::tell_the_log` left out of `accept`, the junk connection is
 //! dropped as before and the log never receives the event.
@@ -22,12 +29,14 @@
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::net::TcpStream;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose, Engine};
 use wz_capi_pico::event_log::{
     wz_ext_event_read, wz_ext_event_t, WZ_EXT_EVENT_LEVEL_LIBRARY, WZ_EXT_EVENT_RECORD,
     WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED, WZ_EXT_EVENT_TLS_DROP_OTHER,
+    WZ_EXT_EVENT_TLS_DROP_STALLED,
 };
 use wz_capi_pico::{
     z_close, z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
@@ -70,6 +79,25 @@ unsafe fn listen(port: u16, cert: &str, key: &str) -> z_owned_session_t {
     session
 }
 
+/// One test at a time: they read one log.
+static LOG: Mutex<()> = Mutex::new(());
+
+/// A cursor at the end of the log as it stands.
+unsafe fn log_end() -> u64 {
+    let mut cursor = 0u64;
+    loop {
+        let mut event: wz_ext_event_t = std::mem::zeroed();
+        let mut args = [0u64; 4];
+        assert_eq!(
+            wz_ext_event_read(&mut cursor, &mut event, args.as_mut_ptr(), args.len()),
+            Z_OK
+        );
+        if event.kind != WZ_EXT_EVENT_RECORD {
+            return cursor;
+        }
+    }
+}
+
 /// The first event from `*cursor` on that the library wrote for a dropped handshake, for at most
 /// ten seconds: its two integers.
 unsafe fn dropped_handshake_event(cursor: &mut u64) -> Option<[u64; 2]> {
@@ -96,12 +124,13 @@ unsafe fn dropped_handshake_event(cursor: &mut u64) -> Option<[u64; 2]> {
 
 #[test]
 fn a_client_that_is_not_speaking_tls_is_dropped_and_the_event_log_is_told() {
+    let _one_at_a_time = LOG.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         let (cert, key) = localhost_cert_key_pem();
         let port = free_port();
         let mut listener = listen(port, &cert, &key);
 
-        let mut cursor = 0u64;
+        let mut cursor = log_end();
         let mut junk = TcpStream::connect(("127.0.0.1", port)).expect("the port accepts");
         junk.write_all(&[b'G'; 200]).expect("junk leaves");
 
@@ -113,6 +142,32 @@ fn a_client_that_is_not_speaking_tls_is_dropped_and_the_event_log_is_told() {
         );
         assert_ne!(event[1], 0, "a failed handshake has the channel's own code");
 
+        z_close(z_session_loan_mut(&mut listener), std::ptr::null());
+        z_session_drop(z_session_move(&mut listener));
+    }
+}
+
+#[test]
+fn a_client_that_never_speaks_is_dropped_as_a_stall_and_the_event_log_is_told() {
+    let _one_at_a_time = LOG.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        let (cert, key) = localhost_cert_key_pem();
+        let port = free_port();
+        let mut listener = listen(port, &cert, &key);
+
+        let mut cursor = log_end();
+        // Connected and silent: held open past the accept budget, so the listener ends it.
+        let silent = TcpStream::connect(("127.0.0.1", port)).expect("the port accepts");
+
+        let event = dropped_handshake_event(&mut cursor)
+            .expect("the event log was told of the stalled connection");
+        assert_eq!(
+            event[0], WZ_EXT_EVENT_TLS_DROP_STALLED,
+            "a peer that sent nothing is a stall"
+        );
+        assert_eq!(event[1], 0, "a stall has no channel code");
+
+        drop(silent);
         z_close(z_session_loan_mut(&mut listener), std::ptr::null());
         z_session_drop(z_session_move(&mut listener));
     }

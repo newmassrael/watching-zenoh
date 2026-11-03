@@ -1308,8 +1308,10 @@ the cooperative engine's test, run by lane C1co tls engine-coop; this table's bu
 the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
     # The listener's event for a dropped handshake (`tests/tls_handshake_drop_event.rs`, needs
     # `tls-mbedtls` and `event-ring`): the same cooperative engine, run by lane C1co tls handshake
-    # drop event, with 1 passed guarded.
+    # drop event, with 2 passed guarded.
     "wz-capi-pico|a_client_that_is_not_speaking_tls_is_dropped_and_the_event_log_is_told|\
+the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
+    "wz-capi-pico|a_client_that_never_speaks_is_dropped_as_a_stall_and_the_event_log_is_told|\
 the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
 )
 

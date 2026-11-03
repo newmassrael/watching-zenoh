@@ -1121,11 +1121,16 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     library event per drop: source `WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED` (0xFF01), level
     255, two integers: why (`WZ_EXT_EVENT_TLS_DROP_STALLED`, `_NO_ROOM` or `_OTHER`) and the
     channel's own code. `tests/tls_handshake_drop_event.rs` (lane `C1co tls handshake drop
-    event`, 1 passed guarded) sends a connection that is not TLS and reads the event back through
-    `wz_ext_event_read`; with the telling switched off it fails for want of the event (measured).
-    Only a failed handshake (`OTHER`) is exercised through the ABI; `NO_ROOM` is held by the
-    channel's test, not by an ABI one, because the provider's arena is 4 MiB, and `STALLED` by
-    neither beyond the channel's count of it (`stream_policy`).
+    event`, 2 passed guarded) holds two of the three words through the ABI and reads the event
+    back through `wz_ext_event_read`: a connection that is not TLS is `OTHER` with the channel's
+    code, and a connection that is made and says nothing is `STALLED` with the code 0 once the
+    accept budget (`PICO_ACCEPT_TIMEOUT_MS`, 1000 ms) passes; the pair runs in 1.0 s. With the
+    telling switched off the first fails for want of the event, and with the stalled word made
+    another the second fails (`left: 2, right: 0`), both measured. `NO_ROOM` is held by the
+    channel's tests (`arena_exhaustion`, `key_store_exhaustion`), not by an ABI one: the
+    provider's arena is 4 MiB, and 198 held sessions of an RSA chain fill it before the 255 the
+    key store holds, so an ABI test would need a couple of hundred client connections held at
+    once, for a mapping those tests already hold below the provider.
   - The Zephyr kit images. The first cut of this step did not reach them; this one does: an image
     compiles `csrc/wz_tls.c` and `src/stream.rs` itself. The C side gained code only under
     `rsa`, which the image never sets, so its object is what it was; the Rust side gained two
