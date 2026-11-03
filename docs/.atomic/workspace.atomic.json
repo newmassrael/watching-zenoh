@@ -308614,6 +308614,34 @@
         "The split is verified locally only by the workflow gates; the next hosted run reports where the two jobs land. Read feature-gates and feature-gates-peel-2 there: the parent should read near 71% of 2700s and the new job near half of 1800s. If the parent grows back again, the next peel is the C1bq, C1br and C1bs group (arena, uring, AF_PACKET), which needs its arming env vars carried with it."
       ]
     },
+    "Round 4202": {
+      "decision_summary": "A question carried since the TLS rounds is answered by measurement: whether a listening peer of the native engine that declares a publisher before a router dials it reaches a client behind the router, when the declaration cache sends a declaration again only on a reconnect. It does. The differential test runs the same scenario with an upstream peer and a wz peer as the subject, an upstream router that dials the subject afterwards and an upstream client behind the router, in two orders (the publisher declared first, the router first as the control). The router holds the link, the client receives a sample and the publisher says it matches a subscriber, equally in both crates and both orders. There was no defect to repair, so the test is the pin.",
+      "changes_bullets": [
+        "conformance/differential/tests/zenoh_api_peer_publisher_before_router.rs (new): the two-order scenario over a macro that instantiates it for each crate, the comparison with a list of known differences that is empty, the upstream control that both orders deliver, and a control that the comparison sees a peer which delivers nothing. scripts/run-ci.sh: Layer E18 runs it with a count guard of 2."
+      ],
+      "verification_bullets": [
+        "cargo test --manifest-path conformance/differential/Cargo.toml --test zenoh_api_peer_publisher_before_router on the build machine: 2 passed, 0 failed, in 2.19 s after a cold build of 1,080 s. The upstream control asserts in both orders that the router holds a link to the peer and that the client receives a sample, so the equality is not one of two nothings. count_guard_lint ends rc 0 (626 guards, the new one among the 255 checked statically), lane_reach_gate rc 0 and lane_feature_membership_gate rc 0. Not covered: a stock zenohd binary as the router (the router is upstream's crate in router mode), tcp on the loopback only, and a pico peer, whose limit in this order stays the C ABI's."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The feature-gate NEG lanes job still ends at 91 to 93 percent of its 2,700 s budget on the hosted runs, which trips the margin step with every lane green; the remedy that job's own notes prescribe is to peel its heaviest lanes into a job of their own. Still unmeasured from the TLS rounds: pico's handling of certificate dates, the 4 MiB TLS arena against a count of sessions, a Zephyr kit image rebuild with the secure link, and a PKCS#8 RSA key refused by Identity::from_pem."
+      ],
+      "publishable_decision_summary": "A question carried since the TLS rounds is answered by measurement: whether a listening peer of the native engine that declares a publisher before a router dials it reaches a client behind the router, when the declaration cache sends a declaration again only on a reconnect. It does. The differential test runs the same scenario with an upstream peer and a wz peer as the subject, an upstream router that dials the subject afterwards and an upstream client behind the router, in two orders (the publisher declared first, the router first as the control). The router holds the link, the client receives a sample and the publisher says it matches a subscriber, equally in both crates and both orders. There was no defect to repair, so the test is the pin.",
+      "publishable_changes_bullets": [
+        "conformance/differential/tests/zenoh_api_peer_publisher_before_router.rs (new): the two-order scenario over a macro that instantiates it for each crate, the comparison with a list of known differences that is empty, the upstream control that both orders deliver, and a control that the comparison sees a peer which delivers nothing. scripts/run-ci.sh: Layer E18 runs it with a count guard of 2."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --manifest-path conformance/differential/Cargo.toml --test zenoh_api_peer_publisher_before_router on the build machine: 2 passed, 0 failed, in 2.19 s after a cold build of 1,080 s. The upstream control asserts in both orders that the router holds a link to the peer and that the client receives a sample, so the equality is not one of two nothings. count_guard_lint ends rc 0 (626 guards, the new one among the 255 checked statically), lane_reach_gate rc 0 and lane_feature_membership_gate rc 0. Not covered: a stock zenohd binary as the router (the router is upstream's crate in router mode), tcp on the loopback only, and a pico peer, whose limit in this order stays the C ABI's."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The feature-gate NEG lanes job still ends at 91 to 93 percent of its 2,700 s budget on the hosted runs, which trips the margin step with every lane green; the remedy that job's own notes prescribe is to peel its heaviest lanes into a job of their own. Still unmeasured from the TLS rounds: pico's handling of certificate dates, the 4 MiB TLS arena against a count of sessions, a Zephyr kit image rebuild with the secure link, and a PKCS#8 RSA key refused by Identity::from_pem."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
