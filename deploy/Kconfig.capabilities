@@ -146,6 +146,13 @@ config WZ_CAP_RESOURCE_SNAPSHOT
 	  Take a snapshot of the node's resources and the spacing of the messages it receives.
 	  Exported by: pico, c.
 
+config WZ_CAP_POOL_MONITOR
+	bool "pool-monitor"
+	default n
+	help
+	  Record how full each of the node's fixed pools has been and list every pool's occupancy and refusals.
+	  Exported by: .
+
 config WZ_CAP_GROUP
 	bool "group"
 	default y

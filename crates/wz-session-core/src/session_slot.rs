@@ -231,6 +231,9 @@ unsafe fn release_cell<R: SessionRuntime, T: TimeSource, D, E>(head: &'static Sl
 pub struct SessionSlots<R: SessionRuntime, T: TimeSource, D, E, const N: usize> {
     cells: [SlotCell<R, T, D, E>; N],
     refused: Cell<u32>,
+    /// The most slots the table has had taken at once: zero-sized unless the build keeps the mark
+    /// (`pool-monitor`), so the table is the size it was.
+    high: Cell<crate::pool_gauge::HighWater>,
 }
 
 // SAFETY: see the module's last section. A slot table is touched by the one task
@@ -255,6 +258,7 @@ impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> SessionSlots<R, T, 
         Self {
             cells: [const { SlotCell::new() }; N],
             refused: Cell::new(0),
+            high: Cell::new(crate::pool_gauge::HighWater::new()),
         }
     }
 
@@ -287,6 +291,20 @@ impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> SessionSlots<R, T, 
     }
 }
 
+impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> crate::pool_gauge::PoolGauge
+    for SessionSlots<R, T, D, E, N>
+{
+    fn pool_stat(&self, name: &'static str) -> crate::pool_gauge::PoolStat {
+        crate::pool_gauge::PoolStat {
+            name,
+            capacity: crate::pool_gauge::count(N),
+            in_use: crate::pool_gauge::count(self.in_use()),
+            high_water: self.high.get().get(),
+            refused: u64::from(self.refused()),
+        }
+    }
+}
+
 impl<R, T, D, E, const N: usize> SessionSlots<R, T, D, E, N>
 where
     R: SessionRuntime<LinkSink = SlotSink<D>, Driver = D> + 'static,
@@ -309,7 +327,7 @@ where
             self.refused.set(self.refused.get().saturating_add(1));
             return Err(SlotsFull { driver, entropy });
         };
-        Ok(Self::occupy(cell, driver, entropy))
+        Ok(self.occupy(cell, driver, entropy))
     }
 
     /// [`Self::claim`] for a link that is made by `make`, which is the call of this function and
@@ -336,7 +354,7 @@ where
             self.refused.set(self.refused.get().saturating_add(1));
             return Err(ClaimRefused::Full);
         };
-        Ok(Self::occupy(cell, driver, entropy))
+        Ok(self.occupy(cell, driver, entropy))
     }
 
     /// The first slot that is free, if there is one.
@@ -347,7 +365,12 @@ where
     }
 
     /// Move `driver` and `entropy` into the free `cell` and mark it claimed.
-    fn occupy(cell: &'static SlotCell<R, T, D, E>, driver: D, entropy: E) -> SlotClaim<R, T, D, E> {
+    fn occupy(
+        &self,
+        cell: &'static SlotCell<R, T, D, E>,
+        driver: D,
+        entropy: E,
+    ) -> SlotClaim<R, T, D, E> {
         // SAFETY: the slot is free, so nothing refers into it, and each part is
         // written once; the state below says so to `release_cell`.
         unsafe {
@@ -357,6 +380,14 @@ where
         cell.state.set(CellState::Claimed);
         cell.head.refs.set(1);
         cell.head.release.set(Some(release_cell::<R, T, D, E>));
+        // Counted after the claim is made, so the slot just taken is among those held. The count
+        // walks the table, so a build that keeps no mark does not make it.
+        #[cfg(feature = "pool-monitor")]
+        {
+            let mut high = self.high.get();
+            high.note(self.in_use());
+            self.high.set(high);
+        }
         SlotClaim { cell }
     }
 }

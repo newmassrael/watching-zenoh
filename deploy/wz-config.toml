@@ -948,6 +948,20 @@ abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "Take a snapshot of the node's resources and the spacing of the messages it receives."
 
+# The pools of the node (docs/pool-monitor.md): each fixed table states how many entries it holds,
+# how many it held at most, and how many it refused for want of room, and the node enumerates them
+# under one name each. wz's own, with no counterpart in an upstream library, so off in every original.
+# What it costs is the high-water mark each pool keeps, which a build without it does not store.
+[[capability]]
+id = "pool-monitor"
+kconfig = "WZ_CAP_POOL_MONITOR"
+os_needs = []
+upstream_off = []
+default = "off"
+abis = ["core"]
+implies = []
+help = "Record how full each of the node's fixed pools has been and list every pool's occupancy and refusals."
+
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"

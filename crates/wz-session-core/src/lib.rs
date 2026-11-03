@@ -237,6 +237,13 @@ pub mod text_out;
 /// [`bounded`], so the registries name one backing-agnostic table.
 pub mod id_map;
 
+/// What a fixed pool says of itself, the same way for every pool (`pool-monitor`,
+/// `docs/pool-monitor.md`): its capacity, the entries it holds, the most it has held and the
+/// entries it refused ([`pool_gauge::PoolStat`]), and the mark that is the only thing a pool
+/// stores for it ([`pool_gauge::HighWater`], zero-sized without the feature). Unconditional,
+/// like [`bounded`], so every pool names one type.
+pub mod pool_gauge;
+
 /// W3 bounded owned-mirror adapters (`owned_bytes` / `owned_string`) for
 /// the builders that copy caller data into SCE's no-alloc bounded codec
 /// owned fields (SCE pin 7a94d084a). Public so the AP runtime

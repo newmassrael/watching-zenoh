@@ -88,6 +88,9 @@ pub trait IdMap<V> {
 pub struct FixedIdMap<V, const N: usize> {
     rows: heapless::Vec<(u64, V), N>,
     refused: u32,
+    /// The most ids the table has held: zero-sized unless the build keeps the mark
+    /// (`pool-monitor`).
+    high: crate::pool_gauge::HighWater,
 }
 
 impl<V, const N: usize> FixedIdMap<V, N> {
@@ -97,12 +100,25 @@ impl<V, const N: usize> FixedIdMap<V, N> {
         Self {
             rows: heapless::Vec::new(),
             refused: 0,
+            high: crate::pool_gauge::HighWater::new(),
         }
     }
 
     /// The declared capacity `N`: the most ids the table holds at once.
     pub const fn capacity(&self) -> usize {
         N
+    }
+}
+
+impl<V, const N: usize> crate::pool_gauge::PoolGauge for FixedIdMap<V, N> {
+    fn pool_stat(&self, name: &'static str) -> crate::pool_gauge::PoolStat {
+        crate::pool_gauge::PoolStat {
+            name,
+            capacity: crate::pool_gauge::count(N),
+            in_use: crate::pool_gauge::count(self.rows.len()),
+            high_water: self.high.get(),
+            refused: u64::from(self.refused),
+        }
     }
 }
 
@@ -126,7 +142,10 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
             return Ok(Some(core::mem::replace(held, value)));
         }
         match self.rows.push((id, value)) {
-            Ok(()) => Ok(None),
+            Ok(()) => {
+                self.high.note(self.rows.len());
+                Ok(None)
+            }
             Err((_, value)) => {
                 self.refused = self.refused.saturating_add(1);
                 Err(CapacityFull(value))
@@ -342,6 +361,37 @@ mod tests {
         table.reset();
         assert_eq!((table.count(), table.refusals()), (0, 1));
         assert!(!table.is_bound());
+    }
+
+    /// The table answers as a pool: its capacity and holdings, the refusals it counted, and the
+    /// most it has held, which stays when ids leave.
+    #[test]
+    fn the_fixed_table_says_its_state_as_a_pool() {
+        use crate::pool_gauge::PoolGauge;
+        let mut table: FixedIdMap<u32, 3> = FixedIdMap::new();
+        let empty = table.pool_stat("peer-aliases");
+        assert_eq!(
+            (empty.name, empty.capacity, empty.in_use, empty.refused),
+            ("peer-aliases", 3, 0, 0)
+        );
+        for id in 0..3u64 {
+            table.bind(id, 0).unwrap();
+        }
+        assert!(table.bind(9, 0).is_err());
+        table.unbind(0);
+        table.unbind(1);
+        let stat = table.pool_stat("peer-aliases");
+        assert_eq!((stat.in_use, stat.refused), (1, 1));
+        let expected_mark = cfg!(feature = "pool-monitor").then_some(3);
+        assert_eq!(
+            stat.high_water, expected_mark,
+            "the mark is the most held, not what is held"
+        );
+        assert_eq!(
+            stat.has_been_full(),
+            expected_mark.map(|_| true),
+            "it was full once; a build without the mark cannot say so"
+        );
     }
 
     #[test]

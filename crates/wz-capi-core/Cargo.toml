@@ -375,6 +375,9 @@ supervision = ["unstable-api"]
 # snapshot and its sampler are in `wz-session-core`; the feature there adds the session's message
 # meter and the call that feeds it, so the model needs it forwarded.
 resource-snapshot = ["unstable-api", "wz-session-core/resource-snapshot", "wz-runtime-tokio/resource-snapshot"]
+# The high-water mark of the node's fixed pools (`deploy/wz-config.toml`, off by default, no door
+# of an ABI: the pools are read from the model). The pools and the mark are in `wz-session-core`.
+pool-monitor = ["wz-session-core/pool-monitor"]
 local-subscriber = []
 local-queryable = []
 

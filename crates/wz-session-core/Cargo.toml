@@ -709,6 +709,12 @@ supervision = ["dep:sce-rust-runtime"]
 # in the crate whatever this says; the feature adds the session's meter and the call that feeds it.
 resource-snapshot = []
 
+# pool-monitor (docs/pool-monitor.md) — every fixed pool keeps the most entries it has held (its
+# high-water mark), beside the entries it holds and the entries it refused, which it keeps either
+# way. The model of a pool's state and the trait a pool answers it by are in the crate whatever
+# this says; the feature adds the mark, which a build without it does not store.
+pool-monitor = []
+
 # session-close-ingress — a rail message can close a RUNNING session. The
 # ingress (a keyexpr matcher) and the session FSM engine live in two different
 # ownership domains and never meet: the matcher runs under the observer lock on

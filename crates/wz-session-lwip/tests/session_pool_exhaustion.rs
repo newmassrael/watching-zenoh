@@ -442,6 +442,30 @@ fn fill_then_refuse<
     assert_eq!(rig.sessions.in_use(), fill, "{why:?}: session slots");
     assert_eq!(rig.pumps.in_use(), fill, "{why:?}: pump cells");
 
+    // The session table says the same as a pool: how many it holds, how many it refused, and,
+    // in a build that keeps the mark (`pool-monitor`), that it was full and never fuller.
+    let sessions = wz_session_core::pool_gauge::PoolGauge::pool_stat(rig.sessions, "sessions");
+    assert_eq!(
+        (
+            sessions.name,
+            sessions.capacity as usize,
+            sessions.in_use as usize
+        ),
+        ("sessions", rig.sessions.capacity(), fill),
+        "{why:?}: the table as a pool"
+    );
+    assert_eq!(sessions.refused, u64::from(slot), "{why:?}: its refusals");
+    // The mark is the most slots taken at once. The refused attempt of a pump or task table
+    // that was full took a slot before it was refused, so the mark can be one past what the
+    // sessions that exist hold: that is the information the mark is for. It never passes the
+    // table's capacity, and never falls below what is held.
+    if let Some(mark) = sessions.high_water {
+        assert!(
+            (fill..=rig.sessions.capacity()).contains(&(mark as usize)),
+            "{why:?}: the mark {mark} lies between what is held and the capacity"
+        );
+    }
+
     // RELEASE AND REUSE: one session closes, which frees its lane, slot, pump cell
     // and task cell, and the next peer's InitSyn is admitted into them. The peer that
     // was refused is let go first (its InitSyn will not be sent again).
