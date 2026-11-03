@@ -1,0 +1,892 @@
+// The validation corpus of the zenoh verdict (docs/flow-zenoh-verdict.md §6.12).
+//
+// Collected after model 6 was frozen (ledger round 4158), of what the
+// development corpus (captures/corpus/) lacks, and counted into no weight until
+// the one reading section 6.13 reports. The format is captures/corpus/'s:
+// every file is a REAL capture, anonymised by scripts/lib/capture_anonymise.py
+// (scope "own": traffic this capture made itself), and
+// `capture_anonymise.py --verify-corpus captures/validation` holds every file to
+// being one the anonymiser would leave as it is.
+//
+// How each was taken is scripts/capture-validation.sh: a zenoh workload on a
+// container's loopback with zenohd and the examples of the pinned release
+// (1.10.2), zenoh-c 1.10.2 or zenoh-pico 1.10.2; a null protocol's real server
+// and client in containers on a docker network of their own, captured in the
+// server's network namespace. Every file is a group of its own: a workload, a
+// link, an implementation or a null protocol (section 6.3).
+{
+  groups: [
+    {
+      name: "query tcp",
+      files: [
+        "zenoh-query-tcp.pcap",
+      ],
+    },
+    {
+      name: "query udp",
+      files: [
+        "zenoh-query-udp.pcap",
+      ],
+    },
+    {
+      name: "liveliness tcp",
+      files: [
+        "zenoh-liveliness-tcp.pcap",
+      ],
+    },
+    {
+      name: "liveliness udp",
+      files: [
+        "zenoh-liveliness-udp.pcap",
+      ],
+    },
+    {
+      name: "fragments tcp",
+      files: [
+        "zenoh-fragments-tcp.pcap",
+      ],
+    },
+    {
+      name: "fragments udp",
+      files: [
+        "zenoh-fragments-udp.pcap",
+      ],
+    },
+    {
+      name: "priorities",
+      files: [
+        "zenoh-priority-tcp.pcap",
+      ],
+    },
+    {
+      name: "authentication",
+      files: [
+        "zenoh-auth-tcp.pcap",
+      ],
+    },
+    {
+      name: "multicast",
+      files: [
+        "zenoh-multicast-peers.pcap",
+      ],
+    },
+    {
+      name: "lowlatency tcp",
+      files: [
+        "zenoh-lowlatency-tcp.pcap",
+      ],
+    },
+    {
+      name: "lowlatency udp",
+      files: [
+        "zenoh-lowlatency-udp.pcap",
+      ],
+    },
+    {
+      name: "websocket",
+      files: [
+        "zenoh-ws.pcap",
+      ],
+    },
+    {
+      name: "peers",
+      files: [
+        "zenoh-peer-tcp.pcap",
+      ],
+    },
+    {
+      name: "two routers",
+      files: [
+        "zenoh-routers-tcp.pcap",
+      ],
+    },
+    {
+      name: "ipv6",
+      files: [
+        "zenoh-ipv6-tcp.pcap",
+      ],
+    },
+    {
+      name: "lz4 with queries",
+      files: [
+        "zenoh-lz4-tcp.pcap",
+      ],
+    },
+    {
+      name: "advanced pub/sub",
+      files: [
+        "zenoh-advanced-tcp.pcap",
+      ],
+    },
+    {
+      name: "session churn",
+      files: [
+        "zenoh-churn-tcp.pcap",
+      ],
+    },
+    {
+      name: "ping",
+      files: [
+        "zenoh-ping-tcp.pcap",
+      ],
+    },
+    {
+      name: "scouting",
+      files: [
+        "zenoh-scouting.pcap",
+      ],
+    },
+    {
+      name: "tls",
+      files: [
+        "zenoh-tls-tcp.pcap",
+      ],
+    },
+    {
+      name: "quic",
+      files: [
+        "zenoh-quic.pcap",
+      ],
+    },
+    {
+      name: "admin space",
+      files: [
+        "zenoh-admin-query.pcap",
+      ],
+    },
+    {
+      name: "querier",
+      files: [
+        "zenoh-querier-tcp.pcap",
+      ],
+    },
+    {
+      name: "zenoh-c pub/sub",
+      files: [
+        "zenoh-c-pubsub.pcap",
+      ],
+    },
+    {
+      name: "zenoh-c query",
+      files: [
+        "zenoh-c-query.pcap",
+      ],
+    },
+    {
+      name: "pico pub/sub tcp",
+      files: [
+        "zenoh-pico-pubsub-tcp.pcap",
+      ],
+    },
+    {
+      name: "pico pub/sub udp",
+      files: [
+        "zenoh-pico-pubsub-udp.pcap",
+      ],
+    },
+    {
+      name: "pico query",
+      files: [
+        "zenoh-pico-query-tcp.pcap",
+      ],
+    },
+    {
+      name: "beanstalkd",
+      files: [
+        "null-beanstalkd.pcap",
+      ],
+    },
+    {
+      name: "consul",
+      files: [
+        "null-consul.pcap",
+      ],
+    },
+    {
+      name: "ftp",
+      files: [
+        "null-ftp.pcap",
+      ],
+    },
+    {
+      name: "git",
+      files: [
+        "null-git.pcap",
+      ],
+    },
+    {
+      name: "grpc",
+      files: [
+        "null-grpc.pcap",
+      ],
+    },
+    {
+      name: "iperf3 tcp",
+      files: [
+        "null-iperf3-tcp.pcap",
+      ],
+    },
+    {
+      name: "iperf3 udp",
+      files: [
+        "null-iperf3-udp.pcap",
+      ],
+    },
+    {
+      name: "irc",
+      files: [
+        "null-irc.pcap",
+      ],
+    },
+    {
+      name: "ldap",
+      files: [
+        "null-ldap.pcap",
+      ],
+    },
+    {
+      name: "mail",
+      files: [
+        "null-mail.pcap",
+      ],
+    },
+    {
+      name: "mariadb",
+      files: [
+        "null-mariadb.pcap",
+      ],
+    },
+    {
+      name: "memcached",
+      files: [
+        "null-memcached.pcap",
+      ],
+    },
+    {
+      name: "modbus",
+      files: [
+        "null-modbus.pcap",
+      ],
+    },
+    {
+      name: "mongodb",
+      files: [
+        "null-mongo.pcap",
+      ],
+    },
+    {
+      name: "nats",
+      files: [
+        "null-nats.pcap",
+      ],
+    },
+    {
+      name: "nsq",
+      files: [
+        "null-nsq.pcap",
+      ],
+    },
+    {
+      name: "rabbitmq",
+      files: [
+        "null-rabbitmq.pcap",
+      ],
+    },
+    {
+      name: "radius",
+      files: [
+        "null-radius.pcap",
+      ],
+    },
+    {
+      name: "rsync",
+      files: [
+        "null-rsync.pcap",
+      ],
+    },
+    {
+      name: "sip",
+      files: [
+        "null-sip.pcap",
+      ],
+    },
+    {
+      name: "smb",
+      files: [
+        "null-smb.pcap",
+      ],
+    },
+    {
+      name: "snmp",
+      files: [
+        "null-snmp.pcap",
+      ],
+    },
+    {
+      name: "stun",
+      files: [
+        "null-stun.pcap",
+      ],
+    },
+    {
+      name: "syslog",
+      files: [
+        "null-syslog.pcap",
+      ],
+    },
+    {
+      name: "telnet",
+      files: [
+        "null-telnet.pcap",
+      ],
+    },
+    {
+      name: "tftp",
+      files: [
+        "null-tftp.pcap",
+      ],
+    },
+    {
+      name: "websocket of another protocol",
+      files: [
+        "null-websocket.pcap",
+      ],
+    },
+    {
+      name: "zeromq",
+      files: [
+        "null-zeromq.pcap",
+      ],
+    },
+    {
+      name: "zookeeper",
+      files: [
+        "null-zookeeper.pcap",
+      ],
+    },
+  ],
+  files: [
+    {
+      file: "zenoh-query-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, a queryable and six z_get clients",
+      taken: "2026-11-03",
+      packets: 123,
+    },
+    {
+      file: "zenoh-query-udp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/udp",
+      source: "the same over UDP unicast",
+      taken: "2026-11-03",
+      packets: 60,
+    },
+    {
+      file: "zenoh-liveliness-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, a liveliness token, its subscriber and three liveliness queries",
+      taken: "2026-11-03",
+      packets: 91,
+    },
+    {
+      file: "zenoh-liveliness-udp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/udp",
+      source: "the same over UDP unicast",
+      taken: "2026-11-03",
+      packets: 43,
+    },
+    {
+      file: "zenoh-fragments-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, a publisher of 100 000-byte samples and a subscriber",
+      taken: "2026-11-03",
+      packets: 182,
+    },
+    {
+      file: "zenoh-fragments-udp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/udp",
+      source: "zenohd 1.10.2, a publisher of 30 000-byte samples over UDP and a subscriber",
+      taken: "2026-11-03",
+      packets: 45,
+    },
+    {
+      file: "zenoh-priority-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, two publishers at priorities real_time (express) and background",
+      taken: "2026-11-03",
+      packets: 147,
+    },
+    {
+      file: "zenoh-auth-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2 with user-password authentication, publish, subscribe and query",
+      taken: "2026-11-03",
+      packets: 218,
+    },
+    {
+      file: "zenoh-multicast-peers.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/udp multicast",
+      source: "two 1.10.2 peers on a multicast transport",
+      taken: "2026-11-03",
+      packets: 34,
+    },
+    {
+      file: "zenoh-lowlatency-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2 and clients with the lowlatency transport, publish, subscribe and query",
+      taken: "2026-11-03",
+      packets: 271,
+    },
+    {
+      file: "zenoh-lowlatency-udp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/udp",
+      source: "the same over UDP unicast",
+      taken: "2026-11-03",
+      packets: 152,
+    },
+    {
+      file: "zenoh-ws.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/websocket",
+      source: "zenohd 1.10.2 on a WebSocket listener, publish, subscribe and query",
+      taken: "2026-11-03",
+      packets: 267,
+    },
+    {
+      file: "zenoh-peer-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "two 1.10.2 peers with no router",
+      taken: "2026-11-03",
+      packets: 59,
+    },
+    {
+      file: "zenoh-routers-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "two zenohd 1.10.2 routers linked, a client on each",
+      taken: "2026-11-03",
+      packets: 156,
+    },
+    {
+      file: "zenoh-ipv6-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp over IPv6",
+      source: "zenohd 1.10.2 on ::1, publish, subscribe and query",
+      taken: "2026-11-03",
+      packets: 218,
+    },
+    {
+      file: "zenoh-lz4-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp, lz4",
+      source: "zenohd 1.10.2 and clients with compression, publish, subscribe and query",
+      taken: "2026-11-03",
+      packets: 219,
+    },
+    {
+      file: "zenoh-advanced-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, the advanced publisher with history and its subscriber",
+      taken: "2026-11-03",
+      packets: 213,
+    },
+    {
+      file: "zenoh-churn-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, a subscriber and thirty one-put sessions",
+      taken: "2026-11-03",
+      packets: 483,
+    },
+    {
+      file: "zenoh-ping-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, z_ping and z_pong, 200 express round trips",
+      taken: "2026-11-03",
+      packets: 842,
+    },
+    {
+      file: "zenoh-scouting.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/udp scouting and tcp",
+      source: "zenohd 1.10.2, z_scout and two peers that find it by multicast scouting",
+      taken: "2026-11-03",
+      packets: 199,
+    },
+    {
+      file: "zenoh-tls-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tls",
+      source: "zenohd 1.10.2 on a TLS listener, publish, subscribe and query",
+      taken: "2026-11-03",
+      packets: 263,
+    },
+    {
+      file: "zenoh-quic.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/quic",
+      source: "the same on a QUIC listener",
+      taken: "2026-11-03",
+      packets: 382,
+    },
+    {
+      file: "zenoh-admin-query.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, four queries of its admin space",
+      taken: "2026-11-03",
+      packets: 95,
+    },
+    {
+      file: "zenoh-querier-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, a queryable and a querier",
+      taken: "2026-11-03",
+      packets: 96,
+    },
+    {
+      file: "zenoh-c-pubsub.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, zenoh-c 1.10.2 z_pub and z_sub",
+      taken: "2026-11-03",
+      packets: 172,
+    },
+    {
+      file: "zenoh-c-query.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, zenoh-c 1.10.2 z_queryable and z_get",
+      taken: "2026-11-03",
+      packets: 259,
+    },
+    {
+      file: "zenoh-pico-pubsub-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, zenoh-pico 1.10.2 z_pub and z_sub",
+      taken: "2026-11-03",
+      packets: 116,
+    },
+    {
+      file: "zenoh-pico-pubsub-udp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/udp",
+      source: "the same over UDP unicast",
+      taken: "2026-11-03",
+      packets: 56,
+    },
+    {
+      file: "zenoh-pico-query-tcp.pcap",
+      hypothesis: "zenoh",
+      scope: "own",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.2, zenoh-pico 1.10.2 z_queryable and z_get",
+      taken: "2026-11-03",
+      packets: 125,
+    },
+    {
+      file: "null-beanstalkd.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "beanstalkd",
+      source: "schickling/beanstalkd, put, reserve, stats",
+      taken: "2026-11-03",
+      packets: 15,
+    },
+    {
+      file: "null-consul.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "consul (serf gossip, RPC, HTTP)",
+      source: "two consul 1.19 agents joining, a key put",
+      taken: "2026-11-03",
+      packets: 249,
+    },
+    {
+      file: "null-ftp.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "ftp",
+      source: "alpine-ftp-server and busybox ftpput, ftpget",
+      taken: "2026-11-03",
+      packets: 64,
+    },
+    {
+      file: "null-git.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "git",
+      source: "git daemon and git clone",
+      taken: "2026-11-03",
+      packets: 59,
+    },
+    {
+      file: "null-grpc.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "grpc (http/2 cleartext)",
+      source: "grpcbin and grpcurl",
+      taken: "2026-11-03",
+      packets: 66,
+    },
+    {
+      file: "null-iperf3-tcp.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "iperf3/tcp",
+      source: "iperf3 server and client, a megabyte",
+      taken: "2026-11-03",
+      packets: 86,
+    },
+    {
+      file: "null-iperf3-udp.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "iperf3/udp",
+      source: "the same over UDP",
+      taken: "2026-11-03",
+      packets: 813,
+    },
+    {
+      file: "null-irc.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "irc",
+      source: "inspircd and a client joining a channel",
+      taken: "2026-11-03",
+      packets: 18,
+    },
+    {
+      file: "null-ldap.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "ldap",
+      source: "openldap and ldapsearch",
+      taken: "2026-11-03",
+      packets: 15,
+    },
+    {
+      file: "null-mail.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "smtp, imap, pop3",
+      source: "greenmail and curl",
+      taken: "2026-11-03",
+      packets: 72,
+    },
+    {
+      file: "null-mariadb.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "mysql",
+      source: "mariadb 11 server and client",
+      taken: "2026-11-03",
+      packets: 35,
+    },
+    {
+      file: "null-memcached.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "memcached",
+      source: "memcached 1.6 and its text protocol",
+      taken: "2026-11-03",
+      packets: 10,
+    },
+    {
+      file: "null-modbus.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "modbus/tcp",
+      source: "pymodbus server and client",
+      taken: "2026-11-03",
+      packets: 28,
+    },
+    {
+      file: "null-mongo.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "mongodb",
+      source: "mongo 7 and mongosh",
+      taken: "2026-11-03",
+      packets: 73,
+    },
+    {
+      file: "null-nats.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "nats",
+      source: "nats server and nats-box",
+      taken: "2026-11-03",
+      packets: 102,
+    },
+    {
+      file: "null-nsq.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "nsq",
+      source: "nsqd, to_nsq and nsq_tail",
+      taken: "2026-11-03",
+      packets: 51,
+    },
+    {
+      file: "null-rabbitmq.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "amqp 0-9-1",
+      source: "rabbitmq 3 and pika",
+      taken: "2026-11-03",
+      packets: 58,
+    },
+    {
+      file: "null-radius.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "radius",
+      source: "freeradius and radtest",
+      taken: "2026-11-03",
+      packets: 3,
+    },
+    {
+      file: "null-rsync.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "rsync",
+      source: "rsync daemon and client",
+      taken: "2026-11-03",
+      packets: 54,
+    },
+    {
+      file: "null-sip.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "sip",
+      source: "sipp as server and as client",
+      taken: "2026-11-03",
+      packets: 30,
+    },
+    {
+      file: "null-smb.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "smb",
+      source: "samba and smbclient",
+      taken: "2026-11-03",
+      packets: 38,
+    },
+    {
+      file: "null-snmp.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "snmp",
+      source: "net-snmp snmpd and snmpwalk",
+      taken: "2026-11-03",
+      packets: 76,
+    },
+    {
+      file: "null-stun.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "stun",
+      source: "coturn and turnutils_stunclient",
+      taken: "2026-11-03",
+      packets: 2,
+    },
+    {
+      file: "null-syslog.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "syslog over udp and tcp",
+      source: "rsyslog and util-linux logger",
+      taken: "2026-11-03",
+      packets: 27,
+    },
+    {
+      file: "null-telnet.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "telnet",
+      source: "busybox telnetd and telnet",
+      taken: "2026-11-03",
+      packets: 33,
+    },
+    {
+      file: "null-tftp.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "tftp",
+      source: "tftp-hpa and busybox tftp",
+      taken: "2026-11-03",
+      packets: 395,
+    },
+    {
+      file: "null-websocket.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "websocket",
+      source: "an echo server and a python websockets client, binary and text",
+      taken: "2026-11-03",
+      packets: 34,
+    },
+    {
+      file: "null-zeromq.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "zmtp",
+      source: "pyzmq request and reply",
+      taken: "2026-11-03",
+      packets: 24,
+    },
+    {
+      file: "null-zookeeper.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "zookeeper",
+      source: "zookeeper 3.9 and zkCli",
+      taken: "2026-11-03",
+      packets: 26,
+    },
+  ],
+}
