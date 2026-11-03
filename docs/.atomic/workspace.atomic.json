@@ -308330,6 +308330,60 @@
         "Open: the largest frames of the asking client's chain are now the decodes of the lent reply (lend_response 1,432 and MsgPutIn::decode_into 1,416 bytes), which hold the deployment's lists inline as the request did; the admin image's stack bound (66 calls through a register unclaimed); that the thread-entry bytes (56 and 16) hold for another board or kernel configuration; the dial path's frame on the host build of the node (10,568 bytes, the same before this change) was not looked at. Also: a hosted reading of Layers Qzk and Qzb and of the previous rounds."
       ]
     },
+    "Round 4195": {
+      "decision_summary": "Step 2 of the server-layer split: the storage manager leaves wz-session-core for the new wz-storage crate, built on the core and named by nothing in it. It composes the backend, volume and config modules, which stay in the core under storage-backend until their own steps, so the crate depends on the core with that one feature. The module keeps its name (wz_storage::storage_manager): a downstream path changes only its crate, and a citation of the file still names one tracked file. Under the shorter name the file took over another entry's citation of an upstream file of that name, which is why the plan's rule holds. The feature storage-mgr-multi-storage-host stays on wz-runtime-tokio and wz and now means dep:wz-storage; the core's feature of that name goes and the core feature model loses the line. wz-storage is no_std with alloc, as the module was.",
+      "changes_bullets": [
+        "crates/wz-storage: new crate (Cargo.toml, src/lib.rs); src/storage_manager.rs is crates/wz-session-core/src/storage_manager.rs moved, its paths now wz_session_core::storage_backend, ::storage_config, ::storage_volume and ::sample.",
+        "crates/wz-session-core: the storage_manager module and the storage-mgr-multi-storage-host feature removed; lib.rs and Cargo.toml say in prose where the manager went; sources/features/wz-session-core.scxml regenerated.",
+        "crates/wz-runtime-tokio: storage-mgr-multi-storage-host forwards dep:wz-storage where it forwarded the core feature; storage_manager_service uses wz_storage::storage_manager.",
+        "crates/Cargo.toml and Cargo.lock: wz-storage a member. .github/workflows/platform.yml: crates/wz-storage/** in paths.",
+        "scripts/run-ci.sh: C1z's core leg of the manager feature (53) becomes the wz-storage leg of 8, the core's other leg keeping its 45; wz-storage clippy in place of the core's manager-feature clippy. scripts/lib/nondefault-tests-gate.sh: the core row loses the feature. scripts/lib/layer_direction_gate.py: IN_CORE loses storage_manager.",
+        "store: the reason of storage-mgr-multi-storage-host names wz-storage as the kernel's crate, its cfg site as wz-runtime-tokio's optional dependency, and the lines of create_backend, add_storage and remove_storage in the moved file."
+      ],
+      "verification_bullets": [
+        "Layer C1z pass on hkl001 (the wz-storage leg ran its 8, the core storage leg its 45) after the module took its core name; Layer C1bz pass for wz-storage, wz-session-core and wz-runtime-tokio.",
+        "Layer C1bzr was not completed: the run for the three crates ended at its 10,000 MB reservation on one core after 9,633 s. wz-storage has no features and so no reduced configuration, and the tokio module that links to it is in 130 of its 140 reduced configurations (the other ten leave the module out), and C1bz's full build documents it.",
+        "layer_direction_gate --check OK (13 server modules still in the core, 2 of 3 upper crates built) and --selftest; reason_citation_gate, store_reason_citation_gate and store_reasons_resolve rc 0; the hook's 127 round-fed gates, the extended-range gates and Layers C0e, C0f rc 0; Layer 0 pass with shellcheck 0.11.0.",
+        "guarded_count_gate over the range: 181 of 181 guards OK on hkl001 (pc3 did not answer ssh).",
+        "validate-workspace: T1 orphans 14 (new 0), T3 warn 4, T4 info 15, unchanged by the reason edit."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend"
+      ],
+      "carry_forward_bullets": [
+        "Step 3 of the server-layer split: the next storage module to leave the core for wz-storage.",
+        "SCE main e248007a34 states the protocol's bound in its zenoh forge resources (the eight stems and more: every chain's max-depth, err/msg_put payload, init_body cookie, query parameters, the suffixes) and drops the unusable `{Codec}<'a>` aliases of an unbounded codec. Move the SCE pin past it, then remove the eight stems from Layer B's LAYER2_KNOWN_DIVERGENCE and re-measure the four older entries (request, wireexpr, msg_put, query).",
+        "Measure whether moving the borrowed-to-owned conversions out of decode_one_record takes back any of the coop text.",
+        "A hosted reading of Layers B, C1cs, C1bzr, C1cn, C1z and 0 at this round's head."
+      ],
+      "publishable_decision_summary": "Step 2 of the server-layer split: the storage manager leaves wz-session-core for the new wz-storage crate, built on the core and named by nothing in it. It composes the backend, volume and config modules, which stay in the core under storage-backend until their own steps, so the crate depends on the core with that one feature. The module keeps its name (wz_storage::storage_manager): a downstream path changes only its crate, and a citation of the file still names one tracked file. Under the shorter name the file took over another entry's citation of an upstream file of that name, which is why the plan's rule holds. The feature storage-mgr-multi-storage-host stays on wz-runtime-tokio and wz and now means dep:wz-storage; the core's feature of that name goes and the core feature model loses the line. wz-storage is no_std with alloc, as the module was.",
+      "publishable_changes_bullets": [
+        "crates/wz-storage: new crate (Cargo.toml, src/lib.rs); src/storage_manager.rs is crates/wz-session-core/src/storage_manager.rs moved, its paths now wz_session_core::storage_backend, ::storage_config, ::storage_volume and ::sample.",
+        "crates/wz-session-core: the storage_manager module and the storage-mgr-multi-storage-host feature removed; lib.rs and Cargo.toml say in prose where the manager went; sources/features/wz-session-core.scxml regenerated.",
+        "crates/wz-runtime-tokio: storage-mgr-multi-storage-host forwards dep:wz-storage where it forwarded the core feature; storage_manager_service uses wz_storage::storage_manager.",
+        "crates/Cargo.toml and Cargo.lock: wz-storage a member. .github/workflows/platform.yml: crates/wz-storage/** in paths.",
+        "scripts/run-ci.sh: C1z's core leg of the manager feature (53) becomes the wz-storage leg of 8, the core's other leg keeping its 45; wz-storage clippy in place of the core's manager-feature clippy. scripts/lib/nondefault-tests-gate.sh: the core row loses the feature. scripts/lib/layer_direction_gate.py: IN_CORE loses storage_manager.",
+        "store: the reason of storage-mgr-multi-storage-host names wz-storage as the kernel's crate, its cfg site as wz-runtime-tokio's optional dependency, and the lines of create_backend, add_storage and remove_storage in the moved file."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1z pass on hkl001 (the wz-storage leg ran its 8, the core storage leg its 45) after the module took its core name; Layer C1bz pass for wz-storage, wz-session-core and wz-runtime-tokio.",
+        "Layer C1bzr was not completed: the run for the three crates ended at its 10,000 MB reservation on one core after 9,633 s. wz-storage has no features and so no reduced configuration, and the tokio module that links to it is in 130 of its 140 reduced configurations (the other ten leave the module out), and C1bz's full build documents it.",
+        "layer_direction_gate --check OK (13 server modules still in the core, 2 of 3 upper crates built) and --selftest; reason_citation_gate, store_reason_citation_gate and store_reasons_resolve rc 0; the hook's 127 round-fed gates, the extended-range gates and Layers C0e, C0f rc 0; Layer 0 pass with shellcheck 0.11.0.",
+        "guarded_count_gate over the range: 181 of 181 guards OK on hkl001 (pc3 did not answer ssh).",
+        "validate-workspace: T1 orphans 14 (new 0), T3 warn 4, T4 info 15, unchanged by the reason edit."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3 of the server-layer split: the next storage module to leave the core for wz-storage.",
+        "SCE main e248007a34 states the protocol's bound in its zenoh forge resources (the eight stems and more: every chain's max-depth, err/msg_put payload, init_body cookie, query parameters, the suffixes) and drops the unusable `{Codec}<'a>` aliases of an unbounded codec. Move the SCE pin past it, then remove the eight stems from Layer B's LAYER2_KNOWN_DIVERGENCE and re-measure the four older entries (request, wireexpr, msg_put, query).",
+        "Measure whether moving the borrowed-to-owned conversions out of decode_one_record takes back any of the coop text.",
+        "A hosted reading of Layers B, C1cs, C1bzr, C1cn, C1z and 0 at this round's head."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
