@@ -88,6 +88,12 @@ impl RouterState {
         &self.forwarder
     }
 
+    /// The data plane [`Self::forwarder`] is, counted: what a declaration made on the node holds
+    /// so that it can be withdrawn after the session that made it has been let go of.
+    pub fn shared_forwarder(&self) -> Arc<RouterForwarder> {
+        Arc::clone(&self.forwarder)
+    }
+
     /// Declare a liveliness token of the node on `keyexpr`: the nodes that asked are told, and so
     /// are the subscribers of the node itself. The id answered retracts it
     /// ([`undeclare_token`](Self::undeclare_token)).

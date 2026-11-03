@@ -41,7 +41,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::sample::MarshalCache;
-use crate::session::{not_a_registry, session_state};
+use crate::session::{session_handle, SessionHandle};
 
 use wz_capi_core::faces::{SharedSession, SubId};
 
@@ -113,11 +113,38 @@ pub(crate) fn make_subscriber_callback(
 /// each wire undeclare and releases the last closure reference (→ the C
 /// `drop(context)`).
 struct SubscriberState {
-    shared: Arc<SharedSession>,
-    id: SubId,
+    holder: SubscriberHolder,
     /// R311y568 — the keyexpr this subscription was declared under, so
     /// [`z_subscriber_keyexpr`] can answer.
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
+}
+
+/// What a subscription is declared on, and so what retracts it.
+enum SubscriberHolder {
+    /// The registry of faces: the subscription is a [`SubId`] of its SSOT.
+    Registry {
+        shared: Arc<SharedSession>,
+        id: SubId,
+    },
+    /// A node: the subscription is hosted on its data plane, which it holds counted so that the
+    /// subscription can be withdrawn after the session handle has been let go of.
+    #[cfg(feature = "router-node")]
+    Node {
+        forwarder: Arc<wz_runtime_tokio::router_forward::RouterForwarder>,
+        zid: [u8; 16],
+        id: u64,
+    },
+}
+
+impl SubscriberHolder {
+    /// The identity of the session the subscription is declared on.
+    fn zid(&self) -> [u8; 16] {
+        match self {
+            Self::Registry { shared, .. } => shared.zid(),
+            #[cfg(feature = "router-node")]
+            Self::Node { zid, .. } => *zid,
+        }
+    }
 }
 
 /// Leak a [`SubscriberState`] and hand back the handle a `z_owned_subscriber_t`
@@ -134,9 +161,38 @@ pub(crate) fn subscriber_state_handle(
     id: SubId,
     keyexpr: String,
 ) -> Handle {
+    state_handle(
+        SubscriberHolder::Registry {
+            shared: shared.clone(),
+            id,
+        },
+        keyexpr,
+    )
+}
+
+/// [`subscriber_state_handle`] for a subscription hosted on a node.
+#[cfg(feature = "router-node")]
+fn node_subscriber_state_handle(
+    node: &wz_capi_core::drive::RouterState,
+    id: u64,
+    keyexpr: String,
+) -> Handle {
+    let mut zid = [0u8; 16];
+    let wire = node.zid();
+    zid[..wire.len().min(16)].copy_from_slice(&wire[..wire.len().min(16)]);
+    state_handle(
+        SubscriberHolder::Node {
+            forwarder: node.shared_forwarder(),
+            zid,
+            id,
+        },
+        keyexpr,
+    )
+}
+
+fn state_handle(holder: SubscriberHolder, keyexpr: String) -> Handle {
     let mut boxed = Box::new(SubscriberState {
-        shared: shared.clone(),
-        id,
+        holder,
         keyexpr: crate::keyexpr::DeclaredKeyexpr::new(keyexpr),
     });
     // Bind AFTER boxing — the state is at its final address only here. See
@@ -147,7 +203,13 @@ pub(crate) fn subscriber_state_handle(
 
 impl Drop for SubscriberState {
     fn drop(&mut self) {
-        self.shared.undeclare_subscriber(self.id);
+        match &self.holder {
+            SubscriberHolder::Registry { shared, id } => shared.undeclare_subscriber(*id),
+            #[cfg(feature = "router-node")]
+            SubscriberHolder::Node { forwarder, id, .. } => {
+                forwarder.unhost_subscriber(*id);
+            }
+        }
     }
 }
 
@@ -295,10 +357,10 @@ pub unsafe extern "C" fn z_declare_subscriber(
         *owned = z_owned_closure_sample_t::null_value();
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { not_a_registry(session) };
+            return Z_ENULL;
         };
         let ke = ke.to_owned();
         // Reject a non-canonical keyexpr UP FRONT rather than recording a dead
@@ -314,17 +376,27 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // SAFETY: the caller's contract for the options struct.
         let allowed_origin = unsafe { subscriber_allowed_origin(options) };
         let declared = ke.clone();
-        let id = state.shared.declare_subscriber(ke, allowed_origin, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-        });
-        unsafe {
-            *subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
-                &state.shared,
-                id,
-                declared,
-            ))
+        let closure = Arc::new(cclosure);
+        let handle = match held {
+            SessionHandle::Registry(state) => {
+                let id = state.shared.declare_subscriber(ke, allowed_origin, {
+                    Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+                });
+                subscriber_state_handle(&state.shared, id, declared)
+            }
+            // A node hosts the subscription on its data plane, which hands it what its own
+            // session publishes and what arrives from its faces, as `allowed_origin` admits.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => {
+                let id = node.forwarder().host_subscriber_from(
+                    &ke,
+                    allowed_origin,
+                    Box::new(make_subscriber_callback(closure)),
+                );
+                node_subscriber_state_handle(node, id, declared)
+            }
         };
+        unsafe { *subscriber = z_owned_subscriber_t::from_handle(handle) };
         Z_OK
     })
 }
@@ -395,8 +467,8 @@ pub unsafe extern "C" fn z_subscriber_id(
         }
         // SAFETY: as above.
         let state = unsafe { &*(handle as *const SubscriberState) };
-        crate::entity::z_entity_global_id_t::for_entity(
-            &state.shared,
+        crate::entity::z_entity_global_id_t::for_entity_of(
+            state.holder.zid(),
             subscriber as *const std::ffi::c_void,
         )
     })

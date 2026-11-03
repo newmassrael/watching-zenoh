@@ -36,8 +36,8 @@ use crate::publisher::{
 };
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 use crate::publisher::{z_reliability_t, Z_RELIABILITY_RELIABLE};
-use crate::result::{publish_refusal, ZResult, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::result::{publish_refusal, ZResult, Z_ENULL, Z_OK};
+use crate::session::{session_handle, SessionHandle};
 
 /// Options for `z_put` (`zenoh_commons.h:927-970`).
 #[repr(C)]
@@ -318,13 +318,28 @@ pub unsafe extern "C" fn z_put(
         let payload = unsafe { take_outbound(payload) };
         // SAFETY: the caller's contract for the options struct.
         let publish = unsafe { resolve_put_options(options) };
-        let (Some(state), Some(keyexpr), Some(payload)) = (
+        let (Some(held), Some(keyexpr), Some(payload)) = (
             // SAFETY: the caller's contract for both handles.
-            unsafe { session_state(session) },
+            unsafe { session_handle(session) },
             unsafe { keyexpr_str(key_expr) },
             payload,
         ) else {
-            return unsafe { not_a_registry(session) };
+            return Z_ENULL;
+        };
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            SessionHandle::Registry(state) => state,
+            // A node names every key whole on the wire, so a declared key is published by its
+            // text, and a payload in shared memory goes out as its bytes until the node carries
+            // the descriptor.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => {
+                return node_publish(node, keyexpr, payload.bytes(), &publish);
+            }
         };
         // R311y564 — a keyexpr that carries a DECLARATION publishes aliased, the
         // bandwidth saving `z_declare_keyexpr` exists to enable. Undeclared
@@ -343,6 +358,22 @@ pub unsafe extern "C" fn z_put(
             Err(why) => publish_refusal(why),
         }
     })
+}
+
+/// Publish `payload` on `keyexpr` as the session of `node`: to the subscribers it hosts and to
+/// the faces whose subscriptions match, as the partition of its south lets the message pass. The
+/// codec's refusal is the one the registry reports, a message too large to send.
+#[cfg(feature = "router-node")]
+fn node_publish(
+    node: &wz_capi_core::drive::RouterState,
+    keyexpr: &str,
+    payload: &[u8],
+    options: &wz_runtime_tokio::session::PublishOptions,
+) -> ZResult {
+    match node.forwarder().publish_with(keyexpr, payload, options) {
+        Ok(()) => Z_OK,
+        Err(_) => publish_refusal(wz_capi_core::faces::FanoutError::ExceedsCapacity),
+    }
 }
 
 /// Delete the data behind `key_expr` (zenoh-c `z_delete`).
@@ -369,13 +400,24 @@ pub unsafe extern "C" fn z_delete(
 ) -> ZResult {
     guarded(|| {
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(keyexpr)) = (unsafe { session_state(session) }, unsafe {
+        let (Some(held), Some(keyexpr)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { not_a_registry(session) };
+            return Z_ENULL;
         };
         // SAFETY: the caller's contract for the options struct.
         let publish = unsafe { resolve_delete_options(options) };
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            SessionHandle::Registry(state) => state,
+            // A delete takes the route a put to its key would.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => return node_publish(node, keyexpr, &[], &publish),
+        };
         // The DEL half of the same aliasing choice — see `z_put`.
         // SAFETY: the caller's contract for the handle.
         let sent = match unsafe { crate::keyexpr::keyexpr_mapping(key_expr) } {

@@ -55,8 +55,14 @@ impl z_entity_global_id_t {
         shared: &wz_capi_core::faces::SharedSession,
         handle: *const std::ffi::c_void,
     ) -> Self {
+        Self::for_entity_of(shared.zid(), handle)
+    }
+
+    /// [`Self::for_entity`] for an entity of the session whose identity is `zid`, whatever
+    /// holds that session.
+    pub(crate) fn for_entity_of(zid: [u8; 16], handle: *const std::ffi::c_void) -> Self {
         Self {
-            zid: z_id_t { id: shared.zid() },
+            zid: z_id_t { id: zid },
             eid: (handle as usize as u64 & u64::from(u32::MAX)) as u32,
         }
     }

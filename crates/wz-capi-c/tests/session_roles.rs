@@ -35,6 +35,8 @@ use wz_capi_c::session::z_session_is_closed;
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 #[cfg(feature = "router-node")]
+use wz_capi_c::timestamp::{z_timestamp_new, z_timestamp_t};
+#[cfg(feature = "router-node")]
 use wz_capi_c::zid::z_info_zid;
 use wz_runtime_tokio_test_support::free_port;
 
@@ -272,10 +274,12 @@ fn a_gateway_south_of_subregions_opens_a_node_that_carries_little_yet() {
                 "the node has its own id ({mode})"
             );
             assert!(!z_session_is_closed(z_session_loan(&session)));
+            // The stamp of a session's clock is one of the operations a node does not carry yet.
+            let mut stamp: z_timestamp_t = std::mem::zeroed();
             assert_eq!(
-                put_rc(&session),
+                z_timestamp_new(&mut stamp, z_session_loan(&session)),
                 Z_EUNAVAILABLE,
-                "a node does not carry a put yet ({mode})"
+                "a node does not carry a timestamp yet ({mode})"
             );
             assert_eq!(
                 z_close(z_session_loan_mut(&mut session), std::ptr::null_mut()),
@@ -314,6 +318,45 @@ fn a_gateway_south_of_subregions_opens_a_node_that_carries_little_yet() {
             "the registry of faces carries the put"
         );
         close_session(session);
+    }
+}
+
+/// A node opened through the C ABI puts and subscribes: a registry peer that dials it hears what
+/// the node puts, and the node's subscriber hears what that peer puts.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_node_opened_through_the_c_abi_puts_and_subscribes() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the contexts are freed after them.
+    let ((hits_node, ctx_node), (hits_peer, ctx_peer)) =
+        unsafe { (count_samples(&node), count_samples(&peer)) };
+    // SAFETY: both sessions are live.
+    unsafe {
+        assert!(
+            put_until_it_arrives(&node, &hits_peer),
+            "what the node put never reached the peer"
+        );
+        assert!(
+            put_until_it_arrives(&peer, &hits_node),
+            "what the peer put never reached the node's subscriber"
+        );
+    }
+    // SAFETY: both sessions are live and owned here; the contexts are freed after them.
+    unsafe {
+        close_session(node);
+        close_session(peer);
+        drop(Box::from_raw(ctx_node));
+        drop(Box::from_raw(ctx_peer));
     }
 }
 
