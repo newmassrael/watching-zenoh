@@ -1360,3 +1360,63 @@ and no real zenoh stream (noise accepted 40, 35, 4 and 0 of 40 at depths 1 to
 
 No word of the corpus moves and no front of it is added: the corpus holds no
 WebSocket capture. The validation corpus is where D15 meets the wire.
+
+### 6.12 The freeze: model 6, registered before the validation corpus (2026-11-03)
+
+This is the entry D5 asks for. It registers the model the validation corpus
+will be read against, and how that corpus is read, before any of its files
+exists. It moves nothing in the reader.
+
+**What is frozen.** Model 6 as the reader at this entry computes it:
+
+- The rule: each sum is the `log2` of an e-process against the hypothesis it
+  rejects (D1); that hypothesis's unknown rates are taken at their likeliest
+  over the 95% region its corpus allows, the other side mixed over a prior
+  fixed in advance; every term rounded toward the rejected side (D3, D8). The
+  word is the first crossing of `+20` bits (`yes`) or `-20` bits (`no`), and
+  it latches (D4).
+- The rejected zenoh hypothesis is zenoh of this wire, version `0x09` (D10),
+  whose bytes reach the capture altered with chance at most `2^-24` where the
+  transport checksum verified and `2^-10` where none did (D11).
+- The checks and where they are weighed: the cookie echo, the Init roles, the
+  version header (D14), the SN steps, the unit readings, the stream framing,
+  and the fronts of datagrams, of stream chains held from their SYN (D13) and
+  of WebSocket messages read from the upgrade on (D15), each front against the
+  fifteen IDs of D12.
+- The measured parameters: `zenoh_calibration_generated.rs` as the development
+  corpus gives it (22 zenoh groups, 18 null files), the zenoh priors of weight
+  one outcome at the Jeffreys estimate, the SN prior Beta(89/10000,
+  19911/10000), the null side's bounds and means, the front's null prior.
+- The groups of section 6.3: a null protocol, a zenoh release line, a link
+  condition, a workload.
+
+`the_model_is_the_one_frozen_before_the_validation_corpus` holds all of it as
+one digest, `0xace0388900a8cc99`, the same in every build of the reader. A
+change to any of it fails that test until a ledger entry registers the new
+digest, so a model that has changed cannot be read against the validation
+corpus under this entry's name.
+
+**What the validation corpus is.** Captures of what the development corpus
+lacks (section 6.4): queries and replies, liveliness, fragmented payloads,
+priorities other than the default, authentication, multicast, an
+implementation other than the reference one, a lowlatency link (D12) and a
+WebSocket link (D15); and null protocols the development corpus does not hold.
+Each file names its group. The files sit apart from `captures/corpus/` and are
+counted into no weight until the report below is written.
+
+**How it is read, once.** The report states, by group:
+
+1. The errors: every zenoh group with a flow that reads `no`, and every null
+   group with a flow that reads `yes`. Any one refutes the frozen model and is
+   reported as a refutation.
+2. The model's validity (section 6.4, second layer): the share of groups whose
+   sums cross `+1` to `+10` bits and `-1` to `-10` bits, each with its exact
+   95% interval, against the level.
+3. The operating characteristics: the units a flow needs before its word, per
+   group, with the 95th percentile.
+
+The report is judged at the interim level of section 6.4: a group fails with
+chance at most 10%, which needs 29 groups a side. After the report the
+validation files may join the development corpus and the model may change, and
+the next freeze needs a validation corpus of its own.
+
