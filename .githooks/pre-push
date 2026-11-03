@@ -1228,6 +1228,11 @@ round_fed_gates=(
     # MEASURED: well under a second, a parse with no build.
     "claude_md_upstream_pin_gate.py --selftest"
     "claude_md_upstream_pin_gate.py --check"
+    # The server layer sits above wz-session-core: the core's manifest and source name no upper
+    # crate, and the list of server modules still in the core only shrinks. Round-fed: it reads
+    # the workspace manifests and the core's source. MEASURED: under a second, a parse with no build.
+    "layer_direction_gate.py --selftest"
+    "layer_direction_gate.py --check"
     # The stats golden's provenance line against the oracle's lock: a pin bump that does not
     # regenerate the golden. MEASURED: well under a second, a parse with no build.
     "zenoh_stats_golden.py --header-selftest"

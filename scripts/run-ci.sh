@@ -3364,6 +3364,10 @@ layer_c0_test_discipline() {
     # `UPSTREAM_VERSION` enforces; a bullet that states none FAILS, not passes.
     python3 scripts/lib/claude_md_upstream_pin_gate.py --selftest || return 1
     python3 scripts/lib/claude_md_upstream_pin_gate.py --check || return 1
+    # The server layer (storage, admin space, auth methods) sits above wz-session-core: the core
+    # names no upper crate and the list of server modules not yet moved out of it only shrinks.
+    python3 scripts/lib/layer_direction_gate.py --selftest || return 1
+    python3 scripts/lib/layer_direction_gate.py --check || return 1
     # The stats golden's provenance line against the oracle's lock (round 3976 moved the pin and the
     # golden kept its old versions; Layer E17 is where that showed, hosted and a build later).
     python3 scripts/lib/zenoh_stats_golden.py --header-selftest || return 1
