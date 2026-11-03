@@ -991,6 +991,20 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         session-unicast-open,\
         transport-keepalive\
         |"
+    # `pool-monitor` and `declarations-synced-event` each switch ONE test on in the crate
+    # (`pool_gauge::tests::the_mark_only_rises_and_saturates`,
+    # `decl_sink::tests::synced_sinks_tell_each_observer_in_install_order_and_forget_a_removed_one`),
+    # and no row above names either, which the census said, hosted:
+    #
+    #   nondefault-tests: FAIL -- wz-session-core has 2175 test(s) only a feature
+    #     build reaches; legs run 2173 and SKIPS excuses 0, leaving 2 claimed by
+    #     NOTHING.
+    #
+    # Two rows, one per feature, because neither is a selector and neither changes what a
+    # test of the other means. The filters are the modules' paths, so a test added to either
+    # module later is claimed without touching the rows.
+    "wz-session-core|hook|pool-monitor|pool_gauge::"
+    "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # S9d, the end-to-end half: `wz-session-lwip`'s `tests/slot_control_records.rs`
     # drives a real session pair on the host lwIP loopback and counts one acceptor
     # iteration per control record. It names `codec-response-final` beside the slot
