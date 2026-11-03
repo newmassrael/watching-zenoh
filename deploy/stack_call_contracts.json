@@ -4,6 +4,11 @@
   "cold": [
     "^core::str::slice_error_fail"
   ],
+  "thread_entry": {
+    "frames": ["z_thread_entry", "bg_thread_main", "main"],
+    "extra": 16,
+    "why": "the main thread's stack holds, beneath wz_app_main, the kernel's frames that run it (z_thread_entry, bg_thread_main and the app's main: 56 bytes in the images) and, at the top of the stack, the thread-local storage and the alignment (16 bytes with the 8 of .tbss). Read off the real stack of the plain client on the kit by walking its frame-pointer chain at the deepest write (2026-11-03): wz_app_main's entry was 72 bytes deep, and the bound that started at wz_app_main was 16 bytes under the kit's reading"
+  },
   "site_pins": {
     "engine-turn": {"zephyr-client-fixed": 36, "zephyr-client-heap": 36, "zephyr-client-fixed-batching": 36, "zephyr-client-fixed-get": 36},
     "engine-host": {"zephyr-client-fixed": 5, "zephyr-client-heap": 5, "zephyr-client-fixed-batching": 5, "zephyr-client-fixed-get": 5},
@@ -104,7 +109,7 @@
     {
       "id": "tx-encoder",
       "where": {"file": "function.rs"},
-      "callees": "(send_response_final|dispatch_declare_lent|send_reply_parts)::\\{closure",
+      "callees": "(send_response_final|dispatch_declare_lent|send_reply_parts|send_get_parts)::\\{closure",
       "why": "a call of the `Fn` the send's dispatch was handed (`as_encoder`, a trait object), made in the dispatch and in the frame writer under it that a batching window uses: the closure of `send_response_final`, of `dispatch_declare_lent` or of `send_reply_parts`, each written at the call that sends and passed by reference for the length of it. The rule is the call's own place in the library (`core::ops::function`) and not the function that makes it, so the calls through a `TxBuf` that sit in the same functions stay the rules of `tx_buf.rs` below; its number of sites is pinned for each image, so another call through a `Fn` is read before it is claimed"
     },
     {

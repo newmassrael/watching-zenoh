@@ -378,9 +378,27 @@ def analyse(model: Model, contract: dict) -> Result:
         below_total, below_path = deepest(task)
         if model.funcs[root].frame + below_total > total:
             total, path = model.funcs[root].frame + below_total, (root, *below_path)
+    chain = [(model.funcs[s].frame, model.funcs[s].norm) for s in path]
+    # What the thread's stack holds beneath the entry function the bound is rooted at: the kernel's
+    # frames that run it (the contract names them) and what sits at the top of the stack before them.
+    # A walk of the real stack of the plain client on the kit (2026-11-03) found the entry function
+    # 72 bytes deep, 56 of them three frames and 16 the thread-local storage and alignment, which a
+    # bound that starts at the entry function leaves out.
+    below = contract.get("thread_entry")
+    if below:
+        by_name = {f.name: f for f in model.funcs.values()}
+        absent = [n for n in below["frames"] if n not in by_name]
+        for n in absent:
+            res.unclaimed.append((n, "a thread-entry function of the contract is not in the image"))
+        prefix = [(by_name[n].frame, by_name[n].norm) for n in below["frames"] if n in by_name]
+        extra = int(below.get("extra", 0))
+        if extra:
+            prefix.append((extra, "(the thread-local storage and the alignment at the top of the stack)"))
+        total += sum(frame for frame, _ in prefix)
+        chain = prefix + chain
     res.bound = total
     res.edges, res.cold, res.root = edges, cold, root
-    res.chain = [(model.funcs[s].frame, model.funcs[s].norm) for s in path]
+    res.chain = chain
     res.cycles = sorted((model.funcs[a].norm, model.funcs[b].norm) for a, b in cycles)
     return res
 
@@ -567,6 +585,13 @@ def selftest() -> int:
     res = analyse(_model(), base)
     eq("the register call reaches leaf_b and the frames below it", res.bound, 100 + 50 + 40 + 200)
     eq("nothing unclaimed", res.unclaimed, [])
+    # the thread's entry frames and its top-of-stack bytes lie beneath the function the bound is rooted at
+    entry_contract = {**base, "thread_entry": {"frames": ["worker"], "extra": 16, "why": "t"}}
+    entered = analyse(_model(), entry_contract)
+    eq("the thread entry frames and the extra are added to the bound", entered.bound, 100 + 50 + 40 + 200 + 50 + 16)
+    eq("and lead the chain", [name for _, name in entered.chain][:2], ["worker", "(the thread-local storage and the alignment at the top of the stack)"])
+    missing = analyse(_model(), {**base, "thread_entry": {"frames": ["no_such_function"], "why": "t"}})
+    eq("a thread-entry function the image lacks is reported", len(missing.unclaimed), 1)
     # a rule names the site by line: another line is unclaimed
     other = {"rules": [{**rule, "where": {"file": "lib.rs", "line": 8}}]}
     eq("a site no rule claims is reported", len(analyse(_model(), other).unclaimed), 1)

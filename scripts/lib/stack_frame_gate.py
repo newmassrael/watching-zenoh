@@ -370,8 +370,9 @@ IMAGES = (
         entry="wz_app_main",
         # 2,648 bytes over 10 frames at the SCE pin 9619440966 (2,424 before it): the pin regenerated
         # the codecs, and the receive path's frames grew by 224. The same figure for the heap and the
-        # batching clients.
-        peak=2648,
+        # batching clients. 2,656 once the reader counts the word a function allocates with `str.w rN,
+        # [sp, #-4]!` (two on this chain).
+        peak=2656,
     ),
     # The fixed client with its storage block taken from the kernel heap at start
     # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
@@ -385,7 +386,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2648,
+        peak=2656,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -437,7 +438,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2648,
+        peak=2656,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -505,8 +506,9 @@ IMAGES = (
         # 6,876 bytes over 11 frames at the SCE pin 9619440966 (2,972 before it): the dispatch of the
         # getter's events (`EventsOf<GetterEvents>`) is a frame of 3,696 bytes, which the pin's codecs
         # made (it was not among the largest frames before), under `dispatch_copied`, with the
-        # application layer's dispatch of 520 beneath it. The cause of the frame was not found.
-        peak=6876,
+        # application layer's dispatch of 520 beneath it. The cause of the frame was not found. 6,888
+        # with the word of `str.w rN, [sp, #-4]!` counted.
+        peak=6888,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
@@ -557,8 +559,9 @@ IMAGES = (
         # followed. 9,588 with the other limits the node does not use stated as well (keyexpr bytes
         # 128, locator length 32, static connects 2, queryables 2, subscriptions 2, no inbound
         # interests and no remote declarations, 4 peer key aliases, 2 pending replies and finals): the
-        # same 26 frames, the largest the node's `start` at 3,968. 9,628 at the SCE pin 9619440966.
-        peak=9628,
+        # same 26 frames, the largest the node's `start` at 3,968. 9,628 at the SCE pin 9619440966, 9,632 with
+        # the word of `str.w rN, [sp, #-4]!` counted.
+        peak=9632,
     ),
 )
 
@@ -568,6 +571,12 @@ _PUSH = re.compile(r"\b(?:push|stmdb)(?:\.w)?\s+(?:sp!,\s*)?\{([^}]*)\}")
 _MOVW = re.compile(r"\bmovw\s+(r\d+|ip),\s*#(\d+)")
 _MOVT = re.compile(r"\bmovt\s+(r\d+|ip),\s*#(\d+)")
 _SUB_REG = re.compile(r"\bsub(?:\.w)?\s+sp,\s*sp,\s*(r\d+|ip)")
+#: A word stored below sp with the pointer written back (`str.w fp, [sp, #-4]!`): the compiler's way to keep
+#: sp eight-byte aligned after an odd number of pushed registers. It lowers sp as a push does, and the kit's
+#: watchpoint on the stack found a function at the end of the plain client's worst chain that did exactly
+#: this (2026-11-03): each such function was four bytes short in the chain, six of them on that chain were
+#: the 24 bytes by which the kit's reading exceeded the bound.
+_PREDEC = re.compile(r"\bstr(?:\.w)?\s+\w+,\s*\[sp,\s*#-(\d+)\]!")
 
 #: How many instructions of a function's start are read for its frame.
 PROLOGUE = 14
@@ -596,6 +605,9 @@ def frames(disassembly: str) -> list[tuple[int, str]]:
             push = _PUSH.search(line)
             if push:
                 frame += 4 * len([r for r in push.group(1).split(",") if r.strip()])
+            predec = _PREDEC.search(line)
+            if predec:
+                frame += int(predec.group(1))
             sub = _SUB_IMM.search(line)
             if sub:
                 frame += int(sub.group(1))
@@ -862,6 +874,12 @@ _FIXTURE = """\
 
 00004000 <no_frame>:
     4000:\t4770      \tbx\tlr
+
+00006000 <aligned_push>:
+    6000:\tb5f0      \tpush\t{r4, r5, r6, r7, lr}
+    6002:\taf03      \tadd\tr7, sp, #12
+    6004:\tf84d bd04 \tstr.w\tfp, [sp, #-4]!
+    6008:\tbdf0      \tpop\t{r4, r5, r6, r7, pc}
 """
 
 
@@ -914,6 +932,7 @@ def selftest() -> int:
     expect("movw/movt behind sub sp, sp, ip", read.get("movw_movt_sub"), 20 + 65536 + 16448)
     expect("a small sub", read.get("small_sub"), 8 + 8)
     expect("a function with no frame is absent", "no_frame" in read, False)
+    expect("a word stored below sp with write-back is a frame word", read.get("aligned_push"), 20 + 4)
 
     many = [(100, f"f{i}") for i in range(MIN_FRAMED_FUNCTIONS)]
     ok, _ = judge("t", 16384, "f0", many + [(4816, "task_entry")])
