@@ -13,9 +13,10 @@
 //! `Request` the owned path writes, byte for byte: the text and the parameters are read
 //! where they lie, and the message is described in the codec's PARTS form (references and
 //! a slice of at most three extension entries) that the codec's own wire writer reads. The
-//! lent form (`wz_codecs::lent::Request`) is not built: it holds the lists of the
-//! deployment inline at their capacity, and a `get` that states no extension would carry
-//! that capacity on the stack (a frame of 3,328 bytes at the SCE pin 9619440966).
+//! lent form (`wz_codecs::lent::Request`) is not built, as R4194 decided: it holds the
+//! lists of the deployment inline at their capacity, and a `get` that states no extension
+//! would carry that capacity on the stack (a frame of 3,328 bytes at the SCE pin
+//! 9619440966).
 //!
 //! What it carries is what a `get` of a node that stores nothing asks for: a literal
 //! keyexpr, the selector parameters, the consolidation, the target, the timeout and the

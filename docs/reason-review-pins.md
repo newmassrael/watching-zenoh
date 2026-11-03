@@ -93,4 +93,4 @@ normal state once nothing remains.
 | session-close-ingress | crates/wz-session-core/src/switchboard.rs | e58b8ce18efce97818dcb2a77e9ca7848b4ace36 | R4167 |
 | session-close-ingress | crates/wz-session-core/src/zid_hex.rs | 0f0211fdc425791e4ac3e161ca41de0d104f3420 | R3783 |
 | session-close-ingress | crates/wz-session-lwip/src/session_drive.rs | 4705def88669eff1ee3aa8e0ff33413d26719b7f | R4167 |
-| session-close-ingress | crates/wz-session-mcu/src/slot_host.rs | c1cd55a7e24550d50e18621987bfd192e10835c0 | R4187 |
+| session-close-ingress | crates/wz-session-mcu/src/slot_host.rs | 2e945e020ce1abf8c7038811c8b2ae29d0a7c734 | R4201 |
