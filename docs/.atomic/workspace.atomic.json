@@ -307398,6 +307398,64 @@
         "Replaces the carry of round 4158. The flow zenoh test's registered steps are done: the model is frozen and its validation corpus is read and reported. What stays: the claim reaches the interim level only (29 groups a side; the first target needs 59); the validation files may now join the development corpus, which moves the model and needs a new freeze and a new validation corpus; a compressed link's uncompressed batch is not a point the ws scan resumes at (doc 6.11). The consumer is told the report."
       ]
     },
+    "Round 4167": {
+      "decision_summary": "The SCE pin moves from 955774d15a to 9619440966 through ADR 0077 section 7, with c3d930c95c as a waypoint: a field's bound is now the protocol's (a byte string at its length field's width, a list with none where the protocol states none), and what a node holds is the storage profile's capacity, given by the deploy/codec_node.yaml deployment that writes wz_codecs::node::Node. Every lent view (wz_codecs::lent::X) holds its lists at Node on every target, so a lent decode allocates nothing; the owned forms in wz-session-core are transport_profile::owned::X at TransportStorage, which is Heap with alloc and Node without. A send path encodes the owned message with encode(sink): the projection try_as_borrowed holds its lists at the value's profile, which at Heap allocated a vector per subscriber per send, measured. The dissector reads the protocol and caps no chain or slice list. A storing form at Node refuses a list past its capacity with CapacityExceeded, read whole first; the routing graph builds a list past 64 as upstream does.",
+      "changes_bullets": [
+        "vendor/sce, out/**: the pin at 9619440966 and the regenerated codecs, stage 2 included; xtask names the Node deployment's storage Inline.",
+        "deploy/codec_node.yaml, xtask: the Node deployment and its capacities; byte fields at the protocol's width.",
+        "crates/wz-codecs/src/lib.rs: pub mod lent, one alias per codec at Node, gated as its module; Heap re-exported under alloc.",
+        "crates/wz-session-core/src/transport_profile/owned.rs: new, the owned form of each transport-reachable codec at TransportStorage.",
+        "crates/wz-session-core: frame_encode sends through the owned encode; held_list gains lawful and HeldList for a Lawful chain; lent_control, linkstate_oam, put_payload, request_build, declare_ext_qos and push_build take the generated forms and drop their own caps (LINK_STATES_CAP, MAX_SLICES, MAX_CHAIN).",
+        "crates/wz-session-core/src/dissect.rs: the walkers take no maximum; the capacity test reads Node's capacity.",
+        "crates/wz-routing-graph, crates/wz-runtime-tokio, crates/wz-capture, crates/wz-capi-*: call sites follow the grouped and lent forms; low_pass reads a chain through HeldList.",
+        "scripts/lib/feature_gate_diagnostic.py: codec-hello and codec-linkstate leave the compound-cfg deferral; scripts/run-ci.sh guarded counts; census gates held to the grouped fields."
+      ],
+      "verification_bullets": [
+        "On the tree rebased onto round 4161: cargo test --workspace 9658 passed, 0 failed, 853 ignored; cargo clippy --workspace --all-targets -D warnings clean; cargo check --workspace --all-targets and wz-session-core --all-features --all-targets clean; layers C1bnl and C1g pass, C1bz passes on a run with its own label.",
+        "C1cf: the one crate it refused, wz-tls-mbedtls, builds clean under the gate's own command once its arena test is gated; wz-capture, red before, was fixed on main by its owner and passes on the rebase.",
+        "Hot path allocations after the send fix, measured on the tree before the rebase, equal the budget: no-hlc 8/472, 10/602, 68/6142, 85/7262 and time-hlc 14/526, 17/720, 89/6466, 107/7650 (count/bytes), where the projection had added one allocation and 40 B per subscriber.",
+        "The deferred static gates ran, 124 of 125 pass; the one red was reason_review_pin_gate, whose eleven session-close-ingress rows move here after the cited anchors were checked against the rebased tree (12 file @ anchor pairs, none missing) and this change was read as call-site edits only on those files.",
+        "A red on main repaired here: cargo test --workspace failed to link wz-tls-mbedtls's tests/arena_exhaustion.rs without vendored."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "Parity gap found here: the owned parse (parse_frame_payload) decodes the lent form at Node, so a heap participant refuses a message with more than 8 extensions where upstream reads any length; SCE's NodeStorage::Heap deployment (CappedVec, CappedStr, CappedBytes) is the candidate fix.",
+        "The routing graph builds a list past 64 as upstream does, and a Node receiver refuses it with CapacityExceeded; a mesh past Node's capacity has no full linkstate flood on a node with no allocator.",
+        "The dissect row 3 filler's comment says msg_put matches the marker on the 4-bit id; it is stale.",
+        "deploy/text_budget.json and the footprint rows were not measured locally; the hosted run judges them."
+      ],
+      "publishable_decision_summary": "The SCE pin moves from 955774d15a to 9619440966 through ADR 0077 section 7, with c3d930c95c as a waypoint: a field's bound is now the protocol's (a byte string at its length field's width, a list with none where the protocol states none), and what a node holds is the storage profile's capacity, given by the deploy/codec_node.yaml deployment that writes wz_codecs::node::Node. Every lent view (wz_codecs::lent::X) holds its lists at Node on every target, so a lent decode allocates nothing; the owned forms in wz-session-core are transport_profile::owned::X at TransportStorage, which is Heap with alloc and Node without. A send path encodes the owned message with encode(sink): the projection try_as_borrowed holds its lists at the value's profile, which at Heap allocated a vector per subscriber per send, measured. The dissector reads the protocol and caps no chain or slice list. A storing form at Node refuses a list past its capacity with CapacityExceeded, read whole first; the routing graph builds a list past 64 as upstream does.",
+      "publishable_changes_bullets": [
+        "vendor/sce, out/**: the pin at 9619440966 and the regenerated codecs, stage 2 included; xtask names the Node deployment's storage Inline.",
+        "deploy/codec_node.yaml, xtask: the Node deployment and its capacities; byte fields at the protocol's width.",
+        "crates/wz-codecs/src/lib.rs: pub mod lent, one alias per codec at Node, gated as its module; Heap re-exported under alloc.",
+        "crates/wz-session-core/src/transport_profile/owned.rs: new, the owned form of each transport-reachable codec at TransportStorage.",
+        "crates/wz-session-core: frame_encode sends through the owned encode; held_list gains lawful and HeldList for a Lawful chain; lent_control, linkstate_oam, put_payload, request_build, declare_ext_qos and push_build take the generated forms and drop their own caps (LINK_STATES_CAP, MAX_SLICES, MAX_CHAIN).",
+        "crates/wz-session-core/src/dissect.rs: the walkers take no maximum; the capacity test reads Node's capacity.",
+        "crates/wz-routing-graph, crates/wz-runtime-tokio, crates/wz-capture, crates/wz-capi-*: call sites follow the grouped and lent forms; low_pass reads a chain through HeldList.",
+        "scripts/lib/feature_gate_diagnostic.py: codec-hello and codec-linkstate leave the compound-cfg deferral; scripts/run-ci.sh guarded counts; census gates held to the grouped fields."
+      ],
+      "publishable_verification_bullets": [
+        "On the tree rebased onto round 4161: cargo test --workspace 9658 passed, 0 failed, 853 ignored; cargo clippy --workspace --all-targets -D warnings clean; cargo check --workspace --all-targets and wz-session-core --all-features --all-targets clean; layers C1bnl and C1g pass, C1bz passes on a run with its own label.",
+        "C1cf: the one crate it refused, wz-tls-mbedtls, builds clean under the gate's own command once its arena test is gated; wz-capture, red before, was fixed on main by its owner and passes on the rebase.",
+        "Hot path allocations after the send fix, measured on the tree before the rebase, equal the budget: no-hlc 8/472, 10/602, 68/6142, 85/7262 and time-hlc 14/526, 17/720, 89/6466, 107/7650 (count/bytes), where the projection had added one allocation and 40 B per subscriber.",
+        "The deferred static gates ran, 124 of 125 pass; the one red was reason_review_pin_gate, whose eleven session-close-ingress rows move here after the cited anchors were checked against the rebased tree (12 file @ anchor pairs, none missing) and this change was read as call-site edits only on those files.",
+        "A red on main repaired here: cargo test --workspace failed to link wz-tls-mbedtls's tests/arena_exhaustion.rs without vendored."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Parity gap found here: the owned parse (parse_frame_payload) decodes the lent form at Node, so a heap participant refuses a message with more than 8 extensions where upstream reads any length; SCE's NodeStorage::Heap deployment (CappedVec, CappedStr, CappedBytes) is the candidate fix.",
+        "The routing graph builds a list past 64 as upstream does, and a Node receiver refuses it with CapacityExceeded; a mesh past Node's capacity has no full linkstate flood on a node with no allocator.",
+        "The dissect row 3 filler's comment says msg_put matches the marker on the 4-bit id; it is stale.",
+        "deploy/text_budget.json and the footprint rows were not measured locally; the hosted run judges them."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
