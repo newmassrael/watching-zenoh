@@ -2444,6 +2444,34 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R45_CARRIES,
     },
+    // Revision 55 ADDS the census's size of each message's payload, and retires
+    // nothing. Every `carried` entry (a row's and a completed chain's
+    // `above_transport.carried`) gains `payload_size`: `null` where the census
+    // sizes no payload for the message the entry names, and otherwise
+    // `{"size_verdict":…,"bytes":…,"at_most_bytes":…}` with `size_verdict` one
+    // of `measured` (`bytes` is the size), `elsewhere` (the bytes went through
+    // shared memory) or `unresolved` (the bytes are here and unseparated,
+    // `at_most_bytes` bounds them); the two numbers are `null` where the word
+    // does not give them, so the object has one shape.
+    //
+    // THE ANSWER IS THE CENSUS'S. It is `agg::payload_size` of the message the
+    // session parsed at the entry's place, the function the census counts
+    // through, so over one capture and a selector that admits everything, the
+    // `measured` bytes of the entries attributed to a keyexpr add up to that
+    // keyexpr row's `payload_bytes` and the `elsewhere` and `unresolved` entries
+    // number its `unsized_payloads`. It is a key of its own and not a member of
+    // `payload`, which is the walk's reading of the slot: a query value's slot
+    // includes the length prefix the census does not count, and a value whose
+    // encoding the walk cannot read has no slot and has a census answer.
+    DocumentShape {
+        document: FIELDS,
+        revision: 55,
+        keys: FIELDS_R55_KEYS,
+        retiring: &[],
+        families: FIELDS_R55_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R55_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -17248,6 +17276,466 @@ pub const FIELDS_R51_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// What `size_verdict` says at field-document revision 55 — the three arms of
+/// the census's `agg::PayloadSize`, which a `carried` entry's `payload_size`
+/// names for the message the entry stands for.
+///
+/// A CODE SPAN and not a link, for the reason [`SELECTED_R13`] gives.
+pub const SIZE_VERDICT_R55: &[&str] = &["elsewhere", "measured", "unresolved"];
+
+/// The keys the field document carries at revision 55: revision 51's PLUS a
+/// `carried` entry's `payload_size`, with `size_verdict` and `at_most_bytes`
+/// inside it (`bytes` was already a key of the document).
+pub const FIELDS_R55_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "answers",
+    "at_least",
+    "at_most_bytes",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "close_seen",
+    "closes",
+    "completion_ns",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "crossed_at_packet",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "eps_basis",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "first_reply",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "model",
+    "name",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "payload_size",
+    "phase",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "round_trip_ns",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "size_verdict",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stated",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// The value families the field document declares at revision 55: revision
+/// 50's PLUS `size_verdict`, drawn from [`SIZE_VERDICT_R55`].
+pub const FIELDS_R55_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "basis",
+        values: BASIS_R45,
+    },
+    ValueFamily {
+        key: "batch_header",
+        values: BATCH_HEADER_R44,
+    },
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "size_verdict",
+        values: SIZE_VERDICT_R55,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// What each family's word decides at field-document revision 55: revision
+/// 45's, PLUS `size_verdict`, a passenger. `payload_size` writes `bytes` and
+/// `at_most_bytes` beside every word, `null` where the word gives no number,
+/// so the word decides the values and not which keys arrive.
+pub const FIELDS_R55_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The keys the field document carries at revision 49: revision 47's PLUS
 /// model 3's `crossed_at_packet` and the four extremes of the two sums.
 pub const FIELDS_R49_KEYS: &[&str] = &[
@@ -21879,7 +22367,10 @@ mod tests {
             // To 50 with model 4, to 51 and 52 with the round trips on the
             // rows that end them, to 53 with model 5, to 54 with model 6:
             // words and values move.
-            (FIELDS, 54),
+            // To 55 when every `carried` entry gained `payload_size`, the
+            // census's size of the message's payload: keys arrive and a family
+            // is declared.
+            (FIELDS, 55),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

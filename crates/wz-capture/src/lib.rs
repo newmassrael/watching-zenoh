@@ -215,8 +215,11 @@ pub use progress::Progress;
 mod closes_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod fields_revised_tests;
+// The census's size of each message's payload, on the field document's entries.
 #[cfg(all(test, feature = "network-codecs"))]
 mod ordered_fold_tests;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod payload_size_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod window_tests;
 // A map that is cheap to copy while it is being grown, which is what lets a plane

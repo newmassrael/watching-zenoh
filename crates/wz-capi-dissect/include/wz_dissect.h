@@ -421,6 +421,46 @@
  * application data. The range is derived from the message's bytes and does not
  * change in an issued row.
  *
+ * AND HOW LARGE THE CENSUS SAYS THAT PAYLOAD IS, at field-document revision 55.
+ *
+ *     `payload_size`  {"size_verdict":"measured","bytes":N,"at_most_bytes":null}
+ *                     {"size_verdict":"elsewhere","bytes":null,"at_most_bytes":null}
+ *                     {"size_verdict":"unresolved","bytes":null,"at_most_bytes":N}
+ *                     or `null`
+ *
+ * It follows `payload` on every entry of `carried` and of
+ * `above_transport.carried`. It is the census's answer for the message the
+ * entry names -- the same function the census's keyexpr plane sums -- so do
+ * not size a payload from `end - start` and `shm_descriptor`: that is a second
+ * rule, and it disagrees with the census exactly where the census cannot
+ * measure. `measured` gives the application bytes in `bytes`; `elsewhere` says
+ * the bytes went through shared memory and nothing on this wire sizes them;
+ * `unresolved` says the bytes are here but could not be separated (a query
+ * value whose length prefix will not read or disagrees with the bytes behind
+ * it), and `at_most_bytes` bounds them. `null` means the census sizes no
+ * payload for this entry: the message has none it sizes (a delete, a query
+ * with no value, a declaration, every transport message, and the row's own
+ * entry), or the session parsed no message at the entry's place and so the
+ * census did not count it.
+ *
+ * The contract, over one capture and a selector that admits everything: for
+ * each key, the `bytes` of the `measured` entries add up to that keyexpr row's
+ * `payload_bytes` in the census, and the entries whose `size_verdict` is
+ * `elsewhere` or `unresolved` number its `unsized_payloads`.
+ *
+ * A key of its own and not a member of `payload`, because `payload` is the
+ * walk's reading of the slot and this is the census's reading of the message:
+ * a query value's slot includes the length prefix the census does not count,
+ * and a value whose encoding the walk cannot read has no slot at all and still
+ * has a census answer. Derived from the message's bytes; it does not change in
+ * an issued row.
+ *
+ * @values fields size_verdict
+ *
+ * `size_verdict` is a closed family: `measured`, `elsewhere`, `unresolved`. The
+ * word decides the values and not which keys arrive -- `bytes` and
+ * `at_most_bytes` are on every word, `null` where the word gives no number.
+ *
  * AND WHICH BODY THE MESSAGE CARRIES, at field-document revision 33.
  *
  *     `body`  the name of the body the message carries, or `null`
@@ -1300,7 +1340,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":54,"key":"kind","values":[...],
+ *     {"name":"fields","revision":55,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1352,6 +1392,7 @@
  * @carries fields reason passenger
  * @carries fields request_kind passenger
  * @carries fields selected passenger
+ * @carries fields size_verdict passenger
  * @carries fields state discriminant
  * @carries fields strength passenger
  * @carries fields under passenger
@@ -4965,7 +5006,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":54,"key":"state",
+ *     "value_families":[{"name":"fields","revision":55,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

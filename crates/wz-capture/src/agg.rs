@@ -183,6 +183,43 @@ pub(crate) enum PayloadSize {
     Unresolved { at_most: u64 },
 }
 
+/// The words are the field document's, so they exist where it does.
+#[cfg(all(feature = "network-codecs", feature = "dissect"))]
+impl PayloadSize {
+    /// The word the field document's `size_verdict` writes for this arm.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Measured(_) => "measured",
+            Self::Elsewhere => "elsewhere",
+            Self::Unresolved { .. } => "unresolved",
+        }
+    }
+
+    /// The next arm, so the walk visits every one without a list.
+    ///
+    /// `#[cfg(test)]` with its caller: the vocabulary gate is the only consumer.
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Measured(_) => Self::Elsewhere,
+            Self::Elsewhere => Self::Unresolved { at_most: 0 },
+            Self::Unresolved { .. } => return None,
+        })
+    }
+
+    /// Every word [`Self::name`] can return, WALKED rather than written down.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::Measured(0));
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+}
+
 impl KeyexprCounts {
     /// Every record attributed to this keyexpr, whatever kind.
     pub fn messages(&self) -> usize {
@@ -2430,116 +2467,156 @@ pub(crate) fn source_timestamp(
 pub(crate) fn classify(
     message: &NetworkMessage,
 ) -> Option<(&WireKeyexpr, KeyexprCounts, RecordKind)> {
+    // With `network-codecs` off there is no arm left that can name a record, and
+    // the function correctly answers `None` for every one: a decoder that cannot
+    // name a Push has no keyexpr to attribute, which is a smaller reach and not
+    // a wrong one.
     #[cfg(feature = "network-codecs")]
+    {
+        let read = read_record(message)?;
+        let mut counts = KeyexprCounts::default();
+        match read.kind {
+            RecordKind::Put => counts.puts = 1,
+            RecordKind::Del => counts.dels = 1,
+            RecordKind::Query => counts.queries = 1,
+            RecordKind::Reply => counts.replies = 1,
+            RecordKind::Err => counts.errs = 1,
+        }
+        if let Some(size) = read.payload {
+            counts.record_payload(size);
+        }
+        Some((read.keyexpr, counts, read.kind))
+    }
+    #[cfg(not(feature = "network-codecs"))]
+    {
+        let _ = message;
+        None
+    }
+}
+
+/// What the census reads off one record before it counts it: the keyexpr it
+/// is attributed to, its kind, and what its payload amounts to.
+#[cfg(feature = "network-codecs")]
+struct ReadRecord<'a> {
+    keyexpr: &'a WireKeyexpr,
+    kind: RecordKind,
+    /// `None` when the record has no payload slot the census sizes: a `Del`, a
+    /// `Query` with no VALUE ext, the unknown request variant, a `Reply` that
+    /// carries a `Del`.
+    payload: Option<PayloadSize>,
+}
+
+/// The census's payload size of ONE record, or `None` when it sizes none.
+///
+/// The answer [`classify`] hands to [`KeyexprCounts::record_payload`], read
+/// through the same [`read_record`], so a reader that reports one record's
+/// size (the field document's `payload_size`, on a `carried` entry) and the
+/// census that sums them cannot apply two rules. Over the records of one
+/// capture, the `Measured` sizes attributed to a keyexpr add up to that row's
+/// `payload_bytes`, and the records whose answer is `Elsewhere` or
+/// `Unresolved` number its `unsized_payloads`.
+///
+/// Gated with the field document, which is its one reader.
+#[cfg(all(feature = "network-codecs", feature = "dissect"))]
+pub(crate) fn payload_size(message: &NetworkMessage) -> Option<PayloadSize> {
+    read_record(message)?.payload
+}
+
+/// The one match over the record carriers, which [`classify`] counts and
+/// [`payload_size`] reports.
+#[cfg(feature = "network-codecs")]
+fn read_record(message: &NetworkMessage) -> Option<ReadRecord<'_>> {
     use wz_codecs::push::PushOwnedVariant;
-    #[cfg(feature = "network-codecs")]
     use wz_codecs::request::RequestOwnedVariant;
-    #[cfg(feature = "network-codecs")]
     use wz_codecs::response::ResponseOwnedVariant;
 
-    // `unused` rather than `unused_mut`: with `network-codecs` off there is no
-    // arm left that reads it, and the function correctly answers `None` for
-    // every record — a decoder that cannot name a Push has no keyexpr to
-    // attribute, which is a smaller reach and not a wrong one.
-    #[allow(unused_mut, unused_variables)]
-    let mut counts = KeyexprCounts::default();
     match message {
-        #[cfg(feature = "network-codecs")]
         NetworkMessage::Push(p) => {
-            let kind = match &p.body {
+            let (kind, payload) = match &p.body {
                 PushOwnedVariant::CodecZenohMsgPut(put)
                 | PushOwnedVariant::Default { body: put, .. } => {
-                    counts.puts = 1;
-                    counts.record_payload(measured_put(put));
-                    RecordKind::Put
+                    (RecordKind::Put, Some(measured_put(put)))
                 }
-                PushOwnedVariant::CodecZenohMsgDel(_) => {
-                    counts.dels = 1;
-                    RecordKind::Del
-                }
+                PushOwnedVariant::CodecZenohMsgDel(_) => (RecordKind::Del, None),
             };
-            Some((&p.keyexpr.body, counts, kind))
+            Some(ReadRecord {
+                keyexpr: &p.keyexpr.body,
+                kind,
+                payload,
+            })
         }
-        #[cfg(feature = "network-codecs")]
         NetworkMessage::Request(r) => {
-            let kind = match &r.body {
+            let (kind, payload) = match &r.body {
                 RequestOwnedVariant::CodecZenohMsgPut(put) => {
-                    counts.puts = 1;
-                    counts.record_payload(measured_put(put));
-                    RecordKind::Put
+                    (RecordKind::Put, Some(measured_put(put)))
                 }
-                RequestOwnedVariant::CodecZenohMsgDel(_) => {
-                    counts.dels = 1;
-                    RecordKind::Del
-                }
-                RequestOwnedVariant::CodecZenohQuery(q) => {
-                    counts.queries = 1;
-                    // R311y637 (§1.1w) — a query's VALUE is not a field of the
-                    // message, it is an ext. Looking only at the body and
-                    // reporting `0` was a confident answer to a question this
-                    // decoder cannot answer; asking the chain separates the
-                    // query that carries nothing (a real zero) from the one
-                    // whose payload this build cannot measure.
-                    // R311y640 (§1.1w) — the ext is asked for its BYTES, and
-                    // those bytes are then asked for their size. R311y637 could
-                    // only reach the first half and so reported every valued
-                    // query as unmeasurable; the payload's own z32 prefix was on
-                    // the wire inside the ext the whole time.
-                    if let Some(body) = query_body_bytes(q.extensions.entries()) {
-                        counts.record_payload(query_value_bytes(body));
-                    }
-                    RecordKind::Query
-                }
+                RequestOwnedVariant::CodecZenohMsgDel(_) => (RecordKind::Del, None),
+                // R311y637 (§1.1w) — a query's VALUE is not a field of the
+                // message, it is an ext. Looking only at the body and
+                // reporting `0` was a confident answer to a question this
+                // decoder cannot answer; asking the chain separates the
+                // query that carries nothing (a real zero) from the one
+                // whose payload this build cannot measure.
+                // R311y640 (§1.1w) — the ext is asked for its BYTES, and
+                // those bytes are then asked for their size. R311y637 could
+                // only reach the first half and so reported every valued
+                // query as unmeasurable; the payload's own z32 prefix was on
+                // the wire inside the ext the whole time.
+                RequestOwnedVariant::CodecZenohQuery(q) => (
+                    RecordKind::Query,
+                    query_body_bytes(q.extensions.entries()).map(query_value_bytes),
+                ),
                 // The unknown request variant is decoded INTO a `Query` body by
                 // the codec's declared default arm, but nothing says the bytes
                 // were a query — so its chain is not read for a query body
                 // either. It keeps the honest zero it always had.
-                RequestOwnedVariant::Default { .. } => {
-                    counts.queries = 1;
-                    RecordKind::Query
-                }
+                RequestOwnedVariant::Default { .. } => (RecordKind::Query, None),
             };
-            Some((&r.keyexpr.body, counts, kind))
+            Some(ReadRecord {
+                keyexpr: &r.keyexpr.body,
+                kind,
+                payload,
+            })
         }
-        #[cfg(feature = "network-codecs")]
         NetworkMessage::Response(r) => {
             use wz_codecs::reply::ReplyOwnedVariant;
-            let kind = match &r.body {
+            let (kind, payload) = match &r.body {
+                // A reply carrying a `MsgPut` stays a REPLY here, and the
+                // choice is deliberate: the kinds partition the records
+                // exactly as the counters do, so `kind == reply` and
+                // `KeyexprCounts::replies` can never disagree about the
+                // same record. A reader after reply payloads writes
+                // `kind == reply and bytes > 0`, which is one term longer
+                // and never ambiguous.
                 ResponseOwnedVariant::CodecZenohReply(reply)
-                | ResponseOwnedVariant::Default { body: reply, .. } => {
-                    counts.replies = 1;
-                    // A reply carrying a `MsgPut` stays a REPLY here, and the
-                    // choice is deliberate: the kinds partition the records
-                    // exactly as the counters do, so `kind == reply` and
-                    // `KeyexprCounts::replies` can never disagree about the
-                    // same record. A reader after reply payloads writes
-                    // `kind == reply and bytes > 0`, which is one term longer
-                    // and never ambiguous.
-                    if let ReplyOwnedVariant::CodecZenohMsgPut(put)
-                    | ReplyOwnedVariant::Default { body: put, .. } = &reply.body
-                    {
-                        // The marker rides the INNER Put, not the `Reply`
-                        // wrapper: upstream's `ReplyBody` IS `PushBody`
-                        // (`zenoh-protocol-1.5.0/src/zenoh/reply.rs:53`) and the
-                        // `Reply` itself declares no shm ext, so the chain to
-                        // ask is the one this arm already holds.
-                        counts.record_payload(measured_put(put));
+                | ResponseOwnedVariant::Default { body: reply, .. } => match &reply.body {
+                    // The marker rides the INNER Put, not the `Reply`
+                    // wrapper: upstream's `ReplyBody` IS `PushBody`
+                    // (`zenoh-protocol-1.5.0/src/zenoh/reply.rs:53`) and the
+                    // `Reply` itself declares no shm ext, so the chain to
+                    // ask is the one this arm already holds.
+                    ReplyOwnedVariant::CodecZenohMsgPut(put)
+                    | ReplyOwnedVariant::Default { body: put, .. } => {
+                        (RecordKind::Reply, Some(measured_put(put)))
                     }
-                    RecordKind::Reply
-                }
-                ResponseOwnedVariant::CodecZenohErr(err) => {
-                    counts.errs = 1;
-                    // An `Err` carries the shm ext in its own right —
-                    // `zextunit!(0x2, true)`, the same identity on a different
-                    // carrier (`zenoh-protocol-1.5.0/src/zenoh/err.rs:49-68`).
-                    counts.record_payload(measured_payload(
+                    ReplyOwnedVariant::CodecZenohMsgDel(_) => (RecordKind::Reply, None),
+                },
+                // An `Err` carries the shm ext in its own right —
+                // `zextunit!(0x2, true)`, the same identity on a different
+                // carrier (`zenoh-protocol-1.5.0/src/zenoh/err.rs:49-68`).
+                ResponseOwnedVariant::CodecZenohErr(err) => (
+                    RecordKind::Err,
+                    Some(measured_payload(
                         err.payload.as_slice(),
                         err.extensions.entries(),
-                    ));
-                    RecordKind::Err
-                }
+                    )),
+                ),
             };
-            Some((&r.keyexpr.body, counts, kind))
+            Some(ReadRecord {
+                keyexpr: &r.keyexpr.body,
+                kind,
+                payload,
+            })
         }
         _ => None,
     }

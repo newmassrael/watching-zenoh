@@ -3018,7 +3018,11 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
                 escape_into(&field.name, out);
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
-                push_carried(bytes, &field, space, at, judging, closes, out);
+                let planes = RecordPlanes {
+                    closes,
+                    session: SessionBatch::of_row(carried, &field, space),
+                };
+                push_carried(bytes, &field, space, at, judging, planes, out);
                 push_payload_block(&field, declarations, at, out);
             } else {
                 let mut why = String::from("the session read these bytes as ");
@@ -3385,13 +3389,15 @@ fn push_carried(
     space: MidSpace,
     at: KeyexprAt<'_>,
     judging: E2eRow<'_>,
-    closes: Option<RowCloses<'_>>,
+    planes: RecordPlanes<'_>,
     out: &mut String,
 ) {
+    let RecordPlanes { closes, session } = planes;
     out.push_str(",\"carried\":[");
     let mut first = true;
     let mut entry = |word: &str,
                      node: &wz_session_core::dissect::Field,
+                     is_record: bool,
                      keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
                      payload: Option<crate::payload_decode::PayloadSlot>,
                      e2e: Option<crate::payload_decode::E2eJudged<'_>>,
@@ -3416,6 +3422,7 @@ fn push_carried(
         }
         push_keyexpr_miss(keyexpr.as_ref().and_then(|k| k.as_ref().err()), out);
         push_payload_slot(payload.as_ref(), out);
+        push_payload_size(session, is_record.then_some(node), out);
         push_e2e(e2e.as_ref(), out);
         // On EVERY entry, `null` on one that is not a `ResponseFinal`: the rule
         // `body` states, and the reason `message` stays a passenger in the
@@ -3436,7 +3443,17 @@ fn push_carried(
         } else {
             None
         };
-        entry(message.name(), field, keyexpr, None, None, None, None, out);
+        entry(
+            message.name(),
+            field,
+            false,
+            keyexpr,
+            None,
+            None,
+            None,
+            None,
+            out,
+        );
     }
     for (index, record) in records.into_iter().enumerate() {
         let word = record_word(bytes, record);
@@ -3458,6 +3475,7 @@ fn push_carried(
         entry(
             word,
             record,
+            true,
             keyexpr,
             crate::payload_decode::payload_slot(record),
             e2e,
@@ -3507,6 +3525,159 @@ fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mu
     out.push_str(",\"shm_descriptor\":");
     out.push_str(if slot.shm_descriptor { "true" } else { "false" });
     out.push('}');
+}
+
+/// The SESSION's parse of the batch a walked list's records come from, and
+/// where that batch begins in the walk's coordinates.
+///
+/// The census sums what the session parsed (`BatchParse::messages`), and the
+/// entries are what a second walk over the same bytes found. The two are tied
+/// by PLACE: a walked record whose offset into the batch and length are those
+/// of a parsed message is that message. Not by index alone, because the two
+/// readers stop at different places when a record will not decode, and an
+/// index would then pair an entry with a message it is not.
+///
+/// Without `network-codecs` there is no census to size what the join finds, so
+/// the fields are carried and not read.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "network-codecs"), allow(dead_code))]
+struct SessionBatch<'a> {
+    parse: &'a wz_session_core::network_message::BatchParse,
+    /// Where offset 0 of `parse.spans` sits in the walk's coordinates.
+    base: usize,
+}
+
+impl<'a> SessionBatch<'a> {
+    /// The batch a row's own `carried` entries are records of: a `Frame`'s
+    /// payload, which starts where the walk's `payload` group does, or a
+    /// lowlatency row's one network message, which is the row.
+    ///
+    /// `None` for a row the session parsed no batch out of (it carried none, or
+    /// it is a fragment, whose records a completed chain reports under
+    /// `above_transport`), and for a `Frame` whose walk names no payload group.
+    fn of_row(
+        carried: Option<&'a wz_session_core::passive::Carried>,
+        field: &wz_session_core::dissect::Field,
+        space: MidSpace,
+    ) -> Option<Self> {
+        let Some(wz_session_core::passive::Carried::Batch(parse)) = carried else {
+            return None;
+        };
+        let base = if matches!(space, MidSpace::Network) {
+            field.span.start
+        } else {
+            let wz_session_core::dissect::FieldValue::Nested(children) = &field.value else {
+                return None;
+            };
+            children.iter().find(|c| c.name == "payload")?.span.start
+        };
+        Some(Self { parse, base })
+    }
+
+    /// The batch a completed chain's records are, walked from offset 0 of the
+    /// joined buffer the session parsed.
+    #[cfg(feature = "reassembly")]
+    fn joined(parse: &'a wz_session_core::network_message::BatchParse) -> Self {
+        Self { parse, base: 0 }
+    }
+
+    /// The parsed message at the walked record's place, or `None` when the
+    /// session parsed none there.
+    #[cfg(feature = "network-codecs")]
+    fn message_at(
+        &self,
+        record: &wz_session_core::dissect::Field,
+    ) -> Option<&'a wz_session_core::network_message::NetworkMessage> {
+        let offset = record.span.start.checked_sub(self.base)?;
+        // `spans` is in wire order, so it is sorted by offset.
+        let index = self
+            .parse
+            .spans
+            .binary_search_by_key(&offset, |(at, _)| *at)
+            .ok()?;
+        let (_, len) = self.parse.span_of(index)?;
+        if len != record.span.len() {
+            return None;
+        }
+        self.parse.messages.get(index)
+    }
+}
+
+/// What the planes that read a row's records ELSEWHERE say about each of them,
+/// for [`push_carried`] to write beside the walk's own reading.
+#[derive(Clone, Copy)]
+struct RecordPlanes<'a> {
+    /// The exchange pairing, by the record's place in its row.
+    closes: Option<RowCloses<'a>>,
+    /// The session's parse, which the census counts, tied to each record by its
+    /// place in the batch.
+    session: Option<SessionBatch<'a>>,
+}
+
+/// The `payload_size` key of one `carried` entry: the census's size of the
+/// payload of the message the entry names, or `null`.
+///
+/// `record` is `None` for the entry that names the ROW, which is a transport
+/// message (or, on a lowlatency row, the same message its one record entry
+/// names, and counted there).
+///
+/// `null` when the census sizes no payload for this entry: the message has no
+/// payload slot the census sizes (a `Del`, a `Query` with no value, a
+/// `Declare`, every transport message), or the session parsed no message at
+/// the entry's place, so the census did not count it either. Otherwise the
+/// census's answer for exactly this message (`agg::payload_size`, the function
+/// `classify` counts through):
+///
+/// ```text
+/// {"size_verdict":"measured","bytes":N,"at_most_bytes":null}
+/// {"size_verdict":"elsewhere","bytes":null,"at_most_bytes":null}
+/// {"size_verdict":"unresolved","bytes":null,"at_most_bytes":N}
+/// ```
+///
+/// A KEY OF ITS OWN and not a member of `payload`, because `payload` is the
+/// walk's reading of the slot and this is the census's reading of the message,
+/// and the two do not coincide: a query whose value's encoding the walk cannot
+/// read has no slot and has a census size (`unresolved`), and a query value's
+/// slot includes the length prefix the census does not count. Nested under
+/// `payload`, the census's answer would be missing exactly where it differs.
+fn push_payload_size(
+    session: Option<SessionBatch<'_>>,
+    record: Option<&wz_session_core::dissect::Field>,
+    out: &mut String,
+) {
+    out.push_str(",\"payload_size\":");
+    #[cfg(feature = "network-codecs")]
+    {
+        use crate::agg::PayloadSize;
+        let size = record
+            .zip(session)
+            .and_then(|(record, session)| session.message_at(record))
+            .and_then(crate::agg::payload_size);
+        let Some(size) = size else {
+            out.push_str("null");
+            return;
+        };
+        out.push_str("{\"size_verdict\":");
+        escape_into(size.name(), out);
+        // Both numbers on every word, `null` where the word gives none, so the
+        // word decides the values and not which keys arrive.
+        let (bytes, at_most) = match size {
+            PayloadSize::Measured(n) => (Some(n), None),
+            PayloadSize::Elsewhere => (None, None),
+            PayloadSize::Unresolved { at_most } => (None, Some(at_most)),
+        };
+        out.push_str(",\"bytes\":");
+        push_opt_u64(bytes, out);
+        out.push_str(",\"at_most_bytes\":");
+        push_opt_u64(at_most, out);
+        out.push('}');
+    }
+    #[cfg(not(feature = "network-codecs"))]
+    {
+        // Without the record plane there is no census to size anything.
+        let _ = (session, record);
+        out.push_str("null");
+    }
 }
 
 /// The `body` key of one `carried` entry, after its `message`: the name of the
@@ -3749,8 +3920,11 @@ fn push_above_transport(
     out.push_str("{\"carried_state\":");
     escape_into(carried_state(carried).name(), out);
     #[cfg(feature = "reassembly")]
-    if let wz_session_core::passive::Carried::Reassembled { joined, .. } = carried {
+    if let wz_session_core::passive::Carried::Reassembled { joined, batch } = carried {
         let walked = wz_session_core::dissect::dissect_batch(joined, 0);
+        // Walked from offset 0 of the buffer the session parsed, so the two
+        // readers' coordinates are the same.
+        let session = SessionBatch::joined(batch);
         out.push_str(",\"fields\":[");
         for (i, record) in walked.records.iter().enumerate() {
             if i > 0 {
@@ -3782,6 +3956,9 @@ fn push_above_transport(
             // the same finder, in the JOINED buffer's coordinates like the
             // entry's `start` and `end`.
             push_payload_slot(crate::payload_decode::payload_slot(record).as_ref(), out);
+            // Since revision 55 — the census's size of the same message, as on a
+            // row's own entries.
+            push_payload_size(Some(session), Some(record), out);
             // The end-to-end verdict of a message that arrived in pieces: the
             // frames a profile protects are the ones large enough to be
             // fragmented, so a chain's records are judged like a batch's, at
@@ -9524,6 +9701,9 @@ mod tests {
         // datagram link, a put request and a query request each closed, and a
         // final whose request the capture does not hold.
         rendered.extend(crate::closes_tests::pin_documents());
+        // And the documents that carry `payload_size` (revision 55) under each
+        // of its three words, `at_most_bytes` among them.
+        rendered.extend(crate::payload_size_tests::pin_documents());
         let states = PayloadDecoding::all();
         assert_eq!(
             states.len(),
@@ -9702,7 +9882,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 80] = [
+        let live: [(&str, &str, Vec<&'static str>); 81] = [
             // On what grounds a session parameter's value is known.
             (rev::FIELDS, "basis", BasisWord::names()),
             // The session's per-frame verdicts, each held to the
@@ -9805,6 +9985,13 @@ mod tests {
             // chain on `CarriedState`; what holds it to `Carried` itself is
             // `carried_state`'s exhaustive match, which a new variant breaks.
             (rev::FIELDS, "carried_state", CarriedState::names()),
+            // Revision 55 — the census's size verdict. The walk is the census's
+            // own `PayloadSize`, whose word is an exhaustive match.
+            (
+                rev::FIELDS,
+                "size_verdict",
+                crate::agg::PayloadSize::names(),
+            ),
             (rev::FIELDS, "under", RefusedUnder::names()),
             (rev::FIELDS, "wrong", Misbound::names()),
             (rev::FIELDS, "offset_space", crate::AnchorSpace::names()),
@@ -10636,6 +10823,9 @@ mod tests {
         // two of its words.
         let mut closes_docs = crate::closes_tests::pin_documents();
         closes_docs.extend(crate::closes_tests::datagram_pin_documents());
+        // Revision 55 — `size_verdict` over all three of its words, on both links.
+        closes_docs.extend(crate::payload_size_tests::pin_documents());
+        closes_docs.extend(crate::payload_size_tests::datagram_pin_documents());
         let mut fields_docs: Vec<&String> = alloc::vec![
             &with,
             &without,
@@ -11836,8 +12026,11 @@ mod tests {
                 "\"keyexpr_cause\":null,\"keyexpr_id\":null,\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
+                 \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":{bytes},\
+                 \"at_most_bytes\":null}},\
                  \"payload_decode\":{{\"state\":\"decoded\",\
-                 \"keyexpr\":\"demo/sensor\""
+                 \"keyexpr\":\"demo/sensor\"",
+                bytes = payload.len()
             )),
             "under the carried entry: {chain}"
         );
@@ -11972,6 +12165,8 @@ mod tests {
                 "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\"keyexpr_id\":7,\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
+                 \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":3,\
+                 \"at_most_bytes\":null}},\
                  \"payload_decode\":{{\"state\":\"keyexpr_unresolved\"}}"
             )),
             "{doc}"

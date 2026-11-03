@@ -4021,8 +4021,11 @@ int main(void) {
      * the network ids, and `version_header`'s zenoh side derived. Values and
      * words move under stationary keys.
      * 54: model 6: `wire_front` on a WebSocket message's first byte. Values
-     * move under stationary keys. */
-    revisioned[2].revision = 54;
+     * move under stationary keys.
+     * 55: every `carried` entry's `payload_size`, the census's size of the
+     * message's payload. Keys arrive and a family is declared; nothing
+     * retires. */
+    revisioned[2].revision = 55;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
