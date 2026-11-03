@@ -307792,6 +307792,66 @@
         "Open: the two frames of the asking client (the dispatch of the getter's events, 3,696 bytes, and the closure of send_get_parts, 3,328), which the pin's codecs made; the admin image's stack bound (66 calls through a register unclaimed, floor 10,416); that the thread-entry bytes (56 and 16) hold for another board or kernel configuration (they are read from the image, but the 16 is a constant); a hosted reading of Layers Qzk and Qzb."
       ]
     },
+    "Round 4179": {
+      "decision_summary": "Step 1 of the server-layer split: the usrpwd auth method leaves wz-session-core for the new wz-auth crate, built on the core and named by nothing in it. The handshake's half of authentication (auth_dispatch, extauth) stays in the core, and a method is still handed to AuthDispatch::new by whoever builds the session, so the seam is the one that already existed and nothing was widened. The feature name access-extauth-usrpwd stays on every crate that offered it (wz-runtime-tokio, wz-capi-core, wz) and now means dep:wz-auth; the core's feature of that name and its optional sha3 go, the core feature model loses the line. wz-auth is no_std with alloc, as the module was, so a node with no operating system still authenticates. The dissector test that held the usrpwd body walker to this tree's own method moved with the method, and now reads the OpenSyn the core's encode_open writes around a body a real handshake through two dispatches produced, with the responder's acceptance of that very extension as its control; the core keeps its hand-laid body tests. Comments that point at the method from the core name the crate in prose, since the direction gate refuses an upper crate's path in core source.",
+      "changes_bullets": [
+        "crates/wz-auth: new crate (Cargo.toml, src/lib.rs); src/usrpwd.rs is crates/wz-session-core/src/extauth_usrpwd.rs moved, paths now wz_session_core::auth_dispatch and ::vle; tests/dissect_usrpwd.rs new.",
+        "crates/wz-session-core: extauth_usrpwd, its feature and the optional sha3 removed; the dissect usrpwd-method test removed; comments in dissect.rs, vle.rs, source_info_ext.rs and lib.rs name wz-auth in prose; sources/features/wz-session-core.scxml regenerated.",
+        "crates/wz-runtime-tokio, wz-capi-core: access-extauth-usrpwd forwards dep:wz-auth; wz-capi-c and wz-integration-tests take wz-auth as a dev-dependency; every use path moves to wz_auth::usrpwd.",
+        "crates/Cargo.toml and Cargo.lock: wz-auth a member; conformance/differential and differential-shm locks refreshed for it. .github/workflows/platform.yml: crates/wz-auth/** in paths.",
+        "scripts/run-ci.sh: C1y extauth 19 -> 4 on session-extauth plus C1y usrpwd 15 on wz-auth, auth_dispatch on session-extauth, wz-auth clippy in place of the core's usrpwd clippy; C1bn's auth-union arm on session-extauth and a wz-auth dissect leg of 1. scripts/lib/nondefault-tests-gate.sh: the core row loses the feature. scripts/lib/layer_direction_gate.py: IN_CORE loses extauth_usrpwd.",
+        "store: the reasons of access-extauth-usrpwd and session-unicast-accept cite crates/wz-auth/src/usrpwd.rs; a line-number citation of the old file is re-cited by anchor.",
+        "crates/wz-tls-mbedtls/tests/key_store_exhaustion.rs: gated on vendored, a link red on main."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 9663 passed, 0 failed, 853 ignored; wz-auth's 15 unit tests and its dissect test pass; cargo check --workspace --all-targets clean.",
+        "Lanes C1y and C1bn pass (C1bn on hkl002: hkl001 lacks libpcap's headers and stopped it at its first leg, a host fact and not this change). The new guards were read off --list: the core's extauth filter 4, wz-auth's lib 15, the wz-auth dissect leg 1; auth_dispatch stays 9.",
+        "cargo clippy -D warnings clean for wz-auth (all targets, and with default features off), wz-session-core --all-features, wz-runtime-tokio and wz-capi-core with access-extauth-usrpwd, and wz-capi-c; cargo doc -p wz-auth with -D warnings clean; cargo fmt --check clean.",
+        "The deferred static gates, 127 of 127, pass after two were fixed here: platform_trigger_paths_gate (crates/wz-auth/** added) and reason_citation_gate (a line citation of the moved file re-cited by anchor). layer_direction_gate: 14 server modules in the core of 14 listed, 1 of 3 upper crates built.",
+        "The pre-push citation form gate (2f) refused the first push: a line-form upstream citation and a root-less one were written in the new crate's manifest and the core's comment. Both are rewritten (an anchor, and prose) and the gate passes locally.",
+        "validate-workspace after the store mutations: T1 orphans 14 with 0 new, T3 warn 4, T4 info 15, as before.",
+        "A red on main repaired here: wz-tls-mbedtls tests/key_store_exhaustion.rs linked without vendored, the same defect round 4167 fixed for arena_exhaustion; its owner session was told."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Owed, the split's next steps: wz-storage (storage_manager first, then the other storage modules), wz-admin with a session row extension trait, then the core's storage features go and IN_CORE is empty.",
+        "The pubkey method and its store live in wz-runtime-tokio (std, RSA), not in wz-auth; whether the auth layer gathers them is open, since the method is std-only and the runtime is its one consumer.",
+        "bx.toml does not declare libpcap's headers as a need of lane C1bn, so bx may place it on hkl001, which lacks them, and the lane then stops at its first leg.",
+        "A new test file in wz-tls-mbedtls that drives the C side needs #![cfg(feature = \"vendored\")]; two arrived without it, and no gate asks."
+      ],
+      "publishable_decision_summary": "Step 1 of the server-layer split: the usrpwd auth method leaves wz-session-core for the new wz-auth crate, built on the core and named by nothing in it. The handshake's half of authentication (auth_dispatch, extauth) stays in the core, and a method is still handed to AuthDispatch::new by whoever builds the session, so the seam is the one that already existed and nothing was widened. The feature name access-extauth-usrpwd stays on every crate that offered it (wz-runtime-tokio, wz-capi-core, wz) and now means dep:wz-auth; the core's feature of that name and its optional sha3 go, the core feature model loses the line. wz-auth is no_std with alloc, as the module was, so a node with no operating system still authenticates. The dissector test that held the usrpwd body walker to this tree's own method moved with the method, and now reads the OpenSyn the core's encode_open writes around a body a real handshake through two dispatches produced, with the responder's acceptance of that very extension as its control; the core keeps its hand-laid body tests. Comments that point at the method from the core name the crate in prose, since the direction gate refuses an upper crate's path in core source.",
+      "publishable_changes_bullets": [
+        "crates/wz-auth: new crate (Cargo.toml, src/lib.rs); src/usrpwd.rs is crates/wz-session-core/src/extauth_usrpwd.rs moved, paths now wz_session_core::auth_dispatch and ::vle; tests/dissect_usrpwd.rs new.",
+        "crates/wz-session-core: extauth_usrpwd, its feature and the optional sha3 removed; the dissect usrpwd-method test removed; comments in dissect.rs, vle.rs, source_info_ext.rs and lib.rs name wz-auth in prose; sources/features/wz-session-core.scxml regenerated.",
+        "crates/wz-runtime-tokio, wz-capi-core: access-extauth-usrpwd forwards dep:wz-auth; wz-capi-c and wz-integration-tests take wz-auth as a dev-dependency; every use path moves to wz_auth::usrpwd.",
+        "crates/Cargo.toml and Cargo.lock: wz-auth a member; conformance/differential and differential-shm locks refreshed for it. .github/workflows/platform.yml: crates/wz-auth/** in paths.",
+        "scripts/run-ci.sh: C1y extauth 19 -> 4 on session-extauth plus C1y usrpwd 15 on wz-auth, auth_dispatch on session-extauth, wz-auth clippy in place of the core's usrpwd clippy; C1bn's auth-union arm on session-extauth and a wz-auth dissect leg of 1. scripts/lib/nondefault-tests-gate.sh: the core row loses the feature. scripts/lib/layer_direction_gate.py: IN_CORE loses extauth_usrpwd.",
+        "store: the reasons of access-extauth-usrpwd and session-unicast-accept cite crates/wz-auth/src/usrpwd.rs; a line-number citation of the old file is re-cited by anchor.",
+        "crates/wz-tls-mbedtls/tests/key_store_exhaustion.rs: gated on vendored, a link red on main."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 9663 passed, 0 failed, 853 ignored; wz-auth's 15 unit tests and its dissect test pass; cargo check --workspace --all-targets clean.",
+        "Lanes C1y and C1bn pass (C1bn on hkl002: hkl001 lacks libpcap's headers and stopped it at its first leg, a host fact and not this change). The new guards were read off --list: the core's extauth filter 4, wz-auth's lib 15, the wz-auth dissect leg 1; auth_dispatch stays 9.",
+        "cargo clippy -D warnings clean for wz-auth (all targets, and with default features off), wz-session-core --all-features, wz-runtime-tokio and wz-capi-core with access-extauth-usrpwd, and wz-capi-c; cargo doc -p wz-auth with -D warnings clean; cargo fmt --check clean.",
+        "The deferred static gates, 127 of 127, pass after two were fixed here: platform_trigger_paths_gate (crates/wz-auth/** added) and reason_citation_gate (a line citation of the moved file re-cited by anchor). layer_direction_gate: 14 server modules in the core of 14 listed, 1 of 3 upper crates built.",
+        "The pre-push citation form gate (2f) refused the first push: a line-form upstream citation and a root-less one were written in the new crate's manifest and the core's comment. Both are rewritten (an anchor, and prose) and the gate passes locally.",
+        "validate-workspace after the store mutations: T1 orphans 14 with 0 new, T3 warn 4, T4 info 15, as before.",
+        "A red on main repaired here: wz-tls-mbedtls tests/key_store_exhaustion.rs linked without vendored, the same defect round 4167 fixed for arena_exhaustion; its owner session was told."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, the split's next steps: wz-storage (storage_manager first, then the other storage modules), wz-admin with a session row extension trait, then the core's storage features go and IN_CORE is empty.",
+        "The pubkey method and its store live in wz-runtime-tokio (std, RSA), not in wz-auth; whether the auth layer gathers them is open, since the method is std-only and the runtime is its one consumer.",
+        "bx.toml does not declare libpcap's headers as a need of lane C1bn, so bx may place it on hkl001, which lacks them, and the lane then stops at its first leg.",
+        "A new test file in wz-tls-mbedtls that drives the C side needs #![cfg(feature = \"vendored\")]; two arrived without it, and no gate asks."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
