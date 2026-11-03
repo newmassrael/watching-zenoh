@@ -307734,6 +307734,34 @@
         "Open, first: what the stack bound model misses at the SCE pin 9619440966 (readings 24 over the bound for three images and 1,020 over for the asking client), and the frame of 3,696 bytes of the getter's events dispatch; until then the kit rows of the four fixed clients keep their old readings and the kit lane reports them outside their rows. Also: the admin image's stack bound (66 calls through a register unclaimed, floor 10,340); a hint for more than one peer and more than one commander key; the limits the admin overlay leaves at their defaults; a hosted reading of Layer Qzk and Qzb."
       ]
     },
+    "Round 4177": {
+      "decision_summary": "The regions tests dial the first IPv4 locator of info().locators(), and both upstream's enumeration and this tree's list every adapter's address as the platform reports it, so a Windows host with a disconnected adapter leads with a 169.254 address nothing answers and every scenario fails on connect, on upstream's library as on this tree. That made regions look ungradable on Windows. Z8_SKIP_LINK_LOCAL removes link-local addresses from the list the test reads, in the generated copy only (off by default: the files stay upstream's byte for byte); the engine's list is untouched. With it, regions runs 126 of 126 on this tree on the Windows host, and upstream's own library is the control.",
+      "changes_bullets": [
+        "scripts/lib/z8_upstream_suite.py: Z8_SKIP_LINK_LOCAL rewrites the one line of the regions entry that reads the locators to drop /169.254. addresses (refused unless the line is found exactly once); the selftest covers the rewrite, CRLF text and the refusal."
+      ],
+      "verification_bullets": [
+        "Harness selftest passes. Windows host with Z8_SKIP_LINK_LOCAL: regions 126 of 126 pass on this tree. Control, upstream's own library with Z8_STOCK and the same option: 124 run, 115 pass; the nine that fail are scenario5 order4_queque and the eight scenario7 order1 to order4 pubsub and putsub tests (unique_timestamps), which this tree passes. Without the option every scenario failed on connect on both (first attempt with a wrong pattern, // instead of /, changed nothing and was corrected)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the hosted verdict of the previous round and the hosted reading of the pico-peer text; the budgets of the other pico cases; the nine tests upstream's library fails on Windows are upstream's, not recorded further here."
+      ],
+      "publishable_decision_summary": "The regions tests dial the first IPv4 locator of info().locators(), and both upstream's enumeration and this tree's list every adapter's address as the platform reports it, so a Windows host with a disconnected adapter leads with a 169.254 address nothing answers and every scenario fails on connect, on upstream's library as on this tree. That made regions look ungradable on Windows. Z8_SKIP_LINK_LOCAL removes link-local addresses from the list the test reads, in the generated copy only (off by default: the files stay upstream's byte for byte); the engine's list is untouched. With it, regions runs 126 of 126 on this tree on the Windows host, and upstream's own library is the control.",
+      "publishable_changes_bullets": [
+        "scripts/lib/z8_upstream_suite.py: Z8_SKIP_LINK_LOCAL rewrites the one line of the regions entry that reads the locators to drop /169.254. addresses (refused unless the line is found exactly once); the selftest covers the rewrite, CRLF text and the refusal."
+      ],
+      "publishable_verification_bullets": [
+        "Harness selftest passes. Windows host with Z8_SKIP_LINK_LOCAL: regions 126 of 126 pass on this tree. Control, upstream's own library with Z8_STOCK and the same option: 124 run, 115 pass; the nine that fail are scenario5 order4_queque and the eight scenario7 order1 to order4 pubsub and putsub tests (unique_timestamps), which this tree passes. Without the option every scenario failed on connect on both (first attempt with a wrong pattern, // instead of /, changed nothing and was corrected)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the hosted verdict of the previous round and the hosted reading of the pico-peer text; the budgets of the other pico cases; the nine tests upstream's library fails on Windows are upstream's, not recorded further here."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
