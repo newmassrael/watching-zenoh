@@ -555,7 +555,7 @@ CASES: tuple[Case, ...] = (
     # 2026-11-03, the SCE pins -- 9,456,022 on hosted run 41589047498 and 9,458,478 on hkl001 at
     # the head (the larger), the growth pico-client-coop's note of this day attributes; that and
     # 3,500.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_462_000,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_467_100,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
@@ -587,7 +587,12 @@ CASES: tuple[Case, ...] = (
               "the hosted ones: hosted CI read 9,416,742 at `017e3c711`, whose local reading "
               "was 9,331,648, and a build machine reads the hosted figure within a thousand "
               "bytes. 9,420,262 on a build machine on the tree of round 3939: the budget is "
-              "that reading and 3,500, to the hundred"),
+              "that reading and 3,500, to the hundred. Hosted CI read 9,470,386 at `7f04bea6a7` "
+              "(8,386 over 9,462,000) and 9,463,502 at `d46109c70a` (1,502 over); the lean "
+              "get (`5893b87a10`) lies between the two and the fall of 6,884 was not bisected "
+              "to it. The growth that remains over the earlier budget is not attributed to "
+              "one commit: the budget moves to the hosted reading of `d46109c70a` and 3,500, "
+              "rounded up to the hundred"),
 )
 
 
