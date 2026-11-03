@@ -308412,6 +308412,34 @@
         "The same hosted run is also red on the C0 discard-site gate, three rustdoc links in the C1bzr shards, the capic-default size budget, the Zephyr stack bound and the NEG lanes' time alarm; each is read against the current main tip and repaid as its own round if it still stands. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd."
       ]
     },
+    "Round 4197": {
+      "decision_summary": "The hosted run on the main tip was red in three places that no gate row of the census could account for, each read from its own job log. The reduced-configuration docs job (C1bzr) reported three rustdoc errors the ledger carries none of: two intra-doc links in the open plan to peer_fits_node and client_fits_node, which exist only with router-node, and one in z_session_drop to the crate-private SessionHandle. They are written as code, not links. The C0 discard-site lint named the depth-first walk of the selector path test (a local stack of borrows, every node asserted on) and the walk is registered with that reason.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs and crates/wz-capi-c/src/session.rs: three doc links become plain code. scripts/lib/discard_site_lint.py: one ALLOWED entry for the walk in selector_path_tests.rs, with its reason."
+      ],
+      "verification_bullets": [
+        "rustdoc of wz-capi-core and wz-capi-c on the build machine no longer reports the three errors (open_plan.rs line 726, session.rs line 468); 15 errors remain in those two crates, which the C1bzr ledger carries and which the hosted job did not name. discard_site_lint.py ends rc 0 with 97 removal sites and its --selftest ends rc 0. The hosted C1bzr and C0 jobs are not re-run for this round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Still red on the same hosted run and not repaid here: the capic-default text budget (9,463,502 bytes against 9,462,000), the stack bound of the four Zephyr client images (exec-drop claims 4 calls through a register and pins 3; the bound reads 3,440 where the rows hold 3,472; the get image's bound 4,352 is below its kit reading 4,472), and the NEG lanes' time alarm (93 percent of 2,700 s)."
+      ],
+      "publishable_decision_summary": "The hosted run on the main tip was red in three places that no gate row of the census could account for, each read from its own job log. The reduced-configuration docs job (C1bzr) reported three rustdoc errors the ledger carries none of: two intra-doc links in the open plan to peer_fits_node and client_fits_node, which exist only with router-node, and one in z_session_drop to the crate-private SessionHandle. They are written as code, not links. The C0 discard-site lint named the depth-first walk of the selector path test (a local stack of borrows, every node asserted on) and the walk is registered with that reason.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs and crates/wz-capi-c/src/session.rs: three doc links become plain code. scripts/lib/discard_site_lint.py: one ALLOWED entry for the walk in selector_path_tests.rs, with its reason."
+      ],
+      "publishable_verification_bullets": [
+        "rustdoc of wz-capi-core and wz-capi-c on the build machine no longer reports the three errors (open_plan.rs line 726, session.rs line 468); 15 errors remain in those two crates, which the C1bzr ledger carries and which the hosted job did not name. discard_site_lint.py ends rc 0 with 97 removal sites and its --selftest ends rc 0. The hosted C1bzr and C0 jobs are not re-run for this round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still red on the same hosted run and not repaid here: the capic-default text budget (9,463,502 bytes against 9,462,000), the stack bound of the four Zephyr client images (exec-drop claims 4 calls through a register and pins 3; the bound reads 3,440 where the rows hold 3,472; the get image's bound 4,352 is below its kit reading 4,472), and the NEG lanes' time alarm (93 percent of 2,700 s)."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
