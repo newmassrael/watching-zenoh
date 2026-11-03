@@ -237,7 +237,7 @@ def manifest(deps: dict[str, str], member: dict[str, list[str]], out: pathlib.Pa
         "autotests = true",
         "",
         "[dev-dependencies]",
-        f'zenoh = {{ path = "{ROOT}/crates/wz-zenoh", features = ["unstable", "internal"] }}',
+        f'zenoh = {{ path = "{ROOT.as_posix()}/crates/wz-zenoh", features = ["unstable", "internal"] }}',
     ]
     for name in FAMILY:
         if name == "zenoh":
@@ -294,7 +294,7 @@ def manifest(deps: dict[str, str], member: dict[str, list[str]], out: pathlib.Pa
     ]
     lines += ["", "[patch.crates-io]"]
     for name, directory in FAMILY.items():
-        lines.append(f'{name} = {{ path = "{ROOT}/crates/{directory}" }}')
+        lines.append(f'{name} = {{ path = "{ROOT.as_posix()}/crates/{directory}" }}')
     lines.append("")
     return "\n".join(lines)
 
@@ -348,7 +348,11 @@ NOFILE = 1 << 16
 
 def raise_open_files_limit() -> None:
     """Raise the soft limit of open files to [`NOFILE`], or to the hard limit when that is lower."""
-    import resource
+    try:
+        import resource
+    except ImportError:
+        # Windows has no soft limit of open files to raise: a process holds handles up to memory.
+        return
 
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     wanted = NOFILE if hard == resource.RLIM_INFINITY else min(NOFILE, hard)
@@ -365,7 +369,8 @@ def run(cmd: list[str], cwd: pathlib.Path, log: pathlib.Path, bound: int) -> int
                 stdout=fh,
                 stderr=subprocess.STDOUT,
                 timeout=bound,
-                preexec_fn=raise_open_files_limit,
+                # `preexec_fn` exists only where processes fork; elsewhere there is no limit to raise.
+                preexec_fn=raise_open_files_limit if os.name == "posix" else None,
             ).returncode
         except subprocess.TimeoutExpired:
             return None
