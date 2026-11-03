@@ -275,6 +275,10 @@ mod zenoh_hierarchy_tests;
 /// The SN steps of a flow as a mixture over its link's break rate, in integers,
 /// from the counts in one step, and the logarithm model 3's terms stand on.
 pub mod zenoh_mixture;
+/// The validation corpus (`captures/validation/`), read against the model frozen
+/// before it was collected (`docs/flow-zenoh-verdict.md` §6.12).
+#[cfg(test)]
+mod zenoh_validation_tests;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.

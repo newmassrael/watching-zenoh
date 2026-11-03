@@ -44,8 +44,14 @@ pub(crate) struct Entry {
 }
 
 pub(crate) fn manifest() -> Vec<Entry> {
-    let text = std::fs::read_to_string(corpus_dir().join("corpus.json5"))
-        .expect("captures/corpus/corpus.json5 reads");
+    manifest_in(&corpus_dir(), "corpus.json5")
+}
+
+/// The manifest `name` of the captures in `dir`, as [`manifest`] reads the
+/// development corpus's: the validation corpus is described the same way.
+pub(crate) fn manifest_in(dir: &std::path::Path, name: &str) -> Vec<Entry> {
+    let path = dir.join(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let doc = json5::parse(&text).unwrap_or_else(|e| panic!("the manifest is JSON5: {e:?}"));
     let Some(Json5Value::Array(files)) = doc.get("files") else {
         panic!("the manifest has a `files` array");

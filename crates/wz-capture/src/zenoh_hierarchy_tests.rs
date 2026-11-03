@@ -71,6 +71,35 @@ fn binomial_cdf(k: u64, n: u64, p: f64) -> f64 {
         .sum()
 }
 
+/// The exact (Clopper-Pearson) two-sided 95% interval on a share of `k` in `n`:
+/// the `p` below which seeing `k` or more has chance at most 2.5%, and the `p`
+/// above which seeing `k` or fewer has chance at most 2.5%.
+pub(crate) fn exact_interval(k: u64, n: u64) -> (f64, f64) {
+    let solve = |below: &dyn Fn(f64) -> bool| {
+        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+        for _ in 0..200 {
+            let mid = (lo + hi) / 2.0;
+            if below(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo + hi) / 2.0
+    };
+    let lower = if k == 0 {
+        0.0
+    } else {
+        solve(&|p| 1.0 - binomial_cdf(k - 1, n, p) < 0.025)
+    };
+    let upper = if k >= n {
+        1.0
+    } else {
+        solve(&|p| binomial_cdf(k, n, p) > 0.025)
+    };
+    (lower, upper)
+}
+
 /// The one-sided 95% Clopper-Pearson upper bound on a share of `k` in `n`: the
 /// `p` at which seeing `k` or fewer has chance 5%.
 pub(crate) fn upper_bound(k: u64, n: u64) -> f64 {
