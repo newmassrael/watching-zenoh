@@ -4791,28 +4791,8 @@ jobs:
       # it, which is what their census rows already asked for in words: "ONE
       # job only, and the smallest one that owns wz-capture's default-feature
       # tests". After this split, that job is `dissect` and not this one.
-      # R311y587 — the dissection C ABI, driven from a real C translation unit.
-      # The Rust tests cover the functions; only C covers what is true ONLY
-      # across the boundary (header compiles, symbols export under the names it
-      # declares, calling convention agrees, a Rust-allocated string frees from
-      # C). Probed: renaming the export breaks the link while all six Rust
-      # tests still pass, which is the class this leg exists for.
-      - name: Layer C1bo — dissection C ABI from real C (R311y587)
-        run: bash scripts/run-ci.sh --layer C1bo
-
-      # R2441 (open-debt item 693) — the REPLAY C ABI, in the same job as C1bo
-      # and for the same provisioning: a C compiler, a C++ compiler for the
-      # header's second language, and `nm` for the symbol set. Placed beside its
-      # sibling rather than in a job of its own because the two need exactly the
-      # same tools and neither needs anything else.
-      #
-      # The item it closes: a consumer linking the C ABI could not call
-      # wz-replay's plan half at all, so it implemented the pacing judgement a
-      # second time and reported that it had. Probed: dropping one `#define`
-      # from the header reds the vocabulary gate while every Rust test still
-      # passes, which is the class this leg exists for.
-      - name: Layer C1cj — replay C ABI from real C (R2441)
-        run: bash scripts/run-ci.sh --layer C1cj
+      # (Layers C1bo and C1cj, the dissection and replay C ABIs driven from real
+      # C, run in `feature-gates-peel-2` now, with their reasons: see that job.)
 
       # R311y589 — runtime-zero-copy stopped being an empty flag and became the
       # first consumer of an `sce:kind="buffer-pool"` emit. Both arena arms run
@@ -4851,45 +4831,8 @@ jobs:
       - name: Layer C1bh — storage host dir (R311y581 wiring)
         run: bash scripts/run-ci.sh --layer C1bh
 
-      # R3414 — the four lanes below were peeled from the `ci` job, whose
-      # clock went to 97% on a cold cache (see its `Budget margin` step). They
-      # build the workspace's own feature sets over the same `rust-ci` cache and
-      # the same RocksDB engine this job restores, and this job ended run
-      # 39758930599 at 55% of its clock with 66 GB free. C2's deploy arm SKIPs
-      # here exactly as it did there (no `arm-none-eabi-gcc` in either job).
-      - name: Layer C2 — cargo clippy --deny warnings
-        run: bash scripts/run-ci.sh --layer C2
-
-      - name: Layer C4 — wz facade preset composability matrix
-        # R311eb — cargo-builds the wz facade under all 7 named presets
-        # (mcu-minimal/-extended, ap-client/-router/-full, zenoh-cpp,
-        # cortex-m4-default) so a preset feature-list drift or incoherent
-        # combo cannot pass CI invisibly. Facade-level analog of C1h;
-        # enforced here (unlike the local-only C3 lint-isolation lane)
-        # because it is a composability guard, not a redundant lint pass.
-        # no_std footing of the MCU presets stays Layer G's cross-compile.
-        run: bash scripts/run-ci.sh --layer C4
-
-      - name: Layer C4b — wz facade arbitrary-incomplete-subset matrix
-        # R311ek — cargo-builds the wz facade under deliberately-incomplete
-        # coherent consumer subsets (pubsub-only / queryable-only /
-        # zget-reply-only / declare-observer). The named-preset C4 lane
-        # only covers COMPLETE profiles, and C1h only covers the
-        # wz-session-core layer; this lane is the facade-level analog of
-        # C1h that locks the runtime-tokio glue's over-broad-gating
-        # regression class (observer / liveliness_subscriber / source_info
-        # ext encoder) the default-feature CI never exercises.
-        run: bash scripts/run-ci.sh --layer C4b
-
-      - name: Layer C1i — scouting-active glue unit tests
-        # R311ep — scouting-active is off by default, so Layer C1's
-        # `cargo test --workspace` never builds the scouting glue. This
-        # lane builds + runs the deterministic scouting unit tests
-        # (Scout framing / Hello-locator extraction / scout-timeout)
-        # under --features scouting-active + deny-warnings. The
-        # socket-bound multicast e2e is the opt-in Layer M (multicast
-        # routing is environment-dependent; not a default gate).
-        run: bash scripts/run-ci.sh --layer C1i
+      # (Layers C2, C4, C4b and C1i, the four R3414 peeled from the `ci` job,
+      # run in `feature-gates-peel-2` now: see that job for the measurement.)
 
       # The measurement this job's own header asks for and has never had: it
       # declares "THIS JOB HAS NO OTHER DISK HEADROOM" while recording that
@@ -5067,6 +5010,158 @@ jobs:
         # tuned to sit above this job's first measurement would be the raise
         # this split exists instead of. The budget moved 2700 -> 1800 (R3043)
         # because the floor, unchanged, was the thing that asked for it.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
+  # The SECOND feature-gates peel. Run 41667795029 put `feature-gates` at 2471s
+  # of its 2700s (91%) with every lane green, and its margin step fired. It is
+  # a trend and not a spike: the six completed runs before it read 1707, 1347,
+  # 1312, 1712, 1995 and 2140s. No lane dominates; every lane took about 1.8x
+  # its time on run 41532158411 (1312s), with the same runner image and the same
+  # caches restored, so the job grows with the workspace it compiles. Its sibling
+  # `feature-gates-peel` read 1523s of 1800s (84%) on the same run and has no
+  # room to take more.
+  #
+  # WHY THESE SIX, and they are two themes rather than the heaviest:
+  #   * C2, C4, C4b and C1i are the four R3414 peeled from the `ci` job: they
+  #     build the workspace's own feature sets over the `rust-ci` cache and the
+  #     RocksDB engine, so they travel together with that engine step.
+  #   * C1bo and C1cj drive the dissection and replay C ABIs from real C. They
+  #     need a C and a C++ compiler and `nm`, which the runner image carries,
+  #     and nothing else; they were already placed side by side for that.
+  # On run 41667795029 they took 168 + 60 + 80 + 40 + 136 + 78 = 562s, which
+  # takes `feature-gates` to about 1909s (71%) and leaves this job near 900s of
+  # its 1800s with setup included.
+  #
+  # BUDGET 30, the budget of the sibling peel: this job READS the shared `ci`
+  # cache, as that one does, so its first run is not cold.
+  feature-gates-peel-2:
+    name: feature-gate NEG lanes, workspace sets and C ABI legs (peeled for budget)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `recursive`: these lanes compile wz-session-core, which resolves
+        # sce_forge_runtime out of vendor/sce.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `feature-gates` copy for why this cache exists and why its
+        # RESTORE and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The `feature-gates` list, which C2's workspace build needs for the
+        # RocksDB engine. No `libxml2-dev` (R3009): only the jobs that run
+        # `xtask` need it.
+        run: |
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
+      # R3414 — these four were peeled from the `ci` job, whose clock went to
+      # 97% on a cold cache (see its `Budget margin` step). C2's deploy arm SKIPs
+      # here exactly as it did there (no `arm-none-eabi-gcc` in either job).
+      - name: Layer C2 — cargo clippy --deny warnings
+        run: bash scripts/run-ci.sh --layer C2
+
+      - name: Layer C4 — wz facade preset composability matrix
+        # R311eb — cargo-builds the wz facade under all 7 named presets
+        # (mcu-minimal/-extended, ap-client/-router/-full, zenoh-cpp,
+        # cortex-m4-default) so a preset feature-list drift or incoherent
+        # combo cannot pass CI invisibly. Facade-level analog of C1h;
+        # enforced here (unlike the local-only C3 lint-isolation lane)
+        # because it is a composability guard, not a redundant lint pass.
+        # no_std footing of the MCU presets stays Layer G's cross-compile.
+        run: bash scripts/run-ci.sh --layer C4
+
+      - name: Layer C4b — wz facade arbitrary-incomplete-subset matrix
+        # R311ek — cargo-builds the wz facade under deliberately-incomplete
+        # coherent consumer subsets (pubsub-only / queryable-only /
+        # zget-reply-only / declare-observer). The named-preset C4 lane
+        # only covers COMPLETE profiles, and C1h only covers the
+        # wz-session-core layer; this lane is the facade-level analog of
+        # C1h that locks the runtime-tokio glue's over-broad-gating
+        # regression class (observer / liveliness_subscriber / source_info
+        # ext encoder) the default-feature CI never exercises.
+        run: bash scripts/run-ci.sh --layer C4b
+
+      - name: Layer C1i — scouting-active glue unit tests
+        # R311ep — scouting-active is off by default, so Layer C1's
+        # `cargo test --workspace` never builds the scouting glue. This
+        # lane builds + runs the deterministic scouting unit tests
+        # (Scout framing / Hello-locator extraction / scout-timeout)
+        # under --features scouting-active + deny-warnings. The
+        # socket-bound multicast e2e is the opt-in Layer M (multicast
+        # routing is environment-dependent; not a default gate).
+        run: bash scripts/run-ci.sh --layer C1i
+
+      # R311y587 — the dissection C ABI, driven from a real C translation unit.
+      # The Rust tests cover the functions; only C covers what is true ONLY
+      # across the boundary (header compiles, symbols export under the names it
+      # declares, calling convention agrees, a Rust-allocated string frees from
+      # C). Probed: renaming the export breaks the link while all six Rust
+      # tests still pass, which is the class this leg exists for.
+      - name: Layer C1bo — dissection C ABI from real C (R311y587)
+        run: bash scripts/run-ci.sh --layer C1bo
+
+      # R2441 (open-debt item 693) — the REPLAY C ABI, beside C1bo for the same
+      # provisioning: a C compiler, a C++ compiler for the header's second
+      # language, and `nm` for the symbol set.
+      #
+      # The item it closes: a consumer linking the C ABI could not call
+      # wz-replay's plan half at all, so it implemented the pacing judgement a
+      # second time and reported that it had. Probed: dropping one `#define`
+      # from the header reds the vocabulary gate while every Rust test still
+      # passes, which is the class this leg exists for.
+      - name: Layer C1cj — replay C ABI from real C (R2441)
+        run: bash scripts/run-ci.sh --layer C1cj
+
+      - name: Disk headroom after the lanes (measurement, not a gate)
+        if: always()
+        run: df -h /
+
+      - name: Budget margin — this job may not approach its timeout in silence
+        # 1800 is `timeout-minutes: 30` in seconds; the two are one fact and
+        # `scripts/lib/job_budget_binding.py` holds them together. 90 / 20 are
+        # the parent job's alarm and floor, for the reason its sibling peel
+        # gives.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 

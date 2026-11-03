@@ -175,6 +175,9 @@ for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev
     _add(_codec_package, "The cached RocksDB engine's five compression codecs.",
          ["ci", "nondefault", "nondefault-builds", "nondefault-legs", "dissect", "interop",
           "feature-gates",
+          # The second feature-gates peel restores the same engine for C2's
+          # workspace build.
+          "feature-gates-peel-2",
           "transport-modes", "reduced-docs", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
           "e2e-router-scale"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
@@ -270,6 +273,10 @@ _add(
         # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
+        # Six lanes peeled off `feature-gates` for its budget a second time (C2,
+        # C4, C4b, C1i, C1bo, C1cj). C2 is the workspace clippy, so every member
+        # this row reaches is reached.
+        "feature-gates-peel-2",
         "routing-adminspace",
         # The adminspace lanes, peeled off the job above for its budget: the same
         # runner setup and the same lanes' crates, so it takes the same rows.
@@ -330,6 +337,8 @@ _add(
         # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
+        # The second peel: C2 is the workspace clippy (see the libclang row).
+        "feature-gates-peel-2",
         "routing-adminspace",
         # The adminspace lanes, peeled off the job above for its budget: the same
         # runner setup and the same lanes' crates, so it takes the same rows.
@@ -389,6 +398,9 @@ _add(
         # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
+        # The second peel: C2 is the workspace clippy, which selects the TLS and
+        # QUIC link features where `ring` is reached.
+        "feature-gates-peel-2",
         "routing-adminspace",
         # The adminspace lanes, peeled off the job above for its budget: the same
         # runner setup and the same lanes' crates, so it takes the same rows.
@@ -499,6 +511,7 @@ _add(
     # consumer by naming it. That is the same test the row already applies, and
     # nondefault gets a separate native-engine row above (R2805).
     ["ci", "validate-codegen", "codegen-verify", "interop", "feature-gates",
+     "feature-gates-peel-2",
      "transport-modes", "isolated-crates", "capi-c-arms", "e2e-demo",
      "e2e-demo-pico", "e2e-router-scale", "dissect", "defaults-off", "gate-provenance"],
 )
@@ -603,6 +616,7 @@ _add(
         # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
+        "feature-gates-peel-2",
         "routing-adminspace",
         # The adminspace lanes, peeled off the job above for its budget: the same
         # runner setup and the same lanes' crates, so it takes the same rows.
