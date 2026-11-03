@@ -33,7 +33,7 @@ use wz_capi_port::observation::Refusal;
 use crate::abi::z_loaned_session_t;
 use crate::ffi::guarded;
 use crate::result::{ZResult, WZ_CAPI_C_E_FULL, Z_EGENERIC, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 
 /// What a source writes: the readings it has, and which of them it has.
 ///
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn wz_capi_c_snapshot_poll(session: *const z_loaned_sessio
     guarded(|| {
         // SAFETY: the caller's contract.
         let Some(state) = (unsafe { session_state(session) }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         ZResult::from(snapshot::poll(|| Some(state.shared.message_reading())))
     })

@@ -49,7 +49,7 @@ use crate::bytes::take_payload;
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::result::{publish_refusal, ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 
 /// zenoh-c's `z_congestion_control_t` — a plain C enum, so `c_int`-sized.
 pub type z_congestion_control_t = std::ffi::c_int;
@@ -665,7 +665,7 @@ pub unsafe extern "C" fn z_declare_publisher(
         let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         let keyexpr = ke.to_owned();
         // The same outbound canonicity gate the session put applies, hoisted to

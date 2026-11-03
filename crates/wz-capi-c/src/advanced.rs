@@ -88,7 +88,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{z_publisher_options_t, z_publisher_put_options_t};
 use crate::result::{ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
@@ -684,7 +684,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         let ke = ke.to_owned();
         // The same outbound canon gate every declare in this crate hoists: the
@@ -1393,7 +1393,7 @@ unsafe fn declare_subscriber_state(
     let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
         keyexpr_str(key_expr)
     }) else {
-        return Err(Z_ENULL);
+        return Err(unsafe { not_a_registry(session) });
     };
     let ke = ke.to_owned();
     if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {

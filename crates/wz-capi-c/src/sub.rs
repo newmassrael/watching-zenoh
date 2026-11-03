@@ -41,7 +41,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::sample::MarshalCache;
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 
 use wz_capi_core::faces::{SharedSession, SubId};
 
@@ -298,7 +298,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         let ke = ke.to_owned();
         // Reject a non-canonical keyexpr UP FRONT rather than recording a dead

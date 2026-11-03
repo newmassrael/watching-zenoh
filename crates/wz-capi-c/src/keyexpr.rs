@@ -1022,7 +1022,7 @@ pub unsafe extern "C" fn z_declare_keyexpr(
                 keyexpr_str(key_expr)
             })
         else {
-            return Z_ENULL;
+            return unsafe { crate::session::not_a_registry(session) };
         };
         let literal = literal.to_owned();
         let Some(mapping) = state.shared.declare_keyexpr(literal.clone()) else {
@@ -1069,7 +1069,7 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
         };
         // SAFETY: the caller's contract.
         let Some(state) = (unsafe { crate::session::session_state(session) }) else {
-            return Z_ENULL;
+            return unsafe { crate::session::not_a_registry(session) };
         };
         if let Some(mapping) = mapping {
             state.shared.undeclare_keyexpr(mapping);

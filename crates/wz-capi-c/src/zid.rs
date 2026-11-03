@@ -58,7 +58,7 @@ use std::ffi::c_void;
 use crate::abi::{z_closure_drop_callback_t, z_loaned_session_t, z_owned_string_t};
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_handle, session_state};
 use crate::string::owned_string_from;
 
 /// The zid width zenoh puts on the wire.
@@ -336,8 +336,8 @@ pub unsafe extern "C" fn z_id_to_string(zid: *const z_id_t, dst: *mut z_owned_st
 pub unsafe extern "C" fn z_info_zid(session: *const z_loaned_session_t) -> z_id_t {
     guard_val(z_id_t::empty(), || {
         // SAFETY: the caller's contract.
-        match unsafe { session_state(session) } {
-            Some(state) => z_id_t { id: state.zid() },
+        match unsafe { session_handle(session) } {
+            Some(handle) => z_id_t { id: handle.zid() },
             None => z_id_t::empty(),
         }
     })
@@ -372,9 +372,9 @@ pub unsafe extern "C" fn z_session_id(
 ) -> crate::entity::z_entity_global_id_t {
     guard_val(crate::entity::z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract.
-        match unsafe { session_state(session) } {
-            Some(state) => crate::entity::z_entity_global_id_t {
-                zid: z_id_t { id: state.zid() },
+        match unsafe { session_handle(session) } {
+            Some(handle) => crate::entity::z_entity_global_id_t {
+                zid: z_id_t { id: handle.zid() },
                 eid: 0,
             },
             None => crate::entity::z_entity_global_id_t::empty(),
@@ -446,7 +446,7 @@ unsafe fn enumerate_peers(
         let rc = (|| {
             // SAFETY: the caller's contract.
             let Some(state) = (unsafe { session_state(session) }) else {
-                return Z_ENULL;
+                return unsafe { not_a_registry(session) };
             };
             let Some(call) = taken.call else {
                 // A closure with no callback is not an error; there is simply

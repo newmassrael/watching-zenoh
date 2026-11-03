@@ -82,7 +82,7 @@ use crate::abi::{
 use crate::ffi::{guard_val, guarded};
 use crate::publisher::{z_reliability_t, Z_RELIABILITY_BEST_EFFORT, Z_RELIABILITY_RELIABLE};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 use crate::zid::z_id_t;
 
 // ---------------------------------------------------------------------------
@@ -1997,7 +1997,7 @@ unsafe fn declare_link_listener(
     let Some(state) = (unsafe { session_state(session) }) else {
         let mut held = taken;
         held.run_drop();
-        return Err(Z_ENULL);
+        return Err(unsafe { not_a_registry(session) });
     };
     let (history, filter) = if options.is_null() {
         (false, None)
@@ -2113,7 +2113,7 @@ unsafe fn declare_transport_listener(
     let Some(state) = (unsafe { session_state(session) }) else {
         let mut held = taken;
         held.run_drop();
-        return Err(Z_ENULL);
+        return Err(unsafe { not_a_registry(session) });
     };
     // SAFETY: the caller's contract.
     let history = !options.is_null() && unsafe { (*options).history };
@@ -2467,7 +2467,7 @@ pub unsafe extern "C" fn z_info_links(
                 }
                 Z_OK
             }
-            None => Z_ENULL,
+            None => unsafe { not_a_registry(session) },
         };
         held.run_drop();
         rc
@@ -2505,7 +2505,7 @@ pub unsafe extern "C" fn z_info_transports(
                 }
                 Z_OK
             }
-            None => Z_ENULL,
+            None => unsafe { not_a_registry(session) },
         };
         held.run_drop();
         rc

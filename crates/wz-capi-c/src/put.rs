@@ -36,8 +36,8 @@ use crate::publisher::{
 };
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 use crate::publisher::{z_reliability_t, Z_RELIABILITY_RELIABLE};
-use crate::result::{publish_refusal, ZResult, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::result::{publish_refusal, ZResult, Z_OK};
+use crate::session::{not_a_registry, session_state};
 
 /// Options for `z_put` (`zenoh_commons.h:927-970`).
 #[repr(C)]
@@ -324,7 +324,7 @@ pub unsafe extern "C" fn z_put(
             unsafe { keyexpr_str(key_expr) },
             payload,
         ) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         // R311y564 — a keyexpr that carries a DECLARATION publishes aliased, the
         // bandwidth saving `z_declare_keyexpr` exists to enable. Undeclared
@@ -372,7 +372,7 @@ pub unsafe extern "C" fn z_delete(
         let (Some(state), Some(keyexpr)) = (unsafe { session_state(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         // SAFETY: the caller's contract for the options struct.
         let publish = unsafe { resolve_delete_options(options) };

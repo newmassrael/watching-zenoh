@@ -15,6 +15,8 @@
 use std::ffi::c_void;
 
 use wz_capi_core::drive::{FaceDrive, OpenError, SessionState};
+#[cfg(feature = "router-node")]
+use wz_capi_core::drive::{NodeRole, RouterState};
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::open_plan::{dial_role, AbiChoices, OpenPlan, OpenRefusal, StatedEndpoints};
 use wz_runtime_tokio::session::LocalDeliveryDrain;
@@ -25,14 +27,62 @@ use crate::abi::{
 };
 use crate::config::{config_state, ConfigState, CONNECT_KEY, LISTEN_KEY, MODE_KEY};
 use crate::ffi::{guard_val, guarded};
+#[cfg(feature = "router-node")]
+use crate::result::Z_EUNAVAILABLE;
 use crate::result::{ZResult, Z_EINVAL, Z_ENETWORK, Z_ENULL, Z_OK};
 
-/// Read the [`SessionState`] behind a loaned session.
+/// What the handle slot of a session holds: the registry of faces every open produces, or, in a
+/// build with `router-node`, the node a config that keeps its south apart opens as (only a node
+/// places a remote by a subregion of `gateway/south`).
+///
+/// The operations of this ABI are written over the registry ([`session_state`]); a node answers
+/// the ones it carries through [`session_handle`] and `Z_EUNAVAILABLE` to the rest
+/// ([`not_a_registry`]), so that a node is never taken for a handle that is not there.
+pub(crate) enum SessionHandle {
+    /// The registry of faces: it joins no two of the faces it holds.
+    Registry(SessionState),
+    /// A node that forwards between the faces it holds.
+    #[cfg(feature = "router-node")]
+    Node(RouterState),
+}
+
+impl SessionHandle {
+    /// Stop the session and wait for what it runs on. Closing a closed session is no error.
+    fn close(&self) {
+        match self {
+            Self::Registry(state) => state.close(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.close(),
+        }
+    }
+
+    /// Whether [`Self::close`] has run.
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Registry(state) => state.is_closed(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.is_closed(),
+        }
+    }
+
+    /// The identity the session announces, as the 16 bytes of `z_id_t`.
+    pub(crate) fn zid(&self) -> [u8; 16] {
+        match self {
+            Self::Registry(state) => state.zid(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => crate::zid::z_id_t::from_wire(node.zid()).id,
+        }
+    }
+}
+
+/// Read the [`SessionHandle`] behind a loaned session.
 ///
 /// # Safety
 /// `zs` must be null, or a valid loaned session whose handle slot holds a live
-/// `Box::into_raw::<SessionState>` pointer (what [`z_open`] installs).
-pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
+/// `Box::into_raw::<SessionHandle>` pointer (what [`z_open`] installs).
+pub(crate) unsafe fn session_handle<'a>(
+    zs: *const z_loaned_session_t,
+) -> Option<&'a SessionHandle> {
     if zs.is_null() {
         return None;
     }
@@ -41,8 +91,38 @@ pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<
     if handle.is_null() {
         return None;
     }
-    // SAFETY: as above — a live `Box<SessionState>` this crate leaked.
-    Some(unsafe { &*(handle as *const SessionState) })
+    // SAFETY: as above — a live `Box<SessionHandle>` this crate leaked.
+    Some(unsafe { &*(handle as *const SessionHandle) })
+}
+
+/// Read the [`SessionState`] of the registry behind a loaned session: `None` for a handle that
+/// is not there and for a node, which an operation written over the registry cannot be run on.
+/// What such an operation answers when it finds none is [`not_a_registry`].
+///
+/// # Safety
+/// As [`session_handle`].
+pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
+    // SAFETY: the caller's contract.
+    match unsafe { session_handle(zs) }? {
+        SessionHandle::Registry(state) => Some(state),
+        #[cfg(feature = "router-node")]
+        SessionHandle::Node(_) => None,
+    }
+}
+
+/// What an operation written over the registry answers when [`session_state`] found none:
+/// `Z_EUNAVAILABLE` for a session that is a node, which is there but does not carry the
+/// operation yet, and `Z_ENULL` for a handle that is not there.
+///
+/// # Safety
+/// As [`session_handle`].
+pub(crate) unsafe fn not_a_registry(zs: *const z_loaned_session_t) -> ZResult {
+    // SAFETY: the caller's contract.
+    match unsafe { session_handle(zs) } {
+        #[cfg(feature = "router-node")]
+        Some(SessionHandle::Node(_)) => Z_EUNAVAILABLE,
+        _ => Z_ENULL,
+    }
 }
 
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
@@ -151,9 +231,10 @@ fn plan_of(cfg: &ConfigState) -> Result<OpenPlan, OpenRefusal> {
     let stated = stated_endpoints(cfg);
     let document = cfg.with_default_mode(role.to_str()).render_nested().ok();
     let plan = OpenPlan::resolve(role, stated, document.as_deref())?;
-    // This surface opens the registry of faces and holds no node: subregions of `gateway/south`
-    // have nothing here to place a remote by, and the open says so and does not run without them.
-    plan.refuse_uncarried_south(role, false)?;
+    // Subregions of `gateway/south` are placed by a node alone. A build with `router-node` opens
+    // one where the plan fits it; a build without it has nothing here to place a remote by, and
+    // the open says so and does not run without them.
+    plan.refuse_uncarried_south(role, cfg!(feature = "router-node"))?;
     Ok(plan)
 }
 
@@ -239,6 +320,10 @@ pub(crate) unsafe fn open_session(
         not(feature = "zenoh-c-no-unstable-api")
     ))]
     let shm_keys = plan.shm;
+    // A plan that keeps its south apart is opened as the node that places a remote by it. The
+    // registry of faces is the open of every other plan, as before.
+    #[cfg(feature = "router-node")]
+    let node = plan.node_for_south(plan.role);
     #[allow(unused_mut)]
     let mut arguments = plan.into_arguments(abi_choices(shm_clients));
     // R3065 -- a session opened over a client storage advertises the protocols of THAT
@@ -254,6 +339,10 @@ pub(crate) unsafe fn open_session(
             Err(_) => return Z_ENETWORK,
         };
     }
+    #[cfg(feature = "router-node")]
+    if let Some(role) = node {
+        return open_node(this_, arguments, role);
+    }
     match arguments.run() {
         Ok(state) => {
             // R2957 — the session's own shared-memory provider, as its
@@ -267,15 +356,44 @@ pub(crate) unsafe fn open_session(
                 shm_keys.transport_optimization,
                 shm_keys.pool_size,
             ));
-            let h = Box::into_raw(Box::new(state)) as Handle;
+            let h = Box::into_raw(Box::new(SessionHandle::Registry(state))) as Handle;
             unsafe { *this_ = z_owned_session_t::from_handle(h) };
             Z_OK
         }
-        // The core reports a NEUTRAL failure; zenoh-c's vocabulary for "the
-        // session could not be established" is Z_ENETWORK, whichever the cause.
-        Err(OpenError::DriveFailed | OpenError::LinkFailed | OpenError::SchemeUnknown) => {
-            Z_ENETWORK
+        Err(error) => open_failure(error),
+    }
+}
+
+/// The core reports a NEUTRAL failure; zenoh-c's vocabulary for "the session could not be
+/// established" is Z_ENETWORK, whichever the cause.
+fn open_failure(error: OpenError) -> ZResult {
+    match error {
+        OpenError::DriveFailed | OpenError::LinkFailed | OpenError::SchemeUnknown => Z_ENETWORK,
+    }
+}
+
+/// Open the node `role` names, as the session of `this_`: what `arguments` ask that the node does
+/// not carry yet fails the open by its key, as it does for the Rust API.
+///
+/// # Safety
+/// `this_` must be valid and writable.
+#[cfg(feature = "router-node")]
+unsafe fn open_node(
+    this_: *mut z_owned_session_t,
+    arguments: wz_capi_core::open_plan::OpenArguments,
+    role: NodeRole,
+) -> ZResult {
+    if arguments.router_refusal().is_some() {
+        return Z_EINVAL;
+    }
+    match arguments.run_node(role) {
+        Ok(node) => {
+            let h = Box::into_raw(Box::new(SessionHandle::Node(node))) as Handle;
+            // SAFETY: the caller's contract.
+            unsafe { *this_ = z_owned_session_t::from_handle(h) };
+            Z_OK
         }
+        Err(error) => open_failure(error),
     }
 }
 
@@ -291,9 +409,9 @@ pub unsafe extern "C" fn z_close(
 ) -> ZResult {
     guarded(|| {
         // SAFETY: the caller's contract, delegated.
-        match unsafe { session_state(session) } {
-            Some(state) => {
-                state.close();
+        match unsafe { session_handle(session) } {
+            Some(handle) => {
+                handle.close();
                 Z_OK
             }
             None => Z_ENULL,
@@ -347,7 +465,7 @@ pub unsafe extern "C" fn z_session_loan_mut(
 }
 
 /// Drop an owned session (zenoh-c `z_session_drop`): closes if not already, then
-/// frees the [`SessionState`].
+/// frees the [`SessionHandle`].
 ///
 /// # Safety
 /// `this_` must be null or a valid moved session whose handle is live.
@@ -360,9 +478,12 @@ pub unsafe extern "C" fn z_session_drop(this_: *mut z_moved_session_t) {
         // SAFETY: the caller's contract.
         let handle = unsafe { (*this_)._this.handle };
         if !handle.is_null() {
-            // SessionState::drop runs close() (idempotent).
-            // SAFETY: a live `Box<SessionState>` this crate leaked.
-            drop(unsafe { Box::from_raw(handle as *mut SessionState) });
+            // A registry's drop runs close() (idempotent); a node does not stop on a drop, so the
+            // session is closed first, which is idempotent as well.
+            // SAFETY: a live `Box<SessionHandle>` this crate leaked.
+            let handle = unsafe { Box::from_raw(handle as *mut SessionHandle) };
+            handle.close();
+            drop(handle);
             unsafe { (*this_)._this = z_owned_session_t::null_value() };
         }
         Z_OK
@@ -597,6 +718,6 @@ pub unsafe extern "C" fn zc_get_last_error(out: *mut crate::abi::z_view_string_t
 pub unsafe extern "C" fn z_session_is_closed(session: *const z_loaned_session_t) -> bool {
     guard_val(true, || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { session_state(session) }.map_or(true, SessionState::is_closed)
+        unsafe { session_handle(session) }.map_or(true, SessionHandle::is_closed)
     })
 }

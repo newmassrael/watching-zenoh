@@ -35,7 +35,7 @@ use std::ffi::c_void;
 use crate::abi::z_loaned_session_t;
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
 /// zenoh-c `z_timestamp_t` (`zenoh_opaque.h:257-259`) — 24 bytes at ALIGNMENT 8.
@@ -143,7 +143,7 @@ pub unsafe extern "C" fn z_timestamp_new(
         unsafe { *this_ = z_timestamp_t::empty() };
         // SAFETY: the caller's contract.
         let Some(state) = (unsafe { session_state(session) }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         let mut stamped = z_timestamp_t::empty();
         // R311y569 — the WALL CLOCK, through wz's own NTP64 SSOT.

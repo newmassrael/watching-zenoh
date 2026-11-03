@@ -186,7 +186,7 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return Z_ENULL;
+            return unsafe { crate::session::not_a_registry(session) };
         };
         let ke = ke.to_owned();
         // The same outbound canonicity gate the data plane applies, hoisted so the
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return Z_ENULL;
+            return unsafe { crate::session::not_a_registry(session) };
         };
         let ke = ke.to_owned();
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
@@ -503,7 +503,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
             crate::keyexpr::keyexpr_str(key_expr)
         }) else {
-            return crate::result::Z_ENULL;
+            return unsafe { crate::session::not_a_registry(session) };
         };
         let ke = ke.to_owned();
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {

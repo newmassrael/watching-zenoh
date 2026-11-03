@@ -65,7 +65,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{priority_from_c, z_priority_t};
 use crate::result::{ZResult, Z_EBUSY_MUTEX, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 use crate::string::{take_moved_string, view_string_over};
 
 // ---------------------------------------------------------------------------
@@ -1002,7 +1002,7 @@ pub unsafe extern "C" fn wz_capi_c_group_join(
             unsafe { keyexpr_str(group) },
             member,
         ) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         let MemberState { member, priority } = *member;
         let (id, agg) = match state.shared.join_group(gid.to_owned(), member, priority) {

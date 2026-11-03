@@ -27,9 +27,15 @@ use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::put::z_put;
+#[cfg(feature = "router-node")]
+use wz_capi_c::result::Z_EUNAVAILABLE;
 use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
+#[cfg(feature = "router-node")]
+use wz_capi_c::session::z_session_is_closed;
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
+#[cfg(feature = "router-node")]
+use wz_capi_c::zid::z_info_zid;
 use wz_runtime_tokio_test_support::free_port;
 
 const KEYEXPR: &str = "wz/session-roles/demo";
@@ -118,21 +124,23 @@ unsafe fn count_samples(session: &z_owned_session_t) -> (Arc<AtomicUsize>, *mut 
 }
 
 unsafe fn put_once(session: &z_owned_session_t) {
+    assert_eq!(put_rc(session), Z_OK);
+}
+
+/// What a `z_put` of one small payload answers.
+unsafe fn put_rc(session: &z_owned_session_t) -> i8 {
     let ke = CString::new(KEYEXPR).unwrap();
     let mut view: z_view_keyexpr_t = std::mem::zeroed();
     assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
     let text = CString::new("roles").unwrap();
     let mut payload: z_owned_bytes_t = std::mem::zeroed();
     assert_eq!(z_bytes_copy_from_str(&mut payload, text.as_ptr()), Z_OK);
-    assert_eq!(
-        z_put(
-            z_session_loan(session),
-            z_view_keyexpr_loan(&view),
-            (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
-            std::ptr::null_mut(),
-        ),
-        Z_OK
-    );
+    z_put(
+        z_session_loan(session),
+        z_view_keyexpr_loan(&view),
+        (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+        std::ptr::null_mut(),
+    )
 }
 
 /// Put from `publisher` every 50 ms until a sample is counted, for up to 10 s.
@@ -211,9 +219,10 @@ fn a_client_with_nothing_to_dial_fails_its_open_listener_or_not() {
     }
 }
 
-/// A south kept apart by subregions is placed by a node, and this surface opens the registry of
-/// faces and holds none: the open is refused by the key, whatever the role, and a document that
-/// states the preset (or no `gateway` at all) opens as before.
+/// A south kept apart by subregions is placed by a node, and a build without `router-node` opens
+/// the registry of faces alone and holds none: the open is refused by the key, whatever the
+/// role, and a document that states the preset (or no `gateway` at all) opens as before.
+#[cfg(not(feature = "router-node"))]
 #[test]
 fn a_gateway_south_of_subregions_is_refused_and_the_preset_is_not() {
     let subregions = r#"{ south: [ { filters: [ { modes: ["peer"] } ] } ] }"#;
@@ -233,6 +242,79 @@ fn a_gateway_south_of_subregions_is_refused_and_the_preset_is_not() {
     assert_eq!(rc, Z_OK, "the preset places a remote by its role alone");
     // SAFETY: a live session this test opened.
     unsafe { close_session(session) };
+}
+
+/// A build with `router-node` opens a config that keeps its south apart as the node that places a
+/// remote by it, and the handle of that session is answered where the node carries the operation
+/// (the id, the closing) and by `Z_EUNAVAILABLE` where it does not yet: a `z_put` through it is
+/// neither a put that vanishes nor a handle taken for one that is not there (`Z_ENULL`).
+///
+/// A client that is told no router scouts for one, which no node carries, so it is still refused
+/// by the key; the preset opens as it did.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_gateway_south_of_subregions_opens_a_node_that_carries_little_yet() {
+    let subregions = r#"{ south: [ { filters: [ { modes: ["peer"] } ] } ] }"#;
+    for mode in ["peer", "router"] {
+        let mut entries = stated(mode, Some(free_port()), None);
+        entries.push(("gateway", subregions.to_owned()));
+        // SAFETY: a fresh config and session.
+        let (rc, mut session) = unsafe { open_with(&entries) };
+        assert_eq!(
+            rc, Z_OK,
+            "a {mode} that partitions its south opens as a node"
+        );
+        // SAFETY: a live session this test opened, loaned for each call.
+        unsafe {
+            let id = z_info_zid(z_session_loan(&session));
+            assert!(
+                id.id.iter().any(|byte| *byte != 0),
+                "the node has its own id ({mode})"
+            );
+            assert!(!z_session_is_closed(z_session_loan(&session)));
+            assert_eq!(
+                put_rc(&session),
+                Z_EUNAVAILABLE,
+                "a node does not carry a put yet ({mode})"
+            );
+            assert_eq!(
+                z_close(z_session_loan_mut(&mut session), std::ptr::null_mut()),
+                Z_OK
+            );
+            assert!(
+                z_session_is_closed(z_session_loan(&session)),
+                "closed ({mode})"
+            );
+            close_session(session);
+        }
+    }
+    // A client that is told no router: it scouts for one, and no node carries that.
+    let client = vec![
+        ("mode", String::from("\"client\"")),
+        ("gateway", subregions.to_owned()),
+    ];
+    // SAFETY: a fresh config and session.
+    let (rc, session) = unsafe { open_with(&client) };
+    assert_eq!(
+        rc, Z_EINVAL,
+        "a client that scouts and partitions its south"
+    );
+    // SAFETY: a gravestone, which drops as a no-op.
+    unsafe { close_session(session) };
+    let mut preset = stated("peer", Some(free_port()), None);
+    preset.push(("gateway", r#"{ south: "auto" }"#.to_owned()));
+    // SAFETY: a fresh config and session.
+    let (rc, session) = unsafe { open_with(&preset) };
+    assert_eq!(rc, Z_OK, "the preset places a remote by its role alone");
+    // SAFETY: a live session this test opened.
+    unsafe {
+        assert_eq!(
+            put_rc(&session),
+            Z_OK,
+            "the registry of faces carries the put"
+        );
+        close_session(session);
+    }
 }
 
 /// A group no other test or node on this host scouts on, so a session that scouts here meets

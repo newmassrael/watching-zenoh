@@ -700,6 +700,24 @@ impl OpenPlan {
             && self.listen_phase.policy.exit_on_failure
     }
 
+    /// The node `role` is opened as when this plan keeps its south apart (`gateway/south` names
+    /// subregions), which only a node places a remote by: a router always, a peer or a client
+    /// where [`Self::peer_fits_node`] or [`Self::client_fits_node`] say so. `None` for a plan that
+    /// keeps no south apart, which every surface opens as it opened it before, and for a shape
+    /// that fits no node.
+    #[cfg(feature = "router-node")]
+    pub fn node_for_south(&self, role: WhatAmI) -> Option<crate::drive::NodeRole> {
+        use crate::drive::NodeRole;
+        if !matches!(self.gateway_south, SouthPartition::Custom(_)) {
+            return None;
+        }
+        match role {
+            WhatAmI::Router => Some(NodeRole::Router),
+            WhatAmI::Peer => self.peer_fits_node().then_some(NodeRole::Peer),
+            WhatAmI::Client => self.client_fits_node().then_some(NodeRole::Client),
+        }
+    }
+
     /// Whether the south this plan keeps apart is carried out when `role` is opened by a caller
     /// that can run a node (`can_run_a_node`) or one that cannot.
     ///
@@ -714,12 +732,7 @@ impl OpenPlan {
         }
         #[cfg(feature = "router-node")]
         {
-            can_run_a_node
-                && match role {
-                    WhatAmI::Router => true,
-                    WhatAmI::Peer => self.peer_fits_node(),
-                    WhatAmI::Client => self.client_fits_node(),
-                }
+            can_run_a_node && self.node_for_south(role).is_some()
         }
         #[cfg(not(feature = "router-node"))]
         {

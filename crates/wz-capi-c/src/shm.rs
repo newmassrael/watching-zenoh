@@ -1792,7 +1792,7 @@ pub unsafe extern "C" fn z_obtain_shm_provider(
         let Some(session) = (unsafe { crate::session::session_state(this_) }) else {
             // SAFETY: checked non-null above.
             unsafe { *out_state = Z_SHM_PROVIDER_STATE_DISABLED };
-            return Z_ENULL;
+            return unsafe { crate::session::not_a_registry(this_) };
         };
         let Some(shm) = session.abi_extension::<Arc<SessionShm>>() else {
             // SAFETY: checked non-null above.

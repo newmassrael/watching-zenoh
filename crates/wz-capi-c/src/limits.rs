@@ -16,7 +16,7 @@
 use crate::abi::z_loaned_session_t;
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::session_handle;
 
 /// The most bytes of ONE encoded message this session sends, written through
 /// `out`.
@@ -38,8 +38,10 @@ pub unsafe extern "C" fn wz_capi_c_session_max_message_bytes(
     out: *mut usize,
 ) -> ZResult {
     guarded(|| {
+        // The limit is a constant of this library's reassembly slot, which the registry and a node
+        // share: a handle that is not there is the only thing with none to ask.
         // SAFETY: the caller's contract.
-        if out.is_null() || unsafe { session_state(session) }.is_none() {
+        if out.is_null() || unsafe { session_handle(session) }.is_none() {
             return Z_ENULL;
         }
         // SAFETY: `out` is non-null and valid for one write, by the contract.

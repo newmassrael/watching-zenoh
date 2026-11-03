@@ -51,7 +51,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::reply_keyexpr::{parameters_has_anyke, reply_keyexpr_is_covered};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::session_state;
+use crate::session::{not_a_registry, session_state};
 use crate::string::view_string_over;
 
 use wz_capi_core::faces::{QblId, SharedSession};
@@ -781,7 +781,7 @@ pub unsafe extern "C" fn z_declare_queryable(
         let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry(session) };
         };
         let ke = ke.to_owned();
         // The same outbound gate the subscriber path applies, hoisted so the
