@@ -307252,6 +307252,36 @@
         "Windows Z8 (first run, pc6): pass 21 of 31 files; empty 4 (acl, interceptors, low_pass, qos_overwrite: upstream gates the file to unix). Fail 6: session 4 of 5 and shm 8 of 10 (the multicast test opens udp/224.0.0.1:0 and Windows itself refuses 224.0.0.1, shown with a plain socket; shm's two are the same open error); liveliness 45 of 46 (regression_3, the assertion Linux fixed in round 4050); qos 0 of 2 and queryable 1 of 3 (a receive times out, cause not found; the OS loops multicast back on the host); routing 7 of 8 (scouting_delay_regression: open took 537 ms, bound 400). The controls with upstream's zenoh on Windows are owed, as is regions."
       ]
     },
+    "Round 4162": {
+      "decision_summary": "The task cells of the admin image of decision D14 are 2,048 bytes and not 12,288. They were sized for an application layer that carried 4.8 KB of pending-query registries and held its by-value argument twice; with the limits the node does not use stated (the two previous entries) the pump's future is small, and the number was measured and not guessed: a cell of 4,096, one of 2,048 and one of 1,024 each ran the whole witness on the kit (status answered, close refused, open taken, both sessions listed, the written endpoint live, an unlisted router refused), so the future is under 1,024 bytes, and a cell the future does not fit is refused at spawn, which the witness would have shown as a session that never came up. The cell is twice the bound the measurement gives, 2,048. The three cells were 36,864 bytes of the node's STORAGE; the .bss is 267,671 bytes (298,391 before, 412,711 at the first row of the image), the text 324,712, and three runs on the kit at this size held the row (stack reading 7,744) with Layer Qz passing on the QEMU admin images. The comment of TASK_BYTES says what the number was and why it fell.",
+      "changes_bullets": [
+        "deploy/zephyr-admin-node/rust/src/fixed_admin.rs: TASK_BYTES and its comment. deploy/text_budget.json and deploy/resource_budget.json: the image's text and the prose of its row. docs/session-lifecycle-intent.md: the paragraph of the image's rows."
+      ],
+      "verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls at a task cell of 4,096, 2,048 and 1,024 bytes, each holding every step of the witness; three runs at 2,048 inside the image's row; the text gate holds (324,712). Layer Qz run locally with WZ_QZ_REQUIRE=1 passes on all four images. The hosted run has not been read. The smallest cell the future fits was not found (1,024 is the lowest tried)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the limits the overlay still leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's) and the Mbed TLS arena (98,304 bytes, 37 percent of the .bss), which a measurement of one inbound and one dialled session at their peak could size; a hosted reading of Layer Qzk."
+      ],
+      "publishable_decision_summary": "The task cells of the admin image of decision D14 are 2,048 bytes and not 12,288. They were sized for an application layer that carried 4.8 KB of pending-query registries and held its by-value argument twice; with the limits the node does not use stated (the two previous entries) the pump's future is small, and the number was measured and not guessed: a cell of 4,096, one of 2,048 and one of 1,024 each ran the whole witness on the kit (status answered, close refused, open taken, both sessions listed, the written endpoint live, an unlisted router refused), so the future is under 1,024 bytes, and a cell the future does not fit is refused at spawn, which the witness would have shown as a session that never came up. The cell is twice the bound the measurement gives, 2,048. The three cells were 36,864 bytes of the node's STORAGE; the .bss is 267,671 bytes (298,391 before, 412,711 at the first row of the image), the text 324,712, and three runs on the kit at this size held the row (stack reading 7,744) with Layer Qz passing on the QEMU admin images. The comment of TASK_BYTES says what the number was and why it fell.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-admin-node/rust/src/fixed_admin.rs: TASK_BYTES and its comment. deploy/text_budget.json and deploy/resource_budget.json: the image's text and the prose of its row. docs/session-lifecycle-intent.md: the paragraph of the image's rows."
+      ],
+      "publishable_verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls at a task cell of 4,096, 2,048 and 1,024 bytes, each holding every step of the witness; three runs at 2,048 inside the image's row; the text gate holds (324,712). Layer Qz run locally with WZ_QZ_REQUIRE=1 passes on all four images. The hosted run has not been read. The smallest cell the future fits was not found (1,024 is the lowest tried)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the limits the overlay still leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's) and the Mbed TLS arena (98,304 bytes, 37 percent of the .bss), which a measurement of one inbound and one dialled session at their peak could size; a hosted reading of Layer Qzk."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
