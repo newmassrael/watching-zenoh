@@ -307998,6 +307998,34 @@
         "The refusal is the interim: take each shape that is refused into the node and remove it from carries_south, the C ABI last (its session handle is the registry's SessionState and cannot hold a RouterState, so it needs a handle that can hold either). A peer that accepts no session and a client with no listener or router are the first shapes. Read the hosted run for the 9 legs of the partition test file and for the Z8 lane. Open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers; the C ABI tests other than session_roles were not run with this change."
       ]
     },
+    "Round 4185": {
+      "decision_summary": "Two rows in the non-default test legs claim the two wz-session-core tests that the census named as claimed by no leg on the hosted run of the round 4181 tip: pool_gauge::tests::the_mark_only_rises_and_saturates (feature pool-monitor) and decl_sink::tests::synced_sinks_tell_each_observer_in_install_order_and_forget_a_removed_one (feature declarations-synced-event). The two features arrived with ebb5760a39 and 45ab988142 and no row named either. One row per feature, each filtered by the module path, so a test added to either module later is claimed without touching the row. Neither feature is a selector, so neither joins a row above.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the rows wz-session-core|hook|pool-monitor|pool_gauge:: and wz-session-core|hook|declarations-synced-event|decl_sink::, with a comment quoting the hosted refusal."
+      ],
+      "verification_bullets": [
+        "On pc2, each with the package compiled in the log. cargo test -p wz-session-core --features pool-monitor -- pool_gauge:: ran 5 tests and passed, the claimed one among them. cargo test -p wz-session-core --features declarations-synced-event -- decl_sink:: ran 7 tests and passed, the claimed one among them (the first attempt ended 137 and was retried). bash -n on the gate script is clean. The census read from the hosted job (shard 1 of 2) names only these two as unclaimed; the full census on this tree was not seen to pass: a fourth pc2 run ended on a full disk and a linker bus error while listing wz-runtime-tokio and wz-session-core, and the hosted shard 0 of 2 was still queued."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Open: the census with every crate listed has still not been seen to pass for this tree (pc2 ran out of disk four times while listing; the hosted shard 0 of 2 had not run); the wz peer publisher a router dials is measured (47 against upstream 47) and not pinned as a test, for want of a lane that checks for zenohd with a wz_zenoh publisher; hosted runs not read to the end."
+      ],
+      "publishable_decision_summary": "Two rows in the non-default test legs claim the two wz-session-core tests that the census named as claimed by no leg on the hosted run of the round 4181 tip: pool_gauge::tests::the_mark_only_rises_and_saturates (feature pool-monitor) and decl_sink::tests::synced_sinks_tell_each_observer_in_install_order_and_forget_a_removed_one (feature declarations-synced-event). The two features arrived with ebb5760a39 and 45ab988142 and no row named either. One row per feature, each filtered by the module path, so a test added to either module later is claimed without touching the row. Neither feature is a selector, so neither joins a row above.",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the rows wz-session-core|hook|pool-monitor|pool_gauge:: and wz-session-core|hook|declarations-synced-event|decl_sink::, with a comment quoting the hosted refusal."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2, each with the package compiled in the log. cargo test -p wz-session-core --features pool-monitor -- pool_gauge:: ran 5 tests and passed, the claimed one among them. cargo test -p wz-session-core --features declarations-synced-event -- decl_sink:: ran 7 tests and passed, the claimed one among them (the first attempt ended 137 and was retried). bash -n on the gate script is clean. The census read from the hosted job (shard 1 of 2) names only these two as unclaimed; the full census on this tree was not seen to pass: a fourth pc2 run ended on a full disk and a linker bus error while listing wz-runtime-tokio and wz-session-core, and the hosted shard 0 of 2 was still queued."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the census with every crate listed has still not been seen to pass for this tree (pc2 ran out of disk four times while listing; the hosted shard 0 of 2 had not run); the wz peer publisher a router dials is measured (47 against upstream 47) and not pinned as a test, for want of a lane that checks for zenohd with a wz_zenoh publisher; hosted runs not read to the end."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
