@@ -308088,6 +308088,62 @@
         "The consumer is told fields 55 and the commit, and why the size is a key beside payload and not inside it. Open: an entry whose walk and the session's parse disagree about a record's place reads null while the census counted that record; no capture in the tree produces such a disagreement, and the contract holds only where none occurs."
       ]
     },
+    "Round 4188": {
+      "decision_summary": "Repayment of the hosted reds of run 41589047498 (round 4178) that the two SCE pin moves of round 4167 left, and the small ones beside them. The pins follow SCE's ADR 0077: a codec document states the protocol's bound and the Node deployment (deploy/codec_node.yaml) states the profile's number. Three checks still read the old place: verify-codegen emitted unbounded codecs without views (rust) or a deployment (c11), gate 2e read the capacity from the SCXML, and SCE's own forge resources still state profile numbers, so eight stems are named divergences until they state the wire width. The text growth is bisected on one host with pico-client-coop as the witness: +35,144 at the first pin and -11,968 at the second, which is the codec shape the ADR chose, so thirteen budgets move to their reading and 3,500. Four doc links, six shellcheck findings, the tokio census leg and a test count are repaid with them.",
+      "changes_bullets": [
+        "scripts/verify-codegen.sh: emit() passes --views to the rust backend and --deploy deploy/codec_node.yaml to c11, on both sides of the golden compare.",
+        "scripts/run-ci.sh: Layer B's LAYER2_KNOWN_DIVERGENCE gains encoding, locator, ext_zbuf, open_body, hello, ext_envelope, msg_del and ext_entry, each with the one attribute that differs from SCE's resource; C1bn's one-name loop becomes a single check (SC2043); C1ah node_clock 25 -> 28 for the three reply-stamp tests of a112baa068.",
+        "scripts/lib/attachment_capacity_witness_gate.py and .githooks/pre-push: gate 2e reads ext_zbuf's capacity from deploy/codec_node.yaml (node_capacity, by indentation) where it read the SCXML; the selftest fixture holds a sibling codec and header prose.",
+        "scripts/lib/capability_cost_gate.py: thirteen text budgets move (the nine coop cases, pico-peer, pico-default, capic-client-small, capic-default), with the bisect and the symbol diff in the note above pico-client-coop.",
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-tokio wide leg gains declarations-synced-event and remote-declaration-watch for three session::tests.",
+        "crates/wz-session-core/src/pool_gauge.rs and crates/wz-runtime-tokio/src/session/decl_listener.rs: intra-doc links that no reduced configuration resolved (Layer C1bzr) name the crate path or become code.",
+        "scripts/kit-lane.sh, scripts/capture-validation/null-workload.sh and build-c-pico.sh: six shellcheck findings (SC2209, SC2129, SC2016)."
+      ],
+      "verification_bullets": [
+        "Layer B pass on hkl001 (eight stems report the audit-traced L2 mismatch, every emit passes) and Layer B2 pass on pc3.",
+        "Layer C1cs at the rebased head on hkl001 read every case; the thirteen budgets are the larger of that reading and the hosted one, plus 3,500, to the hundred. capability_cost_gate --selftest 16/16.",
+        "pico-client-coop on hkl001: 946,919 (round 4119), 947,655 (4155), 947,663 (4166), 982,807 (85f794fa03), 970,839 (78e443084b and the head); the hosted run read 971,087.",
+        "cargo test wz-session-core --lib decl_sink:: (declarations-synced-event) ran 7 and pool_gauge:: (pool-monitor) ran 5, both pass; Layer C1ah pass.",
+        "attachment_capacity_witness_gate rc 0 and selftest OK; the pre-push extended-range gates and Layers C0e, C0f rc 0; upstream_citation_anchor_gate --resolve-if-pinned OK."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "Remove the eight stems from Layer B's LAYER2_KNOWN_DIVERGENCE the day SCE's forge resources state the wire width; the SCE session has the item and says the unbounded ones first need a deployment capacity in its conformance run.",
+        "Measure whether moving the borrowed-to-owned conversions out of decode_one_record (1,438 -> 18,628 at the pins) takes back any of the coop text.",
+        "A hosted reading of Layers B, C1cs, C1bzr, C1cn and 0 at this round's head.",
+        "Step 2 of the server-layer split: storage_manager to wz-storage."
+      ],
+      "publishable_decision_summary": "Repayment of the hosted reds of run 41589047498 (round 4178) that the two SCE pin moves of round 4167 left, and the small ones beside them. The pins follow SCE's ADR 0077: a codec document states the protocol's bound and the Node deployment (deploy/codec_node.yaml) states the profile's number. Three checks still read the old place: verify-codegen emitted unbounded codecs without views (rust) or a deployment (c11), gate 2e read the capacity from the SCXML, and SCE's own forge resources still state profile numbers, so eight stems are named divergences until they state the wire width. The text growth is bisected on one host with pico-client-coop as the witness: +35,144 at the first pin and -11,968 at the second, which is the codec shape the ADR chose, so thirteen budgets move to their reading and 3,500. Four doc links, six shellcheck findings, the tokio census leg and a test count are repaid with them.",
+      "publishable_changes_bullets": [
+        "scripts/verify-codegen.sh: emit() passes --views to the rust backend and --deploy deploy/codec_node.yaml to c11, on both sides of the golden compare.",
+        "scripts/run-ci.sh: Layer B's LAYER2_KNOWN_DIVERGENCE gains encoding, locator, ext_zbuf, open_body, hello, ext_envelope, msg_del and ext_entry, each with the one attribute that differs from SCE's resource; C1bn's one-name loop becomes a single check (SC2043); C1ah node_clock 25 -> 28 for the three reply-stamp tests of a112baa068.",
+        "scripts/lib/attachment_capacity_witness_gate.py and .githooks/pre-push: gate 2e reads ext_zbuf's capacity from deploy/codec_node.yaml (node_capacity, by indentation) where it read the SCXML; the selftest fixture holds a sibling codec and header prose.",
+        "scripts/lib/capability_cost_gate.py: thirteen text budgets move (the nine coop cases, pico-peer, pico-default, capic-client-small, capic-default), with the bisect and the symbol diff in the note above pico-client-coop.",
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-tokio wide leg gains declarations-synced-event and remote-declaration-watch for three session::tests.",
+        "crates/wz-session-core/src/pool_gauge.rs and crates/wz-runtime-tokio/src/session/decl_listener.rs: intra-doc links that no reduced configuration resolved (Layer C1bzr) name the crate path or become code.",
+        "scripts/kit-lane.sh, scripts/capture-validation/null-workload.sh and build-c-pico.sh: six shellcheck findings (SC2209, SC2129, SC2016)."
+      ],
+      "publishable_verification_bullets": [
+        "Layer B pass on hkl001 (eight stems report the audit-traced L2 mismatch, every emit passes) and Layer B2 pass on pc3.",
+        "Layer C1cs at the rebased head on hkl001 read every case; the thirteen budgets are the larger of that reading and the hosted one, plus 3,500, to the hundred. capability_cost_gate --selftest 16/16.",
+        "pico-client-coop on hkl001: 946,919 (round 4119), 947,655 (4155), 947,663 (4166), 982,807 (85f794fa03), 970,839 (78e443084b and the head); the hosted run read 971,087.",
+        "cargo test wz-session-core --lib decl_sink:: (declarations-synced-event) ran 7 and pool_gauge:: (pool-monitor) ran 5, both pass; Layer C1ah pass.",
+        "attachment_capacity_witness_gate rc 0 and selftest OK; the pre-push extended-range gates and Layers C0e, C0f rc 0; upstream_citation_anchor_gate --resolve-if-pinned OK."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Remove the eight stems from Layer B's LAYER2_KNOWN_DIVERGENCE the day SCE's forge resources state the wire width; the SCE session has the item and says the unbounded ones first need a deployment capacity in its conformance run.",
+        "Measure whether moving the borrowed-to-owned conversions out of decode_one_record (1,438 -> 18,628 at the pins) takes back any of the coop text.",
+        "A hosted reading of Layers B, C1cs, C1bzr, C1cn and 0 at this round's head.",
+        "Step 2 of the server-layer split: storage_manager to wz-storage."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
