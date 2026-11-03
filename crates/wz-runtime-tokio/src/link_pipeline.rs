@@ -676,6 +676,12 @@ fn bind_listener(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<T
         SocketAddr::V6(_) => TcpSocket::new_v6()?,
     };
     socket.set_reuseaddr(true)?;
+    #[cfg(windows)]
+    if let SocketAddr::V6(v6) = addr {
+        if v6.ip().is_unspecified() {
+            accept_ipv4_on_v6_wildcard(&socket)?;
+        }
+    }
     // R311y236 — honour a listen-side `#iface=` bind (SO_BINDTODEVICE) before
     // bind, so a listener can be pinned to a NIC (the accept-side mirror of the
     // dial-side connect bind). Feature/platform-gated in `bind_socket_to_device`.
@@ -686,6 +692,53 @@ fn bind_listener(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<T
     link_socket.configure_stream(&socket, addr)?;
     socket.bind(addr)?;
     socket.listen(LISTEN_BACKLOG)
+}
+
+/// Let a listener bound to the IPv6 wildcard (`[::]`, the default listen address of a zenoh
+/// peer) take IPv4 connections as well, as every other platform does by default.
+///
+/// Windows keeps `IPV6_V6ONLY` on for an IPv6 socket, so a `[::]` listener there refuses an IPv4
+/// connection (measured: `10061`, after about two seconds of retransmitted SYNs, where a dual-stack
+/// socket accepts in 15 ms), while the locators a node tells its peers are the IPv4 and IPv6
+/// addresses of its interfaces. A peer that was told of this node over gossip dialled the IPv4 one
+/// first and waited the two seconds out; its open, which waits for the dials its gossip made, ran
+/// out `scouting/delay` (`scouting_delay_regression`: 538 ms against a bound of 400, where the
+/// same test on upstream's own library passes). Upstream builds its listener the same way
+/// (`io/zenoh-link-commons/src/tcp.rs` @ `new_listener`) and leaves the option on; this is one of
+/// the places the family goes past it.
+///
+/// `windows-sys` is an optional dependency of this crate and `socket2` another, so the one call is
+/// declared here, against the `ws2_32` the standard library has already linked.
+#[cfg(windows)]
+fn accept_ipv4_on_v6_wildcard(socket: &TcpSocket) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+
+    const IPPROTO_IPV6: i32 = 41;
+    const IPV6_V6ONLY: i32 = 27;
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+        fn WSAGetLastError() -> i32;
+    }
+
+    let only_v6: u32 = 0;
+    // SAFETY: `socket` owns an open SOCKET for the whole call, `only_v6` is a live 4-byte value and
+    // its length is passed with it; the call reads the bytes and keeps no pointer.
+    let rc = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            IPPROTO_IPV6,
+            IPV6_V6ONLY,
+            (&only_v6 as *const u32).cast(),
+            std::mem::size_of::<u32>() as i32,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        // SAFETY: reads the calling thread's last Winsock error; no arguments.
+        Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }))
+    }
 }
 
 /// Accept ONE inbound connection from a *borrowed* [`TcpListener`], applying the
