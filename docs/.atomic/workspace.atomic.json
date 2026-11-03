@@ -307632,6 +307632,36 @@
         "Owed: a full run-ci.sh with no --layer is not caught by needed_by and is placed with --host; the owner is asked for a per-command requirement. bx keeping the toolchain (install, prefix_link) is not decided."
       ]
     },
+    "Round 4174": {
+      "decision_summary": "The kit's secure-channel client reports the peak of its Mbed TLS arena as the admin node does, and its arena is sized by the reading. The reporting moved to the module both images share (fixed_tls.rs: the arena size the build states, WZ_TLS_ARENA_BYTES, now set by the CMake macro of the secure channel for every image that builds it, and the growth of the peak since the last line), the client prints the same line `tls arena: peak N of M bytes` in the loop that prints its stack, and the kit lane's rule that the last such line leaves a quarter of the arena free is one function that the admin run and the verify run of the client both call. Over a dial, a handshake and the host's queries the client's peak is 24,968 bytes (three runs: 24,968, 24,968 and 24,964) where its arena was 49,152, set before anything reported it; it is 36,864 bytes now, 32 percent free, the image's .bss 165,039 (177,327 before). Three runs on the kit at that size held every step: the image and the router verified each other, the host's queries were answered 2,000 times each, and the row was held (stack and GET median). The admin image's peak and arena are unchanged (45,304 of 65,536). The loopback witness images of Layer Qz keep their arenas of 98,304 bytes: they are tests and not images a kit runs.",
+      "changes_bullets": [
+        "deploy/zephyr-admin-node: rust/src/fixed_tls.rs (the arena size and the growth of the peak), rust/src/fixed_admin.rs (uses it), rust/src/fixed_client.rs (the line), CMakeLists.txt (the variable moves into the secure channel macro), overlays/t2g_client_tls.conf (the arena). scripts/kit-lane.sh: hold_the_arena, called by the admin and the verify runs. deploy/resource_budget.json: the client's prose."
+      ],
+      "verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: the client at 49,152 (peak 24,968) and the admin image (45,304 of 65,536) with the shared reporting; three runs of the client at 36,864 each verified the router, answered the host's queries, held the row and printed a peak of 24,964 to 24,968. Layer Qzk run locally across the six images (see the run). deploy/zephyr-admin-node/rust formatted. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the loopback witness images' arenas (98,304 each) report nothing and are tests; the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb; the limits the admin overlay leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's); a hosted reading of Layer Qzk."
+      ],
+      "publishable_decision_summary": "The kit's secure-channel client reports the peak of its Mbed TLS arena as the admin node does, and its arena is sized by the reading. The reporting moved to the module both images share (fixed_tls.rs: the arena size the build states, WZ_TLS_ARENA_BYTES, now set by the CMake macro of the secure channel for every image that builds it, and the growth of the peak since the last line), the client prints the same line `tls arena: peak N of M bytes` in the loop that prints its stack, and the kit lane's rule that the last such line leaves a quarter of the arena free is one function that the admin run and the verify run of the client both call. Over a dial, a handshake and the host's queries the client's peak is 24,968 bytes (three runs: 24,968, 24,968 and 24,964) where its arena was 49,152, set before anything reported it; it is 36,864 bytes now, 32 percent free, the image's .bss 165,039 (177,327 before). Three runs on the kit at that size held every step: the image and the router verified each other, the host's queries were answered 2,000 times each, and the row was held (stack and GET median). The admin image's peak and arena are unchanged (45,304 of 65,536). The loopback witness images of Layer Qz keep their arenas of 98,304 bytes: they are tests and not images a kit runs.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-admin-node: rust/src/fixed_tls.rs (the arena size and the growth of the peak), rust/src/fixed_admin.rs (uses it), rust/src/fixed_client.rs (the line), CMakeLists.txt (the variable moves into the secure channel macro), overlays/t2g_client_tls.conf (the arena). scripts/kit-lane.sh: hold_the_arena, called by the admin and the verify runs. deploy/resource_budget.json: the client's prose."
+      ],
+      "publishable_verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: the client at 49,152 (peak 24,968) and the admin image (45,304 of 65,536) with the shared reporting; three runs of the client at 36,864 each verified the router, answered the host's queries, held the row and printed a peak of 24,964 to 24,968. Layer Qzk run locally across the six images (see the run). deploy/zephyr-admin-node/rust formatted. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the loopback witness images' arenas (98,304 each) report nothing and are tests; the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb; the limits the admin overlay leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's); a hosted reading of Layer Qzk."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
