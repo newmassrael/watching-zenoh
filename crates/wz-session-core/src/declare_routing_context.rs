@@ -37,7 +37,7 @@
 //! This module keeps ONLY the Declare-level header `Z` sync — the one field
 //! that differs from the Push twin.
 
-use wz_codecs::declare::DeclareOwned;
+use crate::transport_profile::owned::DeclareOwned;
 
 use crate::ext_nodeid;
 
@@ -187,7 +187,7 @@ mod tests {
         // this pins that the generated codec round-trips it byte-faithfully and
         // in zenoh's exts-before-body order.
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::declare::Declare;
+        use wz_codecs::lent::Declare;
         use wz_codecs_test_support::TestWire;
 
         let mut d = declare_sub();
@@ -196,7 +196,7 @@ mod tests {
 
         let mut cursor = SceCursor::new(&bytes);
         let decoded = Declare::decode(&mut cursor)
-            .and_then(|x| x.try_into_owned())
+            .and_then(|x| x.try_into_owned_in::<crate::transport_profile::TransportStorage>())
             .expect("decode declare");
         assert_eq!(
             read_declare_source(&decoded),

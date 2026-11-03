@@ -81,7 +81,7 @@ pub fn join_message_len(bytes: &[u8]) -> Option<usize> {
     let chain = &bytes[base_end..];
     let mut cursor = SceCursor::new(chain);
     for _ in 0..crate::parse_error::MAX_EXT_CHAIN_DEPTH {
-        let entry = wz_codecs::ext_entry::ExtEntry::decode(&mut cursor).ok()?;
+        let entry = wz_codecs::lent::ExtEntry::decode(&mut cursor).ok()?;
         if !entry.z() {
             return Some(base_end + chain.len() - cursor.remaining());
         }

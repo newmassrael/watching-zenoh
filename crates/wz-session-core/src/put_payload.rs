@@ -52,16 +52,6 @@ pub const SLICE_KIND_RAW: u8 = 0;
 /// payload (`commons/zenoh-codec/src/core/zbuf.rs` @ `const SHM_PTR: u8 = 1;`).
 pub const SLICE_KIND_SHM_PTR: u8 = 1;
 
-/// How many slices one Put holds: the bound `msg_put.scxml` gives its `slices`
-/// repeat (`max-count="4"`). A count past it is refused by the codec after the
-/// element that does not fit has been read, and the dissector, which must
-/// refuse the same input, reads this to say where.
-pub const MAX_SLICES: usize = 4;
-
-/// How many entries a Put's extension chain holds, the marker included: the
-/// bound `msg_put.scxml` gives the chain (`max-depth="8"`).
-const MAX_CHAIN: usize = 8;
-
 /// The list a Put's chain is held in, at the profile `S`.
 type ChainList<S> = <S as HoldsList<MsgPutExtensionsField>>::List<ExtEntryOwned<S>>;
 
@@ -185,9 +175,11 @@ pub fn view_chain<'v, 'a>(
 /// The chain and the payload are one fact, so the chain must say the layout the
 /// payload has: the entries of a sliced Put carry the marker, and those of an
 /// inline one do not. A chain that says the other layout is refused as
-/// `PresentIfMismatch` and the Put is left as it was; a chain past its bound is
-/// `TooManyElements`. No entries leaves an inline Put with no chain. The
-/// header's `Z` flag follows whether a chain is held.
+/// `PresentIfMismatch` and the Put is left as it was. The protocol bounds the
+/// chain by nothing, so a chain is refused only past what the profile `S` stores
+/// (`CapacityExceeded` from a fixed list; the heap holds any). No entries leaves
+/// an inline Put with no chain. The header's `Z` flag follows whether a chain is
+/// held.
 pub fn set_chain<S: MsgPutStorage>(
     put: &mut MsgPutOwned<S>,
     entries: impl IntoIterator<Item = ExtEntryOwned<S>>,
@@ -195,16 +187,12 @@ pub fn set_chain<S: MsgPutStorage>(
     let mut list = <ChainList<S> as SceList<ExtEntryOwned<S>>>::empty();
     let mut count = 0;
     for entry in entries {
-        if count == MAX_CHAIN {
-            return Err(CodecError::TooManyElements);
-        }
         list.try_push(entry)?;
         count += 1;
     }
     let held = match &mut put.extensions_has_0x12 {
         MsgPutExtensionsHas0x12::Has0x12 { extensions, .. } => {
-            *extensions = place_first::<_, MsgPutExtensionsHas0x12Key, MAX_CHAIN>(list)
-                .map_err(|_| CodecError::PresentIfMismatch)?;
+            *extensions = place_first(list).map_err(|_| CodecError::PresentIfMismatch)?;
             true
         }
         MsgPutExtensionsHas0x12::NotHas0x12 { extensions, .. } => {
@@ -308,7 +296,7 @@ pub fn shm<S: for<'x> MsgPutFrom<'x>>(descriptor: &[u8]) -> Result<MsgPutOwned<S
         encoding: None,
         extensions_has_0x12: MsgPutExtensionsHas0x12::Has0x12 {
             extensions: Placed::default(),
-            slices: shm_slices::<S, _>(descriptor)?,
+            slices: shm_slices::<S, _, _>(descriptor)?,
         },
         payload_len: None,
         slice_count: Some(1),
@@ -320,7 +308,7 @@ pub fn shm<S: for<'x> MsgPutFrom<'x>>(descriptor: &[u8]) -> Result<MsgPutOwned<S
 /// Query are the same list on the wire (`Zenoh080Sliced`), so both take it from
 /// here and no site spells a slice by hand (R3048). The list type is the one of
 /// the field the result is assigned to.
-pub fn shm_slices<S, L>(descriptor: &[u8]) -> Result<Bounded<L, MAX_SLICES>, CodecError>
+pub fn shm_slices<S, L, const MAX: usize>(descriptor: &[u8]) -> Result<Bounded<L, MAX>, CodecError>
 where
     S: for<'x> ZbufSliceFrom<'x>,
     L: SceList<ZbufSliceOwned<S>> + Entries,
@@ -631,9 +619,9 @@ pub(crate) fn join_slices(remade: Vec<(u8, Vec<u8>)>) -> Vec<u8> {
 
 /// `remade` as the wire profile's list of slices.
 #[cfg(feature = "transport-shm")]
-pub(crate) fn slice_list(
+pub(crate) fn slice_list<const MAX: usize>(
     remade: &[(u8, Vec<u8>)],
-) -> Result<Bounded<Vec<ZbufSliceOwned<crate::wire::WireStorage>>, MAX_SLICES>, RelayFault> {
+) -> Result<Bounded<Vec<ZbufSliceOwned<crate::wire::WireStorage>>, MAX>, RelayFault> {
     let unrepresentable = |_| RelayFault::Unrepresentable;
     let mut list = Vec::with_capacity(remade.len());
     for (kind, bytes) in remade {
@@ -689,7 +677,7 @@ pub fn priority_band<S: wz_codecs::ext_entry::ExtEntryStorage>(
 mod tests {
     use super::*;
     use sce_forge_runtime::codec::SceCursor;
-    use wz_codecs::msg_put::MsgPut;
+    use wz_codecs::lent::MsgPut;
 
     type Heap = sce_forge_runtime::codec::Heap;
 
@@ -734,7 +722,7 @@ mod tests {
         let mut list = core::mem::take(slices).into_inner();
         list.extend(more);
         put.slice_count = Some(list.len() as u32);
-        *slices = Bounded::new(list).expect("the slices fit MAX_SLICES");
+        *slices = Bounded::new(list).expect("the slices fit the u32 count");
     }
 
     #[test]

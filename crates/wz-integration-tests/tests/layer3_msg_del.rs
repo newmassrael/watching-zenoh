@@ -15,7 +15,7 @@
 //! (1-byte output). Pins the DEL contract: an empty DEL is a
 //! single header byte with no trailing data.
 
-use wz_codecs::msg_del::MsgDel;
+use wz_codecs::lent::MsgDel;
 use zenoh_pico_sys::{
     _z_del_encode, _z_msg_del_t, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
 };

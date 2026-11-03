@@ -12,9 +12,7 @@
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-#[cfg(feature = "alloc")]
-use sce_forge_runtime::codec::CodecError;
-use sce_forge_runtime::codec::{Bounded, SceList};
+use sce_forge_runtime::codec::{Bounded, CodecError, Follows, Law, Lawful, SceList};
 
 /// The entries of an optional list a message holds, as a slice.
 pub trait HeldList<E> {
@@ -28,6 +26,25 @@ impl<E, L: SceList<E>, const MAX: usize, const MIN: usize> HeldList<E>
     fn entries(&self) -> Option<&[E]> {
         self.as_ref().map(|list| SceList::as_slice(list.inner()))
     }
+}
+
+/// A list whose entries follow a law over their order (a Query's chain, whose entries say whether
+/// the one before them was the shared-memory marker) is read as the list it holds.
+impl<E, L: SceList<E>, const MAX: usize, const MIN: usize, A: Law> HeldList<E>
+    for Option<Lawful<Bounded<L, MAX, MIN>, A>>
+{
+    fn entries(&self) -> Option<&[E]> {
+        self.as_ref()
+            .map(|lawful| SceList::as_slice(lawful.list().inner()))
+    }
+}
+
+/// `list` as a list whose entries follow the law `A` from the start its first entry gives, as a
+/// decode reads one. A list whose entries say otherwise is no value of the field and is refused as
+/// the decode refuses it, `PresentIfMismatch`.
+pub fn lawful<L: Follows<A>, A: Law>(list: L) -> Result<Lawful<L, A>, CodecError> {
+    let start = list.start_of_first();
+    Lawful::new(start, list).ok_or(CodecError::PresentIfMismatch)
 }
 
 /// A decoded message holds its list as the `heapless` vector the decode filled, whose capacity is

@@ -615,8 +615,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # list a node dials, which the config write also fills, so the feature alone is not
                 # what gates it.
                 "connect-endpoints",
-                "codec-hello",
-                "codec-linkstate",
+                # `codec-hello` and `codec-linkstate` LEFT this list by the R3291
+                # route. The SCE pin past ADR 0077 section 7 took the default
+                # profile from the codecs whose lists the protocol bounds by
+                # nothing, and `transport_profile::owned` names their owned forms
+                # at the transport profile under a bare `#[cfg(feature = ..)]`, so
+                # both features now gate public items a probe reads.
                 "codec-scout",
                 # R2973 — MOVED HERE from `NO_PUBLIC_PATH`. Its claim was that
                 # it gates no public item, and R2386's note in that table

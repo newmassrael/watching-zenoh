@@ -2309,7 +2309,7 @@ pub(crate) mod tests {
     /// gives, whose `L` flag is clear.
     fn hello_wire(zid: &[u8], locators: &[&str]) -> Vec<u8> {
         use wz_session_core::codec_owned::{owned_bytes, owned_string};
-        let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {
+        let owned: wz_codecs::hello::HelloOwned<wz_codecs::Heap> = wz_codecs::hello::HelloOwned {
             version: 0x09,
             cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
             zid: owned_bytes(zid).expect("zid"),

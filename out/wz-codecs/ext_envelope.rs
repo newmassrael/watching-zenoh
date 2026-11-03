@@ -16,8 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::ext_entry::ExtEntry;
-
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 
@@ -31,15 +29,23 @@ use super::ext_entry::ExtEntryOwned;
 #[allow(dead_code)]
 pub struct ExtEnvelopeExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<ExtEnvelopeExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `ExtEnvelopeIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait ExtEnvelopeStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ExtEnvelopeExtensionsField> + super::ext_entry::ExtEntryStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ExtEnvelopeExtensionsField> + super::ext_entry::ExtEntryStorage> ExtEnvelopeStorage for S {}
+
+/// What `ExtEnvelopeIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `ExtEnvelope` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait ExtEnvelopeLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ExtEnvelopeExtensionsField> + super::ext_entry::ExtEntryLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ExtEnvelopeExtensionsField> + super::ext_entry::ExtEntryLentStorage> ExtEnvelopeLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside ExtEnvelopeStorage: how it stores each field of that frame.
@@ -56,16 +62,18 @@ impl<'f, S: ExtEnvelopeStorage + super::ext_entry::ExtEntryFrom<'f>> ExtEnvelope
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtEnvelopeIn<S: ExtEnvelopeStorage> {
     pub header_flags: u8,
-    pub extensions: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ExtEnvelopeExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>,
+    pub extensions: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ExtEnvelopeExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>,
 }
 
 /// The eager form: bytes and text borrowed from the frame, lists held inline.
 #[allow(dead_code)]
 pub type ExtEnvelope<'a> = ExtEnvelopeIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type ExtEnvelopeOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = ExtEnvelopeIn<S>;
+pub type ExtEnvelopeOwned<S> = ExtEnvelopeIn<S>;
 
 impl<S: ExtEnvelopeStorage> Default for ExtEnvelopeIn<S> {
     fn default() -> Self {
@@ -147,7 +155,7 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeIn<S> {
         };
         _out.extensions.refill(|_vec| {
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                 _more = _entry.z();
                 // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -158,9 +166,6 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeIn<S> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             Ok(())
         })?;
@@ -175,7 +180,7 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        ExtEnvelope::encode_source(self, w)
+        ExtEnvelopeWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -200,20 +205,20 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeIn<S> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `ExtEnvelope` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `ExtEnvelope`
-/// computes those from what is ([`ExtEnvelope::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`ExtEnvelopeWire::encode_source`]).
 pub trait ExtEnvelopeSource {
     /// The `header_flags` field.
     fn header_flags(&self) -> u8;
     /// The `extensions` field.
-    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>;
+    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>;
 }
 
 impl<T: ExtEnvelopeSource + ?Sized> ExtEnvelopeSource for &T {
     fn header_flags(&self) -> u8 {
         (**self).header_flags()
     }
-    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1> {
+    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1> {
         (**self).extensions()
     }
 }
@@ -227,14 +232,14 @@ pub struct ExtEnvelopeParts<'a> {
     /// The `header_flags` field.
     pub header_flags: u8,
     /// The `extensions` field.
-    pub extensions: ::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>,
+    pub extensions: ::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>,
 }
 
 impl<'a> ExtEnvelopeSource for ExtEnvelopeParts<'a> {
     fn header_flags(&self) -> u8 {
         self.header_flags
     }
-    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1> {
+    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1> {
         self.extensions.iter()
     }
 }
@@ -243,7 +248,7 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeSource for ExtEnvelopeOwned<S> {
     fn header_flags(&self) -> u8 {
         self.header_flags
     }
-    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1> {
+    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1> {
         self.extensions.list_iter()
     }
 }
@@ -252,15 +257,22 @@ impl<'a> ExtEnvelopeSource for ExtEnvelopeView<'a> {
     fn header_flags(&self) -> u8 {
         self.header_flags
     }
-    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1> {
+    fn extensions(&self) -> ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1> {
         self.extensions.iter()
     }
 }
 
+/// The codec `ExtEnvelope` itself: what writes a value read through
+/// [`ExtEnvelopeSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExtEnvelopeWire;
+
 #[allow(dead_code)]
-impl<'a> ExtEnvelope<'a> {
+impl ExtEnvelopeWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `ExtEnvelope::encode` writes for the value it holds, read through
     /// [`ExtEnvelopeSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -274,7 +286,7 @@ impl<'a> ExtEnvelope<'a> {
         let _k_extensions: usize = src.extensions().len();
         w.write_u8(src.header_flags())?;
         for (_i, _e) in src.extensions().enumerate() {
-            ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
         }
         Ok(())
     }
@@ -289,7 +301,7 @@ impl<'a> ExtEnvelope<'a> {
     }
 }
 
-impl<'a, S: ExtEnvelopeSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for ExtEnvelope<'a> {
+impl<S: ExtEnvelopeSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for ExtEnvelopeWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -298,7 +310,7 @@ impl<'a, S: ExtEnvelopeSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<
 }
 
 #[allow(dead_code)]
-impl<'a> ExtEnvelope<'a> {
+impl ExtEnvelopeWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -346,7 +358,7 @@ impl ListWalk<0> for ExtEnvelopeExtensionsWalk {
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ExtEnvelopeView<'a> {
     pub header_flags: u8,
-    pub extensions: Bounded<::sce_forge_runtime::codec::NonEmptyListView<'a, ExtEnvelopeExtensionsWalk, 0>, 8, 1>,
+    pub extensions: Bounded<::sce_forge_runtime::codec::NonEmptyListView<'a, ExtEnvelopeExtensionsWalk, 0>, { usize::MAX }, 1>,
 }
 
 #[allow(dead_code)]
@@ -392,7 +404,7 @@ impl<'a> ExtEnvelopeView<'a> {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -400,9 +412,6 @@ impl<'a> ExtEnvelopeView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             _out.extensions = Bounded::new(::sce_forge_runtime::codec::NonEmptyListView::from_scan(ListView::new(_rest, _count, [])).ok_or(CodecError::NeedMoreBytes)?).ok_or(CodecError::TooManyElements)?;
         }
@@ -420,12 +429,12 @@ impl<'a> ExtEnvelopeView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut ExtEnvelope<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut ExtEnvelopeIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: ExtEnvelopeLentStorage {
         _out.header_flags = self.header_flags;
         _out.extensions.refill(|_vec| {
             for _e in self.extensions.iter() {
-                _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                if let Some(_slot) = _vec.last_mut() {
+                ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                     _e.into_builder(_slot)?;
                 }
             }
@@ -442,7 +451,7 @@ impl<'a> ExtEnvelopeView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        ExtEnvelope::encode_source(self, w)
+        ExtEnvelopeWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -488,8 +497,11 @@ impl<'a> ExtEnvelopeView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `ExtEnvelope<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> ExtEnvelope<'a> {
+impl<'a, D> ExtEnvelopeIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ExtEnvelopeLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`ExtEnvelopeOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -509,11 +521,9 @@ impl<'a> ExtEnvelope<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<ExtEnvelopeOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -527,8 +537,8 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<ExtEnvelope<'_>, CodecError> {
-        let mut _out = ExtEnvelope::default();
+    pub fn try_as_borrowed(&self) -> Result<ExtEnvelopeIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -543,7 +553,7 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut ExtEnvelope<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut ExtEnvelopeIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header_flags = self.header_flags;
         _out.extensions.refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, self.extensions.inner(), |_e| Ok(_e.as_borrowed())))?;
         Ok(())
@@ -563,7 +573,7 @@ impl<S: ExtEnvelopeStorage> ExtEnvelopeOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> ExtEnvelope<'a> {
+impl<'a, D> ExtEnvelopeIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ExtEnvelopeLentStorage {
     /// Project this borrowed view into an owned [`ExtEnvelopeOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

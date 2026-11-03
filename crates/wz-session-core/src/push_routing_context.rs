@@ -320,7 +320,7 @@ mod tests {
         let encoded = p.wire();
 
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
-        let decoded = wz_codecs::push::Push::decode(&mut cursor)
+        let decoded = wz_codecs::lent::Push::decode(&mut cursor)
             .expect("Push round-trip decode")
             .try_into_owned_in::<crate::wire::WireStorage>()
             .expect("into owned");

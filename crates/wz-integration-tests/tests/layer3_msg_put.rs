@@ -29,7 +29,8 @@
 //! primitive class (timestamp embed, encoding embed, ext_entry
 //! variant + tlv-chain).
 
-use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
+use wz_codecs::lent::MsgPut;
+use wz_codecs::msg_put::MsgPutExtensionsHas0x12;
 use zenoh_pico_sys::{
     _z_bytes_from_buf, _z_msg_put_t, _z_put_encode, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf,
     _z_zbuf_clear,

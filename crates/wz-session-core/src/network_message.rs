@@ -58,19 +58,19 @@ use sce_forge_runtime::codec::SceCursor;
 // gated `parse_frame_payload` (their only use), so no borrowed import
 // needs cfg-gating against the body-codec feature matrix.
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-use wz_codecs::declare::DeclareOwned;
+use crate::transport_profile::owned::DeclareOwned;
 #[cfg(feature = "alloc")]
-use wz_codecs::interest::InterestOwned;
+use crate::transport_profile::owned::InterestOwned;
 #[cfg(feature = "alloc")]
-use wz_codecs::oam::OamOwned;
+use crate::transport_profile::owned::OamOwned;
+#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
+use crate::transport_profile::owned::ResponseFinalOwned;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 use wz_codecs::push::PushOwned;
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 use wz_codecs::request::RequestOwned;
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 use wz_codecs::response::ResponseOwned;
-#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
-use wz_codecs::response_final::ResponseFinalOwned;
 
 /// R3011 (open-debt item 850) — the storage profile of the DATA-PLANE messages
 /// a receive path hands up: `Push`, `Request` and `Response`.
@@ -87,9 +87,11 @@ use wz_codecs::response_final::ResponseFinalOwned;
 /// can give it.
 ///
 /// The control-plane variants (`Declare`, `Interest`, `Oam`, `ResponseFinal`)
-/// stay on the default: their byte fields are a few bytes of extension, not a
-/// payload, and a second profile there would only make every helper that reads
-/// both a generic one.
+/// are on [`TransportStorage`](crate::transport_profile::TransportStorage), the
+/// heap where the build allocates and the node's deployment where it does not
+/// ([`crate::transport_profile::owned`]): their byte fields are a few bytes of
+/// extension, not a payload, and a second profile there would only make every
+/// helper that reads both a generic one.
 #[cfg(feature = "rx-shared-bytes")]
 pub type WireStorage = crate::rx_profile::RxShared;
 /// See the `rx-shared-bytes` form of this alias.
@@ -568,10 +570,10 @@ fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
     )
 ))]
 fn declare_view_admission(
-    declare: &wz_codecs::declare::Declare<'_>,
+    declare: &wz_codecs::lent::Declare<'_>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::DeclarationKind as K;
-    use wz_codecs::declare::DeclareVariant as B;
+    use wz_codecs::lent::DeclareVariant as B;
     let (kind, chain) = match &declare.body {
         B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.entries()),
         B::CodecZenohUndeclKexpr(d) => (K::UndeclKeyExpr, d.extensions.entries()),
@@ -600,7 +602,7 @@ fn declare_view_admission(
     )
 ))]
 fn interest_view_admission(
-    interest: &wz_codecs::interest::Interest<'_>,
+    interest: &wz_codecs::lent::Interest<'_>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
     judge_chain(C::Network(N::Interest), interest.extensions.entries())
@@ -620,7 +622,7 @@ fn interest_view_admission(
     )
 ))]
 fn response_final_view_admission(
-    response_final: &wz_codecs::response_final::ResponseFinal<'_>,
+    response_final: &wz_codecs::lent::ResponseFinal<'_>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
     judge_chain(
@@ -640,7 +642,7 @@ fn response_final_view_admission(
         all(feature = "session-multicast", not(feature = "alloc"))
     )
 ))]
-fn oam_view_admission(oam: &wz_codecs::oam::Oam<'_>) -> crate::ext_admit::ExtAdmission {
+fn oam_view_admission(oam: &wz_codecs::lent::Oam<'_>) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
     judge_chain(C::Network(N::Oam), oam.extensions.entries())
 }
@@ -701,9 +703,9 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
         all(feature = "session-multicast", not(feature = "alloc"))
     )
 ))]
-fn push_view_admission(push: &wz_codecs::push::Push<'_>) -> crate::ext_admit::ExtAdmission {
+fn push_view_admission(push: &wz_codecs::lent::Push<'_>) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
-    use wz_codecs::push::PushVariant as B;
+    use wz_codecs::lent::PushVariant as B;
     judge_push_chains(push.extensions.entries(), || match &push.body {
         B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => judge_put_chain(put),
         B::CodecZenohMsgDel(del) => judge_chain(C::Zenoh(Z::Del), del.extensions.entries()),
@@ -888,11 +890,10 @@ fn request_view_admission(
     )
 ))]
 fn response_view_admission(
-    response: &wz_codecs::response::Response<'_>,
+    response: &wz_codecs::lent::Response<'_>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
-    use wz_codecs::reply::ReplyVariant as R;
-    use wz_codecs::response::ResponseVariant as B;
+    use wz_codecs::lent::{ReplyVariant as R, ResponseVariant as B};
     let body = match &response.body {
         B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
             let data = match &reply.body {
@@ -1248,7 +1249,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     Owned(&'r mut RecordBuf),
     /// A Push decoded where the payload lies, valid for the call.
     #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
-    Push(&'r wz_codecs::push::Push<'f>),
+    Push(&'r wz_codecs::lent::Push<'f>),
     /// A Request read where the payload lies, valid for the call: its view, which holds its extension
     /// chains as the bytes they occupy and not as entries (the eager record is 1.8 KB).
     #[cfg(feature = "codec-request")]
@@ -1258,7 +1259,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         feature = "codec-response",
         any(feature = "alloc", feature = "rx-response")
     ))]
-    Response(&'r wz_codecs::response::Response<'f>),
+    Response(&'r wz_codecs::lent::Response<'f>),
     /// A Declare decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
     #[cfg(all(
@@ -1266,7 +1267,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         feature = "codec-declare",
         feature = "rx-control"
     ))]
-    Declare(&'r wz_codecs::declare::Declare<'f>),
+    Declare(&'r wz_codecs::lent::Declare<'f>),
     /// A ResponseFinal decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
     #[cfg(all(
@@ -1274,11 +1275,11 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         feature = "codec-response-final",
         feature = "rx-response"
     ))]
-    ResponseFinal(&'r wz_codecs::response_final::ResponseFinal<'f>),
+    ResponseFinal(&'r wz_codecs::lent::ResponseFinal<'f>),
     /// An Interest decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
     #[cfg(all(feature = "session-slot", feature = "rx-control"))]
-    Interest(&'r wz_codecs::interest::Interest<'f>),
+    Interest(&'r wz_codecs::lent::Interest<'f>),
     /// A record the walk read and judged and no consumer reads further: an Oam, or
     /// the tail of a payload that opens with a MID this build has no decoder for
     /// (the walk ends there, as the owned walk's `Unknown` ends it)
@@ -1525,8 +1526,8 @@ fn lend_push<'f>(
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`), at the frame's lifetime: the
     // codec's lent message is invariant in it, and the record is lent for the call alone.
-    let mut push = wz_codecs::push::Push::<'f>::default();
-    wz_codecs::push::Push::decode_into(cursor, &mut push)
+    let mut push = wz_codecs::lent::Push::<'f>::default();
+    wz_codecs::lent::Push::decode_into(cursor, &mut push)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(push_view_admission(&push))?;
     each(WalkedRecord::Push(&push))
@@ -1575,8 +1576,8 @@ fn lend_response<'f>(
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // At the frame's lifetime, as `lend_push` decodes its record.
-    let mut response = wz_codecs::response::Response::<'f>::default();
-    wz_codecs::response::Response::decode_into(cursor, &mut response)
+    let mut response = wz_codecs::lent::Response::<'f>::default();
+    wz_codecs::lent::Response::decode_into(cursor, &mut response)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(response_view_admission(&response))?;
     each(WalkedRecord::Response(&response))
@@ -1672,8 +1673,8 @@ fn lend_declare<'f>(
     // Decoded into the binding that lends it (see `lend_response`): `Declare::decode` builds a
     // default, decodes into it, and returns it by value, and the `?` that unwraps it moves it again,
     // so three copies of the largest message a record can be were in this frame.
-    let mut declare = wz_codecs::declare::Declare::<'f>::default();
-    wz_codecs::declare::Declare::decode_into(cursor, &mut declare)
+    let mut declare = wz_codecs::lent::Declare::<'f>::default();
+    wz_codecs::lent::Declare::decode_into(cursor, &mut declare)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(declare_view_admission(&declare))?;
     each(WalkedRecord::Declare(&declare))
@@ -1696,8 +1697,8 @@ fn lend_response_final<'f>(
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`).
-    let mut response_final = wz_codecs::response_final::ResponseFinal::<'f>::default();
-    wz_codecs::response_final::ResponseFinal::decode_into(cursor, &mut response_final)
+    let mut response_final = wz_codecs::lent::ResponseFinal::<'f>::default();
+    wz_codecs::lent::ResponseFinal::decode_into(cursor, &mut response_final)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(response_final_view_admission(&response_final))?;
     each(WalkedRecord::ResponseFinal(&response_final))
@@ -1719,8 +1720,8 @@ fn lend_interest<'f>(
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`).
-    let mut interest = wz_codecs::interest::Interest::<'f>::default();
-    wz_codecs::interest::Interest::decode_into(cursor, &mut interest)
+    let mut interest = wz_codecs::lent::Interest::<'f>::default();
+    wz_codecs::lent::Interest::decode_into(cursor, &mut interest)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(interest_view_admission(&interest))?;
     each(WalkedRecord::Interest(&interest))
@@ -1742,8 +1743,8 @@ fn lend_oam<'f>(
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that holds it (see `lend_declare`).
-    let mut oam = wz_codecs::oam::Oam::default();
-    wz_codecs::oam::Oam::decode_into(cursor, &mut oam)
+    let mut oam = wz_codecs::lent::Oam::default();
+    wz_codecs::lent::Oam::decode_into(cursor, &mut oam)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(oam_view_admission(&oam))?;
     each(WalkedRecord::Skipped)
@@ -2021,36 +2022,44 @@ fn decode_one_record(
     match mid {
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => {
-            let req = wz_codecs::request::Request::decode(cursor)?;
+            let req = wz_codecs::lent::Request::decode(cursor)?;
             out.put(NetworkMessage::Request(Box::new(own_wire!(req, origin))))?;
         }
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
-            let push = wz_codecs::push::Push::decode(cursor)?;
+            let push = wz_codecs::lent::Push::decode(cursor)?;
             out.put(NetworkMessage::Push(Box::new(own_wire!(push, origin))))?;
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
-            let rf = wz_codecs::response_final::ResponseFinal::decode(cursor)?;
-            out.put(NetworkMessage::ResponseFinal(rf.try_into_owned()?))?;
+            let rf = wz_codecs::lent::ResponseFinal::decode(cursor)?;
+            out.put(NetworkMessage::ResponseFinal(
+                rf.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
+            ))?;
         }
         wire_const::N_MID_OAM => {
-            let oam = wz_codecs::oam::Oam::decode(cursor)?;
-            out.put(NetworkMessage::Oam(oam.try_into_owned()?))?;
+            let oam = wz_codecs::lent::Oam::decode(cursor)?;
+            out.put(NetworkMessage::Oam(
+                oam.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
+            ))?;
         }
         wire_const::N_MID_INTEREST => {
-            let interest = wz_codecs::interest::Interest::decode(cursor)?;
-            out.put(NetworkMessage::Interest(interest.try_into_owned()?))?;
+            let interest = wz_codecs::lent::Interest::decode(cursor)?;
+            out.put(NetworkMessage::Interest(
+                interest.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
+            ))?;
         }
         #[cfg(feature = "codec-response")]
         wire_const::N_MID_RESPONSE => {
-            let resp = wz_codecs::response::Response::decode(cursor)?;
+            let resp = wz_codecs::lent::Response::decode(cursor)?;
             out.put(NetworkMessage::Response(Box::new(own_wire!(resp, origin))))?;
         }
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => {
-            let decl = wz_codecs::declare::Declare::decode(cursor)?;
-            out.put(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)))?;
+            let decl = wz_codecs::lent::Declare::decode(cursor)?;
+            out.put(NetworkMessage::Declare(Box::new(
+                decl.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
+            )))?;
         }
         _ => return Ok(false),
     }
@@ -2126,17 +2135,19 @@ mod chain_saturation_tests {
         }
     }
 
-    /// THE FIRING LEG. One more extension than the cap, and the generated
-    /// decode would return `Ok` with a payload of `[0x03, 0xAA, 0xBB]`. The
-    /// seam refuses instead — and refuses on the NESTED chain, which is the
+    /// THE FIRING LEG. One more extension than a node stores of a chain. The
+    /// protocol bounds the chain by nothing, but the owned parse decodes the
+    /// lent form at `Node`, which holds eight entries, so the seam refuses the
+    /// ninth as storage (`CapacityExceeded`) rather than misreading the next
+    /// byte as `payload_len` — and refuses on the NESTED chain, which is the
     /// one that costs a payload; the `Push`'s own chain is absent here.
     #[test]
     fn a_chain_past_the_cap_is_refused_at_the_dispatch_seam() {
         let wire = push_with_put_exts(crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1);
         assert_eq!(
             parse_frame_payload(&wire).unwrap_err(),
-            CodecError::TooManyElements,
-            "the dispatch accepted a message whose inner chain never terminated"
+            CodecError::CapacityExceeded,
+            "the dispatch stored a chain past what the node's lent form holds"
         );
     }
 
@@ -2146,7 +2157,7 @@ mod chain_saturation_tests {
     /// decoded message.
     #[test]
     fn the_best_effort_walk_halts_on_it_without_losing_the_earlier_record() {
-        let mut wire = wz_codecs::oam::Oam {
+        let mut wire = wz_codecs::lent::Oam {
             id: 7,
             ..Default::default()
         }
@@ -2644,7 +2655,7 @@ mod record_walk_tests {
     use alloc::vec;
 
     fn oam_record(id: u64) -> Vec<u8> {
-        wz_codecs::oam::Oam {
+        wz_codecs::lent::Oam {
             id,
             ..Default::default()
         }
@@ -2848,19 +2859,21 @@ mod record_walk_tests {
         use crate::declare_build::{build_declare_final, build_declare_subscriber};
         use crate::interest_build::build_interest_subscribers;
         use crate::parse_error::InboundParseError;
-        use wz_codecs::declare::DeclareVariant;
         use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
         use wz_codecs::ext_unit::ExtUnit;
+        use wz_codecs::lent::DeclareVariant;
 
-        fn declare_bytes(declare: &wz_codecs::declare::DeclareOwned) -> Vec<u8> {
+        fn declare_bytes(declare: &crate::transport_profile::owned::DeclareOwned) -> Vec<u8> {
             declare.try_as_borrowed().expect("a view").encode_to_vec()
         }
 
-        fn interest_bytes(interest: &wz_codecs::interest::InterestOwned) -> Vec<u8> {
+        fn interest_bytes(interest: &crate::transport_profile::owned::InterestOwned) -> Vec<u8> {
             interest.try_as_borrowed().expect("a view").encode_to_vec()
         }
 
-        fn response_final_bytes(done: &wz_codecs::response_final::ResponseFinalOwned) -> Vec<u8> {
+        fn response_final_bytes(
+            done: &crate::transport_profile::owned::ResponseFinalOwned,
+        ) -> Vec<u8> {
             done.try_as_borrowed().expect("a view").encode_to_vec()
         }
 
@@ -3025,13 +3038,13 @@ mod record_walk_tests {
                 response_final_bytes(&done)
             };
             let oam = {
-                use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+                use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
                 let mut chain = sce_forge_runtime::heapless::Vec::new();
                 let _ = chain.push(ExtEntry {
                     header: 0x1e,
                     body: ExtEntryVariant::CodecZenohExtUnit(ExtUnit::default()),
                 });
-                wz_codecs::oam::Oam {
+                wz_codecs::lent::Oam {
                     header: wire_const::N_MID_OAM | wire_const::FLAG_N_Z,
                     id: 6,
                     extensions: Some(wz_codecs::Bounded::new(chain).expect("one entry of eight")),
@@ -3079,12 +3092,13 @@ mod record_walk_tests {
         let built = crate::push_build::build_push_literal("a/2", b"v").expect("build");
         let mut refused = built.try_as_borrowed().expect("a view");
         // Id 0xF, mandatory (0x10), unit encoding: defined by no network message.
-        let mut chain = sce_forge_runtime::heapless::Vec::new();
-        let _ = chain.push(wz_codecs::ext_entry::ExtEntry {
-            header: 0x10 | 0x0F,
-            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(Default::default()),
-        });
-        refused.extensions = Some(wz_codecs::Bounded::new(chain).unwrap());
+        // The entry takes the profile of the borrowed Push it goes into.
+        refused.extensions = Some(crate::held_list::one_entry(
+            wz_codecs::ext_entry::ExtEntryIn {
+                header: 0x10 | 0x0F,
+                body: wz_codecs::ext_entry::ExtEntryVariantIn::CodecZenohExtUnit(Default::default()),
+            },
+        ));
         refused.header |= 0x80;
         let refused = refused.encode_to_vec();
         let payload = [plain, refused, push_record("a/3")].concat();
@@ -3113,11 +3127,7 @@ mod record_walk_tests {
         let response = crate::response_build::ResponseReplyBuilder::new(3, 0, Some("q/1"), b"v")
             .build()
             .expect("build");
-        let rq = request
-            .try_as_borrowed()
-            .expect("a view")
-            .encode_to_vec()
-            .expect("a fixture request is encodable");
+        let rq = request.try_as_borrowed().expect("a view").encode_to_vec();
         let rs = response.try_as_borrowed().expect("a view").encode_to_vec();
         let payload = [rq.clone(), oam_record(2), rs.clone()].concat();
         let mut record = new_record_buf();
@@ -3149,26 +3159,18 @@ mod record_walk_tests {
         assert_eq!(owned, 3);
 
         // Id 0xF, mandatory (0x10), unit encoding: defined by no network message.
-        let unknown = || {
-            let mut chain = sce_forge_runtime::heapless::Vec::new();
-            let _ = chain.push(wz_codecs::ext_entry::ExtEntry {
-                header: 0x10 | 0x0F,
-                body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(Default::default()),
-            });
-            chain
+        // The entry takes the profile of the borrowed message it goes into.
+        let unknown = || wz_codecs::ext_entry::ExtEntryIn {
+            header: 0x10 | 0x0F,
+            body: wz_codecs::ext_entry::ExtEntryVariantIn::CodecZenohExtUnit(Default::default()),
         };
         let mut bad_request = request.try_as_borrowed().expect("a view");
-        bad_request.extensions = Some(wz_codecs::Bounded::new(unknown()).unwrap());
+        bad_request.extensions = Some(crate::held_list::one_entry(unknown()));
         bad_request.header |= 0x80;
         let mut bad_response = response.try_as_borrowed().expect("a view");
-        bad_response.extensions = Some(wz_codecs::Bounded::new(unknown()).unwrap());
+        bad_response.extensions = Some(crate::held_list::one_entry(unknown()));
         bad_response.header |= 0x80;
-        for bad in [
-            bad_request
-                .encode_to_vec()
-                .expect("a fixture request with an unknown ext is encodable"),
-            bad_response.encode_to_vec(),
-        ] {
+        for bad in [bad_request.encode_to_vec(), bad_response.encode_to_vec()] {
             let payload = [rq.clone(), bad, rs.clone()].concat();
             let walk = |form| {
                 let mut record = new_record_buf();
@@ -3233,7 +3235,7 @@ mod best_effort_batch_tests {
     /// wire MID (`0x1F`), so the fixture is a real record through the real
     /// encoder rather than a hand-typed byte string.
     fn oam_record(id: u64) -> Vec<u8> {
-        wz_codecs::oam::Oam {
+        wz_codecs::lent::Oam {
             id,
             ..Default::default()
         }
@@ -3589,7 +3591,7 @@ mod declare_body_ext_chain_tests {
             0x2A,
         ];
         let mut cursor = SceCursor::new(&wire);
-        let decoded = wz_codecs::declare::Declare::decode(&mut cursor).expect("decode");
+        let decoded = wz_codecs::lent::Declare::decode(&mut cursor).expect("decode");
         assert_eq!(
             cursor.remaining(),
             0,
@@ -4094,7 +4096,10 @@ mod mandatory_extension_rule_tests {
             let mut request = request();
             match &mut request.body {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
-                    query.extensions = Some(crate::held_list::one_entry(query_entry(header)));
+                    query.extensions = Some(
+                        crate::held_list::lawful(crate::held_list::one_entry(query_entry(header)))
+                            .expect("a chain of one entry follows its law"),
+                    );
                 }
                 other => panic!("a query request carries a Query, got {other:?}"),
             }
@@ -4159,7 +4164,9 @@ mod mandatory_extension_rule_tests {
             NetworkMessage::ResponseFinal(done)
         });
         every_header("oam", &[], |header| {
-            let mut oam = wz_codecs::oam::Oam::default().try_into_owned().unwrap();
+            let mut oam = wz_codecs::lent::Oam::default()
+                .try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                .unwrap();
             oam.extensions = Some(crate::held_list::one_entry(entry(header)));
             NetworkMessage::Oam(oam)
         });

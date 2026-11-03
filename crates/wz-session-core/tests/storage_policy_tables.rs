@@ -207,7 +207,7 @@ mod declarations {
         feature = "declare-queryable",
         feature = "liveliness-subscriber"
     ))]
-    use wz_codecs::declare::DeclareOwned;
+    use wz_session_core::transport_profile::owned::DeclareOwned;
     #[cfg(any(
         feature = "declare-subscriber",
         feature = "declare-queryable",

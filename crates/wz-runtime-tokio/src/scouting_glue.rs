@@ -340,7 +340,7 @@ mod tests {
         // against pico `message.c:675-676` + `transport.c:35-37`.
         let cbyte = (whatami & 0x03) | (((zid.len() as u8) - 1) << 4);
         let l_flag: u8 = u8::from(!locators.is_empty());
-        let owned: HelloOwned = HelloOwned {
+        let owned: HelloOwned<sce_forge_runtime::codec::Heap> = HelloOwned {
             version: 0x09,
             cbyte,
             zid: wz_session_core::codec_owned::owned_bytes(zid).unwrap(),

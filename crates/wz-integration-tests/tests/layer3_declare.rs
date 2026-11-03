@@ -31,7 +31,7 @@
 //! Wire shape: `[0x1E, 0x1A]` = 2 bytes = envelope header
 //! (MID 0x1E, no I, no Z) + decl_final inner header (MID 0x1A).
 
-use wz_codecs::declare::Declare;
+use wz_codecs::lent::Declare;
 use zenoh_pico_sys::{
     _z_declare_encode, _z_n_msg_declare_t, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf,
     _z_zbuf_clear,

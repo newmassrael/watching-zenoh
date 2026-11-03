@@ -371,7 +371,7 @@ pub fn decode_join_patch(bytes: &[u8]) -> u8 {
     // announces nothing: it reads as the owned decode's `Err` read.
     let mut announced = None;
     for _ in 0..crate::parse_error::MAX_EXT_CHAIN_DEPTH {
-        let Ok(entry) = wz_codecs::ext_entry::ExtEntry::decode(&mut cursor) else {
+        let Ok(entry) = wz_codecs::lent::ExtEntry::decode(&mut cursor) else {
             return crate::extpatch::NO_PATCH;
         };
         if announced.is_none() {

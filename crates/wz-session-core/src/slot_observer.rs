@@ -917,8 +917,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use std::sync::{Arc, Mutex};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{Wireexpr, WireexprNonlocal, WireexprVariant};
     use wz_session_core_test_support as fx;
 
     type Req = Requesters<BoxedReplySink, BoxedReplySink>;
@@ -936,7 +935,7 @@ mod tests {
 
     /// A Push naming id `mapping_id` with `M=0`: the id is in OUR space.
     fn push_own_alias(mapping_id: u64) -> crate::wire::PushOwned {
-        use wz_codecs::push::Push;
+        use wz_codecs::lent::Push;
         Push {
             keyexpr: Wireexpr {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {

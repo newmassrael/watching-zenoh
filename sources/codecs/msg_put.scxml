@@ -38,10 +38,11 @@
                   termination on entry header.Z — Y3 atomic 1 grammar;
                   chain is followed by the always-present payload pair
                   so the exhaust-or-depth termination would not detect
-                  the payload boundary. max-depth=4 covers PUT's
-                  upstream ext slots — source_info via
+                  the payload boundary. No depth bound: upstream reads it
+                  until Z clears, past PUT's ext slots — source_info via
                   `_Z_MSG_EXT_ENC_ZBUF | 0x01` and attachment via
-                  `_Z_MSG_EXT_ENC_ZBUF | 0x03` per push_body_encode).
+                  `_Z_MSG_EXT_ENC_ZBUF | 0x03` per push_body_encode —
+                  and what a node stores is its deployment's capacity).
        payload, one of two layouts, chosen by the extension chain and by
        nothing in any header:
          no shared-memory marker in the chain (`!extensions.has(0x12)`):
@@ -157,7 +158,6 @@
     <sce:embed id="encoding" type="codec_zenoh_encoding" sce:byte="2"
                sce:present-if="header.E"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"
                    entry-id="header" entry-id-except="header.Z"/>
@@ -169,7 +169,7 @@
     <sce:field id="slice_count" sce:type="uint32" sce:byte="6" sce:bit-size="vle"
                sce:present-if="extensions.has(0x12)"/>
     <sce:repeat id="slices" type="codec_zenoh_zbuf_slice" sce:byte="7"
-                count="slice_count" max-count="4"
+                count="slice_count"
                 sce:present-if="extensions.has(0x12)"/>
   </datamodel>
 </scxml>

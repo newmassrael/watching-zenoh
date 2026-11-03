@@ -132,13 +132,13 @@
     <sce:field id="num_locators" sce:type="uint64" sce:byte="6" sce:bit-size="vle"
                sce:present-if="options.L"/>
     <sce:repeat id="locators" type="codec_zenoh_locator" sce:byte="7"
-                count="num_locators" max-count="64"
+                count="num_locators"
                 sce:present-if="options.L"/>
     <sce:field id="links_len" sce:type="uint64" sce:byte="8" sce:bit-size="vle"/>
     <sce:repeat id="links" type="codec_zenoh_linkstate_link" sce:byte="9"
-                count="links_len" max-count="64"/>
+                count="links_len"/>
     <sce:repeat id="weights" type="codec_zenoh_linkstate_weight" sce:byte="10"
-                count="links_len" max-count="64"
+                count="links_len"
                 sce:present-if="options.H"/>
   </datamodel>
 </scxml>

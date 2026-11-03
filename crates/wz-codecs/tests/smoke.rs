@@ -28,8 +28,8 @@
 //! pipeline produces self-consistent code.
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::msg_del::MsgDel;
-use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
+use wz_codecs::lent::{MsgDel, MsgPut};
+use wz_codecs::msg_put::MsgPutExtensionsHas0x12;
 use wz_codecs::Bounded;
 
 /// A default Put holds the inline layout with an empty payload and no chain.
@@ -133,7 +133,7 @@ fn reply_default_encode_decode_roundtrip() {
     // the ext-chain absent; the always-present push_body variant
     // defaults to MsgPut (declared default arm) whose header is 0x01
     // baked-in.
-    use wz_codecs::reply::{Reply, ReplyVariant};
+    use wz_codecs::lent::{Reply, ReplyVariant};
 
     // The default body is an empty inline Put (see
     // `a_default_msg_put_is_an_empty_inline_put`).
@@ -268,7 +268,7 @@ fn err_default_encode_decode_roundtrip() {
     // absent; Z=0 keeps the source_info ext-chain absent; the
     // always-present payload pair (length + bytes) emits as VLE(0) +
     // empty bytes = 1 byte.
-    use wz_codecs::err::Err;
+    use wz_codecs::lent::Err;
 
     let err = Err::default();
     let encoded = err.encode_to_vec();

@@ -79,13 +79,13 @@
 // the borrowed `LivelinessSample` view. S9a — the table is a `DeclaredKeys`: the
 // map it always was on the growable backing and a bounded table on the fixed one.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use wz_codecs::declare::DeclareOwnedVariant;
+use crate::transport_profile::owned::DeclareOwnedVariant;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
     feature = "session-slot"
 ))]
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::lent::DeclareVariant;
 
 use crate::bounded::{BoundedString, BoundedVec, Profile, Static, Storage};
 use crate::caps;
@@ -1472,12 +1472,9 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use crate::transport_profile::owned::DeclareOwnedVariant;
     use hashbrown::HashMap;
-    use wz_codecs::declare::DeclareOwnedVariant;
-    use wz_codecs::interest::Interest;
-    use wz_codecs::interest_body::InterestBody;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{Interest, InterestBody, Wireexpr, WireexprLocal, WireexprVariant};
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;
@@ -1490,7 +1487,7 @@ mod tests {
     fn declare_envelope_with_interest(
         body: DeclareOwnedVariant,
         interest_id: Option<u64>,
-    ) -> wz_codecs::declare::DeclareOwned {
+    ) -> crate::transport_profile::owned::DeclareOwned {
         wz_codecs::declare::DeclareOwned {
             header: 0,
             interest_id,
@@ -2644,7 +2641,7 @@ mod tests {
             ),
             extensions: None,
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::transport_profile::TransportStorage>()
         .unwrap();
         let messages = vec![NetworkMessage::Interest(interest)];
         reg.dispatch_messages(&messages, &HashMap::new());
@@ -2752,7 +2749,7 @@ mod tests {
         use crate::bounded::BoundedVec;
         use crate::caps;
         use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
-        use wz_codecs::interest::InterestOwned;
+        use crate::transport_profile::owned::InterestOwned;
         use wz_codecs::interest_body::InterestBodyOwned;
         use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
         use wz_codecs::wireexpr_local::WireexprLocalOwned;

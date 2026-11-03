@@ -35,9 +35,7 @@
 
 use sce_forge_runtime::codec::{Bounded, CodecError, SceSink, SliceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-use wz_codecs::ext_zbuf::ExtZbuf;
-use wz_codecs::response::{Response, ResponseVariant};
+use wz_codecs::lent::{ExtEntry, ExtEntryVariant, ExtZbuf, Response, ResponseVariant};
 use wz_codecs::wire_const;
 
 use crate::ext_header::{ext_identity, EXT_ENC_ZBUF, EXT_FLAG_Z};
@@ -626,8 +624,8 @@ impl<'a> ResponseWriter<'a> {
         encoding: Option<crate::reply_stage::EncodingParts<'a>>,
         timestamp: Option<crate::reply_stage::TimestampParts<'a>>,
         attachment: Option<&'a [u8]>,
-    ) -> Result<wz_codecs::reply::Reply<'_>, CodecError> {
-        use wz_codecs::reply::{Reply, ReplyVariant};
+    ) -> Result<wz_codecs::lent::Reply<'_>, CodecError> {
+        use wz_codecs::lent::{Reply, ReplyVariant};
         let payload: Option<&[u8]> = match body {
             PartsBody::Put(bytes) => Some(bytes),
             PartsBody::Del => None,
@@ -650,7 +648,7 @@ impl<'a> ResponseWriter<'a> {
         #[cfg(feature = "pubsub-timestamp")]
         let timestamp = timestamp
             .map(|ts| {
-                Ok::<_, CodecError>(wz_codecs::timestamp::Timestamp {
+                Ok::<_, CodecError>(wz_codecs::lent::Timestamp {
                     time: ts.time,
                     zid_len: ts.zid.len() as u64,
                     zid: crate::codec_owned::sent(ts.zid)?,
@@ -658,14 +656,14 @@ impl<'a> ResponseWriter<'a> {
             })
             .transpose()?;
         #[cfg(not(feature = "pubsub-timestamp"))]
-        let timestamp: Option<wz_codecs::timestamp::Timestamp<'_>> = None;
+        let timestamp: Option<wz_codecs::lent::Timestamp<'_>> = None;
 
         // An encoding is a Put's only: a Del has no slot for it.
         #[cfg(feature = "pubsub-encoding")]
         let encoding = encoding
             .filter(|_| is_put)
             .map(|e| {
-                Ok::<_, CodecError>(wz_codecs::encoding::Encoding {
+                Ok::<_, CodecError>(wz_codecs::lent::Encoding {
                     packed_id: e.packed_id,
                     schema_len: e.schema.map(|s| s.len() as u64),
                     schema: e.schema.map(schema_text).transpose()?,
@@ -673,7 +671,7 @@ impl<'a> ResponseWriter<'a> {
             })
             .transpose()?;
         #[cfg(not(feature = "pubsub-encoding"))]
-        let encoding: Option<wz_codecs::encoding::Encoding<'_>> = None;
+        let encoding: Option<wz_codecs::lent::Encoding<'_>> = None;
 
         // The body's extension chain: the source info, then the attachment.
         let mut chain: HeaplessVec<ExtEntry<'_>, 8> = HeaplessVec::new();
@@ -714,7 +712,7 @@ impl<'a> ResponseWriter<'a> {
                 if has_chain {
                     header |= wire_const::FLAG_Z_PUT_Z;
                 }
-                ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                ReplyVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                     header,
                     timestamp,
                     encoding,
@@ -739,7 +737,7 @@ impl<'a> ResponseWriter<'a> {
                 if has_chain {
                     header |= FLAG_DEL_Z;
                 }
-                ReplyVariant::CodecZenohMsgDel(wz_codecs::msg_del::MsgDel {
+                ReplyVariant::CodecZenohMsgDel(wz_codecs::lent::MsgDel {
                     header,
                     timestamp,
                     extensions,
@@ -764,19 +762,19 @@ impl<'a> ResponseWriter<'a> {
     fn err<'o>(
         encoding: Option<(u32, Option<&'o str>)>,
         payload: &'o [u8],
-    ) -> Result<wz_codecs::err::Err<'o>, CodecError> {
+    ) -> Result<wz_codecs::lent::Err<'o>, CodecError> {
         let mut header = ERR_HEADER;
         let encoding = encoding
             .map(|(id, schema)| {
                 header |= wire_const::FLAG_Z_ERR_E;
-                Ok::<_, CodecError>(wz_codecs::encoding::Encoding {
+                Ok::<_, CodecError>(wz_codecs::lent::Encoding {
                     packed_id: (id << 1) | u32::from(schema.is_some()),
                     schema_len: schema.map(|s| s.len() as u64),
                     schema: schema.map(schema_text).transpose()?,
                 })
             })
             .transpose()?;
-        Ok(wz_codecs::err::Err {
+        Ok(wz_codecs::lent::Err {
             header,
             encoding,
             extensions: None,

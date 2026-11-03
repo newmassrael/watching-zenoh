@@ -172,7 +172,9 @@ use crate::wireexpr_resolve::{
 };
 
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
+use crate::transport_profile::owned::ResponseFinalOwned;
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
+use wz_codecs::lent::ResponseFinal;
 
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::driver_loop::DriverLoopOutcome;
@@ -2766,7 +2768,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         use crate::ext_view::ExtEntryView;
         use sce_forge_runtime::codec::SceList;
         use wz_codecs::query_ext_entry::QueryExtEntryOwnedVariant;
-        let Some(exts) = query.extensions.as_deref() else {
+        let Some(exts) = crate::held_list::HeldList::entries(&query.extensions) else {
             return Ok(None);
         };
         for ext in exts {
@@ -3417,7 +3419,7 @@ pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
     // only Debug/Clone/PartialEq), so build the borrowed view via the
     // spread default and deep-copy into the owned form at the boundary.
     // ResponseFinal carries no bounded fields, so the owned copy is infallible.
-    .try_into_owned()
+    .try_into_owned_in::<crate::transport_profile::TransportStorage>()
     .expect("ResponseFinal carries no bounded fields")
 }
 
@@ -3466,16 +3468,11 @@ mod tests {
     // Fixtures build the borrowed codec views (`..::default()` lives on
     // the borrowed type) then `.into_owned()` at the dispatch boundary,
     // which now takes the lifetime-free `*Owned` mirrors.
-    use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-    use wz_codecs::ext_zbuf::ExtZbuf;
+    use wz_codecs::lent::{
+        ExtEntry, ExtEntryVariant, ExtZbuf, Query, Request, RequestVariant, Wireexpr, WireexprLocal,
+    };
     #[cfg(feature = "request-put-del")]
-    use wz_codecs::msg_put::MsgPut;
-    use wz_codecs::query::Query;
-    use wz_codecs::request::{Request, RequestVariant};
-    use wz_codecs::wireexpr::Wireexpr;
-    use wz_codecs::wireexpr_local::WireexprLocal;
-    #[cfg(feature = "request-put-del")]
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{MsgPut, WireexprNonlocal};
 
     fn request_query(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
         // Construct a minimal Request whose body is a default Query.
@@ -3491,7 +3488,7 @@ mod tests {
         // (id, suffix) plumbing keeps using this.
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+            body: wz_codecs::lent::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: mapping_id,
                 suffix_len,
                 suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
@@ -3523,7 +3520,7 @@ mod tests {
     ) -> RequestOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+            body: wz_codecs::lent::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len,
                 suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
@@ -3544,11 +3541,14 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(crate::held_list::one_entry(
-            crate::ext_view::query_ext_from_generic(
-                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-            ),
-        ));
+        query.extensions = Some(
+            crate::held_list::lawful(crate::held_list::one_entry(
+                crate::ext_view::query_ext_from_generic(
+                    ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+                ),
+            ))
+            .expect("a chain of one entry follows its law"),
+        );
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -3565,7 +3565,7 @@ mod tests {
     #[cfg(feature = "request-put-del")]
     fn request_put(rid: u64, suffix: &str) -> RequestOwned {
         let keyexpr = Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+            body: wz_codecs::lent::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
                 suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
@@ -3587,8 +3587,8 @@ mod tests {
     fn request_query_nonlocal(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(
-                wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+            body: wz_codecs::lent::WireexprVariant::WireexprNonlocal(
+                wz_codecs::lent::WireexprNonlocal {
                     id: mapping_id,
                     suffix_len,
                     suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
@@ -3913,7 +3913,7 @@ mod tests {
     /// `request_decode_isolation_tests`.
     fn request_query_with_parameters(rid: u64, suffix: &str, params: &[u8]) -> RequestOwned {
         let keyexpr = Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+            body: wz_codecs::lent::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
                 suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
@@ -3980,13 +3980,16 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(crate::held_list::one_entry(
-            crate::ext_view::query_ext_from_generic(
-                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-            ),
-        ));
+        query.extensions = Some(
+            crate::held_list::lawful(crate::held_list::one_entry(
+                crate::ext_view::query_ext_from_generic(
+                    ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+                ),
+            ))
+            .expect("a chain of one entry follows its law"),
+        );
         let keyexpr = Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+            body: wz_codecs::lent::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
                 suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
@@ -6325,7 +6328,7 @@ mod tests {
     ) -> RequestOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+            body: wz_codecs::lent::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len,
                 suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
@@ -6350,11 +6353,14 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(crate::held_list::one_entry(
-            crate::ext_view::query_ext_from_generic(
-                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-            ),
-        ));
+        query.extensions = Some(
+            crate::held_list::lawful(crate::held_list::one_entry(
+                crate::ext_view::query_ext_from_generic(
+                    ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+                ),
+            ))
+            .expect("a chain of one entry follows its law"),
+        );
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -6566,12 +6572,10 @@ mod request_decode_isolation_tests {
     use hashbrown::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-    use wz_codecs::ext_zbuf::ExtZbuf;
-    use wz_codecs::query::Query;
-    use wz_codecs::request::{Request, RequestVariant};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{
+        ExtEntry, ExtEntryVariant, ExtZbuf, Query, Request, RequestVariant, Wireexpr,
+        WireexprLocal, WireexprVariant,
+    };
 
     fn literal_keyexpr(suffix: &str) -> Wireexpr<'_> {
         Wireexpr {
@@ -6599,11 +6603,14 @@ mod request_decode_isolation_tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(crate::held_list::one_entry(
-            crate::ext_view::query_ext_from_generic(
-                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-            ),
-        ));
+        query.extensions = Some(
+            crate::held_list::lawful(crate::held_list::one_entry(
+                crate::ext_view::query_ext_from_generic(
+                    ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+                ),
+            ))
+            .expect("a chain of one entry follows its law"),
+        );
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -6716,11 +6723,14 @@ mod request_decode_isolation_tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(crate::held_list::one_entry(
-            crate::ext_view::query_ext_from_generic(
-                ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
-            ),
-        ));
+        query.extensions = Some(
+            crate::held_list::lawful(crate::held_list::one_entry(
+                crate::ext_view::query_ext_from_generic(
+                    ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+                ),
+            ))
+            .expect("a chain of one entry follows its law"),
+        );
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -7281,7 +7291,7 @@ mod shm_reply_tests {
     use crate::query_sink::ReplyMeta;
     use alloc::vec::Vec;
     use std::sync::Arc;
-    use wz_codecs::query::Query;
+    use wz_codecs::lent::Query;
     use wz_codecs_test_support::TestWire;
 
     /// Eleven bytes, the length the fake's descriptor names.

@@ -1,4 +1,4 @@
-// SCE-MAP: msg_put:141 :: _forge_body
+// SCE-MAP: msg_put:142 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -15,11 +15,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-
-use super::timestamp::Timestamp;
-use super::encoding::Encoding;
-use super::ext_entry::ExtEntry;
-use super::zbuf_slice::ZbufSlice;
 
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::timestamp::TimestampView;
@@ -40,9 +35,9 @@ use super::zbuf_slice::ZbufSliceOwned;
 #[allow(dead_code)]
 pub struct MsgPutExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// The field `payload` of `MsgPut`, which a storage profile
 /// answers for by this type.
@@ -59,7 +54,7 @@ impl ::sce_forge_runtime::codec::HoldsBytes<MsgPutPayloadField> for ::sce_forge_
 pub struct MsgPutSlicesField;
 
 impl ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 4> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 4294967295> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
 }
 
 /// What `MsgPutIn` and the codecs it holds ask of a storage profile.
@@ -67,6 +62,14 @@ impl ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField> for ::sce_forge_ru
 pub trait MsgPutStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField> + ::sce_forge_runtime::codec::HoldsBytes<MsgPutPayloadField> + ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField> + super::timestamp::TimestampStorage + super::encoding::EncodingStorage + super::ext_entry::ExtEntryStorage + super::zbuf_slice::ZbufSliceStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField> + ::sce_forge_runtime::codec::HoldsBytes<MsgPutPayloadField> + ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField> + super::timestamp::TimestampStorage + super::encoding::EncodingStorage + super::ext_entry::ExtEntryStorage + super::zbuf_slice::ZbufSliceStorage> MsgPutStorage for S {}
+
+/// What `MsgPutIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `MsgPut` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait MsgPutLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField> + ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField> + super::timestamp::TimestampLentStorage + super::encoding::EncodingLentStorage + super::ext_entry::ExtEntryLentStorage + super::zbuf_slice::ZbufSliceLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField> + ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField> + super::timestamp::TimestampLentStorage + super::encoding::EncodingLentStorage + super::ext_entry::ExtEntryLentStorage + super::zbuf_slice::ZbufSliceLentStorage> MsgPutLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside MsgPutStorage: how it stores each field of that frame.
@@ -78,7 +81,7 @@ impl<'f, S: MsgPutStorage + ::sce_forge_runtime::codec::StoresBytes<'f, MsgPutPa
 /// The group `MsgPutExtensionsHas0x12` as `MsgPutOwned` holds it, in the storage
 /// profile `S`.
 #[allow(dead_code)]
-pub type MsgPutExtensionsHas0x12Owned<S> = MsgPutExtensionsHas0x12<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField>>::List<ExtEntryOwned<S>>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSliceOwned<S>>, 4>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<MsgPutPayloadField>>::Bytes, 4294967295>>;
+pub type MsgPutExtensionsHas0x12Owned<S> = MsgPutExtensionsHas0x12<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField>>::List<ExtEntryOwned<S>>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSliceOwned<S>>, 4294967295>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<MsgPutPayloadField>>::Bytes, 4294967295>>;
 
 // `MsgPutIn<S>` is the one value this codec has, at the storage
 // profile `S` (docs/adr/0077 §7). `MsgPut<'a>` is it on `Lent`, which
@@ -99,9 +102,11 @@ pub struct MsgPutIn<S: MsgPutStorage> {
 #[allow(dead_code)]
 pub type MsgPut<'a> = MsgPutIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type MsgPutOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = MsgPutIn<S>;
+pub type MsgPutOwned<S> = MsgPutIn<S>;
 
 impl<S: MsgPutStorage> Default for MsgPutIn<S> {
     fn default() -> Self {
@@ -195,11 +200,11 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
         } else {
             _out.encoding = None;
         }
-        let mut extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>> = None;
+        let mut extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>> = None;
         if (header & 0x80u8) != 0 {
             extensions.insert(Default::default()).refill(|_vec| {
                 let mut _more = false;
-                for _ in 0..8u32 {
+                loop {
                     let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                     _more = _entry.z();
                     // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -210,9 +215,6 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
-                }
-                if _more {
-                    return Err(CodecError::TooManyElements);
                 }
                 Ok(())
             })?;
@@ -247,12 +249,9 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
         } else {
             None
         };
-        let mut slices: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSliceOwned<S>>, 4>> = None;
+        let mut slices: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSliceOwned<S>>, 4294967295>> = None;
         if _has_extensions_18 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
-            if _n > 4 {
-                return Err(CodecError::TooManyElements);
-            }
             slices.insert(Default::default()).refill(|_vec| {
                 for _ in 0.._n {
                     ::sce_forge_runtime::codec::SceList::try_push(_vec, ZbufSliceOwned::<S>::decode(cursor)?)?;
@@ -263,7 +262,7 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
             slices = None;
         }
         _out.header = header;
-        _out.extensions_has_0x12 = if _has_extensions_18 { MsgPutExtensionsHas0x12::Has0x12 { extensions: match ::sce_forge_runtime::codec::place_first::<_, MsgPutExtensionsHas0x12Key, 8>(extensions.expect("the gate found the chain").into_inner()) { Ok(_p) => _p, Err(_) => unreachable!("the gate found an entry of the kind") }, slices: slices.unwrap_or_default() } } else { MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.map(|_l| ::sce_forge_runtime::codec::Chain::new(_l.into_inner()).expect("the gates found the chain's kinds as the arm says")), payload: payload.unwrap_or_default() } };
+        _out.extensions_has_0x12 = if _has_extensions_18 { MsgPutExtensionsHas0x12::Has0x12 { extensions: match ::sce_forge_runtime::codec::place_first::<_, MsgPutExtensionsHas0x12Key, { usize::MAX }>(extensions.expect("the gate found the chain").into_inner()) { Ok(_p) => _p, Err(_) => unreachable!("the gate found an entry of the kind") }, slices: slices.unwrap_or_default() } } else { MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.map(|_l| ::sce_forge_runtime::codec::Chain::new(_l.into_inner()).expect("the gates found the chain's kinds as the arm says")), payload: payload.unwrap_or_default() } };
         _out.payload_len = payload_len;
         _out.slice_count = slice_count;
         Ok(())
@@ -326,7 +325,7 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        MsgPut::encode_source(self, w)
+        MsgPutWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -357,14 +356,14 @@ pub enum MsgPutExtensionsHas0x12<Extensions, Slices, Payload> {
     /// While `extensions.has(0x12)` holds.
     Has0x12 {
         /// The `extensions` field.
-        extensions: ::sce_forge_runtime::codec::Placed<Extensions, MsgPutExtensionsHas0x12Key, 8>,
+        extensions: ::sce_forge_runtime::codec::Placed<Extensions, MsgPutExtensionsHas0x12Key, { usize::MAX }>,
         /// The `slices` field.
         slices: Slices,
     },
     /// While `extensions.has(0x12)` does not hold.
     NotHas0x12 {
         /// The `extensions` field.
-        extensions: Option<::sce_forge_runtime::codec::Chain<Extensions, (), (MsgPutExtensionsHas0x12Key,), 8, 1>>,
+        extensions: Option<::sce_forge_runtime::codec::Chain<Extensions, (), (MsgPutExtensionsHas0x12Key,), { usize::MAX }, 1>>,
         /// The `payload` field.
         payload: Payload,
     },
@@ -399,8 +398,8 @@ impl MsgPutExtensionsHas0x12Key {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `MsgPut` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `MsgPut`
-/// computes those from what is ([`MsgPut::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`MsgPutWire::encode_source`]).
 pub trait MsgPutSource {
     /// The `header` field.
     fn header(&self) -> u8;
@@ -409,7 +408,7 @@ pub trait MsgPutSource {
     /// The `encoding` field.
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource>;
     /// The fields `extensions.has(0x12)` decides, held together (docs/adr/0065 §6 R4).
-    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>>;
+    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>>;
 }
 
 impl<T: MsgPutSource + ?Sized> MsgPutSource for &T {
@@ -422,7 +421,7 @@ impl<T: MsgPutSource + ?Sized> MsgPutSource for &T {
     fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
         (**self).encoding()
     }
-    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         (**self).extensions_has_0x12()
     }
 }
@@ -440,11 +439,11 @@ pub struct MsgPutParts<'a> {
     /// The `encoding` field.
     pub encoding: Option<&'a super::encoding::EncodingParts<'a>>,
     /// The fields `extensions.has(0x12)` decides, held together (docs/adr/0065 §6 R4).
-    pub extensions_has_0x12: MsgPutExtensionsHas0x12<&'a [super::ext_entry::ExtEntryParts<'a>], ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub extensions_has_0x12: MsgPutExtensionsHas0x12<&'a [super::ext_entry::ExtEntryParts<'a>], ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
 }
 
 impl<'a> MsgPutSource for MsgPutParts<'a> {
-    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         match &self.extensions_has_0x12 {
             MsgPutExtensionsHas0x12::Has0x12 { extensions, slices } => MsgPutExtensionsHas0x12::Has0x12 { extensions: extensions.iter(), slices: slices.iter() },
             MsgPutExtensionsHas0x12::NotHas0x12 { extensions, payload } => MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.as_ref().map(|_e| _e.iter()), payload: *payload },
@@ -462,7 +461,7 @@ impl<'a> MsgPutSource for MsgPutParts<'a> {
 }
 
 impl<S: MsgPutStorage> MsgPutSource for MsgPutOwned<S> {
-    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         match &self.extensions_has_0x12 {
             MsgPutExtensionsHas0x12::Has0x12 { extensions, slices } => MsgPutExtensionsHas0x12::Has0x12 { extensions: extensions.list_iter(), slices: slices.list_iter() },
             MsgPutExtensionsHas0x12::NotHas0x12 { extensions, payload } => MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.as_ref().map(|_e| _e.list_iter()), payload: payload.as_bytes() },
@@ -480,7 +479,7 @@ impl<S: MsgPutStorage> MsgPutSource for MsgPutOwned<S> {
 }
 
 impl<'a> MsgPutSource for MsgPutView<'a> {
-    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn extensions_has_0x12(&self) -> MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         match &self.extensions_has_0x12 {
             MsgPutExtensionsHas0x12::Has0x12 { extensions, slices } => MsgPutExtensionsHas0x12::Has0x12 { extensions: extensions.iter(), slices: slices.iter() },
             MsgPutExtensionsHas0x12::NotHas0x12 { extensions, payload } => MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.as_ref().map(|_e| _e.iter()), payload: *payload },
@@ -497,10 +496,17 @@ impl<'a> MsgPutSource for MsgPutView<'a> {
     }
 }
 
+/// The codec `MsgPut` itself: what writes a value read through
+/// [`MsgPutSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MsgPutWire;
+
 #[allow(dead_code)]
-impl<'a> MsgPut<'a> {
+impl MsgPutWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `MsgPut::encode` writes for the value it holds, read through
     /// [`MsgPutSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -531,19 +537,19 @@ impl<'a> MsgPut<'a> {
         let _c_header: u8 = (((((src.header() & !0x20) | (u8::from(_p_header_t_0) << 5)) & !0x40) | (u8::from(_p_header_e_0) << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         if let Some(_v) = src.timestamp() {
-            Timestamp::write_source(_v, w)?;
+            super::timestamp::TimestampWire::write_source(_v, w)?;
         }
         if let Some(_v) = src.encoding() {
-            Encoding::write_source(_v, w)?;
+            super::encoding::EncodingWire::write_source(_v, w)?;
         }
         if let Some(_v) = _m_extensions.clone() {
             for (_i, _s) in _v.enumerate() {
                 match _s {
                     ::sce_forge_runtime::codec::Slot::Entry(_e) => {
-                        ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                        super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
                     }
                     ::sce_forge_runtime::codec::Slot::Named => {
-                        ExtEntry::write_source_in(&MsgPutExtensionsHas0x12Key::named(), w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                        super::ext_entry::ExtEntryWire::write_source_in(&MsgPutExtensionsHas0x12Key::named(), w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
                     }
                 }
             }
@@ -559,7 +565,7 @@ impl<'a> MsgPut<'a> {
         }
         if let Some(_v) = _m_slices.clone() {
             for _e in _v {
-                ZbufSlice::write_source(&_e, w)?;
+                super::zbuf_slice::ZbufSliceWire::write_source(&_e, w)?;
             }
         }
         Ok(())
@@ -575,7 +581,7 @@ impl<'a> MsgPut<'a> {
     }
 }
 
-impl<'a, S: MsgPutSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for MsgPut<'a> {
+impl<S: MsgPutSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for MsgPutWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -584,7 +590,7 @@ impl<'a, S: MsgPutSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> fo
 }
 
 #[allow(dead_code)]
-impl<'a> MsgPut<'a> {
+impl MsgPutWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -647,7 +653,7 @@ pub struct MsgPutView<'a> {
     pub header: u8,
     pub timestamp: Option<TimestampView<'a>>,
     pub encoding: Option<EncodingView<'a>>,
-    pub extensions_has_0x12: MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, MsgPutExtensionsWalk, 0>>, Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub extensions_has_0x12: MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, MsgPutExtensionsWalk, 0>>, Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
     pub payload_len: Option<u64>,
     pub slice_count: Option<u32>,
 }
@@ -715,12 +721,12 @@ impl<'a> MsgPutView<'a> {
             _out.encoding = None;
         }
         #[allow(clippy::needless_late_init)]
-        let extensions: Option<Bounded<ListView<'a, MsgPutExtensionsWalk, 0>, 8, 1>>;
+        let extensions: Option<Bounded<ListView<'a, MsgPutExtensionsWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -728,9 +734,6 @@ impl<'a> MsgPutView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
@@ -764,16 +767,13 @@ impl<'a> MsgPutView<'a> {
             None
         };
         #[allow(clippy::needless_late_init)]
-        let slices: Option<Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4>>;
+        let slices: Option<Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4294967295>>;
         if _has_extensions_18 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
-            if _n > 4 {
-                return Err(CodecError::TooManyElements);
-            }
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             for _ in 0.._n {
-                if _count == 4 {
+                if _count == 4294967295 {
                     return Err(CodecError::TooManyElements);
                 }
                 ZbufSliceView::decode(cursor)?;
@@ -784,7 +784,7 @@ impl<'a> MsgPutView<'a> {
             slices = None;
         }
         _out.header = header;
-        _out.extensions_has_0x12 = if _has_extensions_18 { MsgPutExtensionsHas0x12::Has0x12 { extensions: match ::sce_forge_runtime::codec::place_first_in::<_, MsgPutExtensionsHas0x12Key, 8>(extensions.expect("the gate found the chain").into_inner()) { Ok(_p) => _p, Err(_) => unreachable!("the gate found an entry of the kind") }, slices: slices.unwrap_or_default() } } else { MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.map(|_l| ::sce_forge_runtime::codec::Chain::new(::sce_forge_runtime::codec::Without::whole(_l.into_inner())).expect("the gates found the chain's kinds as the arm says")), payload: payload.unwrap_or_default() } };
+        _out.extensions_has_0x12 = if _has_extensions_18 { MsgPutExtensionsHas0x12::Has0x12 { extensions: match ::sce_forge_runtime::codec::place_first_in::<_, MsgPutExtensionsHas0x12Key, { usize::MAX }>(extensions.expect("the gate found the chain").into_inner()) { Ok(_p) => _p, Err(_) => unreachable!("the gate found an entry of the kind") }, slices: slices.unwrap_or_default() } } else { MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.map(|_l| ::sce_forge_runtime::codec::Chain::new(::sce_forge_runtime::codec::Without::whole(_l.into_inner())).expect("the gates found the chain's kinds as the arm says")), payload: payload.unwrap_or_default() } };
         _out.payload_len = payload_len;
         _out.slice_count = slice_count;
         Ok(())
@@ -800,24 +800,24 @@ impl<'a> MsgPutView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut MsgPut<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut MsgPutIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: MsgPutLentStorage {
         _out.header = self.header;
         match &self.timestamp {
-            Some(_b) => _b.into_builder(_out.timestamp.insert(Timestamp::default()))?,
+            Some(_b) => _b.into_builder(_out.timestamp.insert(Default::default()))?,
             None => _out.timestamp = None,
         }
         match &self.encoding {
-            Some(_b) => _b.into_builder(_out.encoding.insert(Encoding::default()))?,
+            Some(_b) => _b.into_builder(_out.encoding.insert(Default::default()))?,
             None => _out.encoding = None,
         }
         match &self.extensions_has_0x12 {
             MsgPutExtensionsHas0x12::Has0x12 { extensions, slices } => {
                 let _o_extensions = ::sce_forge_runtime::codec::Placed::new({ let mut _v = ::sce_forge_runtime::codec::SceList::empty(); for _e in ::sce_forge_runtime::codec::Entries::entries(extensions.rest()) { ::sce_forge_runtime::codec::SceList::try_push(&mut _v, Default::default())?; if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(&mut _v) { _e.into_builder(_slot)?; } } _v }, extensions.place()).expect("the projection keeps each entry's identifier");
-                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a> as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSlice<'a>>, 4> = Default::default();
+                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a, D> as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSliceOwned<::sce_forge_runtime::codec::Lent<'a, D>>>, 4294967295> = Default::default();
                 _o_slices.refill(|_vec| {
                     for _e in slices.iter() {
-                        _vec.push(ZbufSlice::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -827,7 +827,7 @@ impl<'a> MsgPutView<'a> {
             }
             MsgPutExtensionsHas0x12::NotHas0x12 { extensions, payload } => {
                 let _o_extensions = match extensions { Some(_l) => Some(::sce_forge_runtime::codec::Chain::new({ let mut _v = ::sce_forge_runtime::codec::SceList::empty(); for _e in ::sce_forge_runtime::codec::Entries::entries(_l.inner()) { ::sce_forge_runtime::codec::SceList::try_push(&mut _v, Default::default())?; if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(&mut _v) { _e.into_builder(_slot)?; } } _v }).expect("the projection keeps each entry's identifier")), None => None };
-                let mut _o_payload: ::sce_forge_runtime::codec::Bytes<'a, 4294967295> = Default::default();
+                let mut _o_payload: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a, D> as ::sce_forge_runtime::codec::HoldsBytes<MsgPutPayloadField>>::Bytes, 4294967295> = Default::default();
                 _o_payload = *payload;
                 _out.extensions_has_0x12 = MsgPutExtensionsHas0x12::NotHas0x12 { extensions: _o_extensions, payload: _o_payload };
             }
@@ -845,7 +845,7 @@ impl<'a> MsgPutView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        MsgPut::encode_source(self, w)
+        MsgPutWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -908,8 +908,11 @@ impl<'a> MsgPutView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `MsgPut<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> MsgPut<'a> {
+impl<'a, D> MsgPutIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: MsgPutLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`MsgPutOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -933,11 +936,9 @@ impl<'a> MsgPut<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<MsgPutOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -951,8 +952,8 @@ impl<S: MsgPutStorage> MsgPutOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<MsgPut<'_>, CodecError> {
-        let mut _out = MsgPut::default();
+    pub fn try_as_borrowed(&self) -> Result<MsgPutIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -967,7 +968,7 @@ impl<S: MsgPutStorage> MsgPutOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut MsgPut<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut MsgPutIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         match &self.timestamp {
             Some(_v) => _v.as_borrowed_into(_out.timestamp.insert(Default::default())),
@@ -980,13 +981,13 @@ impl<S: MsgPutStorage> MsgPutOwned<S> {
         match &self.extensions_has_0x12 {
             MsgPutExtensionsHas0x12::Has0x12 { extensions, slices } => {
                 let _o_extensions = ::sce_forge_runtime::codec::Placed::new({ let mut _v = ::sce_forge_runtime::codec::SceList::empty(); ::sce_forge_runtime::codec::try_project_bounded_into(&mut _v, extensions.rest(), |_e| Ok(_e.as_borrowed()))?; _v }, extensions.place()).expect("the projection keeps each entry's identifier");
-                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o> as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSlice<'o>>, 4> = Default::default();
+                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o, S> as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSliceOwned<::sce_forge_runtime::codec::Lent<'o, S>>>, 4294967295> = Default::default();
                 _o_slices.refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, slices.inner(), |_e| Ok(_e.as_borrowed())))?;
                 _out.extensions_has_0x12 = MsgPutExtensionsHas0x12::Has0x12 { extensions: _o_extensions, slices: _o_slices };
             }
             MsgPutExtensionsHas0x12::NotHas0x12 { extensions, payload } => {
                 let _o_extensions = match extensions { Some(_l) => Some(::sce_forge_runtime::codec::Chain::new({ let mut _v = ::sce_forge_runtime::codec::SceList::empty(); ::sce_forge_runtime::codec::try_project_bounded_into(&mut _v, _l.inner(), |_e| Ok(_e.as_borrowed()))?; _v }).expect("the projection keeps each entry's identifier")), None => None };
-                let mut _o_payload: ::sce_forge_runtime::codec::Bytes<'o, 4294967295> = Default::default();
+                let mut _o_payload: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o, S> as ::sce_forge_runtime::codec::HoldsBytes<MsgPutPayloadField>>::Bytes, 4294967295> = Default::default();
                 _o_payload = payload.as_bytes();
                 _out.extensions_has_0x12 = MsgPutExtensionsHas0x12::NotHas0x12 { extensions: _o_extensions, payload: _o_payload };
             }
@@ -1010,7 +1011,7 @@ impl<S: MsgPutStorage> MsgPutOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> MsgPut<'a> {
+impl<'a, D> MsgPutIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: MsgPutLentStorage {
     /// Project this borrowed view into an owned [`MsgPutOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

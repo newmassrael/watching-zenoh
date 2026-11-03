@@ -17,7 +17,7 @@
 //! id VLE 0). No qos / timestamp ext, no body (UNIT is empty per
 //! the protocol §5 OAM definition).
 
-use wz_codecs::oam::Oam;
+use wz_codecs::lent::Oam;
 use zenoh_pico_sys::{
     _z_n_msg_oam_t, _z_oam_encode, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
 };

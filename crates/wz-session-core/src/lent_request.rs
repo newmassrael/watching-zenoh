@@ -29,10 +29,9 @@
 
 use sce_forge_runtime::codec::{Bounded, CodecError, SceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::query::Query;
-use wz_codecs::request::{Request, RequestVariant};
+use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
+use wz_codecs::lent::{Query, Request, RequestVariant};
 
 use crate::lent_control::{local, qos_entry, with_z};
 use crate::query_mode::{ConsolidationMode, QueryTarget, TARGET_EXT_ID};
@@ -164,6 +163,7 @@ impl<'a> RequestWriter<'a> {
             body: RequestVariant::CodecZenohQuery(query),
         }
         .encode(sink)
+        .map_err(CodecError::from)
     }
 }
 
@@ -212,7 +212,7 @@ mod tests {
         let request = build_request_query_with_meta(parts.rid, 0, Some(parts.keyexpr), &meta)
             .expect("the owned request is built");
         let view = request.try_as_borrowed().expect("a view");
-        view.encode_to_vec().expect("the request view is encodable")
+        view.encode_to_vec()
     }
 
     /// The bytes the writer writes for `parts`.

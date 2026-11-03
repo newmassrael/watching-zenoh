@@ -16,9 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::wireexpr::Wireexpr;
-use super::ext_entry::ExtEntry;
-
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
@@ -34,15 +31,23 @@ use super::ext_entry::ExtEntryOwned;
 #[allow(dead_code)]
 pub struct DeclKexprExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<DeclKexprExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `DeclKexprIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait DeclKexprStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclKexprExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclKexprExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage> DeclKexprStorage for S {}
+
+/// What `DeclKexprIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `DeclKexpr` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait DeclKexprLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclKexprExtensionsField> + super::wireexpr::WireexprLentStorage + super::ext_entry::ExtEntryLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclKexprExtensionsField> + super::wireexpr::WireexprLentStorage + super::ext_entry::ExtEntryLentStorage> DeclKexprLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside DeclKexprStorage: how it stores each field of that frame.
@@ -61,16 +66,18 @@ pub struct DeclKexprIn<S: DeclKexprStorage> {
     pub header: u8,
     pub id: u64,
     pub keyexpr: WireexprOwned<S>,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<DeclKexprExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<DeclKexprExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
 }
 
 /// The eager form: bytes and text borrowed from the frame, lists held inline.
 #[allow(dead_code)]
 pub type DeclKexpr<'a> = DeclKexprIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type DeclKexprOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = DeclKexprIn<S>;
+pub type DeclKexprOwned<S> = DeclKexprIn<S>;
 
 impl<S: DeclKexprStorage> Default for DeclKexprIn<S> {
     fn default() -> Self {
@@ -157,7 +164,7 @@ impl<S: DeclKexprStorage> DeclKexprIn<S> {
         if (header & 0x80u8) != 0 {
             _out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _more = false;
-                for _ in 0..8u32 {
+                loop {
                     let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                     _more = _entry.z();
                     // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -168,9 +175,6 @@ impl<S: DeclKexprStorage> DeclKexprIn<S> {
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
-                }
-                if _more {
-                    return Err(CodecError::TooManyElements);
                 }
                 Ok(())
             })?;
@@ -227,7 +231,7 @@ impl<S: DeclKexprStorage> DeclKexprIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        DeclKexpr::encode_source(self, w)
+        DeclKexprWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -252,8 +256,8 @@ impl<S: DeclKexprStorage> DeclKexprIn<S> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `DeclKexpr` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `DeclKexpr`
-/// computes those from what is ([`DeclKexpr::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`DeclKexprWire::encode_source`]).
 pub trait DeclKexprSource {
     /// The `header` field.
     fn header(&self) -> u8;
@@ -262,7 +266,7 @@ pub trait DeclKexprSource {
     /// The `keyexpr` field.
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
 }
 
 impl<T: DeclKexprSource + ?Sized> DeclKexprSource for &T {
@@ -275,7 +279,7 @@ impl<T: DeclKexprSource + ?Sized> DeclKexprSource for &T {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         (**self).keyexpr()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         (**self).extensions()
     }
 }
@@ -293,7 +297,7 @@ pub struct DeclKexprParts<'a> {
     /// The `keyexpr` field.
     pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
 }
 
 impl<'a> DeclKexprSource for DeclKexprParts<'a> {
@@ -306,7 +310,7 @@ impl<'a> DeclKexprSource for DeclKexprParts<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
@@ -321,7 +325,7 @@ impl<S: DeclKexprStorage> DeclKexprSource for DeclKexprOwned<S> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
@@ -336,15 +340,22 @@ impl<'a> DeclKexprSource for DeclKexprView<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
+/// The codec `DeclKexpr` itself: what writes a value read through
+/// [`DeclKexprSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeclKexprWire;
+
 #[allow(dead_code)]
-impl<'a> DeclKexpr<'a> {
+impl DeclKexprWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `DeclKexpr::encode` writes for the value it holds, read through
     /// [`DeclKexprSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -356,16 +367,16 @@ impl<'a> DeclKexpr<'a> {
     #[doc(hidden)]
     pub fn write_source<S: DeclKexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
-        let _n_d_header_n_0: usize = usize::from(Wireexpr::input_n(src.keyexpr()));
+        let _n_d_header_n_0: usize = usize::from(super::wireexpr::WireexprWire::input_n(src.keyexpr()));
         let _p_header_z_0: bool = src.extensions().is_some();
         let _v_header_n: u8 = _n_d_header_n_0 as u8;
         let _c_header: u8 = (((src.header() & !0x20) | (_v_header_n << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         w.write_vle_u64(src.id())?;
-        Wireexpr::write_source(src.keyexpr(), w)?;
+        super::wireexpr::WireexprWire::write_source(src.keyexpr(), w)?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
-                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
             }
         }
         Ok(())
@@ -381,7 +392,7 @@ impl<'a> DeclKexpr<'a> {
     }
 }
 
-impl<'a, S: DeclKexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for DeclKexpr<'a> {
+impl<S: DeclKexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for DeclKexprWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -390,7 +401,7 @@ impl<'a, S: DeclKexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S>
 }
 
 #[allow(dead_code)]
-impl<'a> DeclKexpr<'a> {
+impl DeclKexprWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -440,7 +451,7 @@ pub struct DeclKexprView<'a> {
     pub header: u8,
     pub id: u64,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, DeclKexprExtensionsWalk, 0>, 8, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, DeclKexprExtensionsWalk, 0>, { usize::MAX }, 1>>,
 }
 
 #[allow(dead_code)]
@@ -488,7 +499,7 @@ impl<'a> DeclKexprView<'a> {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -496,9 +507,6 @@ impl<'a> DeclKexprView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
@@ -519,15 +527,15 @@ impl<'a> DeclKexprView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut DeclKexpr<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut DeclKexprIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: DeclKexprLentStorage {
         _out.header = self.header;
         _out.id = self.id;
         self.keyexpr.into_builder(&mut _out.keyexpr)?;
         match &self.extensions {
             Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -546,7 +554,7 @@ impl<'a> DeclKexprView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        DeclKexpr::encode_source(self, w)
+        DeclKexprWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -605,8 +613,11 @@ impl<'a> DeclKexprView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `DeclKexpr<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> DeclKexpr<'a> {
+impl<'a, D> DeclKexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclKexprLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`DeclKexprOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -628,11 +639,9 @@ impl<'a> DeclKexpr<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<DeclKexprOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -646,8 +655,8 @@ impl<S: DeclKexprStorage> DeclKexprOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<DeclKexpr<'_>, CodecError> {
-        let mut _out = DeclKexpr::default();
+    pub fn try_as_borrowed(&self) -> Result<DeclKexprIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -662,7 +671,7 @@ impl<S: DeclKexprStorage> DeclKexprOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut DeclKexpr<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut DeclKexprIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         _out.id = self.id;
         self.keyexpr.as_borrowed_into(&mut _out.keyexpr);
@@ -687,7 +696,7 @@ impl<S: DeclKexprStorage> DeclKexprOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> DeclKexpr<'a> {
+impl<'a, D> DeclKexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclKexprLentStorage {
     /// Project this borrowed view into an owned [`DeclKexprOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

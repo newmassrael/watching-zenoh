@@ -18,15 +18,13 @@
 
 #![allow(dead_code)]
 
-fn keyexpr(suffix: &'static str) -> wz_codecs::wireexpr::Wireexpr<'static> {
-    wz_codecs::wireexpr::Wireexpr {
-        body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
-            wz_codecs::wireexpr_local::WireexprLocal {
-                id: 0,
-                suffix_len: Some(suffix.len() as u64),
-                suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
-            },
-        ),
+fn keyexpr(suffix: &'static str) -> wz_codecs::lent::Wireexpr<'static> {
+    wz_codecs::lent::Wireexpr {
+        body: wz_codecs::lent::WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+            id: 0,
+            suffix_len: Some(suffix.len() as u64),
+            suffix: Some(wz_codecs::Bounded::new(suffix).unwrap()),
+        }),
     }
 }
 
@@ -39,12 +37,12 @@ fn framed_frame(record: &[u8]) -> Vec<u8> {
 }
 
 fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
-    wz_codecs::response::Response {
-        header: wz_codecs::response::Response::default().header | wz_codecs::wire_const::FLAG_N_N,
+    wz_codecs::lent::Response {
+        header: wz_codecs::lent::Response::default().header | wz_codecs::wire_const::FLAG_N_N,
         request_id,
         keyexpr: keyexpr(suffix),
-        body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
-            body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+        body: wz_codecs::lent::ResponseVariant::CodecZenohReply(wz_codecs::lent::Reply {
+            body: wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                 payload_len: Some(payload.len() as u64),
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     extensions: None,
@@ -69,14 +67,14 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
 /// nothing wrong with it, and until this existed there was no such capture to
 /// point the tool at.
 fn push(suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
-    wz_codecs::push::Push {
+    wz_codecs::lent::Push {
         // The N flag says the keyexpr carries a SUFFIX, and `keyexpr` above
         // always writes one. Without it the decode reads a different shape and
         // the walk halts on the record -- which reports as three plane-level
         // gaps rather than as a bad fixture.
-        header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
         keyexpr: keyexpr(suffix),
-        body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+        body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
             payload_len: Some(payload.len() as u64),
             extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,
@@ -198,16 +196,14 @@ pub fn aliased_capture(with_declaration: bool) -> Vec<u8> {
 
 /// `DeclKexpr`: bind `id` to the literal `base` in the sender's space.
 fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
-    wz_codecs::declare::Declare {
-        body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-            wz_codecs::decl_kexpr::DeclKexpr {
-                header: wz_session_core::wire_const::D_MID_KEXPR
-                    | wz_session_core::wire_const::FLAG_D_N,
-                id,
-                keyexpr: keyexpr(base),
-                extensions: None,
-            },
-        ),
+    wz_codecs::lent::Declare {
+        body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(wz_codecs::lent::DeclKexpr {
+            header: wz_session_core::wire_const::D_MID_KEXPR
+                | wz_session_core::wire_const::FLAG_D_N,
+            id,
+            keyexpr: keyexpr(base),
+            extensions: None,
+        }),
         ..Default::default()
     }
     .encode_to_vec()
@@ -215,20 +211,18 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
 
 /// A reply whose keyexpr is the bare numeric `id`, with no suffix at all.
 fn aliased_reply(request_id: u64, id: u64, payload: &'static [u8]) -> Vec<u8> {
-    wz_codecs::response::Response {
-        header: wz_codecs::response::Response::default().header,
+    wz_codecs::lent::Response {
+        header: wz_codecs::lent::Response::default().header,
         request_id,
-        keyexpr: wz_codecs::wireexpr::Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
-                wz_codecs::wireexpr_local::WireexprLocal {
-                    id,
-                    suffix_len: None,
-                    suffix: None,
-                },
-            ),
+        keyexpr: wz_codecs::lent::Wireexpr {
+            body: wz_codecs::lent::WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                id,
+                suffix_len: None,
+                suffix: None,
+            }),
         },
-        body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
-            body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+        body: wz_codecs::lent::ResponseVariant::CodecZenohReply(wz_codecs::lent::Reply {
+            body: wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                 payload_len: Some(payload.len() as u64),
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     extensions: None,

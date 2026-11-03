@@ -18,10 +18,12 @@
                               header construction).
        byte 1+  : request_id (VLE u64 — correlates this final marker
                               with the original Request's rid).
-       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
-                              depth=4 covers upstream's `_z_msg_ext_
-                              skip_non_mandatories` call site;
-                              entry-flag-Z termination).
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain with no
+                              depth bound: upstream reads it until Z
+                              clears (the `_z_msg_ext_
+                              skip_non_mandatories` call site), and
+                              what a node stores is its deployment's
+                              capacity; entry-flag-Z termination).
 
      No inner body — RESPONSE_FINAL is a pure correlation marker
      signalling that the Accepting side will send no more replies
@@ -43,7 +45,6 @@
     </sce:flags>
     <sce:field id="request_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>

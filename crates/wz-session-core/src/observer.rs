@@ -458,7 +458,7 @@ impl ApplicationLayerObserver {
     fn stage_queryable_interest(
         queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
         staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
-        interest: &wz_codecs::interest::InterestOwned,
+        interest: &crate::transport_profile::owned::InterestOwned,
         peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
     ) {
         if !interest.c() {
@@ -1216,9 +1216,7 @@ mod tests {
     ))]
     mod push_fixtures {
         use crate::wire::PushOwned;
-        use wz_codecs::push::Push;
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
 
         pub(super) fn push_literal(suffix: &str, payload: &[u8]) -> PushOwned {
             let keyexpr = Wireexpr {
@@ -1233,7 +1231,7 @@ mod tests {
                 ..Push::default()
             };
             // Set the inner MsgPut body's payload to the test bytes, inline.
-            if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
+            if let wz_codecs::lent::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
                 put.payload_len = Some(payload.len() as u64);
                 put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     extensions: None,
@@ -1251,10 +1249,10 @@ mod tests {
     // feature is the gate.
     #[cfg(feature = "declare-subscriber")]
     mod decl_fixtures {
-        use wz_codecs::decl_subscriber::DeclSubscriber;
-        use wz_codecs::declare::{Declare, DeclareOwned, DeclareVariant};
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        use crate::transport_profile::owned::DeclareOwned;
+        use wz_codecs::lent::{
+            DeclSubscriber, Declare, DeclareVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
+        };
 
         pub(super) fn declare_decl_subscriber(id: u64, suffix: &str) -> DeclareOwned {
             let keyexpr = Wireexpr {
@@ -1273,7 +1271,7 @@ mod tests {
                 body: DeclareVariant::CodecZenohDeclSubscriber(decl),
                 ..Declare::default()
             }
-            .try_into_owned()
+            .try_into_owned_in::<crate::transport_profile::TransportStorage>()
             .unwrap()
         }
     }
@@ -1370,9 +1368,9 @@ mod tests {
         use alloc::{boxed::Box, vec};
         use core::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
-        use wz_codecs::declare::{Declare, DeclareVariant};
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        use wz_codecs::lent::{
+            Declare, DeclareVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
+        };
 
         #[test]
         fn dispatch_event_routes_event_into_all_consumer_registries_without_cross_talk() {
@@ -1419,15 +1417,15 @@ mod tests {
                     };
                     Declare {
                         body: DeclareVariant::CodecZenohDeclQueryable(
-                            wz_codecs::decl_queryable::DeclQueryable {
+                            wz_codecs::lent::DeclQueryable {
                                 id: 2,
                                 keyexpr,
-                                ..wz_codecs::decl_queryable::DeclQueryable::default()
+                                ..wz_codecs::lent::DeclQueryable::default()
                             },
                         ),
                         ..Declare::default()
                     }
-                    .try_into_owned()
+                    .try_into_owned_in::<crate::transport_profile::TransportStorage>()
                     .unwrap()
                 })),
                 NetworkMessage::Declare(Box::new({
@@ -1439,16 +1437,14 @@ mod tests {
                         }),
                     };
                     Declare {
-                        body: DeclareVariant::CodecZenohDeclToken(
-                            wz_codecs::decl_token::DeclToken {
-                                id: 3,
-                                keyexpr,
-                                ..wz_codecs::decl_token::DeclToken::default()
-                            },
-                        ),
+                        body: DeclareVariant::CodecZenohDeclToken(wz_codecs::lent::DeclToken {
+                            id: 3,
+                            keyexpr,
+                            ..wz_codecs::lent::DeclToken::default()
+                        }),
                         ..Declare::default()
                     }
-                    .try_into_owned()
+                    .try_into_owned_in::<crate::transport_profile::TransportStorage>()
                     .unwrap()
                 })),
             ]);
@@ -1602,7 +1598,7 @@ mod tests {
         // to this module because the cross-talk suite above deliberately uses
         // the id=0 LITERAL form, which consults no space at all.
         fn push_own_alias(mapping_id: u64) -> crate::wire::PushOwned {
-            use wz_codecs::push::Push;
+            use wz_codecs::lent::Push;
             Push {
                 keyexpr: Wireexpr {
                     body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
@@ -1617,19 +1613,28 @@ mod tests {
             .unwrap()
         }
 
-        fn decl_subscriber_own_alias(id: u64, mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
+        fn decl_subscriber_own_alias(
+            id: u64,
+            mapping_id: u64,
+        ) -> crate::transport_profile::owned::DeclareOwned {
             wz_session_core_test_support::declare_envelope_decl_subscriber(
                 wz_session_core_test_support::decl_subscriber_nonlocal(id, mapping_id, None),
             )
         }
 
-        fn decl_queryable_own_alias(id: u64, mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
+        fn decl_queryable_own_alias(
+            id: u64,
+            mapping_id: u64,
+        ) -> crate::transport_profile::owned::DeclareOwned {
             wz_session_core_test_support::declare_envelope_decl_queryable(
                 wz_session_core_test_support::decl_queryable_nonlocal(id, mapping_id, None),
             )
         }
 
-        fn decl_token_own_alias(id: u64, mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
+        fn decl_token_own_alias(
+            id: u64,
+            mapping_id: u64,
+        ) -> crate::transport_profile::owned::DeclareOwned {
             wz_session_core_test_support::declare_envelope_decl_token(
                 wz_session_core_test_support::decl_token_nonlocal(id, mapping_id, None),
             )
@@ -1643,8 +1648,7 @@ mod tests {
         use crate::driver_loop::IterationEvent;
         use crate::network_message::NetworkMessage;
         use alloc::{boxed::Box, vec};
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        use wz_codecs::lent::{Wireexpr, WireexprNonlocal, WireexprVariant};
 
         #[test]
         fn flush_pending_clears_queryable_staged_buffers() {
@@ -1664,8 +1668,7 @@ mod tests {
                 });
 
             // Synthesize an inbound Query for "home/temp".
-            use wz_codecs::query::Query;
-            use wz_codecs::request::{Request, RequestVariant};
+            use wz_codecs::lent::{Query, Request, RequestVariant};
             let suffix = "home/temp";
             let keyexpr = Wireexpr {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
@@ -1811,7 +1814,7 @@ mod tests {
 
         /// `id: 0` with a suffix is a literal keyexpr — no peer mapping needed,
         /// so these tests measure the ROUTING and not a resolution accident.
-        fn token(id: u64, keyexpr: &str) -> wz_codecs::decl_token::DeclTokenOwned {
+        fn token(id: u64, keyexpr: &str) -> crate::transport_profile::owned::DeclTokenOwned {
             decl_token_nonlocal(id, 0, Some(keyexpr))
         }
 
@@ -2568,11 +2571,9 @@ mod history_replay_is_peer_scoped {
         let mut observer = ApplicationLayerObserver::new();
         // Same shape as the local token above, but arriving over the wire.
         observer.liveliness_subscribers.dispatch_declare(
-            &wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclToken(decl_token_nonlocal(
-                41,
-                0,
-                Some("live/theirs"),
-            )),
+            &crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclToken(
+                decl_token_nonlocal(41, 0, Some("live/theirs")),
+            ),
             &hashbrown::HashMap::<u64, alloc::string::String>::new(),
         );
 

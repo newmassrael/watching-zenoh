@@ -196,8 +196,9 @@ mod tests {
     use alloc::sync::Arc;
     use alloc::vec;
     use sce_forge_runtime::codec::{Heap, SceCursor};
+    use wz_codecs::lent::Push;
     use wz_codecs::msg_put::{MsgPutExtensionsHas0x12, MsgPutPayloadField};
-    use wz_codecs::push::{Push, PushOwnedVariant, PushStorage};
+    use wz_codecs::push::{PushOwnedVariant, PushStorage};
 
     use crate::link::RxStorage;
 

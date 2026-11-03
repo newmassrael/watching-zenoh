@@ -50,7 +50,7 @@ use alloc::string::{String, ToString};
 use hashbrown::HashMap;
 
 use crate::passive::Direction;
-use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 
 /// What an observer could make of one wire expression.

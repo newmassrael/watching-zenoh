@@ -359,7 +359,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             .expect("a borrowed view")
             .encode_to_vec()
     };
-    let oam = wz_codecs::oam::Oam {
+    let oam = wz_codecs::lent::Oam {
         id: 7,
         ..Default::default()
     }

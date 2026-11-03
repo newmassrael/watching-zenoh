@@ -59,8 +59,11 @@ use crate::bounded::{Static, Storage};
 use crate::caps;
 use crate::id_map::{FixedIdMap, IdMap, KeyText, PeerAliases};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::wireexpr::{WireexprOwnedVariant, WireexprStorage, WireexprVariant};
+use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
+use sce_forge_runtime::codec::Lent;
+use wz_codecs::wireexpr::{
+    WireexprLentStorage, WireexprOwnedVariant, WireexprStorage, WireexprVariantIn,
+};
 
 /// The `(id, suffix)` a Wireexpr carries, whichever mapping arm holds them.
 ///
@@ -587,11 +590,14 @@ pub type KeyexprBuf = crate::bounded::BoundedString<{ crate::caps::MAX_KEYEXPR_B
 pub struct KeyexprPastBound;
 
 /// The `(id, suffix)` a wireexpr carries as it is decoded, where its frame
-/// lies: [`id_and_suffix`] over the borrowed form.
-pub fn id_and_suffix_view<'k>(body: &WireexprVariant<'k>) -> (u64, Option<&'k str>) {
+/// lies: [`id_and_suffix`] over the borrowed form, at any profile the lent form
+/// holds its lists in (a wireexpr holds none, so the answer is the same).
+pub fn id_and_suffix_view<'k, D: WireexprLentStorage>(
+    body: &WireexprVariantIn<Lent<'k, D>>,
+) -> (u64, Option<&'k str>) {
     match body {
-        WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
-        WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
+        WireexprVariantIn::WireexprLocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
+        WireexprVariantIn::WireexprNonlocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
     }
 }
 
@@ -612,15 +618,15 @@ pub fn id_and_suffix_view<'k>(body: &WireexprVariant<'k>) -> (u64, Option<&'k st
 /// in place does exactly that (`pubsub::SubscriberRegistry`), and counts it.
 // The frame's lifetime `'f` is its own: the borrowed wireexpr is invariant in it, so it cannot
 // shrink to the caller's buffer, and the suffix it lends outlives the answer.
-pub fn resolve_wireexpr_view<'k, 'f: 'k>(
-    body: &WireexprVariant<'f>,
+pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
+    body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix) = id_and_suffix_view(body);
     let arm = match body {
-        WireexprVariant::WireexprLocal(_) => Space::Peer,
-        WireexprVariant::WireexprNonlocal(_) => Space::Own,
+        WireexprVariantIn::WireexprLocal(_) => Space::Peer,
+        WireexprVariantIn::WireexprNonlocal(_) => Space::Own,
     };
     resolve_parts(arm, id, suffix, spaces, out)
 }
@@ -637,8 +643,8 @@ pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     use wz_codecs::wireexpr::WireexprViewVariant as V;
     let body = match body {
-        V::WireexprLocal(arm) => WireexprVariant::WireexprLocal(arm.clone()),
-        V::WireexprNonlocal(arm) => WireexprVariant::WireexprNonlocal(arm.clone()),
+        V::WireexprLocal(arm) => WireexprVariantIn::WireexprLocal(arm.clone()),
+        V::WireexprNonlocal(arm) => WireexprVariantIn::WireexprNonlocal(arm.clone()),
     };
     resolve_wireexpr_view(&body, spaces, out)
 }
@@ -851,8 +857,8 @@ pub fn resolve_declared_keyexpr_into<'k, S: WireexprStorage>(
 /// [`resolve_declared_keyexpr_into`] over a wireexpr read where its frame lies:
 /// the same rule through one shared function, so a declaration the receive path
 /// lends is bound under exactly the keyexpr the owned one is.
-pub fn resolve_declared_keyexpr_view<'k, 'f: 'k>(
-    body: &WireexprVariant<'f>,
+pub fn resolve_declared_keyexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
+    body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {

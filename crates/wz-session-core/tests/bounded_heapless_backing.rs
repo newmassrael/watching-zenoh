@@ -273,9 +273,9 @@ fn local_token_table_refuses_the_token_past_max_local_tokens_without_allocating(
 #[cfg(feature = "codec-declare")]
 mod peer_tables {
     use super::*;
-    use wz_codecs::declare::DeclareOwned;
     use wz_session_core::bounded::Profile;
     use wz_session_core::id_map::PeerAliases;
+    use wz_session_core::transport_profile::owned::DeclareOwned;
     use wz_session_core::wireexpr_resolve::MappingSpaces;
     use wz_session_core_test_support as fx;
 

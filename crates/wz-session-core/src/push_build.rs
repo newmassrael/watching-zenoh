@@ -55,8 +55,12 @@ use crate::wire::parts::ExtEntryOwnedVariant;
 #[cfg(feature = "pubsub-qos")]
 use wz_codecs::ext_zint::ExtZint;
 
-/// A Push's extension chain, or its body's, within the bound the codec declares.
-type ExtChain = Bounded<Vec<ExtEntryOwned>, 8, 1>;
+/// A Push's extension chain, or its body's, as the codec's field holds it: the
+/// protocol bounds a chain by nothing, so the field's bound is `usize::MAX` and
+/// at least one entry. Named here rather than inferred because some builders
+/// only take the list out of it (`into_inner`), which gives the bound nothing to
+/// be inferred from.
+type ExtChain = Bounded<Vec<ExtEntryOwned>, { usize::MAX }, 1>;
 
 /// R121e — build a `Push` network-message with a literal keyexpr
 /// (id=0 + inline suffix) and a `Put` body carrying `value` as
@@ -993,7 +997,7 @@ mod tests {
         feature = "pubsub-source-info",
         feature = "pubsub-qos"
     ))]
-    use wz_codecs::push::Push;
+    use wz_codecs::lent::Push;
     #[cfg(all(
         feature = "pubsub-attachment",
         feature = "pubsub-timestamp",

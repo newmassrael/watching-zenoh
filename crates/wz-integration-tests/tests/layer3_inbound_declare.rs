@@ -23,9 +23,7 @@
 //! the byte-level peer-emission semantics.
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::declare::Declare;
-use wz_codecs::push::Push;
-use wz_codecs::response_final::ResponseFinal;
+use wz_codecs::lent::{Declare, Push, ResponseFinal};
 use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
 #[test]
@@ -71,7 +69,7 @@ fn declare_dispatch_does_not_swallow_subsequent_records() {
     // A bare default Put is not encodable (its payload is gated on the extension
     // chain), so the Push in the batch carries an explicit empty inline payload.
     let mut push = Push::default();
-    if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
+    if let wz_codecs::lent::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
         put.payload_len = Some(0);
         put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
             extensions: None,

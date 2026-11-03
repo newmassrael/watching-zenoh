@@ -2,22 +2,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # What a wz node stores of each codec field whose bound is the protocol's
-# (SCE ADR 0077 section 7). A document's `sce:max-size` is what a frame may
-# say; the number here is what the `Node` profile holds inline, and a frame
-# past it is refused by a storing form as `CodecError::CapacityExceeded`
-# while a lent decode or a view still reads it whole.
+# (SCE ADR 0077 section 7). A document states a field's bound only where the
+# protocol does (`sce:max-size`, `max-count`, `max-depth`, or the width of its
+# length or count field), and a field the protocol bounds by nothing has none.
+# The number here is what the `Node` profile holds inline; a frame past it is
+# refused by a storing form as `CodecError::CapacityExceeded`, while a lent
+# decode or a view still reads it whole. Every field with no bound must have a
+# capacity here, or the generator refuses the deployment, naming the field.
 #
 # The numbers are the ones the documents carried as their bound until the SCE
 # pin crossed ADR 0077 step 1, so the inline footprint of every `Owned<Node>`
-# is what `Owned<Inline>` was. `xtask regen` generates
+# is what `Owned<Inline>` was then. `xtask regen` generates
 # `out/wz-codecs/node.rs` from this file and the codec set.
 codecs:
   msg_put:
     capacity:
       payload: 256
+      slices: 4
+      extensions: 8
   err:
     capacity:
       payload: 256
+      extensions: 8
   zbuf_slice:
     capacity:
       bytes: 256
@@ -27,9 +33,11 @@ codecs:
   query_value_zbuf:
     capacity:
       value: 32
+      slices: 4
   query:
     capacity:
       parameters: 256
+      extensions: 8
   init_body:
     capacity:
       cookie: 128
@@ -48,3 +56,73 @@ codecs:
   wireexpr_nonlocal:
     capacity:
       suffix: 128
+  hello:
+    capacity:
+      locators: 64
+  linkstate:
+    capacity:
+      locators: 64
+      links: 64
+      weights: 64
+  linkstate_list:
+    capacity:
+      link_states: 64
+  # Every extension chain: a node holds eight entries of one, the depth the
+  # documents stated before a chain stated none.
+  decl_final:
+    capacity:
+      extensions: 8
+  decl_kexpr:
+    capacity:
+      extensions: 8
+  decl_queryable:
+    capacity:
+      extensions: 8
+  decl_subscriber:
+    capacity:
+      extensions: 8
+  decl_token:
+    capacity:
+      extensions: 8
+  declare:
+    capacity:
+      extensions: 8
+  ext_envelope:
+    capacity:
+      extensions: 8
+  interest:
+    capacity:
+      extensions: 8
+  msg_del:
+    capacity:
+      extensions: 8
+  oam:
+    capacity:
+      extensions: 8
+  push:
+    capacity:
+      extensions: 8
+  reply:
+    capacity:
+      extensions: 8
+  request:
+    capacity:
+      extensions: 8
+  response:
+    capacity:
+      extensions: 8
+  response_final:
+    capacity:
+      extensions: 8
+  undecl_kexpr:
+    capacity:
+      extensions: 8
+  undecl_queryable:
+    capacity:
+      extensions: 8
+  undecl_subscriber:
+    capacity:
+      extensions: 8
+  undecl_token:
+    capacity:
+      extensions: 8

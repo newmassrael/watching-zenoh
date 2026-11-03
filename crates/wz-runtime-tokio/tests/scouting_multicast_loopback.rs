@@ -24,6 +24,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use sce_forge_runtime::codec::Heap;
 use tokio::net::UdpSocket;
 use wz_codecs::hello::HelloOwned;
 use wz_codecs::locator::LocatorOwned;
@@ -100,7 +101,7 @@ fn pin_egress_to_the_default_route(sock: &UdpSocket) {
 fn craft_hello_datagram(locator: &str) -> Vec<u8> {
     let zid = vec![0x01, 0x02, 0x03];
     let cbyte = 0x01 | (((zid.len() as u8) - 1) << 4); // whatami=peer | zid_len_m1
-    let owned: HelloOwned = HelloOwned {
+    let owned: HelloOwned<Heap> = HelloOwned {
         version: 0x09,
         cbyte,
         zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
@@ -128,7 +129,7 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
 /// flag and the list are two spellings of one fact and bytes that disagree
 /// decode to a shape no scouting window ever observes.
 fn craft_locator_less_hello(zid: &[u8]) -> Vec<u8> {
-    let owned: HelloOwned = HelloOwned {
+    let owned: HelloOwned<Heap> = HelloOwned {
         version: 0x09,
         cbyte: 0x01 | (((zid.len() as u8) - 1) << 4),
         zid: wz_session_core::codec_owned::owned_bytes(zid).unwrap(),

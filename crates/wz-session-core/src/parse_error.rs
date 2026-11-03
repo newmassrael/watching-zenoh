@@ -118,11 +118,13 @@ impl fmt::Display for InboundParseError {
     }
 }
 
-/// R68c — upper bound on ext-chain entries decoded per inbound
-/// frame. Mirrors `ext_envelope.scxml::max-depth="8"` so the wz
-/// inbound decoder fails closed on the same chain length zenoh-pico
-/// would already reject. Production deploys with a higher ceiling
-/// would have to bump this AND `ext_envelope.scxml` together.
+/// R68c — how many ext-chain entries the wz inbound decoder stores of one
+/// transport message, refusing a chain past it as `ExtChainOverflow`. The
+/// protocol bounds a chain by nothing; this is the participant's capacity,
+/// the same eight the `Node` deployment gives every chain
+/// (`deploy/codec_node.yaml`), and the dissector, which judges the wire,
+/// does not apply it. A deployment with a higher ceiling bumps this and the
+/// deploy file together.
 pub const MAX_EXT_CHAIN_DEPTH: usize = 8;
 
 impl core::error::Error for InboundParseError {}

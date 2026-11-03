@@ -84,10 +84,10 @@ fn declare_message() -> Vec<u8> {
 }
 
 fn push_message(payload: &[u8]) -> Vec<u8> {
-    wz_codecs::push::Push {
-        header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+    wz_codecs::lent::Push {
+        header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
         keyexpr: literal("demo/temp"),
-        body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+        body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
             payload_len: Some(payload.len() as u64),
             extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,
@@ -101,21 +101,18 @@ fn push_message(payload: &[u8]) -> Vec<u8> {
 }
 
 fn request_message() -> Vec<u8> {
-    wz_codecs::request::Request {
-        header: wz_codecs::request::Request::default().header | wz_codecs::wire_const::FLAG_N_N,
+    wz_codecs::lent::Request {
+        header: wz_codecs::lent::Request::default().header | wz_codecs::wire_const::FLAG_N_N,
         rid: 7,
         keyexpr: literal("demo/q"),
-        body: wz_codecs::request::RequestVariant::CodecZenohQuery(
-            wz_codecs::query::Query::default(),
-        ),
+        body: wz_codecs::lent::RequestVariant::CodecZenohQuery(wz_codecs::lent::Query::default()),
         ..Default::default()
     }
     .encode_to_vec()
-    .expect("a fixture Request is encodable")
 }
 
 fn response_final_message() -> Vec<u8> {
-    wz_codecs::response_final::ResponseFinal {
+    wz_codecs::lent::ResponseFinal {
         request_id: 7,
         ..Default::default()
     }

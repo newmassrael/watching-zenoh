@@ -25,21 +25,18 @@
 //! is step c2. `codec-linkstate`-gated (AP/full-node routing; absent from
 //! the MCU footprint); owned `Vec` output (alloc-gated).
 //!
-//! The list itself is walked an entry at a time in both directions, never
-//! through the generated bounded `LinkstateList` view, whose every slot sits
-//! on the calling task's stack (see "The list walk" below).
+//! The list itself is encoded and decoded by the generated owned codec, never
+//! through the lent `LinkstateList` at `Node`, whose every slot sits on the
+//! calling task's stack (see "The list" below).
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink, VecSink};
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
+use crate::transport_profile::owned::{LinkstateListOwned, OamOwned, OamOwnedVariant};
+use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::linkstate::{Linkstate, LinkstateOwned};
-use wz_codecs::linkstate_list::{LinkstateList, LinkstateListOwned};
-use wz_codecs::oam::{OamOwned, OamOwnedVariant};
 use wz_codecs::wire_const;
 
 /// Raw 2-bit body-encoding selectors (the value before it is shifted into
@@ -83,94 +80,23 @@ pub enum LinkstateOam {
     Malformed(Option<CodecError>),
 }
 
-/// How many entries a LinkStateList may hold: the bound of the generated
-/// borrowed view's `link_states` field, read off its type so this module
-/// enforces exactly the cap the codec's own `decode` and `try_as_borrowed`
-/// enforce, and follows it if the codec's source changes it.
-const LINK_STATES_CAP: usize = bound_of(|list: &LinkstateList<'static>| &list.link_states);
-
-const fn bound_of<T, const N: usize>(
-    _field: for<'v> fn(&'v LinkstateList<'static>) -> &'v HeaplessVec<T, N>,
-) -> usize {
-    N
-}
-
-// ── The list walk ────────────────────────────────────────────────────
+// ── The list ─────────────────────────────────────────────────────────
 //
-// The generated `LinkstateList` view holds its entries in a bounded inline
-// list, `HeaplessVec<Linkstate, LINK_STATES_CAP>`, so a value of it is every
-// slot at once: ~171 KB whether the list carries one entry or the bound
-// (`the_borrowed_linkstate_lists_stack_footprint_is_bounded`). Encoding an
-// owned list goes through that view (`try_as_borrowed`, then `encode`), and
-// decoding one produces it before projecting to owned. The value lives on the
-// stack and moves by value through each of those calls, which in a debug
-// build kept ~1.58 MiB of stack for one flood of a one-entry list.
+// The lent `LinkstateList` at `Node` holds its entries in a fixed inline list,
+// so a value of it is every slot at once: ~171 KB whether the list carries one
+// entry or 64 (`the_borrowed_linkstate_lists_stack_footprint_is_bounded`), and
+// in a debug build a flood that went through it kept ~1.58 MiB of a router's
+// poll stack for a one-entry list. Both directions run inside whatever task
+// polls the routing plane: a router floods its link state from
+// `FaceForwarder::register`, inside the accept loop's poll, and parses an
+// inbound advertisement there too, on a tokio worker's or a test thread's 2 MiB.
 //
-// Both directions run inside whatever task polls the routing plane: a router
-// floods its link state from `FaceForwarder::register`, inside the accept
-// loop's poll, and parses an inbound advertisement there too. That task's
-// stack is a tokio worker's or a test thread's 2 MiB, and the loop's own
-// frames already take part of it; the router e2e in the widest feature leg
-// overflowed exactly there.
-//
-// So the carrier walks the list an entry at a time and never materialises the
-// bounded view. The wire is the codec's, unchanged: a VLE count, then each
-// entry by the generated `Linkstate` codec. The bound the list codec checks is
-// the type of the owned list, and what is left, each entry projected, is
-// checked here first, so a list the codec refuses is refused here with the
-// same error and no byte written.
-// The parity tests below pin both directions against the generated list codec.
-
-/// Encode `list` as the LinkStateList wire, entry by entry.
-///
-/// The bytes the generated `LinkstateList::encode` writes for
-/// `list.try_as_borrowed()?`, and the same refusals: every entry is projected
-/// first, in order. A list past the bound is not a value of the owned list's
-/// type, so it has no refusal here. An entry the generated encode refuses is
-/// the same `Err` here, which the generated `encode_to_vec` returns too since
-/// the codec declares it may fail.
-fn encode_linkstate_list(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
-    for entry in list.link_states.iter() {
-        entry.try_as_borrowed()?;
-    }
-    let mut bytes = Vec::new();
-    let mut sink = VecSink::new(&mut bytes);
-    sink.write_vle_u64(list.num_link_states)?;
-    for entry in list.link_states.iter() {
-        entry.try_as_borrowed()?.encode(&mut sink)?;
-    }
-    Ok(bytes)
-}
-
-/// Decode a LinkStateList from `cursor` into its owned form, entry by entry.
-///
-/// What the generated `LinkstateList::decode` then `try_into_owned` produce
-/// and refuse, in their order: every entry is decoded, an entry past
-/// [`LINK_STATES_CAP`] is `TooManyElements` once it has decoded, and only
-/// then is each entry projected to owned. The decoded entries wait on the heap,
-/// not in a bounded inline list.
-fn decode_linkstate_list_owned(
-    cursor: &mut SceCursor<'_>,
-) -> Result<LinkstateListOwned, CodecError> {
-    let num_link_states = cursor.read_vle_u64()?;
-    let mut entries: Vec<Linkstate<'_>> = Vec::new();
-    for _ in 0..num_link_states {
-        let entry = Linkstate::decode(cursor)?;
-        if entries.len() >= LINK_STATES_CAP {
-            return Err(CodecError::TooManyElements);
-        }
-        entries.push(entry);
-    }
-    let link_states = entries
-        .into_iter()
-        .map(Linkstate::try_into_owned)
-        .collect::<Result<Vec<LinkstateOwned>, CodecError>>()?;
-    Ok(LinkstateListOwned {
-        num_link_states,
-        link_states: sce_forge_runtime::codec::Bounded::new(link_states)
-            .ok_or(CodecError::TooManyElements)?,
-    })
-}
+// So the carrier encodes and decodes the list through the generated OWNED codec
+// at `TransportStorage`, the heap on the builds this module compiles in: the
+// entries live in a `Vec` and no fixed list is materialised. The protocol
+// bounds the list by nothing (its count is a `u64`), and so does the heap
+// decode, which is the wire's own judge; a node that stores the list at `Node`
+// refuses one past 64 entries there, as storage (`CapacityExceeded`).
 
 /// Build the OAM network-message wire bytes carrying `list`. Mirrors
 /// zenoh `Network::make_msg`: encode the LinkStateList with the routing
@@ -179,9 +105,7 @@ fn decode_linkstate_list_owned(
 /// separately. Owned input (the topology graph in step c2 holds owned
 /// link-state records); `alloc`-only, like the sibling builders.
 pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
-    Ok(build_linkstate_oam_owned(list)?
-        .try_as_borrowed()?
-        .encode_to_vec())
+    Ok(build_linkstate_oam_owned(list)?.encode_to_vec())
 }
 
 /// Build the OAM-LINKSTATE carrier as an OWNED message — the send-path form.
@@ -189,7 +113,7 @@ pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecEr
 /// via `send_network_message` (c3d). [`build_linkstate_oam`] is the same
 /// message rendered to wire bytes (for inspection / byte-parity tests).
 pub fn build_linkstate_oam_owned(list: &LinkstateListOwned) -> Result<OamOwned, CodecError> {
-    let list_bytes = encode_linkstate_list(list)?;
+    let list_bytes = list.encode_to_vec();
     let value_len = list_bytes.len() as u64;
 
     // The qos extension (QoSType::OAM). Its header is composed from named
@@ -240,11 +164,11 @@ pub fn build_linkstate_oam_owned(list: &LinkstateListOwned) -> Result<OamOwned, 
 }
 
 /// Classify a decoded OAM message as a topology carrier. See
-/// [`LinkstateOam`] for the three outcomes. Decoding walks the list an entry
-/// at a time through the generated `Linkstate` codec, projecting each to
-/// owned (`decode_linkstate_list_owned`), so a payload
-/// exceeding the generic ext-ZBuf `<32>` owned cap is fine (the structured
-/// link-state records carry their own appropriately-bounded fields).
+/// [`LinkstateOam`] for the three outcomes. The list is decoded by the
+/// generated owned codec at `TransportStorage` (see "The list" above), so a
+/// payload exceeding the generic ext-ZBuf `<32>` owned cap is fine (the
+/// structured link-state records carry their own fields), and a list of any
+/// length the wire carries is read.
 pub fn try_parse_linkstate_oam(oam: &OamOwned) -> LinkstateOam {
     // Truncate BEFORE comparing: the decoded field holds the whole zint, and a
     // sender that wrote a wide encoding of `0x1_0001` addressed every
@@ -261,7 +185,7 @@ pub fn try_parse_linkstate_oam(oam: &OamOwned) -> LinkstateOam {
         _ => return LinkstateOam::Malformed(None),
     };
     let mut cursor = SceCursor::new(body_bytes);
-    match decode_linkstate_list_owned(&mut cursor) {
+    match LinkstateListOwned::decode(&mut cursor) {
         Ok(list) => LinkstateOam::Decoded(list),
         Err(e) => LinkstateOam::Malformed(Some(e)),
     }
@@ -271,7 +195,7 @@ pub fn try_parse_linkstate_oam(oam: &OamOwned) -> LinkstateOam {
 mod tests {
     use super::*;
     use wz_codecs::ext_unit::ExtUnit;
-    use wz_codecs::oam::Oam;
+    use wz_codecs::lent::{LinkstateList, Oam};
 
     /// A LinkStateList wire of one minimal LinkState entry (the `MIN`
     /// oracle from the wz-codecs linkstate byte-parity test): count=1,
@@ -293,19 +217,17 @@ mod tests {
     const WEIGHTED_LIST_WIRE: [u8; 10] =
         [0x01, 0x08, 0x03, 0x00, 0x02, 0x05, 0x09, 0x64, 0xAC, 0x02];
 
+    /// `wire` decoded by the heap decode, the wire's own judge.
     fn decode_list_owned(wire: &[u8]) -> LinkstateListOwned {
         let mut cursor = SceCursor::new(wire);
-        LinkstateList::decode(&mut cursor)
-            .expect("decode list")
-            .try_into_owned()
-            .expect("list to owned")
+        LinkstateListOwned::decode(&mut cursor).expect("decode list")
     }
 
     fn decode_oam_owned(wire: &[u8]) -> OamOwned {
         let mut cursor = SceCursor::new(wire);
         Oam::decode(&mut cursor)
             .expect("decode oam")
-            .try_into_owned()
+            .try_into_owned_in::<crate::transport_profile::TransportStorage>()
             .expect("oam to owned")
     }
 
@@ -328,10 +250,11 @@ mod tests {
     /// That figure once also read "the library's own parse path fits inside
     /// 2 MiB", which was measured, while the BUILD path went unmeasured and
     /// took ~1.58 MiB of a router's poll stack per flood. The carrier now
-    /// crosses no borrowed list in either direction (the list walk above, held
+    /// crosses no fixed list in either direction (the owned codec above, held
     /// by `the_carrier_runs_in_less_stack_than_one_borrowed_list`); the
-    /// crossings left here are this test's own oracle, `decode_list_owned` and
-    /// the final `try_as_borrowed`, which is why the figure stays.
+    /// crossings left here are this module's tests' own: the lent `Oam` decode
+    /// and the final `try_as_borrowed`, and the `Node` decode the parity tests
+    /// use as their control, which is why the figure stays.
     const ROUND_TRIP_STACK: usize = 8 * 1024 * 1024;
 
     /// build an OAM from a list wire, decode+parse it back, and return the
@@ -522,8 +445,8 @@ mod tests {
     ///
     /// The budget is one borrowed list's own size: an implementation that
     /// materialises the bounded view cannot fit in it, whatever its frames,
-    /// and one that walks the list an entry at a time needs a few entries'
-    /// worth. A full list (the bound, 64 entries) is parsed and rebuilt.
+    /// and one that keeps the entries on the heap needs a few entries' worth.
+    /// A list of what a node stores (64 entries) is parsed and rebuilt.
     #[test]
     fn the_carrier_runs_in_less_stack_than_one_borrowed_list() {
         let budget = core::mem::size_of::<LinkstateList<'_>>();
@@ -560,59 +483,69 @@ mod tests {
             .expect("the oracle must fit in ROUND_TRIP_STACK");
     }
 
-    /// The list walk writes the generated list codec's bytes: an empty list,
-    /// one entry, a weighted entry, and a full list at the bound.
+    /// The carrier writes the list codec's bytes: an empty list, one entry, a
+    /// weighted entry, a list of what a node stores (64) and one past it (65).
     #[test]
-    fn the_list_walk_encodes_what_the_list_codec_encodes() {
+    fn the_carrier_writes_the_list_codecs_bytes() {
         with_oracle_stack(|| {
             for wire in [
                 vec![0x00],
                 LIST_WIRE.to_vec(),
                 WEIGHTED_LIST_WIRE.to_vec(),
                 minimal_list_wire(64),
+                minimal_list_wire(65),
             ] {
                 let list = decode_list_owned(&wire);
-                let by_codec = list.try_as_borrowed().expect("in bound").encode_to_vec();
-                assert_eq!(encode_linkstate_list(&list), Ok(by_codec.clone()));
-                assert_eq!(by_codec, wire);
+                assert_eq!(list.encode_to_vec(), wire, "the list codec");
+                let OamOwnedVariant::CodecZenohExtZbuf(zbuf) = build_linkstate_oam_owned(&list)
+                    .expect("the carrier builds")
+                    .body
+                else {
+                    panic!("a linkstate OAM carries a ZBuf body");
+                };
+                assert_eq!(zbuf.value.as_slice(), wire.as_slice(), "the carrier");
             }
         });
     }
 
-    /// A list one entry past the bound is not an owned list at all, so neither
-    /// the list walk nor the list codec is offered one, and the bound that
-    /// refuses it is the codec's own: the field's type says it here, and
-    /// `LINK_STATES_CAP` agrees with it at exactly the bound.
+    /// The protocol bounds the list by nothing, so a list one entry past the 64
+    /// a node stores is built, carried and read back whole on the heap, the
+    /// wire's own judge. A node's storing decode (`Node`) refuses the same bytes
+    /// as storage, `CapacityExceeded`, and stores the 64-entry list, which is
+    /// the control that keeps a decode refusing every list from passing.
     #[test]
-    fn the_list_walk_refuses_a_list_past_the_bound_as_the_codec_does() {
-        assert_eq!(LINK_STATES_CAP, 64);
+    fn a_list_past_what_a_node_stores_is_carried_whole() {
         with_oracle_stack(|| {
-            let list = decode_list_owned(&minimal_list_wire(64));
-            let wire = encode_linkstate_list(&list).expect("a list at the bound is encodable");
-            assert_eq!(build_linkstate_oam_owned(&list).map(|_| ()), Ok(()));
-            assert_eq!(wire, minimal_list_wire(64));
+            let wire = minimal_list_wire(65);
+            let list = decode_list_owned(&wire);
+            assert_eq!(list.link_states.len(), 65);
+            let oam_wire = build_linkstate_oam(&list).expect("a 65-entry list is carried");
+            match try_parse_linkstate_oam(&decode_oam_owned(&oam_wire)) {
+                LinkstateOam::Decoded(parsed) => assert_eq!(parsed, list),
+                other => panic!("the carrier reads its own advertisement back: {other:?}"),
+            }
 
-            let mut entries = list.link_states.into_inner();
-            entries.push(entries[0].clone());
-            let past_the_bound: Option<LinkstateListOwned> =
-                sce_forge_runtime::codec::Bounded::new(entries).map(|link_states| {
-                    LinkstateListOwned {
-                        num_link_states: 65,
-                        link_states,
-                    }
-                });
-            assert!(past_the_bound.is_none());
+            assert_eq!(
+                LinkstateList::decode(&mut SceCursor::new(&wire)).err(),
+                Some(CodecError::CapacityExceeded),
+                "a node stores 64 entries and refuses the 65th as storage"
+            );
+            assert!(
+                LinkstateList::decode(&mut SceCursor::new(&minimal_list_wire(64))).is_ok(),
+                "a node stores 64 entries"
+            );
         });
     }
 
-    /// The list walk decodes what the list codec decodes, and refuses an
-    /// advertisement past the bound, or one cut short, with the codec's error.
+    /// The carrier parses what the heap decode reads, list for list and error
+    /// for error: past what a node stores it reads the whole list, and a list
+    /// cut short is refused with the decode's error.
     #[test]
-    fn the_list_walk_decodes_what_the_list_codec_decodes() {
+    fn the_carrier_parses_what_the_heap_decode_reads() {
         with_oracle_stack(|| {
-            let mut past_bound = minimal_list_wire(64);
-            past_bound[0] = 65;
-            past_bound.extend_from_slice(&[0x00, 0x40, 0x00, 0x00]);
+            let mut past_node = minimal_list_wire(64);
+            past_node[0] = 65;
+            past_node.extend_from_slice(&[0x00, 0x40, 0x00, 0x00]);
             let mut cut_short = minimal_list_wire(3);
             cut_short.pop();
             for wire in [
@@ -620,16 +553,17 @@ mod tests {
                 LIST_WIRE.to_vec(),
                 WEIGHTED_LIST_WIRE.to_vec(),
                 minimal_list_wire(64),
-                past_bound,
+                past_node,
                 cut_short,
             ] {
-                let by_codec = LinkstateList::decode(&mut SceCursor::new(&wire))
-                    .and_then(|list| list.try_into_owned());
-                let by_walk = decode_linkstate_list_owned(&mut SceCursor::new(&wire));
-                assert_eq!(by_walk, by_codec, "wire {wire:02x?}");
+                let by_heap = LinkstateListOwned::decode(&mut SceCursor::new(&wire));
                 match try_parse_linkstate_oam(&linkstate_oam_of(&wire)) {
-                    LinkstateOam::Decoded(list) => assert_eq!(Ok(list), by_codec),
-                    LinkstateOam::Malformed(Some(e)) => assert_eq!(Err(e), by_codec),
+                    LinkstateOam::Decoded(list) => {
+                        assert_eq!(Ok(list), by_heap, "wire {wire:02x?}")
+                    }
+                    LinkstateOam::Malformed(Some(e)) => {
+                        assert_eq!(Err(e), by_heap, "wire {wire:02x?}")
+                    }
                     other => panic!("a ZBuf linkstate body is decoded or malformed: {other:?}"),
                 }
             }

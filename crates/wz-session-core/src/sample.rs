@@ -76,9 +76,9 @@ use crate::vle::read_vle_u64;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::{Bounded, CodecError};
 
-#[cfg(test)]
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryStorage};
+#[cfg(test)]
+use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
 
 /// Application-level mirror of [`wz_codecs::timestamp::Timestamp`].
 ///
@@ -127,7 +127,7 @@ impl TimestampHint {
     /// [`Self::from_codec`] over the timestamp as it is decoded, where its
     /// frame lies: the same two fields, so a Put delivered in place reports
     /// the timestamp its owned projection would.
-    pub fn from_view(ts: &wz_codecs::timestamp::Timestamp<'_>) -> Self {
+    pub fn from_view(ts: &wz_codecs::lent::Timestamp<'_>) -> Self {
         Self {
             time: ts.time,
             zid: ts.zid.to_vec(),
@@ -143,8 +143,8 @@ impl TimestampHint {
     /// `LengthOutOfRange` for a zid past the 16 bytes a zenoh id has: the
     /// codec holds the zid within that bound, so such a timestamp has no
     /// frame.
-    pub fn to_codec(&self) -> Result<wz_codecs::timestamp::Timestamp<'_>, CodecError> {
-        Ok(wz_codecs::timestamp::Timestamp {
+    pub fn to_codec(&self) -> Result<wz_codecs::lent::Timestamp<'_>, CodecError> {
+        Ok(wz_codecs::lent::Timestamp {
             time: self.time,
             zid_len: self.zid.len() as u64,
             zid: Bounded::new(self.zid.as_slice()).ok_or(CodecError::LengthOutOfRange)?,
@@ -235,7 +235,7 @@ impl EncodingHint {
     /// [`Self::from_codec`] over the encoding as it is decoded, where its frame
     /// lies: a Put delivered in place reports the encoding its owned projection
     /// would. Only a schema is copied; an encoding that names none costs nothing.
-    pub fn from_view(encoding: &wz_codecs::encoding::Encoding<'_>) -> Self {
+    pub fn from_view(encoding: &wz_codecs::lent::Encoding<'_>) -> Self {
         Self {
             packed_id: encoding.packed_id,
             schema: encoding.schema.map(|s| String::from(s.into_inner())),
@@ -252,14 +252,14 @@ impl EncodingHint {
     /// `LengthOutOfRange` for a schema past the `u8` length the protocol
     /// reads it with: the codec holds the schema within that bound, so such
     /// an encoding has no frame.
-    pub fn to_codec(&self) -> Result<wz_codecs::encoding::Encoding<'_>, CodecError> {
+    pub fn to_codec(&self) -> Result<wz_codecs::lent::Encoding<'_>, CodecError> {
         let schema_len = self.schema.as_ref().map(|s| s.len() as u64);
         let schema = self
             .schema
             .as_deref()
             .map(|s| Bounded::new(s).ok_or(CodecError::LengthOutOfRange))
             .transpose()?;
-        Ok(wz_codecs::encoding::Encoding {
+        Ok(wz_codecs::lent::Encoding {
             packed_id: self.packed_id,
             schema_len,
             schema,
@@ -1476,7 +1476,7 @@ mod tests {
         let entry = |header: u8| {
             let mut ext = ExtEntry::new();
             ext.header = header;
-            ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+            ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
                 value_len: payload.len() as u64,
                 value: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
             });
@@ -1516,7 +1516,7 @@ mod tests {
         let mut ext = ExtEntry::new();
         ext.set_ext_id(0x01);
         ext.set_enc(0x02);
-        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
             value_len: payload.len() as u64,
             value: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
         });
@@ -1537,7 +1537,7 @@ mod tests {
         ext.set_ext_id(0x01);
         ext.set_enc(0x02);
         // header says zidlen 16, but payload only has 1 byte.
-        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
             value_len: 1,
             value: wz_codecs::Bounded::new(&[0xF0u8] as &[u8]).unwrap(),
         });
@@ -1549,7 +1549,7 @@ mod tests {
         let mut ext = ExtEntry::new();
         ext.set_ext_id(0x01);
         ext.set_enc(0x02);
-        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
             value_len: 0,
             value: wz_codecs::Bounded::new(&[] as &[u8]).unwrap(),
         });
@@ -1569,7 +1569,7 @@ mod tests {
         let mut ext = ExtEntry::new();
         ext.set_ext_id(0x01);
         ext.set_enc(0x02);
-        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
             value_len: payload.len() as u64,
             value: wz_codecs::Bounded::new(payload.as_slice()).unwrap(),
         });

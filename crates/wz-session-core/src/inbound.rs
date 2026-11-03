@@ -652,7 +652,7 @@ impl InPlaceExtChain {
     /// Read the chain at the cursor, leaving the cursor after its last entry.
     fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, InboundParseError> {
         use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
-        use wz_codecs::ext_entry::ExtEntry;
+        use wz_codecs::lent::ExtEntry;
         let before = cursor.remaining();
         let mut chain = Self::EMPTY;
         let mut priority = None;

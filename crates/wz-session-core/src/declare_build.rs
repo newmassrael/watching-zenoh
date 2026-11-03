@@ -34,16 +34,12 @@ pub(crate) use crate::declare_ext_qos::DECLARE_ENVELOPE_HEADER;
 // without the terminator fails `-D unused-imports` (measured: six crates on
 // Layer C1bz).
 #[cfg(feature = "declare-final")]
-use wz_codecs::decl_final::DeclFinalOwned;
-use wz_codecs::decl_kexpr::DeclKexprOwned;
-use wz_codecs::decl_queryable::DeclQueryableOwned;
-use wz_codecs::decl_subscriber::DeclSubscriberOwned;
-use wz_codecs::decl_token::DeclTokenOwned;
-use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::undecl_kexpr::UndeclKexprOwned;
-use wz_codecs::undecl_queryable::UndeclQueryableOwned;
-use wz_codecs::undecl_subscriber::UndeclSubscriberOwned;
-use wz_codecs::undecl_token::UndeclTokenOwned;
+use crate::transport_profile::owned::DeclFinalOwned;
+use crate::transport_profile::owned::{
+    DeclKexprOwned, DeclQueryableOwned, DeclSubscriberOwned, DeclTokenOwned, DeclareOwned,
+    DeclareOwnedVariant, UndeclKexprOwned, UndeclQueryableOwned, UndeclSubscriberOwned,
+    UndeclTokenOwned,
+};
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
@@ -1479,7 +1475,7 @@ mod tests {
         // distance << 8). Build -> stamp info -> wire -> decode -> read it back.
         use crate::queryable_info::{read_queryable_info, QueryableInfo};
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::declare::Declare;
+        use wz_codecs::lent::Declare;
 
         let info = QueryableInfo {
             complete: true,
@@ -1494,7 +1490,7 @@ mod tests {
         let bytes = declare.wire();
         let mut cursor = SceCursor::new(&bytes);
         let decoded = Declare::decode(&mut cursor)
-            .and_then(|x| x.try_into_owned())
+            .and_then(|x| x.try_into_owned_in::<crate::transport_profile::TransportStorage>())
             .expect("decode declare");
         let DeclareOwnedVariant::CodecZenohDeclQueryable(d) = &decoded.body else {
             panic!("body must survive as a DeclQueryable");
@@ -2021,13 +2017,13 @@ mod tests {
     fn undeclare_subscriber_keyexpr_round_trips_through_the_wire() {
         use crate::declare_ext_keyexpr::read_ext_keyexpr;
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::declare::Declare;
+        use wz_codecs::lent::Declare;
 
         let d = build_undeclare_subscriber_with_keyexpr("demo/sub").unwrap();
         let bytes = d.wire();
         let mut cursor = SceCursor::new(&bytes);
         let decoded = Declare::decode(&mut cursor)
-            .and_then(|x| x.try_into_owned())
+            .and_then(|x| x.try_into_owned_in::<crate::transport_profile::TransportStorage>())
             .expect("decode declare");
         match &decoded.body {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
@@ -2074,13 +2070,13 @@ mod tests {
     fn undeclare_token_keyexpr_round_trips_through_the_wire() {
         use crate::declare_ext_keyexpr::read_ext_keyexpr;
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::declare::Declare;
+        use wz_codecs::lent::Declare;
 
         let d = build_undeclare_token_with_keyexpr("live/tok").unwrap();
         let bytes = d.wire();
         let mut cursor = SceCursor::new(&bytes);
         let decoded = Declare::decode(&mut cursor)
-            .and_then(|x| x.try_into_owned())
+            .and_then(|x| x.try_into_owned_in::<crate::transport_profile::TransportStorage>())
             .expect("decode declare");
         match &decoded.body {
             DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
@@ -2208,13 +2204,13 @@ mod tests {
     fn undeclare_queryable_keyexpr_round_trips_through_the_wire() {
         use crate::declare_ext_keyexpr::read_ext_keyexpr;
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::declare::Declare;
+        use wz_codecs::lent::Declare;
 
         let d = build_undeclare_queryable_with_keyexpr("demo/qbl").unwrap();
         let bytes = d.wire();
         let mut cursor = SceCursor::new(&bytes);
         let decoded = Declare::decode(&mut cursor)
-            .and_then(|x| x.try_into_owned())
+            .and_then(|x| x.try_into_owned_in::<crate::transport_profile::TransportStorage>())
             .expect("decode declare");
         match &decoded.body {
             DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {

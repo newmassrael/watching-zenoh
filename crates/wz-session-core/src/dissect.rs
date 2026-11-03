@@ -1639,12 +1639,14 @@ pub fn readable_ext_bodies_line(enc: u8) -> String {
 /// bytes. So the layout has a producer AND a consumer in this tree, which is
 /// the rule [`walk_ext_zbuf_body`] admits a walker under.
 ///
-/// # The bound is the PARTICIPANT's
+/// # The chain is read as the wire says
 ///
-/// [`crate::parse_error::MAX_EXT_CHAIN_DEPTH`] rather than a number chosen
-/// here, because `demux` reaches this same body through `decode_ext_chain` and
-/// that is the cap it applies. An observer that accepted a chain the
-/// participant beside it refuses would report a handshake the peer never saw.
+/// The protocol bounds the chain by nothing, so it is read until an entry's `Z`
+/// flag is clear, as every chain here is ([`walk_ext_chain_z`]). The
+/// participant's `decode_ext_chain` stops at
+/// [`crate::parse_error::MAX_EXT_CHAIN_DEPTH`], which is how many entries it
+/// stores, not a rule of the frame: a handshake past it is one the peer did
+/// send, and the dissector reports it as sent.
 ///
 /// # The sub-ext bodies, and the sentence that used to stop here
 ///
@@ -1664,11 +1666,7 @@ pub fn readable_ext_bodies_line(enc: u8) -> String {
 /// and [`walk_auth_usrpwd_body`] / [`walk_pubkey_challenge_body`] answer what
 /// each one put on the wire.
 fn walk_auth_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
-    walk_ext_chain_z(
-        c,
-        crate::parse_error::MAX_EXT_CHAIN_DEPTH,
-        crate::ext_name::ExtCarrier::Auth,
-    )
+    walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Auth)
 }
 
 /// One zenoh `ZBuf` — a VLE length then that many bytes — as its two fields.
@@ -2003,32 +2001,33 @@ fn walk_ext_wireexpr_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecErr
 /// the flag still set, and a walker that collapsed them would now disagree
 /// with the codec on the second:
 ///
-/// | loop stopped with the flag set | cursor    | reported as        |
-/// |--------------------------------|-----------|--------------------|
-/// | the depth cap refused an entry | non-empty | `TooManyElements` |
-/// | the peer's frame ended mid-chain | empty   | `NeedMoreBytes`    |
+/// The protocol bounds a chain by nothing: upstream reads entries until one's
+/// `Z` flag is clear, and so does this. What a node stores of a chain is its
+/// deployment's capacity, a fact of the storing decode and not of the wire, so
+/// the dissector, which judges the wire, has no cap. One way is left for the
+/// loop to stop with the flag still set:
 ///
-/// The second row is a failure R311y582's report did not name and SCE found
-/// while measuring: for `MsgPut` it is masked (`payload_len` then hits EOF),
-/// but a codec whose chain is its LAST field — `Interest` is exactly that
-/// shape — reported a truncated chain as a finished one. It is signalled
-/// independently of `on-overflow`, because the cap was never reached and no
-/// overflow policy is in play; the frame is simply short.
+/// | loop stopped with the flag set   | cursor | reported as     |
+/// |----------------------------------|--------|-----------------|
+/// | the peer's frame ended mid-chain | empty  | `NeedMoreBytes` |
 ///
-/// Both rows are pinned by `a_chain_past_the_cap_is_refused_rather_than_misread`
-/// against the codec and the walker together, so the mirror claim is a
-/// MEASURED one rather than an inspection of two loops that look alike.
+/// It is a failure R311y582's report did not name and SCE found while
+/// measuring: for `MsgPut` it is masked (`payload_len` then hits EOF), but a
+/// codec whose chain is its LAST field — `Interest` is exactly that shape —
+/// reported a truncated chain as a finished one.
+///
+/// Pinned by `a_chain_past_the_node_capacity_is_read_as_the_wire_says` against
+/// the wire judge (the heap decode) and the walker together, so the mirror
+/// claim is a MEASURED one rather than an inspection of two loops that look
+/// alike.
 fn walk_ext_chain_z(
     c: &mut SpanCursor<'_>,
-    max: usize,
     carrier_kind: crate::ext_name::ExtCarrier,
 ) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
     let mut more = false;
-    for _ in 0..max {
-        if c.remaining() == 0 {
-            break;
-        }
+    // Each entry takes at least its header byte, so the walk ends with the cursor.
+    while c.remaining() != 0 {
         let (z, f) = walk_ext_entry(c, carrier_kind)?;
         out.push(f);
         more = z;
@@ -2036,11 +2035,8 @@ fn walk_ext_chain_z(
             break;
         }
     }
-    if more && c.remaining() == 0 {
-        return Err(CodecError::NeedMoreBytes);
-    }
     if more {
-        return Err(CodecError::TooManyElements);
+        return Err(CodecError::NeedMoreBytes);
     }
     Ok(out)
 }
@@ -2058,16 +2054,13 @@ fn walk_ext_chain_z(
 /// (`commons/zenoh-codec/src/zenoh/mod.rs` @
 /// `let ext_shm = if iext::eid(self.header) == SID {`). An entry that shares
 /// only the 4-bit id, a mandatory unit or a zint or a ZBuf at identifier 4, is
-/// an unknown extension there and here. The two failure rows are those of
-/// [`walk_ext_chain_z`].
-fn walk_query_ext_chain(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, CodecError> {
+/// an unknown extension there and here. The chain has no cap and one failure
+/// row, those of [`walk_ext_chain_z`].
+fn walk_query_ext_chain(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
     let mut more = false;
     let mut after_shm = false;
-    for _ in 0..max {
-        if c.remaining() == 0 {
-            break;
-        }
+    while c.remaining() != 0 {
         let header = c.peek_u8()?;
         // The codec's own rule (`query_ext_entry.scxml`): the ZBuf entry right
         // after the marker is read in its sliced shape, whatever its identity.
@@ -2085,11 +2078,8 @@ fn walk_query_ext_chain(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>
             break;
         }
     }
-    if more && c.remaining() == 0 {
-        return Err(CodecError::NeedMoreBytes);
-    }
     if more {
-        return Err(CodecError::TooManyElements);
+        return Err(CodecError::NeedMoreBytes);
     }
     Ok(out)
 }
@@ -2204,11 +2194,7 @@ pub fn walk_msg_put(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let mut is_shm = false;
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            let chain = walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Put,
-            )?;
+            let chain = walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Put)?;
             is_shm = chain_carries_ext_eid(&chain, SHM_MARKER_EID);
             Ok(chain)
         })?);
@@ -2229,15 +2215,14 @@ pub fn walk_msg_put(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     Ok(out)
 }
 
-/// The elements of a sliced payload, `count` of them, as `MsgPut`'s codec
-/// reads them: a count past the list's bound (`msg_put.scxml`, `max-count`)
-/// is refused before any element is read, as the codec's decode refuses it
-/// since the bound is part of the field's type (SCE ADR 0077 step 1), so a
-/// truncated element past the bound is reported as the count it is.
+/// The elements of a sliced payload, `count` of them, as the wire reads them.
+/// The protocol bounds the count only by its `u32` width, so every element it
+/// names is read, and an element the frame cuts short reports its own
+/// truncation, as the view and the heap decode do. How many slices a node
+/// stores is its deployment's capacity, which the dissector does not judge.
+/// Each element takes at least two bytes (its kind and its length), so a count
+/// the frame cannot hold stops at the first element past the frame's end.
 fn walk_zbuf_slices(c: &mut SpanCursor<'_>, count: u32) -> Result<Vec<Field>, CodecError> {
-    if count as usize > crate::put_payload::MAX_SLICES {
-        return Err(CodecError::TooManyElements);
-    }
     let mut out = Vec::new();
     for _ in 0..count {
         out.push(c.nested("slice_entry", walk_zbuf_slice)?);
@@ -2285,11 +2270,7 @@ pub fn walk_msg_del(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Del,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Del)
         })?);
     }
     Ok(out)
@@ -2320,9 +2301,7 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(c.bytes("parameters", n as usize)?);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| {
-            walk_query_ext_chain(c, crate::ext_chain::QUERY_EXT_CHAIN_DEPTH)
-        })?);
+        out.push(c.nested("extensions", |c| walk_query_ext_chain(c))?);
     }
     Ok(out)
 }
@@ -2343,11 +2322,7 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Reply,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Reply)
         })?);
     }
     out.push(walk_put_or_del_body(c)?);
@@ -2370,11 +2345,7 @@ pub fn walk_err(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let mut is_shm = false;
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            let chain = walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Err,
-            )?;
+            let chain = walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Err)?;
             is_shm = chain_carries_ext_eid(&chain, SHM_MARKER_EID);
             Ok(chain)
         })?);
@@ -2416,11 +2387,7 @@ pub fn walk_push(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Push,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Push)
         })?);
     }
     out.push(walk_put_or_del_body(c)?);
@@ -2445,11 +2412,7 @@ pub fn walk_request(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Request,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Request)
         })?);
     }
     // Query is the codec's default arm here, not MsgPut.
@@ -2479,11 +2442,7 @@ pub fn walk_response(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Response,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Response)
         })?);
     }
     out.push(match c.peek_u8()? & 0x1F {
@@ -2506,11 +2465,7 @@ pub fn walk_response_final(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecEr
     out.push(rid);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::ResponseFinal,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::ResponseFinal)
         })?);
     }
     Ok(out)
@@ -2560,11 +2515,7 @@ pub fn walk_interest(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Interest,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Interest)
         })?);
     }
     Ok(out)
@@ -2590,11 +2541,7 @@ pub fn walk_oam(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(id);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::NetworkOam,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::NetworkOam)
         })?);
     }
     match enc {
@@ -2670,11 +2617,7 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
                 // The `Undeclare*` bodies' own chain — `declare::common::ext`,
                 // whose one row is `WireExprExt` at `0x0f`, NOT the `Declare`
                 // message's QoS / Timestamp / NodeId space.
-                walk_ext_chain_z(
-                    c,
-                    crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                    crate::ext_name::ExtCarrier::DeclareCommon,
-                )
+                walk_ext_chain_z(c, crate::ext_name::ExtCarrier::DeclareCommon)
             })?);
         }
         Ok(out)
@@ -2696,11 +2639,7 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
             {
                 if (*h as u8 & 0x80) != 0 {
                     out.push(c.nested("extensions", |c| {
-                        walk_ext_chain_z(
-                            c,
-                            crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                            crate::ext_name::ExtCarrier::DeclareQueryable,
-                        )
+                        walk_ext_chain_z(c, crate::ext_name::ExtCarrier::DeclareQueryable)
                     })?);
                 }
             }
@@ -2739,11 +2678,7 @@ pub fn walk_declare(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Declare,
-            )
+            walk_ext_chain_z(c, crate::ext_name::ExtCarrier::Declare)
         })?);
     }
     out.push(walk_declare_body(c)?);
@@ -3740,11 +3675,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(id);
             if has_ext {
                 out.push(c.nested("extensions", |c| {
-                    walk_ext_chain_z(
-                        c,
-                        crate::parse_error::MAX_EXT_CHAIN_DEPTH,
-                        transport_carrier(mid),
-                    )
+                    walk_ext_chain_z(c, transport_carrier(mid))
                 })?);
                 chain_walked = true;
             }
@@ -3851,11 +3782,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(sn);
             if has_ext {
                 out.push(c.nested("extensions", |c| {
-                    walk_ext_chain_z(
-                        c,
-                        crate::parse_error::MAX_EXT_CHAIN_DEPTH,
-                        transport_carrier(mid),
-                    )
+                    walk_ext_chain_z(c, transport_carrier(mid))
                 })?);
                 chain_walked = true;
             }
@@ -3901,11 +3828,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
     // already read it — see `chain_walked` above.
     if has_ext && !chain_walked {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(
-                c,
-                crate::parse_error::MAX_EXT_CHAIN_DEPTH,
-                transport_carrier(mid),
-            )
+            walk_ext_chain_z(c, transport_carrier(mid))
         })?);
     }
     Ok(group(name, start, c.offset(), out))
@@ -5125,11 +5048,9 @@ mod tests {
     #[test]
     fn an_oam_linkstate_body_is_walked_into_its_topology() {
         use sce_forge_runtime::heapless::Vec as HeaplessVec;
-        use wz_codecs::linkstate::Linkstate;
+        use wz_codecs::lent::{Linkstate, LinkstateList, Locator};
         use wz_codecs::linkstate_link::LinkstateLink;
-        use wz_codecs::linkstate_list::LinkstateList;
         use wz_codecs::linkstate_weight::LinkstateWeight;
-        use wz_codecs::locator::Locator;
 
         let mut locators = HeaplessVec::new();
         locators
@@ -5512,7 +5433,7 @@ mod tests {
         assert_eq!(raw(&entries[2], "bytes"), b"odd".to_vec());
 
         let mut c = SceCursor::new(&marked);
-        let m = wz_codecs::msg_put::MsgPut::decode(&mut c).expect("the codec reads it too");
+        let m = wz_codecs::lent::MsgPut::decode(&mut c).expect("the codec reads it too");
         let slices = match &m.extensions_has_0x12 {
             wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 { slices, .. } => {
                 Some(slices.len())
@@ -5527,44 +5448,47 @@ mod tests {
         );
     }
 
-    /// The codec holds four slices and refuses a count of five before it reads
-    /// an element, so a truncated fifth element is still a count past the
-    /// bound. The walker answers the same on the same bytes (`msg_put.scxml`,
-    /// `max-count="4"`), four being the control that keeps a walker refusing
-    /// every count from passing.
+    /// The protocol bounds a Put's slices only by their `u32` count, so the
+    /// walker reads past the four a node stores exactly as the wire judge (the
+    /// generated view, which stores nothing) does, and a cut element reports its
+    /// own truncation in both. The control is the storing decode at `Node`,
+    /// which holds four slices: it refuses the five the view accepts with
+    /// `CapacityExceeded`, the one refusal a storing form adds (ADR 0077
+    /// section 7), and four fit there too.
     #[test]
-    fn a_sliced_put_is_refused_past_four_slices_as_the_codec_refuses_it() {
+    fn a_sliced_put_past_the_node_capacity_is_read_as_the_wire_says() {
         let marker = [ext_unit(SHM_MARKER_BYTE, false)];
         let slice =
             |n: usize| -> Vec<(u64, &'static [u8])> { (0..n).map(|_| (0u64, &b"a"[..])).collect() };
         let answers = |bytes: &[u8]| {
             let walked = walk_msg_put(&mut SpanCursor::new(bytes)).err();
-            let read = wz_codecs::msg_put::MsgPut::decode(&mut SceCursor::new(bytes)).err();
-            (walked, read)
+            let wire = wz_codecs::msg_put::MsgPutView::decode(&mut SceCursor::new(bytes)).err();
+            (walked, wire)
         };
+        let stored =
+            |bytes: &[u8]| wz_codecs::lent::MsgPut::decode(&mut SceCursor::new(bytes)).err();
 
         let four = msg_put_sliced(&marker, &slice(4));
-        assert_eq!(answers(&four), (None, None), "four slices fit");
+        assert_eq!(answers(&four), (None, None), "four slices are a Put");
+        assert_eq!(stored(&four), None, "a node stores four slices");
 
         let five = msg_put_sliced(&marker, &slice(5));
+        assert_eq!(answers(&five), (None, None), "five slices are a Put too");
         assert_eq!(
-            answers(&five),
-            (
-                Some(CodecError::TooManyElements),
-                Some(CodecError::TooManyElements)
-            )
+            stored(&five),
+            Some(CodecError::CapacityExceeded),
+            "a node stores four slices and refuses the fifth as storage"
         );
 
-        // A count of five whose fifth element is cut short: the count is
-        // refused first, so both report the bound, not the truncation.
+        // A count of five whose fifth element is cut short: the truncation is
+        // what both report, since no count is refused.
         let mut cut = msg_put_sliced(&marker, &slice(5));
         cut.truncate(cut.len() - 1);
+        let (walked, wire) = answers(&cut);
+        assert!(walked.is_some(), "a cut element is refused");
         assert_eq!(
-            answers(&cut),
-            (
-                Some(CodecError::TooManyElements),
-                Some(CodecError::TooManyElements)
-            )
+            walked, wire,
+            "the walker reports the truncation the view reports"
         );
     }
 
@@ -5630,7 +5554,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                wz_codecs::lent::Request::decode(&mut c).expect("codec rejected");
                 b.len() - c.remaining()
             },
             walk_request,
@@ -5854,22 +5778,22 @@ mod tests {
         assert!(root.find("shm_descriptor").is_none());
     }
 
-    /// R311y605 (F4) — the linkstate walker's cap divergence, PINNED.
+    /// R311y605 (F4) — the linkstate walker reads a topology past what a node
+    /// stores, PINNED.
     ///
-    /// The walker deliberately does NOT mirror the codec's
-    /// `HeaplessVec<_, 64>` bound: refusing to render a large topology hides
-    /// exactly what an analyst opened the capture for. So the two disagree
-    /// ONE-DIRECTIONALLY by design — the walker accepts advertisements the
-    /// codec rejects, never the reverse.
+    /// The protocol bounds the list by nothing (its count is a `u64`), so the
+    /// walker reads every entry, as the wire judge (the generated view, which
+    /// stores nothing) does: refusing to render a large topology would hide
+    /// exactly what an analyst opened the capture for. The storing decode at
+    /// `Node` holds 64 entries and refuses the 65th as `CapacityExceeded`, the
+    /// one refusal a storing form adds, and only for a frame the view accepts
+    /// (ADR 0077 section 7).
     ///
-    /// That was documented and unasserted, which is the weaker half of the
-    /// pair: a future round that "fixed the inconsistency" by adding the cap to
-    /// the walker would have broken the analyst's case with every test green.
-    /// Both directions are asserted here, on the SAME bytes, so the claim is
-    /// the divergence rather than either half of it.
+    /// All three are asserted on the SAME bytes, so a future round that put a
+    /// cap back into the walker reds here.
     #[test]
-    fn the_linkstate_walker_reads_a_topology_the_codec_refuses() {
-        use wz_codecs::linkstate_list::LinkstateList;
+    fn the_linkstate_walker_reads_a_topology_a_node_does_not_store() {
+        use wz_codecs::lent::LinkstateList;
 
         // 65 entries: one past the codec's cap. Only the COUNT prefix is
         // hand-written — each record's bytes come from the `Linkstate` codec's
@@ -5878,7 +5802,7 @@ mod tests {
         // layout (the first attempt at this fixture omitted `links_len` and the
         // walker was right to refuse it).
         const N: usize = 65;
-        let one = wz_codecs::linkstate::Linkstate {
+        let one = wz_codecs::lent::Linkstate {
             options: 0,
             psid: 7,
             sn: 1,
@@ -5898,12 +5822,15 @@ mod tests {
             body.extend_from_slice(&one);
         }
 
-        // The CODEC refuses it.
+        // The wire judge reads it; the storing decode at `Node` refuses it as storage.
         let mut c = SceCursor::new(&body);
-        let codec = LinkstateList::decode(&mut c);
-        assert!(
-            codec.is_err(),
-            "the codec's HeaplessVec<_, 64> must refuse a 65-link advertisement"
+        wz_codecs::linkstate_list::LinkstateListView::decode(&mut c)
+            .expect("a 65-entry advertisement is a LinkStateList");
+        assert_eq!(c.remaining(), 0, "the wire judge left bytes unread");
+        assert_eq!(
+            LinkstateList::decode(&mut SceCursor::new(&body)).err(),
+            Some(CodecError::CapacityExceeded),
+            "a node stores 64 entries and refuses the 65th as storage"
         );
 
         // The WALKER reads it, and reads all 65.
@@ -5920,14 +5847,14 @@ mod tests {
         );
         assert_eq!(w.remaining(), 0, "the walker left bytes unread");
 
-        // CONTROL: at 64 the two AGREE, so the divergence above is about the
-        // cap and not about the walker reading a different layout entirely.
+        // CONTROL: at 64 the node stores it too, so the refusal above is the
+        // capacity and not the storing decode reading a different layout.
         let mut body64 = vle(64);
         for _ in 0..64usize {
             body64.extend_from_slice(&one);
         }
         let mut c = SceCursor::new(&body64);
-        let by_codec = LinkstateList::decode(&mut c).expect("64 is inside the cap");
+        let by_codec = LinkstateList::decode(&mut c).expect("a node stores 64 entries");
         assert_eq!(by_codec.link_states.len(), 64);
         let mut w = SpanCursor::new(&body64);
         walk_linkstate_list(&mut w).expect("the walker reads 64 too");
@@ -5944,7 +5871,7 @@ mod tests {
     /// is `Zenoh080Bounded<u16>`, and this field does not select it.
     #[test]
     fn a_link_weight_wider_than_u16_is_truncated_the_way_upstream_truncates_it() {
-        use wz_codecs::linkstate_list::LinkstateList;
+        use wz_codecs::lent::LinkstateList;
 
         // count=1 / options=WGT / psid=3 / sn=0 / links_len=1 / links=[5] /
         // weights=[65537]. 65537 is VLE 0x81 0x80 0x04 and truncates to 1.
@@ -6054,7 +5981,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                let m = wz_codecs::msg_put::MsgPut::decode(&mut c).expect("codec rejected fixture");
+                let m = wz_codecs::lent::MsgPut::decode(&mut c).expect("codec rejected fixture");
                 // Cross-check the codec's own view while it is in scope.
                 let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     payload: decoded_payload,
@@ -6091,19 +6018,19 @@ mod tests {
         let ts = f.find("timestamp").unwrap().span;
         span_redecodes(&bytes, ts, |s| {
             let mut c = SceCursor::new(s);
-            wz_codecs::timestamp::Timestamp::decode(&mut c)?;
+            wz_codecs::lent::Timestamp::decode(&mut c)?;
             Ok(s.len() - c.remaining())
         });
         let enc = f.find("encoding").unwrap().span;
         span_redecodes(&bytes, enc, |s| {
             let mut c = SceCursor::new(s);
-            wz_codecs::encoding::Encoding::decode(&mut c)?;
+            wz_codecs::lent::Encoding::decode(&mut c)?;
             Ok(s.len() - c.remaining())
         });
         let ext = f.find("ext").unwrap().span;
         span_redecodes(&bytes, ext, |s| {
             let mut c = SceCursor::new(s);
-            wz_codecs::ext_entry::ExtEntry::decode(&mut c)?;
+            wz_codecs::lent::ExtEntry::decode(&mut c)?;
             Ok(s.len() - c.remaining())
         });
     }
@@ -6118,7 +6045,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::msg_put::MsgPut::decode(&mut c).expect("codec rejected fixture");
+                wz_codecs::lent::MsgPut::decode(&mut c).expect("codec rejected fixture");
                 b.len() - c.remaining()
             },
             walk_msg_put,
@@ -6128,43 +6055,24 @@ mod tests {
         assert!(f.find("encoding").is_none());
     }
 
-    /// R311y582 (A1) — a chain LONGER than the codec's cap must not decode to
-    /// a confident wrong answer.
+    /// The capacity a node stores of each chain, read back OUT of every lent
+    /// form's list type at the `Node` profile, equals
+    /// [`crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH`].
     ///
-    /// The generated Z-terminated chain is `for _ in 0..MAX` over a
-    /// `HeaplessVec<_, MAX>` (`out/wz-codecs/msg_put.rs:107-119`), so the
-    /// `TooManyElements` arm is unreachable and the entry-flag emit carries no
-    /// post-loop overflow check (`vendor/sce` generator: the check is dropped
-    /// whenever `terminate_on` is `EntryFlag`). A 5th extension therefore ends
-    /// the loop on the FOR bound with the 4th entry's Z bit still set, and the
-    /// cursor sitting on the 5th extension's header — which the codec then
-    /// reads as `payload_len`.
-    ///
-    /// The fixture is built so the misread SUCCEEDS: the 5th extension's
-    /// header byte is `0x03`, a plausible VLE length that fits the bytes left.
-    /// So the failure is not an error, it is a Put whose payload is three
-    /// bytes that were never the payload. That is the shape a dissector must
-    /// never produce, and it is why this is a defect rather than a limit.
-    ///
-    /// R311y582 (A1) — the walker is told each chain's bound as a constant;
-    /// the codec gets it from its container type. This is the gate that keeps
-    /// the two from drifting: it reads `N` back OUT of every generated field's
-    /// type and compares.
-    ///
-    /// A regenerated codec at a different `max-depth` reds here, which is the
-    /// only warning that matters — a walker bound BELOW the codec's rejects
-    /// wire the codec accepts, and one ABOVE it walks into bytes the codec
-    /// never read. Neither shows up in any `agree` fixture, because both
-    /// parsers are fed chains far shorter than the cap.
+    /// The walker has no cap: the protocol bounds a chain by nothing, and the
+    /// dissector reads it to the entry whose `Z` flag is clear. The constant is
+    /// what the tests that build a chain one entry past a node's storage use to
+    /// size it, so a deploy file with another capacity reds here rather than
+    /// leaving those tests building a chain that fits.
     #[test]
-    fn the_generated_chain_capacities_match_the_constants() {
-        use crate::ext_chain::{NETWORK_EXT_CHAIN_DEPTH, QUERY_EXT_CHAIN_DEPTH};
+    fn the_node_chain_capacities_match_the_constant() {
+        use crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
 
         /// Recover the const-generic capacity from the field's own type.
         fn cap<const N: usize, const MAX: usize, const MIN: usize>(
             _: &Option<
                 sce_forge_runtime::codec::Bounded<
-                    sce_forge_runtime::heapless::Vec<wz_codecs::ext_entry::ExtEntry<'_>, N>,
+                    sce_forge_runtime::heapless::Vec<wz_codecs::lent::ExtEntry<'_>, N>,
                     MAX,
                     MIN,
                 >,
@@ -6177,7 +6085,7 @@ mod tests {
         /// layout.
         fn cap_put<const N: usize, Slices, Payload>(
             _: &wz_codecs::msg_put::MsgPutExtensionsHas0x12<
-                sce_forge_runtime::heapless::Vec<wz_codecs::ext_entry::ExtEntry<'_>, N>,
+                sce_forge_runtime::heapless::Vec<wz_codecs::lent::ExtEntry<'_>, N>,
                 Slices,
                 Payload,
             >,
@@ -6185,67 +6093,51 @@ mod tests {
             N
         }
 
-        /// The same, for the Query's chain, whose entry is its own kind (R3044).
-        fn cap_query<const N: usize, const MAX: usize, const MIN: usize>(
-            _: &Option<
-                sce_forge_runtime::codec::Bounded<
-                    sce_forge_runtime::heapless::Vec<
-                        wz_codecs::query_ext_entry::QueryExtEntry<'_>,
-                        N,
-                    >,
-                    MAX,
-                    MIN,
-                >,
-            >,
-        ) -> usize {
-            N
-        }
-
         // The network layer.
         assert_eq!(
-            cap(&wz_codecs::push::Push::default().extensions),
+            cap(&wz_codecs::lent::Push::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::request::Request::default().extensions),
+            cap(&wz_codecs::lent::Request::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::response::Response::default().extensions),
+            cap(&wz_codecs::lent::Response::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::response_final::ResponseFinal::default().extensions),
+            cap(&wz_codecs::lent::ResponseFinal::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::oam::Oam::default().extensions),
+            cap(&wz_codecs::lent::Oam::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::interest::Interest::default().extensions),
+            cap(&wz_codecs::lent::Interest::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::declare::Declare::default().extensions),
+            cap(&wz_codecs::lent::Declare::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
 
         // The zenoh-payload layer.
         assert_eq!(
-            cap_put(&wz_codecs::msg_put::MsgPut::default().extensions_has_0x12),
+            cap_put(&wz_codecs::lent::MsgPut::default().extensions_has_0x12),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::msg_del::MsgDel::default().extensions),
+            cap(&wz_codecs::lent::MsgDel::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::reply::Reply::default().extensions),
+            cap(&wz_codecs::lent::Reply::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::err::Err::default().extensions),
+            cap(&wz_codecs::lent::Err::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
 
@@ -6253,84 +6145,77 @@ mod tests {
         // this round missed all four; naming them here is what keeps the next
         // reader from repeating it.
         assert_eq!(
-            cap(&wz_codecs::decl_queryable::DeclQueryable::default().extensions),
+            cap(&wz_codecs::lent::DeclQueryable::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::undecl_subscriber::UndeclSubscriber::default().extensions),
+            cap(&wz_codecs::lent::UndeclSubscriber::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::undecl_queryable::UndeclQueryable::default().extensions),
+            cap(&wz_codecs::lent::UndeclQueryable::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
         );
         assert_eq!(
-            cap(&wz_codecs::undecl_token::UndeclToken::default().extensions),
+            cap(&wz_codecs::lent::UndeclToken::default().extensions),
             NETWORK_EXT_CHAIN_DEPTH
-        );
-
-        // Query has a depth constant of its own. Its chain ends at the entry
-        // whose Z flag is clear like the others' (R3046), and not at the end
-        // of the cursor as it did before.
-        assert_eq!(
-            cap_query(&wz_codecs::query::Query::default().extensions),
-            QUERY_EXT_CHAIN_DEPTH
         );
     }
 
     /// R311y589 — the three rows the entry-flag chain can end on, asserted
-    /// against the CODEC and the WALKER together so "the walker mirrors the
-    /// codec" is a measurement rather than an inspection of two loops that
-    /// look alike.
+    /// against the WIRE JUDGE (the generated view, which stores nothing) and the
+    /// WALKER together so "the walker reads the wire as the protocol does" is a
+    /// measurement rather than an inspection of two loops that look alike. The
+    /// storing decode at `Node` is asserted beside them as the control on what a
+    /// node adds: `CapacityExceeded`, and only for a frame the view accepts (ADR
+    /// 0077 section 7).
     ///
-    /// R311y582 (A1) wrote this test with two halves: the walker refused and
-    /// the codec MISREAD, and the second half was pinned precisely so it would
-    /// flip when SCE honoured `on-overflow="reject"`. It flipped (`ec3b032984`),
-    /// and this is the post-flip statement.
+    /// | row | chain ends because | cursor | walker and view | `Node` |
+    /// |-----|--------------------|--------|-----------------|--------|
+    /// | 1 | the wire's terminator, one entry past what a node stores | empty | `Ok`, real payload | `CapacityExceeded` |
+    /// | 2 | the peer's frame ended mid-chain | empty | `NeedMoreBytes` | — |
+    /// | 3 | the wire's terminator, AT what a node stores | empty | `Ok`, real payload | `Ok` |
     ///
-    /// | row | chain ends because | cursor | both must answer |
-    /// |-----|--------------------|--------|------------------|
-    /// | 1 | the cap refused an entry the peer sent | non-empty | `TooManyElements` |
-    /// | 2 | the peer's frame ended mid-chain | empty | `NeedMoreBytes` |
-    /// | 3 | the wire's own terminator, AT the cap | empty | `Ok`, real payload |
-    ///
-    /// Row 3 is the CONTROL and it is not decoration: a guard that refused
-    /// every chain would satisfy rows 1 and 2 and prove nothing. Row 2 is the
-    /// DISCRIMINATOR — a second failure on this path that R311y582's report to
-    /// SCE never named, and the one the pre-fix codec answered `Ok` on.
+    /// Row 3 is the CONTROL on row 1: a storing decode that refused every chain
+    /// would satisfy row 1's `CapacityExceeded` and prove nothing. Row 2 is the
+    /// DISCRIMINATOR — a failure on this path that R311y582's report to SCE
+    /// never named, and the one the pre-fix codec answered `Ok` on.
     #[test]
-    fn a_chain_past_the_cap_is_refused_rather_than_misread() {
+    fn a_chain_past_the_node_capacity_is_read_as_the_wire_says() {
         let cap = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
         let payload = [0xAAu8, 0xBB, 0xCC];
 
-        // ── Row 1: ONE more extension than the cap, derived rather than
-        //    written out (the first version hardcoded five and raising the cap
-        //    in the same round turned it green while proving nothing). The
-        //    terminating entry's id is 3 so its header byte (0x03) is exactly
-        //    the VLE the OLD codec mistook for `payload_len` — that choice is
-        //    what made the misread SUCCEED with `[0x03, 0xAA, 0xBB]` instead of
-        //    running off the end, and it holds at any cap. The bytes after the
-        //    chain are the reason this row is `TooManyElements` and not row 2's
-        //    `NeedMoreBytes`: the cursor is NOT empty, so the cap is what
-        //    refused, not the frame length.
-        let mut exts: Vec<Vec<u8>> = (1..=cap).map(|i| ext_unit(i as u8, true)).collect();
+        // ── Row 1: ONE more extension than a node stores, derived from the
+        //    capacity rather than written out. The protocol bounds a chain by
+        //    nothing, so the walker and the view read it to the entry whose Z is
+        //    clear and then the payload. The filler is id 1 throughout, which no
+        //    carrier reads as the shared-memory marker; the last entry is id 3.
+        let mut exts: Vec<Vec<u8>> = (0..cap).map(|_| ext_unit(0x1, true)).collect();
         exts.push(ext_unit(0x3, false));
         let over = msg_put(None, None, &exts, &payload);
 
         let mut w = SpanCursor::new(&over);
-        assert_eq!(
-            walk_msg_put(&mut w).err(),
-            Some(CodecError::TooManyElements),
-            "the walker accepted a chain that never terminated inside the bound"
-        );
+        let fields = walk_msg_put(&mut w).expect("a chain past a node's storage is still a chain");
+        let root = group("MsgPut", 0, over.len(), fields);
+        assert_eq!(raw(&root, "payload"), payload.to_vec());
+        assert_eq!(w.remaining(), 0, "the walker left bytes unread");
         {
             let mut c = SceCursor::new(&over);
-            assert_eq!(
-                wz_codecs::msg_put::MsgPut::decode(&mut c).err(),
-                Some(CodecError::TooManyElements),
-                "the codec misread a saturated chain instead of refusing it"
-            );
+            let view = wz_codecs::msg_put::MsgPutView::decode(&mut c)
+                .expect("the wire judge reads a chain past a node's storage");
+            let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload: got, .. } =
+                &view.extensions_has_0x12
+            else {
+                panic!("a chain without the marker leaves the payload inline");
+            };
+            assert_eq!(got.into_inner(), &payload[..]);
+            assert_eq!(c.remaining(), 0, "the wire judge left bytes unread");
         }
+        assert_eq!(
+            wz_codecs::lent::MsgPut::decode(&mut SceCursor::new(&over)).err(),
+            Some(CodecError::CapacityExceeded),
+            "a node stores {cap} entries and refuses the next as storage"
+        );
 
         // ── Row 2: the chain is the LAST field and its final entry still says
         //    "continue". `Interest` is exactly that shape, which is why it is
@@ -6338,9 +6223,8 @@ mod tests {
         //    masked, because reading `payload_len` hits EOF and fails anyway.
         //    Here nothing follows, so before `ec3b032984` the decode reported a
         //    truncated chain as a FINISHED one — `Ok` with three extensions and
-        //    an empty cursor. The cap is never reached, so no overflow policy
-        //    is in play and the refusal is `NeedMoreBytes`, independently of
-        //    `on-overflow`.
+        //    an empty cursor. The chain stops below what a node stores, so the
+        //    refusal is the truncation, `NeedMoreBytes`, and not storage.
         let short = concat(&[
             alloc::vec![0x19u8 | 0x80], // Interest, Z set, no C/F body
             vle(5),
@@ -6350,7 +6234,7 @@ mod tests {
         ]);
         assert!(
             short.len() < cap + 5,
-            "row 2 must stop BELOW the cap, or it is row 1 in disguise"
+            "row 2 must stop BELOW what a node stores, or its refusal could be storage"
         );
 
         let mut w = SpanCursor::new(&short);
@@ -6362,16 +6246,17 @@ mod tests {
         {
             let mut c = SceCursor::new(&short);
             assert_eq!(
-                wz_codecs::interest::Interest::decode(&mut c).err(),
+                wz_codecs::interest::InterestView::decode(&mut c).err(),
                 Some(CodecError::NeedMoreBytes),
-                "the codec reported a truncated chain as a finished one"
+                "the wire judge reported a truncated chain as a finished one"
             );
         }
 
-        // ── Row 3, THE CONTROL: the chain fills the cap EXACTLY and the last
-        //    entry clears Z, so the wire itself terminated it. The field after
-        //    the chain must still read its own bytes. A guard that refused
-        //    everything would pass rows 1 and 2 and fail here.
+        // ── Row 3, THE CONTROL: the chain fills what a node stores EXACTLY and
+        //    the last entry clears Z, so the wire itself terminated it. The field
+        //    after the chain must still read its own bytes, and the storing
+        //    decode at `Node` holds it: row 1's `CapacityExceeded` is the entry
+        //    past the capacity, not a refusal of every chain.
         // R311y597 — the filler ids must carry no meaning, because the row is
         // about chain DEPTH. `1..=cap` used to be the range and it contains
         // `0x2`, which in a Put body is the SHM marker's id: the row was
@@ -6417,14 +6302,14 @@ mod tests {
         let ok = msg_put(None, None, &exact, &payload);
 
         let mut w = SpanCursor::new(&ok);
-        let fields = walk_msg_put(&mut w).expect("a chain terminated at the cap must walk");
+        let fields = walk_msg_put(&mut w).expect("a chain terminated at a node's capacity walks");
         let root = group("MsgPut", 0, ok.len(), fields);
         assert_eq!(raw(&root, "payload"), payload.to_vec());
         assert_eq!(w.remaining(), 0, "the walker left bytes unread");
         {
             let mut c = SceCursor::new(&ok);
-            let m = wz_codecs::msg_put::MsgPut::decode(&mut c)
-                .expect("a chain terminated at the cap must decode");
+            let m = wz_codecs::lent::MsgPut::decode(&mut c)
+                .expect("a node stores a chain of its capacity");
             let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions,
                 payload: got,
@@ -6453,7 +6338,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                let p = wz_codecs::push::Push::decode(&mut c).expect("codec rejected fixture");
+                let p = wz_codecs::lent::Push::decode(&mut c).expect("codec rejected fixture");
                 assert_eq!(p.header, 0x1D | 0x20 | 0x40 | 0x80);
                 assert!(b.len() - c.remaining() > 130);
                 b.len() - c.remaining()
@@ -6468,7 +6353,7 @@ mod tests {
         let ke = f.find("keyexpr").unwrap().span;
         span_redecodes(&bytes, ke, |s| {
             let mut c = SceCursor::new(s);
-            wz_codecs::wireexpr::Wireexpr::decode(&mut c, 1, 1)?;
+            wz_codecs::lent::Wireexpr::decode(&mut c, 1, 1)?;
             Ok(s.len() - c.remaining())
         });
         // The suffix's own span is 130 bytes wide, so a walker that read the
@@ -6488,7 +6373,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::push::Push::decode(&mut c).expect("codec rejected fixture");
+                wz_codecs::lent::Push::decode(&mut c).expect("codec rejected fixture");
                 b.len() - c.remaining()
             },
             walk_push,
@@ -6519,7 +6404,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                let r = wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                let r = wz_codecs::lent::Request::decode(&mut c).expect("codec rejected");
                 assert_eq!(r.rid, 9001);
                 b.len() - c.remaining()
             },
@@ -6550,7 +6435,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                let r = wz_codecs::response::Response::decode(&mut c).expect("codec rejected");
+                let r = wz_codecs::lent::Response::decode(&mut c).expect("codec rejected");
                 assert_eq!(r.request_id, 77);
                 b.len() - c.remaining()
             },
@@ -6575,7 +6460,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::response::Response::decode(&mut c).expect("codec rejected");
+                wz_codecs::lent::Response::decode(&mut c).expect("codec rejected");
                 b.len() - c.remaining()
             },
             walk_response,
@@ -6597,8 +6482,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                let r = wz_codecs::response_final::ResponseFinal::decode(&mut c)
-                    .expect("codec rejected");
+                let r = wz_codecs::lent::ResponseFinal::decode(&mut c).expect("codec rejected");
                 assert_eq!(r.request_id, 4242);
                 assert_eq!(r.extensions.as_ref().unwrap().len(), 2);
                 b.len() - c.remaining()
@@ -6629,7 +6513,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                let i = wz_codecs::interest::Interest::decode(&mut c).expect("codec rejected");
+                let i = wz_codecs::lent::Interest::decode(&mut c).expect("codec rejected");
                 assert_eq!(i.interest_id, 5);
                 b.len() - c.remaining()
             },
@@ -6652,7 +6536,7 @@ mod tests {
                 &bytes,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    wz_codecs::oam::Oam::decode(&mut c).expect("codec rejected fixture");
+                    wz_codecs::lent::Oam::decode(&mut c).expect("codec rejected fixture");
                     b.len() - c.remaining()
                 },
                 walk_oam,
@@ -6700,7 +6584,7 @@ mod tests {
                 &bytes,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    wz_codecs::declare::Declare::decode(&mut c)
+                    wz_codecs::lent::Declare::decode(&mut c)
                         .unwrap_or_else(|e| panic!("codec rejected sub-MID {sub_mid}: {e:?}"));
                     b.len() - c.remaining()
                 },
@@ -6717,8 +6601,8 @@ mod tests {
     /// Whether the generated codec decoded this declaration's key expression
     /// into its `WireexprLocal` arm, which is the arm the codec files an `M=1`
     /// reference under.
-    fn declared_arm_is_local(declare: &wz_codecs::declare::Declare<'_>) -> bool {
-        use wz_codecs::declare::DeclareVariant as V;
+    fn declared_arm_is_local(declare: &wz_codecs::lent::Declare<'_>) -> bool {
+        use wz_codecs::lent::DeclareVariant as V;
         let keyexpr = match &declare.body {
             V::CodecZenohDeclKexpr(b) => &b.keyexpr,
             V::CodecZenohDeclSubscriber(b) => &b.keyexpr,
@@ -6728,7 +6612,7 @@ mod tests {
         };
         matches!(
             keyexpr.body,
-            wz_codecs::wireexpr::WireexprVariant::WireexprLocal(_)
+            wz_codecs::lent::WireexprVariant::WireexprLocal(_)
         )
     }
 
@@ -6751,10 +6635,9 @@ mod tests {
     /// the bit (`commons/zenoh-codec/src/network/declare.rs` @ `wire_expr.mapping = if imsg::has_flag(self.header, subscriber::flag::M) {`).
     #[test]
     fn mapping_is_the_m_bit_of_the_header_that_carries_the_key_expression() {
-        use wz_codecs::wireexpr::WireexprVariant;
-        let is_local = |w: &wz_codecs::wireexpr::Wireexpr<'_>| {
-            matches!(w.body, WireexprVariant::WireexprLocal(_))
-        };
+        use wz_codecs::lent::WireexprVariant;
+        let is_local =
+            |w: &wz_codecs::lent::Wireexpr<'_>| matches!(w.body, WireexprVariant::WireexprLocal(_));
         for m in 0u8..=1 {
             let want = u64::from(m);
 
@@ -6768,7 +6651,7 @@ mod tests {
                 &push,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    let p = wz_codecs::push::Push::decode(&mut c).expect("codec rejected");
+                    let p = wz_codecs::lent::Push::decode(&mut c).expect("codec rejected");
                     assert_eq!(is_local(&p.keyexpr), m == 1, "Push M={m}: the codec's arm");
                     b.len() - c.remaining()
                 },
@@ -6792,7 +6675,7 @@ mod tests {
                 &request,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    let r = wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                    let r = wz_codecs::lent::Request::decode(&mut c).expect("codec rejected");
                     assert_eq!(
                         is_local(&r.keyexpr),
                         m == 1,
@@ -6819,7 +6702,7 @@ mod tests {
                 &response,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    let r = wz_codecs::response::Response::decode(&mut c).expect("codec rejected");
+                    let r = wz_codecs::lent::Response::decode(&mut c).expect("codec rejected");
                     assert_eq!(
                         is_local(&r.keyexpr),
                         m == 1,
@@ -6844,8 +6727,7 @@ mod tests {
                     &bytes,
                     |b| {
                         let mut c = SceCursor::new(b);
-                        let d =
-                            wz_codecs::declare::Declare::decode(&mut c).expect("codec rejected");
+                        let d = wz_codecs::lent::Declare::decode(&mut c).expect("codec rejected");
                         assert_eq!(
                             declared_arm_is_local(&d),
                             m == 1,
@@ -6904,7 +6786,7 @@ mod tests {
                 &bytes,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    let d = wz_codecs::declare::Declare::decode(&mut c).expect("codec rejected");
+                    let d = wz_codecs::lent::Declare::decode(&mut c).expect("codec rejected");
                     assert!(
                         declared_arm_is_local(&d),
                         "bit 6 = {bit6}: the generated decoder pins `Local` for a \
@@ -7671,7 +7553,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::msg_put::MsgPut::decode(&mut c).expect("codec rejected fixture");
+                wz_codecs::lent::MsgPut::decode(&mut c).expect("codec rejected fixture");
                 b.len() - c.remaining()
             },
             walk_msg_put,
@@ -7719,7 +7601,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::response::Response::decode(&mut c).expect("codec rejected fixture");
+                wz_codecs::lent::Response::decode(&mut c).expect("codec rejected fixture");
                 b.len() - c.remaining()
             },
             walk_response,
@@ -7759,7 +7641,7 @@ mod tests {
         );
 
         let mut c = SceCursor::new(&bytes);
-        wz_codecs::query::Query::decode(&mut c).expect("the codec rejected it");
+        wz_codecs::lent::Query::decode(&mut c).expect("the codec rejected it");
         assert_eq!(
             c.remaining(),
             next.len(),
@@ -7784,7 +7666,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::query::Query::decode(&mut c).expect("codec rejected");
+                wz_codecs::lent::Query::decode(&mut c).expect("codec rejected");
                 b.len() - c.remaining()
             },
             walk_query,
@@ -7833,7 +7715,7 @@ mod tests {
                 &bytes,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    wz_codecs::query::Query::decode(&mut c)
+                    wz_codecs::lent::Query::decode(&mut c)
                         .unwrap_or_else(|e| panic!("{name}: the codec rejected it: {e:?}"));
                     b.len() - c.remaining()
                 },
@@ -7899,12 +7781,8 @@ mod tests {
         wire.extend_from_slice(&body);
 
         let mut c = SpanCursor::new(&wire);
-        let chain = walk_ext_chain_z(
-            &mut c,
-            crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
-            crate::ext_name::ExtCarrier::DeclareCommon,
-        )
-        .expect("the chain must walk");
+        let chain = walk_ext_chain_z(&mut c, crate::ext_name::ExtCarrier::DeclareCommon)
+            .expect("the chain must walk");
         // `extensions`, the name the walkers give a chain -- the field-name
         // census reads this file whole, tests included, so a name invented in
         // a fixture is an invention it reds on. It caught this one.
@@ -7943,7 +7821,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::push::Push::decode(&mut c).expect("codec rejected fixture");
+                wz_codecs::lent::Push::decode(&mut c).expect("codec rejected fixture");
                 b.len() - c.remaining()
             },
             walk_push,
@@ -9180,7 +9058,7 @@ mod tests {
                 &bytes,
                 |b| {
                     let mut c = SceCursor::new(b);
-                    wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                    wz_codecs::lent::Request::decode(&mut c).expect("codec rejected");
                     b.len() - c.remaining()
                 },
                 walk_request,
@@ -9209,7 +9087,7 @@ mod tests {
             &bytes,
             |b| {
                 let mut c = SceCursor::new(b);
-                wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                wz_codecs::lent::Request::decode(&mut c).expect("codec rejected");
                 b.len() - c.remaining()
             },
             walk_request,

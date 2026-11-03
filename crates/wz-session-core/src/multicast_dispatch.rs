@@ -2690,10 +2690,10 @@ mod tests {
         use crate::driver_loop::DriverLoopOutcome;
         use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
         use crate::network_message::NetworkMessage;
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use crate::wireexpr_build::literal_wireexpr;
         use alloc::boxed::Box;
         use alloc::vec;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
 
         let mut d = running_dispatcher::<4>(5_000);
         d.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
@@ -2873,10 +2873,10 @@ mod tests {
         use crate::driver_loop::DriverLoopOutcome;
         use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
         use crate::network_message::NetworkMessage;
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use crate::wireexpr_build::literal_wireexpr;
         use alloc::boxed::Box;
         use alloc::vec;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
 
         let mut d = running_dispatcher::<4>(5_000);
         d.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
@@ -2948,9 +2948,9 @@ mod tests {
     /// namespace it does not match).
     #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
     fn ns_decl_sub_frame(keyexpr: &str, id: u64) -> crate::driver_loop::DriverLoopOutcome {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
         use alloc::vec;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         crate::driver_loop::DriverLoopOutcome::FramePayload {
             priority: crate::qos::Priority::DEFAULT,
             reliable: true,
@@ -2979,9 +2979,9 @@ mod tests {
     /// (dropped iff `id` is still blocked in the per-peer ingress).
     #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
     fn ns_undecl_sub_frame(id: u64) -> crate::driver_loop::DriverLoopOutcome {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
         use alloc::vec;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         crate::driver_loop::DriverLoopOutcome::FramePayload {
             priority: crate::qos::Priority::DEFAULT,
             reliable: true,
@@ -4518,8 +4518,8 @@ mod tests {
     #[cfg(feature = "multicast-declarations")]
     fn decl_sub_literal(id: u64, ke: &str) -> crate::network_message::NetworkMessage {
         use crate::network_message::NetworkMessage;
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         NetworkMessage::Declare(Box::new(DeclareOwned {
             header: 0,
             interest_id: None,
@@ -4542,8 +4542,8 @@ mod tests {
         suffix: Option<&str>,
     ) -> crate::network_message::NetworkMessage {
         use crate::network_message::NetworkMessage;
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
         use wz_codecs::wireexpr_local::WireexprLocalOwned;
         let keyexpr = WireexprOwned {
@@ -4570,8 +4570,8 @@ mod tests {
     #[cfg(feature = "multicast-declarations")]
     fn undecl_sub(id: u64) -> crate::network_message::NetworkMessage {
         use crate::network_message::NetworkMessage;
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         NetworkMessage::Declare(Box::new(DeclareOwned {
             header: 0,
             interest_id: None,

@@ -37,9 +37,7 @@
 #[cfg(feature = "alloc")]
 use core::cell::OnceCell;
 
-use wz_codecs::encoding::Encoding;
-use wz_codecs::push::{Push, PushVariant};
-use wz_codecs::timestamp::Timestamp;
+use wz_codecs::lent::{Encoding, Push, PushVariant, Timestamp};
 
 use super::{SubscriberPeer, SubscriberTable};
 use crate::bounded::Storage;
@@ -170,7 +168,7 @@ fn lent_body<'s, 'f>(push: &'s Push<'f>) -> Result<Option<LentBody<'s, 'f>>, Fal
             else {
                 return Err(Fallback::Sliced);
             };
-            let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = crate::put_payload::chain(put);
+            let exts: &[wz_codecs::lent::ExtEntry<'f>] = crate::put_payload::chain(put);
             #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
             let _ = exts;
             Ok(Some(LentBody {
@@ -199,7 +197,7 @@ fn lent_body<'s, 'f>(push: &'s Push<'f>) -> Result<Option<LentBody<'s, 'f>>, Fal
         }
         #[cfg(feature = "pubsub-delete")]
         PushVariant::CodecZenohMsgDel(del) => {
-            let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = del
+            let exts: &[wz_codecs::lent::ExtEntry<'f>] = del
                 .extensions
                 .as_ref()
                 .map_or(&[][..], |chain| chain.as_slice());
@@ -312,7 +310,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             Ok(None) => return Ok(()),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
-        let outer: &[wz_codecs::ext_entry::ExtEntry<'_>] = push
+        let outer: &[wz_codecs::lent::ExtEntry<'_>] = push
             .extensions
             .as_ref()
             .map_or(&[][..], |chain| chain.as_slice());
@@ -773,16 +771,15 @@ mod tests {
     /// builder writes to the `M=0` form that names OUR space.
     fn own_space_push(wire: &[u8]) -> Push<'_> {
         let mut push = Push::decode(&mut SceCursor::new(wire)).expect("decode");
-        let wz_codecs::wireexpr::WireexprVariant::WireexprLocal(local) = &push.keyexpr.body else {
+        let wz_codecs::lent::WireexprVariant::WireexprLocal(local) = &push.keyexpr.body else {
             panic!("the builder writes the peer-space form");
         };
-        push.keyexpr.body = wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(
-            wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+        push.keyexpr.body =
+            wz_codecs::lent::WireexprVariant::WireexprNonlocal(wz_codecs::lent::WireexprNonlocal {
                 id: local.id,
                 suffix_len: local.suffix_len,
                 suffix: local.suffix,
-            },
-        );
+            });
         push
     }
 
@@ -806,7 +803,7 @@ mod tests {
         };
         let mut slices = sce_forge_runtime::heapless::Vec::new();
         for bytes in [&b"ab"[..], &b"cd"[..]] {
-            let _ = slices.push(wz_codecs::zbuf_slice::ZbufSlice {
+            let _ = slices.push(wz_codecs::lent::ZbufSlice {
                 kind: u32::from(crate::put_payload::SLICE_KIND_RAW),
                 len: bytes.len() as u64,
                 bytes: sce_forge_runtime::codec::Bounded::new(bytes).unwrap(),

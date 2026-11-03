@@ -418,9 +418,7 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wz_codecs::push::Push;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{Push, Wireexpr, WireexprLocal, WireexprVariant};
     use wz_runtime_tokio::pubsub::SubscriberRegistry;
 
     let (actions, mut engine) = fresh_setup();

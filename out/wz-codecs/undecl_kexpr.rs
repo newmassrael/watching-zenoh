@@ -16,8 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::ext_entry::ExtEntry;
-
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 
@@ -31,15 +29,23 @@ use super::ext_entry::ExtEntryOwned;
 #[allow(dead_code)]
 pub struct UndeclKexprExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<UndeclKexprExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `UndeclKexprIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait UndeclKexprStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclKexprExtensionsField> + super::ext_entry::ExtEntryStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclKexprExtensionsField> + super::ext_entry::ExtEntryStorage> UndeclKexprStorage for S {}
+
+/// What `UndeclKexprIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `UndeclKexpr` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait UndeclKexprLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclKexprExtensionsField> + super::ext_entry::ExtEntryLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclKexprExtensionsField> + super::ext_entry::ExtEntryLentStorage> UndeclKexprLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside UndeclKexprStorage: how it stores each field of that frame.
@@ -57,16 +63,18 @@ impl<'f, S: UndeclKexprStorage + super::ext_entry::ExtEntryFrom<'f>> UndeclKexpr
 pub struct UndeclKexprIn<S: UndeclKexprStorage> {
     pub header: u8,
     pub id: u64,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<UndeclKexprExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<UndeclKexprExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
 }
 
 /// The eager form: bytes and text borrowed from the frame, lists held inline.
 #[allow(dead_code)]
 pub type UndeclKexpr<'a> = UndeclKexprIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type UndeclKexprOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = UndeclKexprIn<S>;
+pub type UndeclKexprOwned<S> = UndeclKexprIn<S>;
 
 impl<S: UndeclKexprStorage> Default for UndeclKexprIn<S> {
     fn default() -> Self {
@@ -151,7 +159,7 @@ impl<S: UndeclKexprStorage> UndeclKexprIn<S> {
         if (header & 0x80u8) != 0 {
             _out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _more = false;
-                for _ in 0..8u32 {
+                loop {
                     let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                     _more = _entry.z();
                     // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -162,9 +170,6 @@ impl<S: UndeclKexprStorage> UndeclKexprIn<S> {
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
-                }
-                if _more {
-                    return Err(CodecError::TooManyElements);
                 }
                 Ok(())
             })?;
@@ -209,7 +214,7 @@ impl<S: UndeclKexprStorage> UndeclKexprIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        UndeclKexpr::encode_source(self, w)
+        UndeclKexprWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -234,15 +239,15 @@ impl<S: UndeclKexprStorage> UndeclKexprIn<S> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `UndeclKexpr` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `UndeclKexpr`
-/// computes those from what is ([`UndeclKexpr::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`UndeclKexprWire::encode_source`]).
 pub trait UndeclKexprSource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `id` field.
     fn id(&self) -> u64;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
 }
 
 impl<T: UndeclKexprSource + ?Sized> UndeclKexprSource for &T {
@@ -252,7 +257,7 @@ impl<T: UndeclKexprSource + ?Sized> UndeclKexprSource for &T {
     fn id(&self) -> u64 {
         (**self).id()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         (**self).extensions()
     }
 }
@@ -268,7 +273,7 @@ pub struct UndeclKexprParts<'a> {
     /// The `id` field.
     pub id: u64,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
 }
 
 impl<'a> UndeclKexprSource for UndeclKexprParts<'a> {
@@ -278,7 +283,7 @@ impl<'a> UndeclKexprSource for UndeclKexprParts<'a> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
@@ -290,7 +295,7 @@ impl<S: UndeclKexprStorage> UndeclKexprSource for UndeclKexprOwned<S> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
@@ -302,15 +307,22 @@ impl<'a> UndeclKexprSource for UndeclKexprView<'a> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
+/// The codec `UndeclKexpr` itself: what writes a value read through
+/// [`UndeclKexprSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UndeclKexprWire;
+
 #[allow(dead_code)]
-impl<'a> UndeclKexpr<'a> {
+impl UndeclKexprWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `UndeclKexpr::encode` writes for the value it holds, read through
     /// [`UndeclKexprSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -328,7 +340,7 @@ impl<'a> UndeclKexpr<'a> {
         w.write_vle_u64(src.id())?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
-                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
             }
         }
         Ok(())
@@ -344,7 +356,7 @@ impl<'a> UndeclKexpr<'a> {
     }
 }
 
-impl<'a, S: UndeclKexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for UndeclKexpr<'a> {
+impl<S: UndeclKexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for UndeclKexprWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -353,7 +365,7 @@ impl<'a, S: UndeclKexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<
 }
 
 #[allow(dead_code)]
-impl<'a> UndeclKexpr<'a> {
+impl UndeclKexprWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -402,7 +414,7 @@ impl ListWalk<0> for UndeclKexprExtensionsWalk {
 pub struct UndeclKexprView<'a> {
     pub header: u8,
     pub id: u64,
-    pub extensions: Option<Bounded<ListView<'a, UndeclKexprExtensionsWalk, 0>, 8, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, UndeclKexprExtensionsWalk, 0>, { usize::MAX }, 1>>,
 }
 
 impl<'a> Default for UndeclKexprView<'a> {
@@ -459,7 +471,7 @@ impl<'a> UndeclKexprView<'a> {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -467,9 +479,6 @@ impl<'a> UndeclKexprView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
@@ -490,14 +499,14 @@ impl<'a> UndeclKexprView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut UndeclKexpr<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut UndeclKexprIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: UndeclKexprLentStorage {
         _out.header = self.header;
         _out.id = self.id;
         match &self.extensions {
             Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -516,7 +525,7 @@ impl<'a> UndeclKexprView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        UndeclKexpr::encode_source(self, w)
+        UndeclKexprWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -571,8 +580,11 @@ impl<'a> UndeclKexprView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `UndeclKexpr<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> UndeclKexpr<'a> {
+impl<'a, D> UndeclKexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: UndeclKexprLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`UndeclKexprOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -593,11 +605,9 @@ impl<'a> UndeclKexpr<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<UndeclKexprOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -611,8 +621,8 @@ impl<S: UndeclKexprStorage> UndeclKexprOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<UndeclKexpr<'_>, CodecError> {
-        let mut _out = UndeclKexpr::default();
+    pub fn try_as_borrowed(&self) -> Result<UndeclKexprIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -627,7 +637,7 @@ impl<S: UndeclKexprStorage> UndeclKexprOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut UndeclKexpr<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut UndeclKexprIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         _out.id = self.id;
         match &self.extensions {
@@ -651,7 +661,7 @@ impl<S: UndeclKexprStorage> UndeclKexprOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> UndeclKexpr<'a> {
+impl<'a, D> UndeclKexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: UndeclKexprLentStorage {
     /// Project this borrowed view into an owned [`UndeclKexprOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

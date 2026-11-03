@@ -228,7 +228,7 @@ impl PeerOpener for LinkstateOpener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sce_forge_runtime::codec::Bounded;
+    use sce_forge_runtime::codec::{Bounded, Heap};
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::linkstate_list::LinkstateListOwned;
@@ -241,7 +241,7 @@ mod tests {
     const PEER_ZID: &[u8] = &[0xab, 0x01];
     const ADVERTISED: &str = "tcp/127.0.0.1:7447";
 
-    fn entry(psid: u64, sn: u64, zid: &[u8], links: &[u64]) -> LinkstateOwned {
+    fn entry(psid: u64, sn: u64, zid: &[u8], links: &[u64]) -> LinkstateOwned<Heap> {
         LinkstateOwned {
             options: 0,
             psid,
@@ -270,7 +270,7 @@ mod tests {
     /// — without a neighbour joining them the node is detached and pruned, which
     /// is what the first cut of this fixture got wrong and the positive arm
     /// caught.
-    fn flood(locs: &[&str]) -> LinkstateListOwned {
+    fn flood(locs: &[&str]) -> LinkstateListOwned<Heap> {
         let mut peer = entry(2, 5, PEER_ZID, &[1]);
         if !locs.is_empty() {
             peer.num_locators = Some(locs.len() as u64);

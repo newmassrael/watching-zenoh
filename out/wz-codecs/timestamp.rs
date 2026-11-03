@@ -36,6 +36,14 @@ pub trait TimestampStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<TimestampZidField>> TimestampStorage for S {}
 
+/// What `TimestampIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Timestamp` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait TimestampLentStorage: ::core::fmt::Debug + Clone + PartialEq {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq> TimestampLentStorage for D {}
+
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside TimestampStorage: how it stores each field of that frame.
 #[allow(dead_code)]
@@ -169,7 +177,7 @@ impl<S: TimestampStorage> TimestampIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Timestamp::encode_source(self, w)
+        TimestampWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -194,8 +202,8 @@ impl<S: TimestampStorage> TimestampIn<S> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Timestamp` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Timestamp`
-/// computes those from what is ([`Timestamp::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`TimestampWire::encode_source`]).
 pub trait TimestampSource {
     /// The `time` field.
     fn time(&self) -> u64;
@@ -242,10 +250,17 @@ impl<S: TimestampStorage> TimestampSource for TimestampOwned<S> {
     }
 }
 
+/// The codec `Timestamp` itself: what writes a value read through
+/// [`TimestampSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimestampWire;
+
 #[allow(dead_code)]
-impl<'a> Timestamp<'a> {
+impl TimestampWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Timestamp::encode` writes for the value it holds, read through
     /// [`TimestampSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -274,7 +289,7 @@ impl<'a> Timestamp<'a> {
     }
 }
 
-impl<'a, S: TimestampSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Timestamp<'a> {
+impl<S: TimestampSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for TimestampWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -283,7 +298,7 @@ impl<'a, S: TimestampSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S>
 }
 
 #[allow(dead_code)]
-impl<'a> Timestamp<'a> {
+impl TimestampWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -322,8 +337,12 @@ impl<'a> Timestamp<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Self) -> Result<(), CodecError> {
-        _out.clone_from(self);
+    // A codec with no list holds every field alike at every profile, so the
+    // value at any `D` is filled field by field (docs/adr/0077 §7).
+    pub fn into_builder<D>(&self, _out: &mut TimestampIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: TimestampLentStorage {
+        _out.time = self.time;
+        _out.zid_len = self.zid_len;
+        _out.zid = self.zid;
         Ok(())
     }
 }
@@ -361,8 +380,11 @@ impl<'a> Timestamp<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Timestamp<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Timestamp<'a> {
+impl<'a, D> TimestampIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: TimestampLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`TimestampOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -397,8 +419,8 @@ impl<S: TimestampStorage> TimestampOwned<S> {
     /// borrowed view (the owned form is read-only), so an owned consumer
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
-    pub fn as_borrowed(&self) -> Timestamp<'_> {
-        let mut _out = Timestamp::default();
+    pub fn as_borrowed(&self) -> TimestampIn<::sce_forge_runtime::codec::Lent<'_, S>> {
+        let mut _out = Default::default();
         self.as_borrowed_into(&mut _out);
         _out
     }
@@ -413,7 +435,7 @@ impl<S: TimestampStorage> TimestampOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn as_borrowed_into<'o>(&'o self, _out: &mut Timestamp<'o>) {
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut TimestampIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         _out.time = self.time;
         _out.zid_len = self.zid_len;
         _out.zid = self.zid.as_bytes();
@@ -434,7 +456,7 @@ impl<S: TimestampStorage> TimestampOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> Timestamp<'a> {
+impl<'a, D> TimestampIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: TimestampLentStorage {
     /// Project this borrowed view into an owned [`TimestampOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

@@ -3296,7 +3296,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let GroupKey { mapping_id, suffix } = key;
         // Typed, and the last arm a value rather than a `return`: a build with none of the
         // three kinds has that arm alone, and must still know what the match makes.
-        let declare: Result<wz_codecs::declare::DeclareOwned, SendWireError> = match what {
+        let declare: Result<
+            wz_session_core::transport_profile::owned::DeclareOwned,
+            SendWireError,
+        > = match what {
             #[cfg(feature = "declare-subscriber")]
             GroupDeclaration::Subscriber => {
                 wz_session_core::declare_build::build_declare_subscriber(id, mapping_id, suffix)
@@ -3348,7 +3351,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         use wz_session_core::send_wire_error::SendWireError;
         let (mapping_id, suffix) = (key.mapping_id, key.suffix.unwrap_or(""));
         // Typed with a value for the last arm, for the reason `announce` states.
-        let declare: Result<wz_codecs::declare::DeclareOwned, SendWireError> = match what {
+        let declare: Result<
+            wz_session_core::transport_profile::owned::DeclareOwned,
+            SendWireError,
+        > = match what {
             #[cfg(feature = "declare-subscriber")]
             GroupDeclaration::Subscriber => {
                 wz_session_core::declare_build::build_undeclare_subscriber_on_wire(
@@ -3530,7 +3536,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
     fn send_declare_to_group(
         &self,
-        declare: wz_codecs::declare::DeclareOwned,
+        declare: wz_session_core::transport_profile::owned::DeclareOwned,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         self.send_network_message(
             wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),

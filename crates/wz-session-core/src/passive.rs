@@ -4920,7 +4920,7 @@ mod tests {
     /// One encoded OAM record — a real network message through the real
     /// encoder, so the batch fixture cannot drift from what wz emits.
     fn oam_record(id: u64) -> Vec<u8> {
-        wz_codecs::oam::Oam {
+        wz_codecs::lent::Oam {
             id,
             ..Default::default()
         }
@@ -6575,31 +6575,32 @@ mod tests {
         // decoded, as an `Unknown` record, and the table stayed empty — which
         // is why the batch assertion below counts the messages instead of
         // merely matching the arm.
-        let declare: wz_codecs::declare::DeclareOwned = wz_codecs::declare::DeclareOwned {
-            // The MID ALONE: `Default`'s header also carries flags (I / Z),
-            // and announcing an ext chain that `extensions: None` then does
-            // not write leaves the decoder reading the next record's bytes as
-            // a chain. Masking to the MID is what makes this one record.
-            header: wz_codecs::declare::Declare::default().header & 0x1F,
-            interest_id: None,
-            extensions: None,
-            body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexprOwned {
-                    // N (`0x20`) announces the wireexpr's SUFFIX. The parent header
-                    // carries it, not the wireexpr, so leaving it clear makes
-                    // the encoder write the id and DROP the suffix — which the
-                    // first version of this fixture did, and the trailing
-                    // "demo/robots/" bytes then decoded as a second, Unknown
-                    // record.
-                    header: wz_codecs::decl_kexpr::DeclKexpr::default().header | 0x20,
-                    id: 42,
-                    keyexpr,
-                    // R311y804: the body's own Z-gated chain, absent here for the
-                    // reason the header comment above already gives.
-                    extensions: None,
-                },
-            ),
-        };
+        let declare: crate::transport_profile::owned::DeclareOwned =
+            crate::transport_profile::owned::DeclareOwned {
+                // The MID ALONE: `Default`'s header also carries flags (I / Z),
+                // and announcing an ext chain that `extensions: None` then does
+                // not write leaves the decoder reading the next record's bytes as
+                // a chain. Masking to the MID is what makes this one record.
+                header: wz_codecs::lent::Declare::default().header & 0x1F,
+                interest_id: None,
+                extensions: None,
+                body: crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclKexpr(
+                    wz_codecs::decl_kexpr::DeclKexprOwned {
+                        // N (`0x20`) announces the wireexpr's SUFFIX. The parent header
+                        // carries it, not the wireexpr, so leaving it clear makes
+                        // the encoder write the id and DROP the suffix — which the
+                        // first version of this fixture did, and the trailing
+                        // "demo/robots/" bytes then decoded as a second, Unknown
+                        // record.
+                        header: wz_codecs::lent::DeclKexpr::default().header | 0x20,
+                        id: 42,
+                        keyexpr,
+                        // R311y804: the body's own Z-gated chain, absent here for the
+                        // reason the header comment above already gives.
+                        extensions: None,
+                    },
+                ),
+            };
         // Through the real encoder, so the fixture is a batch wz could have
         // emitted rather than a byte string that happens to parse.
         let record = declare
@@ -8537,7 +8538,7 @@ mod join_ring_tests {
             crate::vle::encode_vle_u64_into(&mut wire, u64::from(priority.wire_byte()));
         }
         wire.extend_from_slice(
-            &wz_codecs::oam::Oam {
+            &wz_codecs::lent::Oam {
                 id: sn,
                 ..Default::default()
             }

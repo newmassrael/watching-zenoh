@@ -1918,7 +1918,7 @@ pub(crate) mod fed_tests {
     fn hello_wire_with_locator(locator: &str) -> alloc::vec::Vec<u8> {
         use wz_session_core::codec_owned::{owned_bytes, owned_string};
         let zid = [0x55u8, 0x66, 0x77, 0x88];
-        let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {
+        let owned: wz_codecs::hello::HelloOwned<wz_codecs::Heap> = wz_codecs::hello::HelloOwned {
             version: 0x09,
             cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
             zid: owned_bytes(&zid).expect("zid"),

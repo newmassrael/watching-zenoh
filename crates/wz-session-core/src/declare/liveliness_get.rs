@@ -77,7 +77,7 @@ pub use crate::reply_sink::BoxedReplySink;
 // both for itself.
 
 #[cfg(feature = "alloc")]
-use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 
 #[cfg(feature = "alloc")]
 use crate::driver_loop::DriverLoopOutcome;
@@ -498,10 +498,10 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     ))]
     pub fn dispatch_declare_view<'a, 'f>(
         &mut self,
-        declare: &wz_codecs::declare::Declare<'f>,
+        declare: &wz_codecs::lent::Declare<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        use wz_codecs::declare::DeclareVariant;
+        use wz_codecs::lent::DeclareVariant;
         let peer_keyexpr_table = peer_keyexpr_table.into();
         let Some(interest_id) = declare.interest_id else {
             // Unsolicited (proactive) declaration — not a get reply.

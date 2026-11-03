@@ -78,8 +78,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 
-use wz_codecs::hello::Hello;
-use wz_codecs::locator::Locator;
+use wz_codecs::lent::{Hello, Locator};
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 

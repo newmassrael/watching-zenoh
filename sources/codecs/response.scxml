@@ -32,11 +32,13 @@
                               (`carrier="header" name="N" bit="5"`) as
                               request / push since the response header
                               co-locates the N flag at bit 5.
-       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
-                              depth=4 covers upstream's 3 ext slots
-                              (qos / timestamp / responder per
-                              network.c L266-292) with safety margin;
-                              entry-flag-Z termination since the body
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain with no
+                              depth bound: upstream reads it until Z
+                              clears, past its 3 ext slots (qos /
+                              timestamp / responder per network.c
+                              L266-292), and what a node stores is its
+                              deployment's capacity; entry-flag-Z
+                              termination since the body
                               variant follows the chain — Y3 atomic 1
                               grammar).
        inner    : body       — peek-byte primitive dispatches on the
@@ -100,7 +102,6 @@
     <sce:field id="request_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
     <sce:variant tag="peek.mid">

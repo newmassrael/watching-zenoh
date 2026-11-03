@@ -1,4 +1,4 @@
-// SCE-MAP: response:81 :: _forge_body
+// SCE-MAP: response:83 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -15,11 +15,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-
-use super::wireexpr::Wireexpr;
-use super::ext_entry::ExtEntry;
-use super::reply::Reply;
-use super::err::Err;
 
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::wireexpr::WireexprView;
@@ -79,15 +74,23 @@ use super::err::ErrOwned;
 #[allow(dead_code)]
 pub struct ResponseExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `ResponseIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait ResponseStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage + super::reply::ReplyStorage + super::err::ErrStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage + super::reply::ReplyStorage + super::err::ErrStorage> ResponseStorage for S {}
+
+/// What `ResponseIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Response` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait ResponseLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField> + super::wireexpr::WireexprLentStorage + super::ext_entry::ExtEntryLentStorage + super::reply::ReplyLentStorage + super::err::ErrLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField> + super::wireexpr::WireexprLentStorage + super::ext_entry::ExtEntryLentStorage + super::reply::ReplyLentStorage + super::err::ErrLentStorage> ResponseLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside ResponseStorage: how it stores each field of that frame.
@@ -106,7 +109,7 @@ pub struct ResponseIn<S: ResponseStorage> {
     pub header: u8,
     pub request_id: u64,
     pub keyexpr: WireexprOwned<S>,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
     pub body: ResponseVariantIn<S>,
 }
 
@@ -114,9 +117,11 @@ pub struct ResponseIn<S: ResponseStorage> {
 #[allow(dead_code)]
 pub type Response<'a> = ResponseIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type ResponseOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = ResponseIn<S>;
+pub type ResponseOwned<S> = ResponseIn<S>;
 
 impl<S: ResponseStorage> Default for ResponseIn<S> {
     fn default() -> Self {
@@ -157,7 +162,7 @@ pub enum ResponseVariantIn<S: ResponseStorage> {
 pub type ResponseVariant<'a> = ResponseVariantIn<::sce_forge_runtime::codec::Lent<'a>>;
 
 #[allow(dead_code)]
-pub type ResponseOwnedVariant<S = ::sce_forge_runtime::codec::DefaultStorage> = ResponseVariantIn<S>;
+pub type ResponseOwnedVariant<S> = ResponseVariantIn<S>;
 
 impl<S: ResponseStorage> Default for ResponseVariantIn<S> {
     fn default() -> Self {
@@ -239,7 +244,7 @@ impl<S: ResponseStorage> ResponseIn<S> {
         if (header & 0x80u8) != 0 {
             _out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _more = false;
-                for _ in 0..8u32 {
+                loop {
                     let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                     _more = _entry.z();
                     // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -250,9 +255,6 @@ impl<S: ResponseStorage> ResponseIn<S> {
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
-                }
-                if _more {
-                    return Err(CodecError::TooManyElements);
                 }
                 Ok(())
             })?;
@@ -352,7 +354,7 @@ impl<S: ResponseStorage> ResponseIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Response::encode_source(self, w)
+        ResponseWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -404,8 +406,8 @@ impl<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> ResponseVariantSource<'s, A0, A1, D>
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Response` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Response`
-/// computes those from what is ([`Response::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`ResponseWire::encode_source`]).
 pub trait ResponseSource {
     /// The `header` field.
     fn header(&self) -> u8;
@@ -414,7 +416,7 @@ pub trait ResponseSource {
     /// The `keyexpr` field.
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
     /// The arm of the variant this value holds.
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource>;
 }
@@ -429,7 +431,7 @@ impl<T: ResponseSource + ?Sized> ResponseSource for &T {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         (**self).keyexpr()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         (**self).extensions()
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
@@ -460,7 +462,7 @@ pub struct ResponseParts<'a> {
     /// The `keyexpr` field.
     pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
     /// The arm of the variant this value holds.
     pub body: ResponsePartsBody<'a>,
 }
@@ -475,7 +477,7 @@ impl<'a> ResponseSource for ResponseParts<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
@@ -497,7 +499,7 @@ impl<S: ResponseStorage> ResponseSource for ResponseOwned<S> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.list_iter())
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
@@ -519,7 +521,7 @@ impl<'a> ResponseSource for ResponseView<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
@@ -531,10 +533,17 @@ impl<'a> ResponseSource for ResponseView<'a> {
     }
 }
 
+/// The codec `Response` itself: what writes a value read through
+/// [`ResponseSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResponseWire;
+
 #[allow(dead_code)]
-impl<'a> Response<'a> {
+impl ResponseWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Response::encode` writes for the value it holds, read through
     /// [`ResponseSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -551,23 +560,23 @@ impl<'a> Response<'a> {
     #[doc(hidden)]
     pub fn write_source<S: ResponseSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
-        let _n_d_header_n_0: usize = usize::from(Wireexpr::input_n(src.keyexpr()));
+        let _n_d_header_n_0: usize = usize::from(super::wireexpr::WireexprWire::input_n(src.keyexpr()));
         let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(src.keyexpr()) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
         let _p_header_z_0: bool = src.extensions().is_some();
         let _v_header_n: u8 = _n_d_header_n_0 as u8;
         let _c_header: u8 = (((((src.header() & !0x20) | (_v_header_n << 5)) & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         w.write_vle_u64(src.request_id())?;
-        Wireexpr::write_source(src.keyexpr(), w)?;
+        super::wireexpr::WireexprWire::write_source(src.keyexpr(), w)?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
-                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
             }
         }
         match src.body() {
-            ResponseVariantSource::CodecZenohReply(_b) => Reply::write_source(_b, w)?,
-            ResponseVariantSource::CodecZenohErr(_b) => Err::write_source(_b, w)?,
-            ResponseVariantSource::Default { body: _b, .. } => Reply::write_source(_b, w)?,
+            ResponseVariantSource::CodecZenohReply(_b) => super::reply::ReplyWire::write_source(_b, w)?,
+            ResponseVariantSource::CodecZenohErr(_b) => super::err::ErrWire::write_source(_b, w)?,
+            ResponseVariantSource::Default { body: _b, .. } => super::reply::ReplyWire::write_source(_b, w)?,
         }
         Ok(())
     }
@@ -582,7 +591,7 @@ impl<'a> Response<'a> {
     }
 }
 
-impl<'a, S: ResponseSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Response<'a> {
+impl<S: ResponseSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for ResponseWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -591,7 +600,7 @@ impl<'a, S: ResponseSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> 
 }
 
 #[allow(dead_code)]
-impl<'a> Response<'a> {
+impl ResponseWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -658,7 +667,7 @@ pub struct ResponseView<'a> {
     pub header: u8,
     pub request_id: u64,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, ResponseExtensionsWalk, 0>, 8, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, ResponseExtensionsWalk, 0>, { usize::MAX }, 1>>,
     pub body: ResponseViewVariant<'a>,
 }
 
@@ -714,7 +723,7 @@ impl<'a> ResponseView<'a> {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -722,9 +731,6 @@ impl<'a> ResponseView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
@@ -776,15 +782,15 @@ impl<'a> ResponseView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Response<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut ResponseIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: ResponseLentStorage {
         _out.header = self.header;
         _out.request_id = self.request_id;
         self.keyexpr.into_builder(&mut _out.keyexpr)?;
         match &self.extensions {
             Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -794,23 +800,23 @@ impl<'a> ResponseView<'a> {
         }
         match &self.body {
             ResponseViewVariant::CodecZenohReply(_b) => {
-                _out.body = ResponseVariant::CodecZenohReply(Reply::default());
-                if let ResponseVariant::CodecZenohReply(_o) = &mut _out.body {
+                _out.body = ResponseVariantIn::CodecZenohReply(Default::default());
+                if let ResponseVariantIn::CodecZenohReply(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             ResponseViewVariant::CodecZenohErr(_b) => {
-                _out.body = ResponseVariant::CodecZenohErr(Err::default());
-                if let ResponseVariant::CodecZenohErr(_o) = &mut _out.body {
+                _out.body = ResponseVariantIn::CodecZenohErr(Default::default());
+                if let ResponseVariantIn::CodecZenohErr(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             ResponseViewVariant::Default { tag, body } => {
-                _out.body = ResponseVariant::Default {
+                _out.body = ResponseVariantIn::Default {
                     tag: *tag,
-                    body: Reply::default(),
+                    body: Default::default(),
                 };
-                if let ResponseVariant::Default { body: _o, .. } = &mut _out.body {
+                if let ResponseVariantIn::Default { body: _o, .. } = &mut _out.body {
                     body.into_builder(_o)?;
                 }
             }
@@ -826,7 +832,7 @@ impl<'a> ResponseView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Response::encode_source(self, w)
+        ResponseWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -890,22 +896,17 @@ impl<'a> ResponseView<'a> {
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
-impl<'a> ResponseVariant<'a> {
+impl<'a, D> ResponseVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ResponseLentStorage {
     /// Deep-copy this borrowed variant body into its owned mirror at the
     /// given storage profile. Fallible because a borrowed arm body's own
     /// projection re-checks its declared capacities (the same bounds decode
     /// enforces) — on the growable profile no check can fire.
     pub fn try_into_owned_in<S: ResponseFrom<'a>>(self) -> Result<ResponseOwnedVariant<S>, CodecError> {
         Ok(match self {
-            ResponseVariant::CodecZenohReply(_b) => ResponseOwnedVariant::CodecZenohReply(_b.try_into_owned_in::<S>()?),
-            ResponseVariant::CodecZenohErr(_b) => ResponseOwnedVariant::CodecZenohErr(_b.try_into_owned_in::<S>()?),
-            ResponseVariant::Default { tag, body } => ResponseOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
+            Self::CodecZenohReply(_b) => ResponseOwnedVariant::CodecZenohReply(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohErr(_b) => ResponseOwnedVariant::CodecZenohErr(_b.try_into_owned_in::<S>()?),
+            Self::Default { tag, body } => ResponseOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
         })
-    }
-
-    /// The same projection at the build's default storage profile.
-    pub fn try_into_owned(self) -> Result<ResponseOwnedVariant, CodecError> {
-        self.try_into_owned_in()
     }
 }
 
@@ -915,8 +916,8 @@ impl<S: ResponseStorage> ResponseOwnedVariant<S> {
     /// the inverse of the projection above. Reuses the borrowed view's
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
-    pub fn try_as_borrowed(&self) -> Result<ResponseVariant<'_>, CodecError> {
-        let mut _out = ResponseVariant::default();
+    pub fn try_as_borrowed(&self) -> Result<ResponseVariantIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -930,23 +931,23 @@ impl<S: ResponseStorage> ResponseOwnedVariant<S> {
     /// projection that returns one copies the declared maximum at every layer
     /// it passes through. A caller on a path where that shows projects into a
     /// destination it owns. On `Err`, `_out` holds what was projected so far.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut ResponseVariant<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut ResponseVariantIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         match self {
             ResponseOwnedVariant::CodecZenohReply(_b) => {
-                *_out = ResponseVariant::CodecZenohReply(Default::default());
-                if let ResponseVariant::CodecZenohReply(_o) = _out {
+                *_out = ResponseVariantIn::CodecZenohReply(Default::default());
+                if let ResponseVariantIn::CodecZenohReply(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             ResponseOwnedVariant::CodecZenohErr(_b) => {
-                *_out = ResponseVariant::CodecZenohErr(Default::default());
-                if let ResponseVariant::CodecZenohErr(_o) = _out {
+                *_out = ResponseVariantIn::CodecZenohErr(Default::default());
+                if let ResponseVariantIn::CodecZenohErr(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             ResponseOwnedVariant::Default { tag, body } => {
-                *_out = ResponseVariant::Default { tag: *tag, body: Default::default() };
-                if let ResponseVariant::Default { body: _o, .. } = _out {
+                *_out = ResponseVariantIn::Default { tag: *tag, body: Default::default() };
+                if let ResponseVariantIn::Default { body: _o, .. } = _out {
                     body.try_as_borrowed_into(_o)?;
                 }
             }
@@ -955,8 +956,11 @@ impl<S: ResponseStorage> ResponseOwnedVariant<S> {
     }
 }
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Response<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Response<'a> {
+impl<'a, D> ResponseIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ResponseLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`ResponseOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -979,11 +983,9 @@ impl<'a> Response<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<ResponseOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -997,8 +999,8 @@ impl<S: ResponseStorage> ResponseOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<Response<'_>, CodecError> {
-        let mut _out = Response::default();
+    pub fn try_as_borrowed(&self) -> Result<ResponseIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -1013,7 +1015,7 @@ impl<S: ResponseStorage> ResponseOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Response<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut ResponseIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         _out.request_id = self.request_id;
         self.keyexpr.as_borrowed_into(&mut _out.keyexpr);
@@ -1039,20 +1041,20 @@ impl<S: ResponseStorage> ResponseOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> ResponseVariant<'a> {
+impl<'a, D> ResponseVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ResponseLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
     pub fn try_into_owned_in_origin<S: ResponseStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ResponseOwnedVariant<S>, CodecError> {
         Ok(match self {
-            ResponseVariant::CodecZenohReply(_b) => ResponseOwnedVariant::CodecZenohReply(_b.try_into_owned_in_origin::<S>(origin)?),
-            ResponseVariant::CodecZenohErr(_b) => ResponseOwnedVariant::CodecZenohErr(_b.try_into_owned_in_origin::<S>(origin)?),
-            ResponseVariant::Default { tag, body } => ResponseOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },
+            Self::CodecZenohReply(_b) => ResponseOwnedVariant::CodecZenohReply(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohErr(_b) => ResponseOwnedVariant::CodecZenohErr(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::Default { tag, body } => ResponseOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },
         })
     }
 }
 
 #[allow(dead_code)]
-impl<'a> Response<'a> {
+impl<'a, D> ResponseIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ResponseLentStorage {
     /// Project this borrowed view into an owned [`ResponseOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

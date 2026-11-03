@@ -40,9 +40,10 @@
                                  `Z_CONSOLIDATION_MODE_DEFAULT` per
                                  the decoder's else-branch L533-535).
        Z-gated:
-         chain  : codec_zenoh_ext_entry tlv-chain (max-depth=4
-                              covers the upstream-reserved extension
-                              slots; entry-flag-Z termination per Y3
+         chain  : codec_zenoh_ext_entry tlv-chain (no depth bound:
+                              upstream reads it until Z clears, and
+                              what a node stores is its deployment's
+                              capacity; entry-flag-Z termination per Y3
                               atomic 1 grammar; chain is followed by
                               the always-present push_body so the
                               exhaust-or-depth termination is not
@@ -85,7 +86,6 @@
     <sce:field id="consolidation" sce:type="uint8" sce:byte="1" sce:bit-size="8"
                sce:present-if="header.C"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
     <sce:variant tag="peek.mid">

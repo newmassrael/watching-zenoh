@@ -25,7 +25,7 @@
 //!   smallest data surface) and seeds the per-codec rollout pattern
 //!   for the rest of the post-R90 catalog.
 
-use wz_codecs::response_final::ResponseFinal;
+use wz_codecs::lent::ResponseFinal;
 use zenoh_pico_sys::{
     _z_n_msg_response_final_t, _z_response_final_encode, _z_wbuf_clear, _z_wbuf_make,
     _z_wbuf_to_zbuf, _z_zbuf_clear,

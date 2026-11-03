@@ -1533,17 +1533,17 @@ fn inbound_push_aliased_in_our_space(
     mapping_id: u64,
     payload: &[u8],
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
-    let push = wz_codecs::push::Push {
-        keyexpr: wz_codecs::wireexpr::Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(
-                wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+    let push = wz_codecs::lent::Push {
+        keyexpr: wz_codecs::lent::Wireexpr {
+            body: wz_codecs::lent::WireexprVariant::WireexprNonlocal(
+                wz_codecs::lent::WireexprNonlocal {
                     id: mapping_id,
                     suffix_len: None,
                     suffix: None,
                 },
             ),
         },
-        body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+        body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
             payload_len: Some(payload.len() as u64),
             extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,
@@ -1551,7 +1551,7 @@ fn inbound_push_aliased_in_our_space(
             },
             ..Default::default()
         }),
-        ..wz_codecs::push::Push::default()
+        ..wz_codecs::lent::Push::default()
     }
     .try_into_owned_in::<wz_session_core::wire::WireStorage>()
     .expect("fixture Push is representable");
@@ -3324,13 +3324,13 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
 
     // Simulate the peer's ResponseFinal — the second of the two
     // expected finals — and observe on_final fire then.
-    use wz_codecs::response_final::ResponseFinal;
+    use wz_codecs::lent::ResponseFinal;
     let mut observer = session.observer().lock().unwrap();
     let response_final = ResponseFinal {
         request_id: 0,
         ..ResponseFinal::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap();
     observer.replies.dispatch_response_final(&response_final);
     drop(observer);
@@ -4315,7 +4315,10 @@ fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
     feature = "declare-subscriber",
     feature = "declare-queryable"
 ))]
-fn deliver_peer_declare(session: &TokioSession, body: wz_codecs::declare::DeclareOwnedVariant) {
+fn deliver_peer_declare(
+    session: &TokioSession,
+    body: wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap>,
+) {
     let declare = wz_codecs::declare::DeclareOwned {
         header: 0,
         interest_id: None,
@@ -5333,7 +5336,6 @@ fn expected_query_request_bytes(
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
         .encode_to_vec()
-        .expect("a built Request encodes")
 }
 
 #[cfg(all(
@@ -6382,7 +6384,7 @@ fn a_hold_asks_in_the_form_it_was_given_and_retracts_on_drop() {
     use wz_session_core::interest_build::{
         build_interest_final, build_interest_kinds_with_aggregate, InterestKinds,
     };
-    let encode = |interest: wz_codecs::interest::InterestOwned| {
+    let encode = |interest: wz_codecs::interest::InterestOwned<sce_forge_runtime::codec::Heap>| {
         interest
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
@@ -6660,10 +6662,11 @@ fn querier_clone_shares_session_and_options() {
 /// and take a separate `mapping_id`), so the 1-arg wrapper stays
 /// inline here rather than threading the lower-level builders.
 #[cfg(feature = "declare-queryable")]
-fn make_decl_queryable(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareOwnedVariant {
-    use wz_codecs::decl_queryable::DeclQueryable;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+fn make_decl_queryable(
+    id: u64,
+    keyexpr_literal: &str,
+) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+    use wz_codecs::lent::{DeclQueryable, Wireexpr, WireexprLocal, WireexprVariant};
     let suffix_len = Some(keyexpr_literal.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
@@ -6674,23 +6677,25 @@ fn make_decl_queryable(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::De
     };
     // Build the borrowed variant then deep-copy into the owned
     // mirror that `dispatch_declare` now takes.
-    wz_codecs::declare::DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
+    wz_codecs::lent::DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
         id,
         keyexpr,
         ..DeclQueryable::default()
     })
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap()
 }
 
 #[cfg(feature = "declare-queryable")]
-fn make_undecl_queryable(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
-    use wz_codecs::undecl_queryable::UndeclQueryable;
-    wz_codecs::declare::DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
+fn make_undecl_queryable(
+    id: u64,
+) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+    use wz_codecs::lent::UndeclQueryable;
+    wz_codecs::lent::DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
         id,
         ..UndeclQueryable::default()
     })
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap()
 }
 
@@ -7310,12 +7315,12 @@ fn awaiting_options() -> QueryOptions {
 /// does not decode one never sees a query end by it, so what needs one is gated on both.
 #[cfg(all(feature = "query-get", feature = "codec-response-final"))]
 fn finish_query(session: &TokioSession, rid: u64) {
-    use wz_codecs::response_final::ResponseFinal;
+    use wz_codecs::lent::ResponseFinal;
     let response_final = ResponseFinal {
         request_id: rid,
         ..ResponseFinal::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap();
     session
         .observer()
@@ -8008,10 +8013,11 @@ fn publisher_aliased_delete_routes_to_del_kind() {
 /// body from a single keyexpr literal, distinct ergonomics from
 /// the `wz-session-core-test-support` record builders.
 #[cfg(feature = "declare-subscriber")]
-fn make_decl_subscriber(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareOwnedVariant {
-    use wz_codecs::decl_subscriber::DeclSubscriber;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+fn make_decl_subscriber(
+    id: u64,
+    keyexpr_literal: &str,
+) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+    use wz_codecs::lent::{DeclSubscriber, Wireexpr, WireexprLocal, WireexprVariant};
     let suffix_len = Some(keyexpr_literal.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
@@ -8020,23 +8026,25 @@ fn make_decl_subscriber(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::D
             suffix: Some(wz_codecs::Bounded::new(keyexpr_literal).unwrap()),
         }),
     };
-    wz_codecs::declare::DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
+    wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
         id,
         keyexpr,
         ..DeclSubscriber::default()
     })
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap()
 }
 
 #[cfg(feature = "declare-subscriber")]
-fn make_undecl_subscriber(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
-    use wz_codecs::undecl_subscriber::UndeclSubscriber;
-    wz_codecs::declare::DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
+fn make_undecl_subscriber(
+    id: u64,
+) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+    use wz_codecs::lent::UndeclSubscriber;
+    wz_codecs::lent::DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
         id,
         ..UndeclSubscriber::default()
     })
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap()
 }
 
@@ -11548,7 +11556,9 @@ fn publisher_matching_listener_fires_on_transitions_only() {
          (pico fires the `true` arm only)"
     );
 
-    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+    use sce_forge_runtime::codec::Heap;
+    use wz_codecs::declare::DeclareOwnedVariant;
+    let dispatch = |body: &DeclareOwnedVariant<Heap>| {
         session
             .observer()
             .lock()
@@ -11906,7 +11916,7 @@ fn an_inbound_peer_undeclare_does_not_flip_a_watch_a_local_queryable_holds() {
         "the local queryable already answers, so registration fires true"
     );
 
-    let fan = |body: wz_codecs::declare::DeclareOwnedVariant| {
+    let fan = |body: wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap>| {
         let declare = wz_codecs::declare::DeclareOwned {
             header: 0,
             interest_id: None,
@@ -12330,7 +12340,9 @@ fn matching_listener_callback_may_reenter_session_apis() {
         .expect("session-matching is on in this lane");
     *slot.lock().unwrap() = Some(listener);
 
-    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+    use sce_forge_runtime::codec::Heap;
+    use wz_codecs::declare::DeclareOwnedVariant;
+    let dispatch = |body: &DeclareOwnedVariant<Heap>| {
         session
             .observer()
             .lock()
@@ -12420,7 +12432,9 @@ fn remote_subscriber_listener_delivers_decl_and_undecl_events() {
         .declare_remote_subscriber_listener(move |e| log_cb.lock().unwrap().push(e))
         .expect("declare-subscriber is on in this lane");
 
-    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+    use sce_forge_runtime::codec::Heap;
+    use wz_codecs::declare::DeclareOwnedVariant;
+    let dispatch = |body: &DeclareOwnedVariant<Heap>| {
         session
             .observer()
             .lock()
@@ -12505,10 +12519,11 @@ fn remote_queryable_listener_delivers_decl_and_undecl_events() {
 /// R311lc token-plane listener test (the wz-session-core-test-support
 /// builders are not a dev-dep here per R311ds).
 #[cfg(feature = "liveliness-token")]
-fn make_decl_token(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareOwnedVariant {
-    use wz_codecs::decl_token::DeclToken;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+fn make_decl_token(
+    id: u64,
+    keyexpr_literal: &str,
+) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+    use wz_codecs::lent::{DeclToken, Wireexpr, WireexprLocal, WireexprVariant};
     let suffix_len = Some(keyexpr_literal.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
@@ -12517,23 +12532,25 @@ fn make_decl_token(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::Declar
             suffix: Some(wz_codecs::Bounded::new(keyexpr_literal).unwrap()),
         }),
     };
-    wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
+    wz_codecs::lent::DeclareVariant::CodecZenohDeclToken(DeclToken {
         id,
         keyexpr,
         ..DeclToken::default()
     })
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap()
 }
 
 #[cfg(feature = "liveliness-token")]
-fn make_undecl_token(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
-    use wz_codecs::undecl_token::UndeclToken;
-    wz_codecs::declare::DeclareVariant::CodecZenohUndeclToken(UndeclToken {
+fn make_undecl_token(
+    id: u64,
+) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+    use wz_codecs::lent::UndeclToken;
+    wz_codecs::lent::DeclareVariant::CodecZenohUndeclToken(UndeclToken {
         id,
         ..UndeclToken::default()
     })
-    .try_into_owned()
+    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap()
 }
 
@@ -12627,7 +12644,9 @@ fn decl_listener_callback_may_reenter_session_apis() {
         .expect("declare-subscriber is on in this lane");
     *slot.lock().unwrap() = Some(listener);
 
-    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+    use sce_forge_runtime::codec::Heap;
+    use wz_codecs::declare::DeclareOwnedVariant;
+    let dispatch = |body: &DeclareOwnedVariant<Heap>| {
         session
             .observer()
             .lock()
@@ -13883,9 +13902,9 @@ pub(super) fn make_request_query(
     rid: u64,
     keyexpr_literal: &str,
 ) -> wz_session_core::wire::RequestOwned {
-    use wz_codecs::request::{Request, RequestVariant};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{
+        Query, Request, RequestVariant, Wireexpr, WireexprLocal, WireexprVariant,
+    };
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: 0,
@@ -13898,7 +13917,7 @@ pub(super) fn make_request_query(
         rid,
         keyexpr,
         extensions: None,
-        body: RequestVariant::CodecZenohQuery(wz_codecs::query::Query::default()),
+        body: RequestVariant::CodecZenohQuery(Query::default()),
     }
     .try_into_owned_in::<wz_session_core::wire::WireStorage>()
     .unwrap()
@@ -15610,8 +15629,8 @@ fn peer_final_for(interest_id: u64) -> wz_session_core::driver_loop::DriverLoopO
         interest_id: Some(interest_id),
         extensions: None,
         body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(
-            wz_codecs::decl_final::DeclFinal::default()
-                .try_into_owned()
+            wz_codecs::lent::DeclFinal::default()
+                .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
                 .expect("DeclFinal::default owns no borrowed data"),
         ),
     };

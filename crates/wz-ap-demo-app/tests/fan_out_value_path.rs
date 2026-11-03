@@ -16,9 +16,8 @@
 
 use wz_ap_demo_app::temp_payload::TempPayload;
 use wz_ap_demo_app::{new_engine, register_bindings, SensorMonitorInjector, SensorMonitorState};
-use wz_codecs::push::{Push, PushOwnedVariant};
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_codecs::lent::{Push, Wireexpr, WireexprLocal, WireexprVariant};
+use wz_codecs::push::PushOwnedVariant;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 use wz_session_core::wire::{PushOwned, WireStorage};

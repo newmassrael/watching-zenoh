@@ -32,8 +32,7 @@
 //! and the value.
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::query::Query;
-use wz_codecs::query_ext_entry::QueryExtEntryVariant;
+use wz_codecs::lent::{Query, QueryExtEntryVariant};
 use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
 
 /// The value extension of a plain value: header `0x43`, declared length 2, then
@@ -122,7 +121,7 @@ fn both_layouts_re_encode_to_the_bytes_they_were_read_from() {
         let wire = query(chain, value);
         let mut cursor = SceCursor::new(&wire);
         let decoded = Query::decode(&mut cursor).expect("the Query decodes");
-        let again = decoded.encode_to_vec().expect("the Query encodes");
+        let again = decoded.encode_to_vec();
         assert_eq!(again, wire, "chain {chain:02x?} round-trips");
     }
 }

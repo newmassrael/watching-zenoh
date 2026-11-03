@@ -782,9 +782,8 @@ mod tests {
     // Build a wire-inbound Put Push carrying a literal keyexpr (id=0 ⇒
     // resolve_wireexpr returns the suffix verbatim, no table lookup).
     fn put_push(keyexpr: &str, payload: &[u8]) -> crate::wire::PushOwned {
-        use wz_codecs::push::{Push, PushOwnedVariant};
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_local::WireexprLocal;
+        use wz_codecs::lent::{Push, Wireexpr, WireexprLocal, WireexprVariant};
+        use wz_codecs::push::PushOwnedVariant;
         let mut push = Push {
             keyexpr: Wireexpr {
                 body: WireexprVariant::WireexprLocal(WireexprLocal {
@@ -841,9 +840,8 @@ mod tests {
     /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of [`put_push`]:
     /// the mapping id names OUR space, not the peer's.
     fn put_push_own_alias(mapping_id: u64, payload: &[u8]) -> crate::wire::PushOwned {
-        use wz_codecs::push::{Push, PushOwnedVariant};
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+        use wz_codecs::push::PushOwnedVariant;
         let mut push = Push {
             keyexpr: Wireexpr {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {

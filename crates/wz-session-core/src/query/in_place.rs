@@ -90,7 +90,7 @@ fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bo
             && matches!(
                 &ext.body,
                 QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z)
-                    if wz_codecs::query_value_zbuf::QueryValueZbuf::input_after_shm(z)
+                    if wz_codecs::query_value_zbuf::QueryValueZbufWire::input_after_shm(z)
             )
     })
 }
@@ -117,20 +117,20 @@ fn lent_projection<'q, 'f: 'q>(query: &'q QueryView<'f>) -> QueryProjection<'q> 
         parameters: None,
         #[cfg(feature = "query-attachment")]
         attachment: crate::attachment::decode_attachment_ext_in(
-            walked(query.extensions.as_ref()),
+            walked(query.extensions.as_deref()),
             crate::attachment::ATTACHMENT_EXT_ID_QUERY,
         ),
         #[cfg(not(feature = "query-attachment"))]
         attachment: None,
         #[cfg(feature = "query-source-info")]
-        source_info: crate::sample::extract_source_info_in(walked(query.extensions.as_ref())),
+        source_info: crate::sample::extract_source_info_in(walked(query.extensions.as_deref())),
         #[cfg(not(feature = "query-source-info"))]
         source_info: None,
         // A build with no heap does not project a query's value (its encoding is an
         // owned hint), nor a value or attachment held as shareable bytes.
         #[cfg(all(feature = "alloc", feature = "query-value"))]
         plain_value: crate::query_value_ext::decode_query_value_ext_in(walked(
-            query.extensions.as_ref(),
+            query.extensions.as_deref(),
         )),
         #[cfg(all(feature = "alloc", not(feature = "query-value")))]
         plain_value: None,
@@ -212,7 +212,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
         let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
             return Ok(DispatchOutcome::NOT_DISPATCHED);
         };
-        if has_sliced_value(walked(query.extensions.as_ref())) {
+        if has_sliced_value(walked(query.extensions.as_deref())) {
             return Err(Fallback::SlicedValue);
         }
         // A Request the nodes record on is delivered with a stack of its own to add to.
@@ -258,7 +258,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
         // view is first filled into the codec's own record (the heap profile has the stack
         // for its 1.8 KB, and this is the path of a Request the lent form cannot hold), and
         // that record consumes itself into the owned one.
-        let mut record = wz_codecs::request::Request::default();
+        let mut record = wz_codecs::lent::Request::default();
         if request.into_builder(&mut record).is_err() {
             return;
         }
@@ -361,8 +361,7 @@ mod tests {
         let wire = request
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec()
-            .expect("a fixture request is encodable");
+            .encode_to_vec();
         let peer = peer();
         let (mut owned, owned_log) = recording();
         let messages = parse_frame_payload(&wire).expect("the record decodes");
@@ -501,8 +500,7 @@ mod tests {
         let wire = request
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec()
-            .expect("a fixture request is encodable");
+            .encode_to_vec();
         let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         let (mut reg, log) = recording();
         let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());

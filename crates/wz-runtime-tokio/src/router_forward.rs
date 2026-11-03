@@ -355,9 +355,6 @@ use std::time::{Duration, Instant};
 
 use sce_forge_runtime::codec::CodecError;
 
-use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::interest::InterestOwned;
-use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_routing_graph::{
     AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, Versioned, WhatAmI,
     Zid,
@@ -436,13 +433,16 @@ use wz_session_core::sample_kind::SampleKind;
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
-use wz_codecs::response_final::ResponseFinalOwned;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::queryable_info::{read_queryable_info, QueryableInfo};
 use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, read_request_timeout_ms, set_request_source,
+};
+use wz_session_core::transport_profile::owned::{
+    DeclareOwned, DeclareOwnedVariant, InterestOwned, LinkstateListOwned, OamOwned,
+    ResponseFinalOwned,
 };
 #[cfg(test)]
 use wz_session_core::wire::PushOwnedVariant;
@@ -12405,7 +12405,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// A topology link-state from face `id` in `tier`: ingest it into the tier's net, re-flood
     /// the changed nodes onward to the SAME tier, purge the interest of any detached node, and
     /// coalesce that net's recompute. A face with no net (a client) carries no topology.
-    fn ingest_topology(&mut self, id: FaceId, tier: Region, oam: &wz_codecs::oam::OamOwned)
+    fn ingest_topology(&mut self, id: FaceId, tier: Region, oam: &OamOwned)
     where
         T: std::ops::DerefMut,
     {
@@ -13521,12 +13521,12 @@ mod tests {
     use wz_access_control::{
         AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
     };
-    use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::read_push_hoplimit;
+    use wz_session_core::transport_profile::owned::LinkstateOwned;
 
     /// The state the data path reads or writes that is not the tables (`docs/router-task-per-face.md`,
     /// phase 3b) can be shared between the threads that drive the faces: the pending-query table
@@ -15749,12 +15749,19 @@ mod tests {
                 .north_net()
                 .local_psid_of(&zid(0xAA))
                 .expect("A indexed");
-            let slot = states[0]
-                .links
+            // A set weight rides, so the entry holds its links and weights as one
+            // aligned pair (the `H` arm of its weights flag).
+            let wz_codecs::linkstate::LinkstateOptionsH::H { links_weights } = &states[0].options_h
+            else {
+                panic!("a set weight rides");
+            };
+            let slot = links_weights
+                .first()
+                .as_slice()
                 .iter()
                 .position(|l| l.psid == psid_a)
                 .expect("the link to A is advertised");
-            let weights = states[0].weights.as_ref().expect("a set weight rides");
+            let weights = links_weights.second().as_slice();
             assert_eq!(
                 weights[slot].weight, 400,
                 "the RELOADED weight is on the wire"

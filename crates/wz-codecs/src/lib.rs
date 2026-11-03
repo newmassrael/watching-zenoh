@@ -123,6 +123,13 @@ pub use sce_forge_runtime::codec::Bounded;
 /// count (`Aligned::new(links, weights)`).
 pub use sce_forge_runtime::codec::{Aligned, Chain};
 
+/// The heap profile, for the same reason: a codec `Inline` does not hold has no
+/// default profile, so a caller with an allocator names this one
+/// (`{Codec}Owned<Heap>`, `try_into_owned_in::<Heap>()`) without naming the
+/// runtime crate.
+#[cfg(feature = "alloc")]
+pub use sce_forge_runtime::codec::Heap;
+
 // Re-exposes the alloc-prelude items the SCE codegen emits without
 // fully-qualifying. Invoked at the head of every `pub mod` block so
 // the `include!()`-pasted generated code resolves `String` and
@@ -342,10 +349,12 @@ pub mod locator {
     /// codegen can emit it directly.
     pub const MAX_LOCATOR_LEN: usize = 128;
 
-    /// The maximum number of locators one node advertises — the linkstate
-    /// `locators` list `sce:max-count` (`sources/codecs/linkstate.scxml`). A
-    /// producer caps the list against this so a no-alloc receiver's bounded
-    /// repeat-decode never overflows.
+    /// The maximum number of locators one node advertises: the linkstate
+    /// `locators` capacity `deploy/codec_node.yaml` gives the `node::Node`
+    /// profile. The protocol bounds the list by nothing; a producer caps the
+    /// list against this so a no-alloc receiver, which stores it inline at this
+    /// capacity, does not refuse it as `CapacityExceeded`. Keep in lockstep with
+    /// the deploy file until codegen can emit it directly.
     pub const MAX_LOCATORS_PER_NODE: usize = 64;
 }
 
@@ -546,6 +555,148 @@ pub mod node {
         env!("CARGO_MANIFEST_DIR"),
         "/../../out/wz-codecs/node.rs"
     ));
+}
+
+/// The lent form of every codec `Inline` does not hold, at the `Node` profile.
+///
+/// A codec that holds a list the protocol bounds by nothing (an extension
+/// chain, a list counted by a `u64`) has no lent form at `Inline`. A decode
+/// that borrows its frame must still not allocate, so the lists of these forms
+/// are held inline at the capacity `Node` gives them, the capacity the old
+/// bound had. Name `wz_codecs::lent::{Codec}<'a>` where a borrowed message was
+/// `{Codec}<'a>`.
+///
+/// A codec such a message holds is lent at the same profile, so its child
+/// codecs and the variants of its bodies are named here too: the parts of a
+/// lent `Push` are `lent::Wireexpr<'a>`, `lent::ExtEntry<'a>` and
+/// `lent::PushVariant<'a>`, not the `Inline` forms their modules name.
+pub mod lent {
+    use crate::node::Node;
+    use sce_forge_runtime::codec::Lent;
+
+    /// The lent `DeclFinal`.
+    #[cfg(feature = "codec-declare")]
+    pub type DeclFinal<'a> = crate::decl_final::DeclFinalIn<Lent<'a, Node>>;
+    /// The lent `DeclKexpr`.
+    #[cfg(feature = "codec-declare")]
+    pub type DeclKexpr<'a> = crate::decl_kexpr::DeclKexprIn<Lent<'a, Node>>;
+    /// The lent `DeclQueryable`.
+    #[cfg(feature = "codec-declare")]
+    pub type DeclQueryable<'a> = crate::decl_queryable::DeclQueryableIn<Lent<'a, Node>>;
+    /// The lent `DeclSubscriber`.
+    #[cfg(feature = "codec-declare")]
+    pub type DeclSubscriber<'a> = crate::decl_subscriber::DeclSubscriberIn<Lent<'a, Node>>;
+    /// The lent `DeclToken`.
+    #[cfg(feature = "codec-declare")]
+    pub type DeclToken<'a> = crate::decl_token::DeclTokenIn<Lent<'a, Node>>;
+    /// The lent `UndeclKexpr`.
+    #[cfg(feature = "codec-declare")]
+    pub type UndeclKexpr<'a> = crate::undecl_kexpr::UndeclKexprIn<Lent<'a, Node>>;
+    /// The lent `UndeclQueryable`.
+    #[cfg(feature = "codec-declare")]
+    pub type UndeclQueryable<'a> = crate::undecl_queryable::UndeclQueryableIn<Lent<'a, Node>>;
+    /// The lent `UndeclSubscriber`.
+    #[cfg(feature = "codec-declare")]
+    pub type UndeclSubscriber<'a> = crate::undecl_subscriber::UndeclSubscriberIn<Lent<'a, Node>>;
+    /// The lent `UndeclToken`.
+    #[cfg(feature = "codec-declare")]
+    pub type UndeclToken<'a> = crate::undecl_token::UndeclTokenIn<Lent<'a, Node>>;
+    /// The lent `Declare`.
+    #[cfg(feature = "codec-declare")]
+    pub type Declare<'a> = crate::declare::DeclareIn<Lent<'a, Node>>;
+    /// The lent `Reply`.
+    #[cfg(feature = "codec-response")]
+    pub type Reply<'a> = crate::reply::ReplyIn<Lent<'a, Node>>;
+    /// The lent `Err`.
+    #[cfg(feature = "codec-response")]
+    pub type Err<'a> = crate::err::ErrIn<Lent<'a, Node>>;
+    /// The lent `Response`.
+    #[cfg(feature = "codec-response")]
+    pub type Response<'a> = crate::response::ResponseIn<Lent<'a, Node>>;
+    /// The lent `ResponseFinal`.
+    #[cfg(feature = "codec-response-final")]
+    pub type ResponseFinal<'a> = crate::response_final::ResponseFinalIn<Lent<'a, Node>>;
+    /// The lent `Query`.
+    #[cfg(feature = "codec-request")]
+    pub type Query<'a> = crate::query::QueryIn<Lent<'a, Node>>;
+    /// The lent `Request`.
+    #[cfg(feature = "codec-request")]
+    pub type Request<'a> = crate::request::RequestIn<Lent<'a, Node>>;
+    /// The lent `Push`.
+    #[cfg(feature = "codec-push")]
+    pub type Push<'a> = crate::push::PushIn<Lent<'a, Node>>;
+    /// The lent `MsgPut`.
+    pub type MsgPut<'a> = crate::msg_put::MsgPutIn<Lent<'a, Node>>;
+    /// The lent `MsgDel`.
+    pub type MsgDel<'a> = crate::msg_del::MsgDelIn<Lent<'a, Node>>;
+    /// The lent `ExtEnvelope`.
+    pub type ExtEnvelope<'a> = crate::ext_envelope::ExtEnvelopeIn<Lent<'a, Node>>;
+    /// The lent `Oam`.
+    pub type Oam<'a> = crate::oam::OamIn<Lent<'a, Node>>;
+    /// The lent `Interest`.
+    pub type Interest<'a> = crate::interest::InterestIn<Lent<'a, Node>>;
+    /// The lent `Hello`.
+    #[cfg(feature = "codec-hello")]
+    pub type Hello<'a> = crate::hello::HelloIn<Lent<'a, Node>>;
+    /// The lent `Linkstate`.
+    #[cfg(feature = "codec-linkstate")]
+    pub type Linkstate<'a> = crate::linkstate::LinkstateIn<Lent<'a, Node>>;
+    /// The lent `LinkstateList`.
+    #[cfg(feature = "codec-linkstate")]
+    pub type LinkstateList<'a> = crate::linkstate_list::LinkstateListIn<Lent<'a, Node>>;
+
+    /// The body of a lent `Declare`.
+    #[cfg(feature = "codec-declare")]
+    pub type DeclareVariant<'a> = crate::declare::DeclareVariantIn<Lent<'a, Node>>;
+    /// The body of a lent `Reply`.
+    #[cfg(feature = "codec-response")]
+    pub type ReplyVariant<'a> = crate::reply::ReplyVariantIn<Lent<'a, Node>>;
+    /// The body of a lent `Response`.
+    #[cfg(feature = "codec-response")]
+    pub type ResponseVariant<'a> = crate::response::ResponseVariantIn<Lent<'a, Node>>;
+    /// The body of a lent `Request`.
+    #[cfg(feature = "codec-request")]
+    pub type RequestVariant<'a> = crate::request::RequestVariantIn<Lent<'a, Node>>;
+    /// The body of a lent `Push`.
+    #[cfg(feature = "codec-push")]
+    pub type PushVariant<'a> = crate::push::PushVariantIn<Lent<'a, Node>>;
+    /// The body of a lent `Oam`.
+    pub type OamVariant<'a> = crate::oam::OamVariantIn<Lent<'a, Node>>;
+
+    /// A keyexpr of a lent message.
+    pub type Wireexpr<'a> = crate::wireexpr::WireexprIn<Lent<'a, Node>>;
+    /// The arms of a lent [`Wireexpr`].
+    pub type WireexprVariant<'a> = crate::wireexpr::WireexprVariantIn<Lent<'a, Node>>;
+    /// The local arm of a lent [`Wireexpr`].
+    pub type WireexprLocal<'a> = crate::wireexpr_local::WireexprLocalIn<Lent<'a, Node>>;
+    /// The non-local arm of a lent [`Wireexpr`].
+    pub type WireexprNonlocal<'a> = crate::wireexpr_nonlocal::WireexprNonlocalIn<Lent<'a, Node>>;
+    /// An extension entry of a lent message's chain.
+    pub type ExtEntry<'a> = crate::ext_entry::ExtEntryIn<Lent<'a, Node>>;
+    /// The body of a lent [`ExtEntry`].
+    pub type ExtEntryVariant<'a> = crate::ext_entry::ExtEntryVariantIn<Lent<'a, Node>>;
+    /// The ZBuf body of a lent [`ExtEntry`].
+    pub type ExtZbuf<'a> = crate::ext_zbuf::ExtZbufIn<Lent<'a, Node>>;
+    /// The encoding of a lent message.
+    pub type Encoding<'a> = crate::encoding::EncodingIn<Lent<'a, Node>>;
+    /// The timestamp of a lent message.
+    pub type Timestamp<'a> = crate::timestamp::TimestampIn<Lent<'a, Node>>;
+    /// The body of a lent [`Interest`].
+    pub type InterestBody<'a> = crate::interest_body::InterestBodyIn<Lent<'a, Node>>;
+    /// A slice of a lent sliced payload.
+    pub type ZbufSlice<'a> = crate::zbuf_slice::ZbufSliceIn<Lent<'a, Node>>;
+    /// A locator of a lent message.
+    pub type Locator<'a> = crate::locator::LocatorIn<Lent<'a, Node>>;
+    /// An extension entry of a lent [`Query`]'s chain.
+    #[cfg(feature = "codec-request")]
+    pub type QueryExtEntry<'a> = crate::query_ext_entry::QueryExtEntryIn<Lent<'a, Node>>;
+    /// The body of a lent [`QueryExtEntry`].
+    #[cfg(feature = "codec-request")]
+    pub type QueryExtEntryVariant<'a> =
+        crate::query_ext_entry::QueryExtEntryVariantIn<Lent<'a, Node>>;
+    /// The ZBuf body of a lent [`QueryExtEntry`].
+    #[cfg(feature = "codec-request")]
+    pub type QueryValueZbuf<'a> = crate::query_value_zbuf::QueryValueZbufIn<Lent<'a, Node>>;
 }
 
 /// R311dl — single-source-of-truth wire-protocol MID / flag constants.
@@ -1372,8 +1523,8 @@ mod ext_envelope_oracle {
     //! line 41-52: 0x01 0x80 0xB1 0x2A 0x52 0x02 0xAB 0xCD.
     //! Layer 3 wire-interop vs zenoh-pico `_z_msg_ext_vec_encode`
     //! is R68 carry (FFI bridge wiring complexity).
-    use crate::ext_entry::ExtEntryVariant;
-    use crate::ext_envelope::ExtEnvelope;
+    use crate::ext_entry::ExtEntryVariantIn;
+    use crate::lent::ExtEnvelope;
     use sce_forge_runtime::codec::SceCursor;
 
     const ORACLE_WIRE: [u8; 8] = [0x01, 0x80, 0xB1, 0x2A, 0x52, 0x02, 0xAB, 0xCD];
@@ -1389,15 +1540,15 @@ mod ext_envelope_oracle {
         assert_eq!(env.extensions[2].header, 0x52);
         assert!(matches!(
             env.extensions[0].body,
-            ExtEntryVariant::CodecZenohExtUnit(_)
+            ExtEntryVariantIn::CodecZenohExtUnit(_)
         ));
         assert!(matches!(
             env.extensions[1].body,
-            ExtEntryVariant::CodecZenohExtZint(_)
+            ExtEntryVariantIn::CodecZenohExtZint(_)
         ));
         assert!(matches!(
             env.extensions[2].body,
-            ExtEntryVariant::CodecZenohExtZbuf(_)
+            ExtEntryVariantIn::CodecZenohExtZbuf(_)
         ));
     }
 

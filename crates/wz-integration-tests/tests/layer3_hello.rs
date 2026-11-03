@@ -24,7 +24,9 @@
 //   - bytes 2+: zid
 //   - parent.L: VLE(num_locators) + repeat<locator>
 
-use wz_codecs::hello::{Hello, HelloOwned};
+use wz_codecs::hello::HelloOwned;
+use wz_codecs::lent::Hello;
+use wz_codecs::Heap;
 use zenoh_pico_sys::{
     _z_hello_encode, _z_id_t, _z_locator_array_t, _z_s_msg_hello_t, _z_wbuf_clear, _z_wbuf_make,
     _z_wbuf_to_zbuf, _z_zbuf_clear, z_whatami_t,
@@ -115,7 +117,7 @@ fn layer3_hello_l1_empty_locator_array() {
     // Owned builder: the empty locator chain is an alloc `Vec` of
     // `LocatorOwned` (vs the borrowed heapless `Vec<_, 64>`); encode via
     // the `try_as_borrowed` projection.
-    let wz_owned: HelloOwned = HelloOwned {
+    let wz_owned: HelloOwned<Heap> = HelloOwned {
         version,
         cbyte,
         zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),

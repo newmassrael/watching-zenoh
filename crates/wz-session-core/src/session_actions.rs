@@ -70,14 +70,14 @@ use wz_runtime_core::TimeSource;
 // serves exactly one item and must carry exactly that item's gate; carrying a
 // narrower one is what turned a `declare-subscriber`-without-`liveliness-token`
 // build into E0425 the moment the method's own gate was widened.
-use crate::transport_profile::ExtEntryOwned;
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
-use crate::wire::ResponseOwned;
 #[cfg(all(
     any(feature = "liveliness-token", feature = "declare-subscriber"),
     feature = "alloc"
 ))]
-use wz_codecs::declare::DeclareOwned;
+use crate::transport_profile::owned::DeclareOwned;
+use crate::transport_profile::ExtEntryOwned;
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
+use crate::wire::ResponseOwned;
 
 use crate::action_trace::ActionTrace;
 use crate::close_reason::CloseReason;
@@ -2618,7 +2618,7 @@ impl<'a> LentDeclaration<'a> {
     /// keyexpr suffix past the protocol's `u16` length, which is not sent.
     fn declare(
         &self,
-    ) -> Result<wz_codecs::declare::Declare<'a>, sce_forge_runtime::codec::CodecError> {
+    ) -> Result<wz_codecs::lent::Declare<'a>, sce_forge_runtime::codec::CodecError> {
         match *self {
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
             Self::FinalReply { interest_id } => {
@@ -2671,7 +2671,7 @@ impl<'a> LentDeclaration<'a> {
     #[inline(never)]
     fn encoded_len(&self) -> usize {
         self.declare().map_or(0, |declare| {
-            wz_codecs::declare::Declare::measure(&declare).len()
+            wz_codecs::declare::DeclareWire::measure(&declare).len()
         })
     }
 }
@@ -3161,9 +3161,9 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         // A keyexpr past the protocol's bound is not answered, as the subscriber reply
         // below skips one: the chain's `DeclFinal` still terminates the interest.
-        if let Ok(declare) = build_token_reply(token_id, keyexpr, interest_id)
-            .and_then(|reply| reply.try_into_owned())
-        {
+        if let Ok(declare) = build_token_reply(token_id, keyexpr, interest_id).and_then(|reply| {
+            reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
+        }) {
             self.send_declare(declare);
         }
     }
@@ -8290,8 +8290,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn namespace_egress_declare(
         &self,
-        mut d: wz_codecs::declare::DeclareOwned,
-    ) -> Result<wz_codecs::declare::DeclareOwned, sce_forge_runtime::codec::CodecError> {
+        mut d: crate::transport_profile::owned::DeclareOwned,
+    ) -> Result<crate::transport_profile::owned::DeclareOwned, sce_forge_runtime::codec::CodecError>
+    {
         R::with_mutex_mut(&self.namespace_egress, |slot| match slot.as_ref() {
             Some(ns) => crate::namespace::apply_egress_declare(ns, &mut d),
             None => Ok(()),
@@ -8311,8 +8312,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn namespace_egress_interest(
         &self,
-        mut i: wz_codecs::interest::InterestOwned,
-    ) -> Result<wz_codecs::interest::InterestOwned, sce_forge_runtime::codec::CodecError> {
+        mut i: crate::transport_profile::owned::InterestOwned,
+    ) -> Result<crate::transport_profile::owned::InterestOwned, sce_forge_runtime::codec::CodecError>
+    {
         R::with_mutex_mut(&self.namespace_egress, |slot| match slot.as_ref() {
             Some(ns) => crate::namespace::apply_egress_interest(ns, &mut i),
             None => Ok(()),
@@ -11786,7 +11788,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     fn dispatch_declare(
         &self,
-        declare: wz_codecs::declare::DeclareOwned,
+        declare: crate::transport_profile::owned::DeclareOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_declare_at(DispatchStage::Fresh, &declare, reliable)
@@ -11812,7 +11814,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_declare_at(
         &self,
         stage: DispatchStage,
-        declare: &wz_codecs::declare::DeclareOwned,
+        declare: &crate::transport_profile::owned::DeclareOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = crate::frame_encode::declare_body(declare);
@@ -11822,7 +11824,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_declare_qos(declare),
-            wz_codecs::declare::Declare::measure(declare).len(),
+            wz_codecs::declare::DeclareWire::measure(declare).len(),
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
             // labels cover the four data kinds).
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -11880,7 +11882,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     fn dispatch_oam(
         &self,
-        oam: wz_codecs::oam::OamOwned,
+        oam: crate::transport_profile::owned::OamOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_oam_at(DispatchStage::Fresh, &oam, reliable)
@@ -11895,7 +11897,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_oam_at(
         &self,
         stage: DispatchStage,
-        oam: &wz_codecs::oam::OamOwned,
+        oam: &crate::transport_profile::owned::OamOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = crate::frame_encode::oam_body(oam);
@@ -11905,7 +11907,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_oam_qos(oam),
-            wz_codecs::oam::Oam::measure(oam).len(),
+            wz_codecs::oam::OamWire::measure(oam).len(),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
             as_encoder(&encode_body),
         )
@@ -11948,9 +11950,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Self::REQUEST_ROUTE_PRIORITY,
             reliable,
             crate::declare_ext_qos::read_request_qos(request),
-            // A Request the encode refuses is refused by the body as well; the
-            // reservation for it is moot.
-            wz_codecs::request::Request::measure(request).map_or(0, |measured| measured.len()),
+            wz_codecs::request::RequestWire::measure(request).len(),
             class,
             as_encoder(&encode_body),
         )
@@ -11999,7 +11999,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos.priority(),
             reliable,
             qos,
-            wz_codecs::response::Response::measure(response).len(),
+            wz_codecs::response::ResponseWire::measure(response).len(),
             class,
             as_encoder(&encode_body),
         )?;
@@ -12017,7 +12017,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     fn dispatch_response_final(
         &self,
-        response_final: wz_codecs::response_final::ResponseFinalOwned,
+        response_final: crate::transport_profile::owned::ResponseFinalOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_response_final_at(DispatchStage::Fresh, &response_final, reliable)
@@ -12032,7 +12032,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_response_final_at(
         &self,
         stage: DispatchStage,
-        response_final: &wz_codecs::response_final::ResponseFinalOwned,
+        response_final: &crate::transport_profile::owned::ResponseFinalOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         // R2595 — the band comes off the final's own `ext_qos`, as the Response
@@ -12046,7 +12046,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos.priority(),
             reliable,
             qos,
-            wz_codecs::response_final::ResponseFinal::measure(response_final).len(),
+            wz_codecs::response_final::ResponseFinalWire::measure(response_final).len(),
             // A pure correlation marker — no key expression and no payload, so
             // it is control plane even though it closes a data-plane exchange.
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
@@ -12066,7 +12066,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     fn dispatch_interest(
         &self,
-        interest: wz_codecs::interest::InterestOwned,
+        interest: crate::transport_profile::owned::InterestOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_interest_at(DispatchStage::Fresh, &interest, reliable)
@@ -12084,7 +12084,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_interest_at(
         &self,
         stage: DispatchStage,
-        interest: &wz_codecs::interest::InterestOwned,
+        interest: &crate::transport_profile::owned::InterestOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = crate::frame_encode::interest_body(interest);
@@ -12094,7 +12094,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_interest_qos(interest),
-            wz_codecs::interest::Interest::measure(interest).len(),
+            wz_codecs::interest::InterestWire::measure(interest).len(),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
             as_encoder(&encode_body),
         )
@@ -13014,7 +13014,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         token_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
-    ) -> Result<wz_codecs::declare::DeclareOwned, SendDeclareError> {
+    ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
         // R300 — same gate shape as `send_declare_subscriber`. The full path
         // to `DeclareOwned` mirrors `dispatch_declare` — the module-level
         // `use` is `liveliness-token`-gated but this build half is reachable
@@ -13049,7 +13049,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         subscriber_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
-    ) -> Result<wz_codecs::declare::DeclareOwned, SendDeclareError> {
+    ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
         let reconstructed =
             self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
         check_outbound_keyexpr_pico_safe(&reconstructed)?;
@@ -13175,7 +13175,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
         complete: bool,
-    ) -> Result<wz_codecs::declare::DeclareOwned, SendDeclareError> {
+    ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
         let reconstructed =
             self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
         check_outbound_keyexpr_pico_safe(&reconstructed)?;
@@ -13603,7 +13603,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The emit and the replay-cache prune every queryable retraction shape
     /// shares — see [`Self::retract_subscriber`].
     #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
-    fn retract_queryable(&self, queryable_id: u64, declare: wz_codecs::declare::DeclareOwned) {
+    fn retract_queryable(
+        &self,
+        queryable_id: u64,
+        declare: crate::transport_profile::owned::DeclareOwned,
+    ) {
         // A4 — drop the matching replay entry and send the retraction, as one step: see
         // [`Self::retract_subscriber`].
         // F2 — this surface has no error channel; a transport-down
@@ -13650,7 +13654,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The emit and the replay-cache prune every token retraction shape shares
     /// — see [`Self::retract_subscriber`].
     #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
-    fn retract_token(&self, token_id: u64, declare: wz_codecs::declare::DeclareOwned) {
+    fn retract_token(&self, token_id: u64, declare: crate::transport_profile::owned::DeclareOwned) {
         // A4 — drop the matching replay entry (first-match, pico `_z_prune_declaration` filter
         // semantics) and send the retraction, as one step: see [`Self::retract_subscriber`]. The
         // seam-routed teardown of a `LivelinessToken` goes through

@@ -87,14 +87,14 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+use crate::transport_profile::owned::DeclareOwned;
+#[cfg(feature = "alloc")]
+use crate::transport_profile::owned::InterestOwned;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::{Bounded, CodecError};
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
-use wz_codecs::declare::DeclareOwned;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryStorage};
 use wz_codecs::ext_zint::ExtZint;
-#[cfg(feature = "alloc")]
-use wz_codecs::interest::InterestOwned;
 
 #[cfg(feature = "alloc")]
 use crate::ext_nodeid;
@@ -173,7 +173,8 @@ pub fn qos_ext<S: ExtEntryStorage>(qos: QosLevel) -> ExtEntryOwned<S> {
 /// change reverted.
 #[cfg(feature = "alloc")]
 #[inline(never)]
-pub fn declare_envelope_extensions() -> Bounded<Vec<ExtEntryOwned>, 8, 1> {
+pub fn declare_envelope_extensions<const MAX: usize, const MIN: usize>(
+) -> Bounded<Vec<ExtEntryOwned>, MAX, MIN> {
     crate::held_list::one_entry(qos_ext(QOS_DECLARE))
 }
 
@@ -228,7 +229,9 @@ pub(crate) fn qos_of_raw(raw: Option<u64>) -> QosLevel {
 /// share; everything above it does, which is why it is one function.
 ///
 /// An `Err` is a chain at its bound with no room for the entry
-/// ([`crate::held_list::edit_chain`]): the message cannot be sent.
+/// ([`crate::held_list::edit_chain`]): the message cannot be sent. The protocol
+/// bounds a message's chain by nothing (its `MAX` is `usize::MAX`), so on a
+/// message's chain the entry always fits and this does not err.
 #[cfg(feature = "alloc")]
 fn set_qos_chain<S: ExtEntryStorage, const MAX: usize, const MIN: usize>(
     exts: &mut Option<Bounded<Vec<ExtEntryOwned<S>>, MAX, MIN>>,
@@ -321,7 +324,7 @@ pub fn set_request_qos(
 
 /// R2825 — read an `OAM`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
 #[cfg(feature = "alloc")]
-pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
+pub fn read_oam_qos(oam: &crate::transport_profile::owned::OamOwned) -> QosLevel {
     read_qos_chain(oam.extensions.as_deref())
 }
 
@@ -384,7 +387,7 @@ pub fn set_response_qos(
 /// which is what every final from a pico peer means: pico writes none.
 #[cfg(all(feature = "alloc", feature = "codec-response-final"))]
 pub fn read_response_final_qos(
-    response_final: &wz_codecs::response_final::ResponseFinalOwned,
+    response_final: &crate::transport_profile::owned::ResponseFinalOwned,
 ) -> QosLevel {
     read_qos_chain(response_final.extensions.as_deref())
 }
@@ -396,7 +399,7 @@ pub fn read_response_final_qos(
 /// emit step.
 #[cfg(all(feature = "alloc", feature = "codec-response-final"))]
 pub fn set_response_final_qos(
-    response_final: &mut wz_codecs::response_final::ResponseFinalOwned,
+    response_final: &mut crate::transport_profile::owned::ResponseFinalOwned,
     qos: QosLevel,
 ) -> Result<(), CodecError> {
     set_qos_chain(
@@ -619,14 +622,14 @@ mod tests {
     #[test]
     fn the_qos_ext_survives_the_wire_round_trip() {
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::declare::Declare;
+        use wz_codecs::lent::Declare;
         use wz_codecs_test_support::TestWire;
 
         let d = build_declare_subscriber(9, 0, Some("demo/sub")).expect("build");
         let bytes = d.wire();
         let mut cursor = SceCursor::new(&bytes);
         let decoded = Declare::decode(&mut cursor)
-            .and_then(|x| x.try_into_owned())
+            .and_then(|x| x.try_into_owned_in::<crate::transport_profile::TransportStorage>())
             .expect("decode declare");
         assert_eq!(read_declare_qos(&decoded), QOS_DECLARE);
         assert!(matches!(

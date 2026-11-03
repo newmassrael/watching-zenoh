@@ -37,8 +37,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_codecs::lent::{Wireexpr, WireexprLocal, WireexprVariant};
 
 /// The low endpoint of every link these fixtures build.
 const LOW: [u8; 4] = [10, 0, 0, 1];
@@ -134,16 +133,14 @@ fn sender_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
 
 /// A `DeclKexpr` binding `id` to `suffix` in the sender's space.
 fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
-    wz_codecs::declare::Declare {
-        body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-            wz_codecs::decl_kexpr::DeclKexpr {
-                header: wz_session_core::wire_const::D_MID_KEXPR
-                    | wz_session_core::wire_const::FLAG_D_N,
-                id,
-                keyexpr: sender_space(0, Some(suffix)),
-                extensions: None,
-            },
-        ),
+    wz_codecs::lent::Declare {
+        body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(wz_codecs::lent::DeclKexpr {
+            header: wz_session_core::wire_const::D_MID_KEXPR
+                | wz_session_core::wire_const::FLAG_D_N,
+            id,
+            keyexpr: sender_space(0, Some(suffix)),
+            extensions: None,
+        }),
         ..Default::default()
     }
     .encode_to_vec()
@@ -157,15 +154,15 @@ fn push(keyexpr: Wireexpr<'static>, payload: &'static [u8]) -> Vec<u8> {
         &keyexpr.body,
         WireexprVariant::WireexprLocal(local) if local.suffix.is_some()
     );
-    wz_codecs::push::Push {
-        header: wz_codecs::push::Push::default().header
+    wz_codecs::lent::Push {
+        header: wz_codecs::lent::Push::default().header
             | if named {
                 wz_session_core::wire_const::FLAG_N_N
             } else {
                 0
             },
         keyexpr,
-        body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+        body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
             payload_len: Some(payload.len() as u64),
             extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,

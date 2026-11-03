@@ -16,9 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::encoding::Encoding;
-use super::zbuf_slice::ZbufSlice;
-
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::encoding::EncodingView;
 use super::zbuf_slice::ZbufSliceView;
@@ -44,7 +41,7 @@ impl ::sce_forge_runtime::codec::HoldsBytes<QueryValueZbufValueField> for ::sce_
 pub struct QueryValueZbufSlicesField;
 
 impl ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 4> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 4294967295> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
 }
 
 /// What `QueryValueZbufIn` and the codecs it holds ask of a storage profile.
@@ -52,6 +49,14 @@ impl ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField> for ::sce_
 pub trait QueryValueZbufStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<QueryValueZbufValueField> + ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField> + super::encoding::EncodingStorage + super::zbuf_slice::ZbufSliceStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<QueryValueZbufValueField> + ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField> + super::encoding::EncodingStorage + super::zbuf_slice::ZbufSliceStorage> QueryValueZbufStorage for S {}
+
+/// What `QueryValueZbufIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `QueryValueZbuf` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait QueryValueZbufLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField> + super::encoding::EncodingLentStorage + super::zbuf_slice::ZbufSliceLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField> + super::encoding::EncodingLentStorage + super::zbuf_slice::ZbufSliceLentStorage> QueryValueZbufLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside QueryValueZbufStorage: how it stores each field of that frame.
@@ -63,7 +68,7 @@ impl<'f, S: QueryValueZbufStorage + ::sce_forge_runtime::codec::StoresBytes<'f, 
 /// The group `QueryValueZbufAfterShm` as `QueryValueZbufOwned` holds it, in the storage
 /// profile `S`.
 #[allow(dead_code)]
-pub type QueryValueZbufAfterShmOwned<S> = QueryValueZbufAfterShm<EncodingOwned<S>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSliceOwned<S>>, 4>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<QueryValueZbufValueField>>::Bytes, 4294967295>>;
+pub type QueryValueZbufAfterShmOwned<S> = QueryValueZbufAfterShm<EncodingOwned<S>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSliceOwned<S>>, 4294967295>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<QueryValueZbufValueField>>::Bytes, 4294967295>>;
 
 // `QueryValueZbufIn<S>` is the one value this codec has, at the storage
 // profile `S` (docs/adr/0077 §7). `QueryValueZbuf<'a>` is it on `Lent`, which
@@ -189,12 +194,9 @@ impl<S: QueryValueZbufStorage> QueryValueZbufIn<S> {
         } else {
             None
         };
-        let mut slices: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSliceOwned<S>>, 4>> = None;
+        let mut slices: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSliceOwned<S>>, 4294967295>> = None;
         if (after_shm & 0x01u8) != 0 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
-            if _n > 4 {
-                return Err(CodecError::TooManyElements);
-            }
             slices.insert(Default::default()).refill(|_vec| {
                 for _ in 0.._n {
                     ::sce_forge_runtime::codec::SceList::try_push(_vec, ZbufSliceOwned::<S>::decode(cursor)?)?;
@@ -216,7 +218,7 @@ impl<S: QueryValueZbufStorage> QueryValueZbufIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        QueryValueZbuf::encode_source(self, w)
+        QueryValueZbufWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -269,15 +271,15 @@ impl<Encoding: Default, Slices: Default, Value: Default> Default for QueryValueZ
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `QueryValueZbuf` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `QueryValueZbuf`
-/// computes those from what is ([`QueryValueZbuf::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`QueryValueZbufWire::encode_source`]).
 pub trait QueryValueZbufSource {
     /// The fields `after_shm` decides, held together (docs/adr/0065 §6 R4).
-    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>>;
+    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>>;
 }
 
 impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
-    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         (**self).after_shm()
     }
 }
@@ -289,11 +291,11 @@ impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
 #[derive(Debug, Clone, Copy)]
 pub struct QueryValueZbufParts<'a> {
     /// The fields `after_shm` decides, held together (docs/adr/0065 §6 R4).
-    pub after_shm: QueryValueZbufAfterShm<&'a super::encoding::EncodingParts<'a>, ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub after_shm: QueryValueZbufAfterShm<&'a super::encoding::EncodingParts<'a>, ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
 }
 
 impl<'a> QueryValueZbufSource for QueryValueZbufParts<'a> {
-    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         match &self.after_shm {
             QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding: *encoding, slices: slices.iter(), value_len: *value_len },
             QueryValueZbufAfterShm::NotAfterShm { value } => QueryValueZbufAfterShm::NotAfterShm { value: *value },
@@ -302,7 +304,7 @@ impl<'a> QueryValueZbufSource for QueryValueZbufParts<'a> {
 }
 
 impl<S: QueryValueZbufStorage> QueryValueZbufSource for QueryValueZbufOwned<S> {
-    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         match &self.after_shm {
             QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding, slices: slices.list_iter(), value_len: *value_len },
             QueryValueZbufAfterShm::NotAfterShm { value } => QueryValueZbufAfterShm::NotAfterShm { value: value.as_bytes() },
@@ -311,7 +313,7 @@ impl<S: QueryValueZbufStorage> QueryValueZbufSource for QueryValueZbufOwned<S> {
 }
 
 impl<'a> QueryValueZbufSource for QueryValueZbufView<'a> {
-    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
+    fn after_shm(&self) -> QueryValueZbufAfterShm<&impl super::encoding::EncodingSource, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone, 4294967295>, ::sce_forge_runtime::codec::Bytes<'_, 4294967295>> {
         match &self.after_shm {
             QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => QueryValueZbufAfterShm::AfterShm { encoding, slices: slices.iter(), value_len: *value_len },
             QueryValueZbufAfterShm::NotAfterShm { value } => QueryValueZbufAfterShm::NotAfterShm { value: *value },
@@ -319,10 +321,17 @@ impl<'a> QueryValueZbufSource for QueryValueZbufView<'a> {
     }
 }
 
+/// The codec `QueryValueZbuf` itself: what writes a value read through
+/// [`QueryValueZbufSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QueryValueZbufWire;
+
 #[allow(dead_code)]
-impl<'a> QueryValueZbuf<'a> {
+impl QueryValueZbufWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `QueryValueZbuf::encode` writes for the value it holds, read through
     /// [`QueryValueZbufSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -362,14 +371,14 @@ impl<'a> QueryValueZbuf<'a> {
             w.write_bytes(_v.into_inner())?;
         }
         if let Some(_v) = _m_encoding {
-            Encoding::write_source(_v, w)?;
+            super::encoding::EncodingWire::write_source(_v, w)?;
         }
         if (after_shm & 0x1) != 0 {
             w.write_vle_u32(_d_slice_count)?;
         }
         if let Some(_v) = _m_slices.clone() {
             for _e in _v {
-                ZbufSlice::write_source(&_e, w)?;
+                super::zbuf_slice::ZbufSliceWire::write_source(&_e, w)?;
             }
         }
         Ok(())
@@ -385,7 +394,7 @@ impl<'a> QueryValueZbuf<'a> {
     }
 }
 
-impl<'a, S: QueryValueZbufSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for QueryValueZbuf<'a> {
+impl<S: QueryValueZbufSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for QueryValueZbufWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -394,7 +403,7 @@ impl<'a, S: QueryValueZbufSource + ?Sized> ::sce_forge_runtime::codec::SourceWri
 }
 
 #[allow(dead_code)]
-impl<'a> QueryValueZbuf<'a> {
+impl QueryValueZbufWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -441,7 +450,7 @@ impl ListWalk<0> for QueryValueZbufSlicesWalk {
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct QueryValueZbufView<'a> {
-    pub after_shm: QueryValueZbufAfterShm<EncodingView<'a>, Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub after_shm: QueryValueZbufAfterShm<EncodingView<'a>, Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
     pub slice_count: Option<u32>,
 }
 
@@ -511,16 +520,13 @@ impl<'a> QueryValueZbufView<'a> {
             None
         };
         #[allow(clippy::needless_late_init)]
-        let slices: Option<Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4>>;
+        let slices: Option<Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4294967295>>;
         if (after_shm & 0x01u8) != 0 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
-            if _n > 4 {
-                return Err(CodecError::TooManyElements);
-            }
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             for _ in 0.._n {
-                if _count == 4 {
+                if _count == 4294967295 {
                     return Err(CodecError::TooManyElements);
                 }
                 ZbufSliceView::decode(cursor)?;
@@ -545,16 +551,16 @@ impl<'a> QueryValueZbufView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut QueryValueZbuf<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut QueryValueZbufIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: QueryValueZbufLentStorage {
         match &self.after_shm {
             QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => {
-                let mut _o_encoding: Encoding<'a> = Default::default();
+                let mut _o_encoding: EncodingOwned<::sce_forge_runtime::codec::Lent<'a, D>> = Default::default();
                 encoding.into_builder(&mut _o_encoding)?;
-                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a> as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSlice<'a>>, 4> = Default::default();
+                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a, D> as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSliceOwned<::sce_forge_runtime::codec::Lent<'a, D>>>, 4294967295> = Default::default();
                 _o_slices.refill(|_vec| {
                     for _e in slices.iter() {
-                        _vec.push(ZbufSlice::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -565,7 +571,7 @@ impl<'a> QueryValueZbufView<'a> {
                 _out.after_shm = QueryValueZbufAfterShm::AfterShm { encoding: _o_encoding, slices: _o_slices, value_len: _o_value_len };
             }
             QueryValueZbufAfterShm::NotAfterShm { value } => {
-                let mut _o_value: ::sce_forge_runtime::codec::Bytes<'a, 4294967295> = Default::default();
+                let mut _o_value: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a, D> as ::sce_forge_runtime::codec::HoldsBytes<QueryValueZbufValueField>>::Bytes, 4294967295> = Default::default();
                 _o_value = *value;
                 _out.after_shm = QueryValueZbufAfterShm::NotAfterShm { value: _o_value };
             }
@@ -582,7 +588,7 @@ impl<'a> QueryValueZbufView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        QueryValueZbuf::encode_source(self, w)
+        QueryValueZbufWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -628,8 +634,11 @@ impl<'a> QueryValueZbufView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `QueryValueZbuf<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> QueryValueZbuf<'a> {
+impl<'a, D> QueryValueZbufIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryValueZbufLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`QueryValueZbufOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -667,8 +676,8 @@ impl<S: QueryValueZbufStorage> QueryValueZbufOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<QueryValueZbuf<'_>, CodecError> {
-        let mut _out = QueryValueZbuf::default();
+    pub fn try_as_borrowed(&self) -> Result<QueryValueZbufIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -683,19 +692,19 @@ impl<S: QueryValueZbufStorage> QueryValueZbufOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut QueryValueZbuf<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut QueryValueZbufIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         match &self.after_shm {
             QueryValueZbufAfterShm::AfterShm { encoding, slices, value_len } => {
-                let mut _o_encoding: Encoding<'o> = Default::default();
+                let mut _o_encoding: EncodingOwned<::sce_forge_runtime::codec::Lent<'o, S>> = Default::default();
                 encoding.as_borrowed_into(&mut _o_encoding);
-                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o> as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSlice<'o>>, 4> = Default::default();
+                let mut _o_slices: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o, S> as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSliceOwned<::sce_forge_runtime::codec::Lent<'o, S>>>, 4294967295> = Default::default();
                 _o_slices.refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, slices.inner(), |_e| Ok(_e.as_borrowed())))?;
                 let mut _o_value_len: u64 = Default::default();
                 _o_value_len = *value_len;
                 _out.after_shm = QueryValueZbufAfterShm::AfterShm { encoding: _o_encoding, slices: _o_slices, value_len: _o_value_len };
             }
             QueryValueZbufAfterShm::NotAfterShm { value } => {
-                let mut _o_value: ::sce_forge_runtime::codec::Bytes<'o, 4294967295> = Default::default();
+                let mut _o_value: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o, S> as ::sce_forge_runtime::codec::HoldsBytes<QueryValueZbufValueField>>::Bytes, 4294967295> = Default::default();
                 _o_value = value.as_bytes();
                 _out.after_shm = QueryValueZbufAfterShm::NotAfterShm { value: _o_value };
             }
@@ -718,7 +727,7 @@ impl<S: QueryValueZbufStorage> QueryValueZbufOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> QueryValueZbuf<'a> {
+impl<'a, D> QueryValueZbufIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryValueZbufLentStorage {
     /// Project this borrowed view into an owned [`QueryValueZbufOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

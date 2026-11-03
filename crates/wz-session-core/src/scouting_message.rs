@@ -44,7 +44,9 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::wire_const;
 
 #[cfg(feature = "codec-hello")]
-use wz_codecs::hello::{Hello, HelloOwned};
+use crate::transport_profile::owned::HelloOwned;
+#[cfg(feature = "codec-hello")]
+use wz_codecs::lent::Hello;
 #[cfg(feature = "codec-scout")]
 use wz_codecs::scout::{Scout, ScoutOwned};
 
@@ -141,7 +143,8 @@ pub fn parse_scouting_consuming(bytes: &[u8]) -> Result<(ScoutingFrame, usize), 
             // the flag is an INPUT to the body decode rather than something
             // read back off it — the same shape `Open`'s T bit has.
             let l = u8::from((header & wire_const::FLAG_S_HELLO_L) != 0);
-            let body = Hello::decode(&mut cursor, l)?.try_into_owned()?;
+            let body = Hello::decode(&mut cursor, l)?
+                .try_into_owned_in::<crate::transport_profile::TransportStorage>()?;
             let has_ext = (header & wire_const::FLAG_T_Z) != 0;
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
@@ -530,7 +533,7 @@ mod kind_name_tests {
 
         #[cfg(feature = "codec-hello")]
         {
-            let mut hello = wz_codecs::hello::Hello::new();
+            let mut hello = wz_codecs::lent::Hello::new();
             hello.version = 0x09;
             hello.set_whatami(0x01);
             hello.set_zid_len_m1(3);

@@ -45,6 +45,14 @@ pub trait InitBodyStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<InitBodyZidField> + ::sce_forge_runtime::codec::HoldsBytes<InitBodyCookieField>> InitBodyStorage for S {}
 
+/// What `InitBodyIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `InitBody` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait InitBodyLentStorage: ::core::fmt::Debug + Clone + PartialEq {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq> InitBodyLentStorage for D {}
+
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside InitBodyStorage: how it stores each field of that frame.
 #[allow(dead_code)]
@@ -259,7 +267,7 @@ impl<S: InitBodyStorage> InitBodyIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        InitBody::encode_source(self, w)
+        InitBodyWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -296,8 +304,8 @@ pub struct InitBodyS {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `InitBody` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `InitBody`
-/// computes those from what is ([`InitBody::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`InitBodyWire::encode_source`]).
 pub trait InitBodySource {
     /// The `version` field.
     fn version(&self) -> u8;
@@ -383,10 +391,17 @@ impl<S: InitBodyStorage> InitBodySource for InitBodyOwned<S> {
     }
 }
 
+/// The codec `InitBody` itself: what writes a value read through
+/// [`InitBodySource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InitBodyWire;
+
 #[allow(dead_code)]
-impl<'a> InitBody<'a> {
+impl InitBodyWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `InitBody::encode` writes for the value it holds, read through
     /// [`InitBodySource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -454,7 +469,7 @@ impl<'a> InitBody<'a> {
     }
 }
 
-impl<'a, S: InitBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for InitBody<'a> {
+impl<S: InitBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for InitBodyWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -463,7 +478,7 @@ impl<'a, S: InitBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> 
 }
 
 #[allow(dead_code)]
-impl<'a> InitBody<'a> {
+impl InitBodyWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -502,8 +517,15 @@ impl<'a> InitBody<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Self) -> Result<(), CodecError> {
-        _out.clone_from(self);
+    // A codec with no list holds every field alike at every profile, so the
+    // value at any `D` is filled field by field (docs/adr/0077 §7).
+    pub fn into_builder<D>(&self, _out: &mut InitBodyIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: InitBodyLentStorage {
+        _out.version = self.version;
+        _out.cbyte = self.cbyte;
+        _out.zid = self.zid;
+        _out.s = self.s;
+        _out.cookie_len = self.cookie_len;
+        _out.cookie = self.cookie;
         Ok(())
     }
 }
@@ -541,8 +563,11 @@ impl<'a> InitBody<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `InitBody<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> InitBody<'a> {
+impl<'a, D> InitBodyIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: InitBodyLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`InitBodyOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -580,8 +605,8 @@ impl<S: InitBodyStorage> InitBodyOwned<S> {
     /// borrowed view (the owned form is read-only), so an owned consumer
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
-    pub fn as_borrowed(&self) -> InitBody<'_> {
-        let mut _out = InitBody::default();
+    pub fn as_borrowed(&self) -> InitBodyIn<::sce_forge_runtime::codec::Lent<'_, S>> {
+        let mut _out = Default::default();
         self.as_borrowed_into(&mut _out);
         _out
     }
@@ -596,7 +621,7 @@ impl<S: InitBodyStorage> InitBodyOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn as_borrowed_into<'o>(&'o self, _out: &mut InitBody<'o>) {
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut InitBodyIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         _out.version = self.version;
         _out.cbyte = self.cbyte;
         _out.zid = self.zid.as_bytes();
@@ -620,7 +645,7 @@ impl<S: InitBodyStorage> InitBodyOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> InitBody<'a> {
+impl<'a, D> InitBodyIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: InitBodyLentStorage {
     /// Project this borrowed view into an owned [`InitBodyOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

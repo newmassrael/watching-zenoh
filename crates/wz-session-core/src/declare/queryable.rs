@@ -28,13 +28,13 @@ use crate::id_map::{DeclaredQueryable, DeclaredQueryables, FixedIdMap, IdMap};
 use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use wz_codecs::declare::DeclareOwnedVariant;
+use crate::transport_profile::owned::DeclareOwnedVariant;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
     feature = "session-slot"
 ))]
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::lent::DeclareVariant;
 
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::decl_sink::BorrowedDecl;
@@ -1355,8 +1355,8 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use crate::transport_profile::owned::DeclareOwnedVariant;
     use hashbrown::HashMap;
-    use wz_codecs::declare::DeclareOwnedVariant;
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;

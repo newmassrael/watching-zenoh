@@ -36,11 +36,14 @@
                               `_Z_INTEREST_NOT_FINAL_MASK` shape per
                               `PresentIfPredicate::or_with` upstream
                               docstring).
-       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
-                              depth=4 covers upstream's
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain with no
+                              depth bound: upstream reads it until Z
+                              clears (the
                               `_z_msg_ext_skip_non_mandatories` call
-                              site (interest.c L88); entry-flag-Z
-                              termination per Y3 atomic 1 grammar).
+                              site, interest.c L88), and what a node
+                              stores is its deployment's capacity;
+                              entry-flag-Z termination per Y3 atomic
+                              1 grammar).
 
      Composition: B1-γ flags (header) + B1-α VLE (interest_id) +
      B1-δ Y3 atomic 2b-ii disjunction present-if-on-embed
@@ -66,7 +69,6 @@
     <sce:embed id="body" type="codec_zenoh_interest_body" sce:byte="2"
                sce:present-if="header.C || header.F"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>

@@ -120,8 +120,9 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
         // A keyexpr past the protocol's bound is not answered, as the subscriber reply
         // below skips one: the chain's `DeclFinal` still terminates the interest.
         if let Ok(declare) =
-            crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id)
-                .and_then(|reply| reply.try_into_owned())
+            crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id).and_then(
+                |reply| reply.try_into_owned_in::<crate::transport_profile::TransportStorage>(),
+            )
         {
             self.queue.enqueue(MulticastTxItem::DeclareReply {
                 declare: Box::new(declare),

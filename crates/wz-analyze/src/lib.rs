@@ -6569,20 +6569,20 @@ mod tests {
     /// nothing and every assertion below would pass on a build that never
     /// looked. The wire word is `(id << 1) | has_schema`.
     pub(crate) fn put_declaring(key: &str, encoding_id: u32, payload: &[u8]) -> Vec<u8> {
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_session_core::wire_const::FLAG_N_N,
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
-                    wz_codecs::wireexpr_local::WireexprLocal {
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | wz_session_core::wire_const::FLAG_N_N,
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: wz_codecs::lent::WireexprVariant::WireexprLocal(
+                    wz_codecs::lent::WireexprLocal {
                         id: 0,
                         suffix_len: Some(key.len() as u64),
                         suffix: Some(wz_codecs::Bounded::new(key).unwrap()),
                     },
                 ),
             },
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header | 0x40,
-                encoding: Some(wz_codecs::encoding::Encoding {
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header | 0x40,
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: encoding_id << 1,
                     schema_len: None,
                     schema: None,
@@ -7276,19 +7276,19 @@ mod tests {
                 .expect("re-borrow")
                 .encode_to_vec();
         let put = |key: &str, payload: &[u8]| {
-            wz_codecs::push::Push {
-                header: wz_codecs::push::Push::default().header
+            wz_codecs::lent::Push {
+                header: wz_codecs::lent::Push::default().header
                     | wz_session_core::wire_const::FLAG_N_N,
-                keyexpr: wz_codecs::wireexpr::Wireexpr {
-                    body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
-                        wz_codecs::wireexpr_local::WireexprLocal {
+                keyexpr: wz_codecs::lent::Wireexpr {
+                    body: wz_codecs::lent::WireexprVariant::WireexprLocal(
+                        wz_codecs::lent::WireexprLocal {
                             id: 0,
                             suffix_len: Some(key.len() as u64),
                             suffix: Some(wz_codecs::Bounded::new(key).unwrap()),
                         },
                     ),
                 },
-                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                     payload_len: Some(payload.len() as u64),
                     extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                         extensions: None,
@@ -8054,9 +8054,9 @@ mod tests {
         const ID: u64 = 7;
 
         fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
-            wz_codecs::declare::Declare {
-                body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                    wz_codecs::decl_kexpr::DeclKexpr {
+            wz_codecs::lent::Declare {
+                body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                    wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
                         id,
@@ -8304,15 +8304,13 @@ mod tests {
     pub(crate) fn multilink_sender_space(
         id: u64,
         suffix: Option<&str>,
-    ) -> wz_codecs::wireexpr::Wireexpr<'_> {
-        wz_codecs::wireexpr::Wireexpr {
-            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
-                wz_codecs::wireexpr_local::WireexprLocal {
-                    id,
-                    suffix_len: suffix.map(|s| s.len() as u64),
-                    suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
-                },
-            ),
+    ) -> wz_codecs::lent::Wireexpr<'_> {
+        wz_codecs::lent::Wireexpr {
+            body: wz_codecs::lent::WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                id,
+                suffix_len: suffix.map(|s| s.len() as u64),
+                suffix: suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
+            }),
         }
     }
 
@@ -8326,12 +8324,12 @@ mod tests {
     /// flag and the encoding group travel together and a body without them
     /// walks as `unparsed` too.
     pub(crate) fn multilink_push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header,
             keyexpr: multilink_sender_space(id, None),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header | 0x40,
-                encoding: Some(wz_codecs::encoding::Encoding {
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header | 0x40,
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: 0,
                     schema_len: None,
                     schema: None,
@@ -9964,9 +9962,9 @@ mod quic_pass_tests {
         }
 
         fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
-            wz_codecs::declare::Declare {
-                body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                    wz_codecs::decl_kexpr::DeclKexpr {
+            wz_codecs::lent::Declare {
+                body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                    wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
                         id,

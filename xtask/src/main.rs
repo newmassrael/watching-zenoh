@@ -324,6 +324,10 @@ fn regen_codec_deployment(
             .map(|(codec, feature)| (codec.to_string(), format!("feature = \"{feature}\"")))
             .collect(),
         source: NODE_DEPLOYMENT.to_string(),
+        // The node profile is what a node with no allocator holds, and what the
+        // lent decode holds on every target so that it allocates nothing: every
+        // field in an array at its capacity.
+        storage: sce_build::forge::deployment::NodeStorage::Inline,
     };
     let documents: Vec<PathBuf> = CODECS
         .iter()

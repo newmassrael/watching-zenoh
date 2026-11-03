@@ -154,10 +154,10 @@ use crate::wireexpr_resolve::MappingSpaces;
 // profile's. A session in a slot installs none (its own space is read through the
 // slot's handle, which the registry does not take yet), and reads `M=0` aliases as
 // the relay face does.
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::transport_profile::owned::DeclareOwnedVariant;
 #[cfg(feature = "alloc")]
 use crate::wireexpr_resolve::SharedOwnMappingSpace;
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use wz_codecs::declare::DeclareOwnedVariant;
 // R311gb (Track 2) — these wire-dispatch-supporting imports feed the
 // `alloc`-gated `dispatch_push` (owned `PushOwned` / `Sample` building),
 // and `crate::sample` / the owned codec types are `alloc`-gated, so each
@@ -209,7 +209,7 @@ use crate::sample::Sample;
 use crate::sample::{SampleKind, TimestampHint};
 use crate::sink::{SampleSink, SampleView};
 #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
-use wz_codecs::interest::InterestOwned;
+use crate::transport_profile::owned::InterestOwned;
 // R311gb-2b — `BoxedSink` is the default sink type (the AP closure
 // adapter); only needed by the `alloc`-gated `register` /
 // `register_with_locality` convenience wrappers. The whole `pubsub`
@@ -1317,7 +1317,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     fn respond_to_subscriber_interest_view(
         &mut self,
         peer: &mut SubscriberPeer<P>,
-        interest: &wz_codecs::interest::Interest<'_>,
+        interest: &wz_codecs::lent::Interest<'_>,
     ) {
         let SubscriberPeer {
             naming, interests, ..
@@ -3093,8 +3093,8 @@ impl<P: Storage> SubscriberPeer<P> {
         feature = "storage-profile",
         feature = "session-slot"
     ))]
-    pub(crate) fn absorb_declare_view(&mut self, body: &wz_codecs::declare::DeclareVariant<'_>) {
-        use wz_codecs::declare::DeclareVariant;
+    pub(crate) fn absorb_declare_view(&mut self, body: &wz_codecs::lent::DeclareVariant<'_>) {
+        use wz_codecs::lent::DeclareVariant;
         match body {
             DeclareVariant::CodecZenohDeclKexpr(d) => {
                 let mut composed = KeyexprBuf::new();
@@ -3678,9 +3678,7 @@ impl SubscriberRegistry<BoxedSink> {
 ))]
 mod push_fixtures {
     use super::*;
-    use wz_codecs::push::Push;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{Push, Wireexpr, WireexprLocal, WireexprVariant};
 
     /// A Put-bodied Push for `suffix` (literal local wireexpr, id=0).
     /// `Push::default()` already carries a `CodecZenohMsgPut` body, so the
@@ -3707,7 +3705,7 @@ mod push_fixtures {
     pub(super) fn push_with_del_body(suffix: &str) -> PushOwned {
         let mut push = push_with_keyexpr(suffix);
         push.body = PushOwnedVariant::CodecZenohMsgDel(
-            wz_codecs::msg_del::MsgDel::default()
+            wz_codecs::lent::MsgDel::default()
                 .try_into_owned_in::<crate::wire::WireStorage>()
                 .unwrap(),
         );
@@ -3741,9 +3739,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     // Fixtures build the borrowed codec views then `.into_owned()` at the
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
-    use wz_codecs::push::Push;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
 
     #[test]
     fn dispatch_fires_callback_on_matching_keyexpr() {
@@ -3971,9 +3967,13 @@ mod tests {
         // R98 scope routes Push only. ResponseFinal (or any other
         // variant) flowing through dispatch must not invoke any
         // subscriber callback.
-        use wz_codecs::response_final::ResponseFinal;
+        use wz_codecs::lent::ResponseFinal;
         registry.dispatch(
-            &NetworkMessage::ResponseFinal(ResponseFinal::default().try_into_owned().unwrap()),
+            &NetworkMessage::ResponseFinal(
+                ResponseFinal::default()
+                    .try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                    .unwrap(),
+            ),
             Reliability::Reliable,
         );
 
@@ -4860,26 +4860,27 @@ mod tests {
     /// `id` to the literal keyexpr suffix `s`. Models the wire
     /// shape zenoh-pico emits on `z_declare_keyexpr` when the
     /// argument is a string (no prefix mapping).
-    fn declare_kexpr_literal(mapping_id: u64, s: &str) -> wz_codecs::declare::DeclareOwned {
-        wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+    fn declare_kexpr_literal(
+        mapping_id: u64,
+        s: &str,
+    ) -> crate::transport_profile::owned::DeclareOwned {
+        wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     id: mapping_id,
-                    keyexpr: wz_codecs::wireexpr::Wireexpr {
-                        body: WireexprVariant::WireexprLocal(
-                            wz_codecs::wireexpr_local::WireexprLocal {
-                                id: 0,
-                                suffix_len: Some(s.len() as u64),
-                                suffix: Some(sce_forge_runtime::codec::Bounded::new(s).unwrap()),
-                            },
-                        ),
+                    keyexpr: wz_codecs::lent::Wireexpr {
+                        body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                            id: 0,
+                            suffix_len: Some(s.len() as u64),
+                            suffix: Some(sce_forge_runtime::codec::Bounded::new(s).unwrap()),
+                        }),
                     },
                     ..Default::default()
                 },
             ),
             ..Default::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::transport_profile::TransportStorage>()
         .unwrap()
     }
 
@@ -4894,49 +4895,45 @@ mod tests {
         mapping_id: u64,
         scope: u64,
         suffix: &str,
-    ) -> wz_codecs::declare::DeclareOwned {
-        wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+    ) -> crate::transport_profile::owned::DeclareOwned {
+        wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     id: mapping_id,
-                    keyexpr: wz_codecs::wireexpr::Wireexpr {
-                        body: WireexprVariant::WireexprLocal(
-                            wz_codecs::wireexpr_local::WireexprLocal {
-                                id: scope,
-                                suffix_len: Some(suffix.len() as u64),
-                                suffix: Some(
-                                    sce_forge_runtime::codec::Bounded::new(suffix).unwrap(),
-                                ),
-                            },
-                        ),
+                    keyexpr: wz_codecs::lent::Wireexpr {
+                        body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                            id: scope,
+                            suffix_len: Some(suffix.len() as u64),
+                            suffix: Some(sce_forge_runtime::codec::Bounded::new(suffix).unwrap()),
+                        }),
                     },
                     ..Default::default()
                 },
             ),
             ..Default::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::transport_profile::TransportStorage>()
         .unwrap()
     }
 
-    fn undeclare_kexpr(mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
-        wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohUndeclKexpr(
-                wz_codecs::undecl_kexpr::UndeclKexpr {
+    fn undeclare_kexpr(mapping_id: u64) -> crate::transport_profile::owned::DeclareOwned {
+        wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohUndeclKexpr(
+                wz_codecs::lent::UndeclKexpr {
                     id: mapping_id,
                     ..Default::default()
                 },
             ),
             ..Default::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::transport_profile::TransportStorage>()
         .unwrap()
     }
 
     fn push_with_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> PushOwned {
         Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
                     id: mapping_id,
                     suffix_len: inline_suffix.map(|s| s.len() as u64),
                     suffix: inline_suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
@@ -4954,14 +4951,12 @@ mod tests {
     /// `Mapping::Receiver` (`dispatcher/resource.rs:625`).
     fn push_with_own_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> PushOwned {
         Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprNonlocal(
-                    wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
-                        id: mapping_id,
-                        suffix_len: inline_suffix.map(|s| s.len() as u64),
-                        suffix: inline_suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
-                    },
-                ),
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(wz_codecs::lent::WireexprNonlocal {
+                    id: mapping_id,
+                    suffix_len: inline_suffix.map(|s| s.len() as u64),
+                    suffix: inline_suffix.map(|s| wz_codecs::Bounded::new(s).unwrap()),
+                }),
             },
             ..Push::default()
         }
@@ -5672,14 +5667,10 @@ mod tests {
     /// an erroneous side-effect on one of the no-op arms.
     #[test]
     fn absorb_declare_non_keyexpr_arms_leave_table_empty() {
-        use wz_codecs::decl_final::DeclFinal;
-        use wz_codecs::decl_queryable::DeclQueryable;
-        use wz_codecs::decl_subscriber::DeclSubscriber;
-        use wz_codecs::decl_token::DeclToken;
-        use wz_codecs::declare::DeclareVariant;
-        use wz_codecs::undecl_queryable::UndeclQueryable;
-        use wz_codecs::undecl_subscriber::UndeclSubscriber;
-        use wz_codecs::undecl_token::UndeclToken;
+        use wz_codecs::lent::{
+            DeclFinal, DeclQueryable, DeclSubscriber, DeclToken, DeclareVariant, UndeclQueryable,
+            UndeclSubscriber, UndeclToken,
+        };
 
         let arms: Vec<(&str, DeclareVariant)> = vec![
             (
@@ -5725,7 +5716,9 @@ mod tests {
             let mut registry = SubscriberRegistry::new();
             // `absorb_declare` takes the owned variant; deep-copy the
             // borrowed test arm at the boundary.
-            let body = body.try_into_owned().unwrap();
+            let body = body
+                .try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                .unwrap();
             registry.peer.absorb_declare(&body);
             assert!(
                 registry.mapping_spaces().peer().is_empty(),
@@ -6129,19 +6122,17 @@ mod tests {
             (1..=16).contains(&source_zid.len()),
             "test helper: source_zid len must be 1..=16"
         );
-        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        let mut ext = wz_codecs::lent::ExtEntry::new();
         ext.set_ext_id(0x01); // source_info ext_id
         ext.set_enc(0x02); // ENC_ZBUF
         let mut payload = vec![((source_zid.len() as u8) - 1) << 4];
         payload.extend_from_slice(source_zid);
         payload.push(0); // VLE eid = 0
         payload.push(0); // VLE sn = 0
-        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
-            wz_codecs::ext_zbuf::ExtZbuf {
-                value_len: payload.len() as u64,
-                value: sce_forge_runtime::codec::Bounded::new(&payload[..]).unwrap(),
-            },
-        );
+        ext.body = wz_codecs::lent::ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
+            value_len: payload.len() as u64,
+            value: sce_forge_runtime::codec::Bounded::new(&payload[..]).unwrap(),
+        });
         // The owned `MsgPut` holds its chain in the profile's list; deep-copy the
         // borrowed ext in.
         let mut put: crate::wire::parts::MsgPutOwned = crate::put_payload::inline(b"").unwrap();
@@ -6151,8 +6142,8 @@ mod tests {
         )
         .unwrap();
         let mut push = Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
                     suffix: Some(sce_forge_runtime::codec::Bounded::new(keyexpr).unwrap()),
@@ -6290,14 +6281,13 @@ mod tests {
         // the band an acknowledgement is owed at is read from the wire whether or
         // not that feature is compiled in. This fixture is the receive side alone.
         if let Some(raw) = qos {
-            let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+            let mut ext = wz_codecs::lent::ExtEntry::new();
             ext.set_ext_id(0x01); // QOS_EXT_ID
             ext.set_enc(0x01); // ENC_ZINT
-            ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZint(
-                wz_codecs::ext_zint::ExtZint {
+            ext.body =
+                wz_codecs::lent::ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint {
                     value: u64::from(raw),
-                },
-            );
+                });
             push.extensions = Some(crate::held_list::one_entry(
                 ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
             ));
@@ -6424,7 +6414,7 @@ mod tests {
             metadata_index: 0x35,
             generation: 0,
         };
-        let second = crate::put_payload::shm_slices::<crate::wire::WireStorage, _>(
+        let second = crate::put_payload::shm_slices::<crate::wire::WireStorage, _, _>(
             &crate::extshm::encode_shm_descriptor(&second),
         )
         .expect("one slice for the second buffer");
@@ -6673,21 +6663,22 @@ mod tests {
         // has no MsgPut extensions and therefore no source_info.
         // To reach dispatch_push's PushVariant arm with no source_info
         // we hand in a MsgPut with `extensions = None`.
-        let push = Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
-                    id: 0,
-                    suffix_len: Some("demo/temp".len() as u64),
-                    suffix: Some(sce_forge_runtime::codec::Bounded::new("demo/temp").unwrap()),
-                }),
-            },
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
-                wz_codecs::msg_put::MsgPut::default(),
-            ),
-            ..Push::default()
-        }
-        .try_into_owned_in::<crate::wire::WireStorage>()
-        .unwrap();
+        let push =
+            Push {
+                keyexpr: wz_codecs::lent::Wireexpr {
+                    body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                        id: 0,
+                        suffix_len: Some("demo/temp".len() as u64),
+                        suffix: Some(sce_forge_runtime::codec::Bounded::new("demo/temp").unwrap()),
+                    }),
+                },
+                body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(
+                    wz_codecs::lent::MsgPut::default(),
+                ),
+                ..Push::default()
+            }
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
@@ -6723,19 +6714,19 @@ mod tests {
     /// `pubsub-encoding` — that feature gates only the subscriber-side
     /// projection.
     fn push_put_with_encoding(keyexpr: &str, packed_id: u32) -> PushOwned {
-        let put = wz_codecs::msg_put::MsgPut {
-            encoding: Some(wz_codecs::encoding::Encoding {
+        let put = wz_codecs::lent::MsgPut {
+            encoding: Some(wz_codecs::lent::Encoding {
                 packed_id,
                 schema_len: None,
                 schema: None,
             }),
-            ..wz_codecs::msg_put::MsgPut::default()
+            ..wz_codecs::lent::MsgPut::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut push = Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
                     suffix: Some(sce_forge_runtime::codec::Bounded::new(keyexpr).unwrap()),
@@ -6875,29 +6866,29 @@ mod tests {
     /// constructible regardless of the QoS-byte consumer features — they
     /// gate only the subscriber-side projection (`extract_qos`).
     fn push_put_with_qos(keyexpr: &str, raw: u8) -> PushOwned {
-        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        let mut ext = wz_codecs::lent::ExtEntry::new();
         ext.set_ext_id(0x01); // QOS_EXT_ID
         ext.set_enc(0x01); // ENC_ZINT
-        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZint(
-            wz_codecs::ext_zint::ExtZint {
+        ext.body =
+            wz_codecs::lent::ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint {
                 value: u64::from(raw),
-            },
-        );
-        let mut push = Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
-                    id: 0,
-                    suffix_len: Some(keyexpr.len() as u64),
-                    suffix: Some(sce_forge_runtime::codec::Bounded::new(keyexpr).unwrap()),
-                }),
-            },
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
-                wz_codecs::msg_put::MsgPut::default(),
-            ),
-            ..Push::default()
-        }
-        .try_into_owned_in::<crate::wire::WireStorage>()
-        .unwrap();
+            });
+        let mut push =
+            Push {
+                keyexpr: wz_codecs::lent::Wireexpr {
+                    body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                        id: 0,
+                        suffix_len: Some(keyexpr.len() as u64),
+                        suffix: Some(sce_forge_runtime::codec::Bounded::new(keyexpr).unwrap()),
+                    }),
+                },
+                body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(
+                    wz_codecs::lent::MsgPut::default(),
+                ),
+                ..Push::default()
+            }
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         push.extensions = Some(crate::held_list::one_entry(
             ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
         ));
@@ -6970,19 +6961,19 @@ mod tests {
     /// A Put carrying a wire `timestamp` (time + 4-byte zid).
     fn push_put_with_timestamp(keyexpr: &str) -> PushOwned {
         let zid = [0x09u8, 0x0A, 0x0B, 0x0C];
-        let put = wz_codecs::msg_put::MsgPut {
-            timestamp: Some(wz_codecs::timestamp::Timestamp {
+        let put = wz_codecs::lent::MsgPut {
+            timestamp: Some(wz_codecs::lent::Timestamp {
                 time: 0x1122_3344_5566_7788,
                 zid_len: zid.len() as u64,
                 zid: sce_forge_runtime::codec::Bounded::new(&zid[..]).unwrap(),
             }),
-            ..wz_codecs::msg_put::MsgPut::default()
+            ..wz_codecs::lent::MsgPut::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut push = Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
                     suffix: Some(sce_forge_runtime::codec::Bounded::new(keyexpr).unwrap()),
@@ -6998,15 +6989,13 @@ mod tests {
 
     /// A Put carrying a wire attachment ext (ext_id 0x03 ZBuf).
     fn push_put_with_attachment(keyexpr: &str, bytes: &[u8]) -> PushOwned {
-        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        let mut ext = wz_codecs::lent::ExtEntry::new();
         ext.set_ext_id(0x03); // ATTACHMENT_EXT_ID_PUSH
         ext.set_enc(0x02); // ENC_ZBUF
-        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
-            wz_codecs::ext_zbuf::ExtZbuf {
-                value_len: bytes.len() as u64,
-                value: sce_forge_runtime::codec::Bounded::new(bytes).unwrap(),
-            },
-        );
+        ext.body = wz_codecs::lent::ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
+            value_len: bytes.len() as u64,
+            value: sce_forge_runtime::codec::Bounded::new(bytes).unwrap(),
+        });
         let mut put: crate::wire::parts::MsgPutOwned = crate::put_payload::inline(b"").unwrap();
         crate::put_payload::set_chain(
             &mut put,
@@ -7014,8 +7003,8 @@ mod tests {
         )
         .unwrap();
         let mut push = Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
                     suffix: Some(sce_forge_runtime::codec::Bounded::new(keyexpr).unwrap()),
@@ -7559,9 +7548,7 @@ mod metadata_decode_isolation_tests {
     use alloc::boxed::Box;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use wz_codecs::push::Push;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{Push, Wireexpr, WireexprLocal, WireexprVariant};
 
     /// A literal-keyexpr Put with a `Push::default()` body (no metadata).
     fn put_push_literal(keyexpr: &str) -> PushOwned {
@@ -7584,13 +7571,13 @@ mod metadata_decode_isolation_tests {
     /// `pubsub-timestamp` off — that feature gates only the projection.
     fn put_push_with_timestamp(keyexpr: &str) -> PushOwned {
         let zid = [0x01u8, 0x02, 0x03, 0x04];
-        let put = wz_codecs::msg_put::MsgPut {
-            timestamp: Some(wz_codecs::timestamp::Timestamp {
+        let put = wz_codecs::lent::MsgPut {
+            timestamp: Some(wz_codecs::lent::Timestamp {
                 time: 0x0102_0304_0506_0708,
                 zid_len: zid.len() as u64,
                 zid: sce_forge_runtime::codec::Bounded::new(&zid[..]).unwrap(),
             }),
-            ..wz_codecs::msg_put::MsgPut::default()
+            ..wz_codecs::lent::MsgPut::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
@@ -7603,15 +7590,13 @@ mod metadata_decode_isolation_tests {
     /// hand (the `crate::attachment` helper is `attachment-bytes`-gated
     /// and absent in this profile); the wire form is the raw ZBuf value.
     fn put_push_with_attachment(keyexpr: &str, bytes: &[u8]) -> PushOwned {
-        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        let mut ext = wz_codecs::lent::ExtEntry::new();
         ext.set_ext_id(0x03); // ATTACHMENT_EXT_ID_PUSH
         ext.set_enc(0x02); // ENC_ZBUF
-        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
-            wz_codecs::ext_zbuf::ExtZbuf {
-                value_len: bytes.len() as u64,
-                value: sce_forge_runtime::codec::Bounded::new(bytes).unwrap(),
-            },
-        );
+        ext.body = wz_codecs::lent::ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
+            value_len: bytes.len() as u64,
+            value: sce_forge_runtime::codec::Bounded::new(bytes).unwrap(),
+        });
         let mut put: crate::wire::parts::MsgPutOwned = crate::put_payload::inline(b"").unwrap();
         crate::put_payload::set_chain(
             &mut put,

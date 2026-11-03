@@ -23,7 +23,7 @@ use wz_codecs::interest::InterestHeaderCOrF;
 use wz_codecs::wire_const;
 
 #[cfg(feature = "alloc")]
-use wz_codecs::interest::InterestOwned;
+use crate::transport_profile::owned::InterestOwned;
 #[cfg(feature = "alloc")]
 use wz_codecs::interest_body::InterestBodyOwned;
 #[cfg(feature = "alloc")]

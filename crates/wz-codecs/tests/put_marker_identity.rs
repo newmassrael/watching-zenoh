@@ -29,7 +29,8 @@
 //! at the end of a chain and `0x92` before another entry.
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
+use wz_codecs::lent::MsgPut;
+use wz_codecs::msg_put::MsgPutExtensionsHas0x12;
 
 /// A one-slice sliced payload: count 1, kind RAW, length 1, one byte.
 const SLICED: [u8; 4] = [0x01, 0x00, 0x01, 0xAB];

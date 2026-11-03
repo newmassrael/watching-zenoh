@@ -76,12 +76,20 @@ use std::num::NonZeroU16;
 use petgraph::dot::Dot;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableUnGraph;
-use sce_forge_runtime::codec::{Aligned, Bounded, CodecError};
-use wz_codecs::linkstate::{LinkstateOptionsH, LinkstateOwned};
+use sce_forge_runtime::codec::{Aligned, Bounded, CodecError, Heap};
+use wz_codecs::linkstate::LinkstateOptionsH;
 use wz_codecs::linkstate_link::LinkstateLink;
-use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::linkstate_weight::LinkstateWeight;
-use wz_codecs::locator::{LocatorOwned, MAX_LOCATORS_PER_NODE, MAX_LOCATOR_LEN};
+use wz_codecs::locator::{MAX_LOCATORS_PER_NODE, MAX_LOCATOR_LEN};
+
+/// One LinkState entry as the graph builds and ingests it. This crate always
+/// builds with an allocator, so the lists the protocol bounds by nothing are
+/// held on the heap.
+type LinkstateOwned = wz_codecs::linkstate::LinkstateOwned<Heap>;
+/// A LinkStateList as the graph builds and ingests it; see [`LinkstateOwned`].
+type LinkstateListOwned = wz_codecs::linkstate_list::LinkstateListOwned<Heap>;
+/// A locator of a [`LinkstateOwned`].
+type LocatorOwned = wz_codecs::locator::LocatorOwned<Heap>;
 
 /// The node-role type, re-exported from `wz-codecs` (the SSOT). The graph keys
 /// a node's role on this typed enum; the former `WHATAMI_*` byte constants and
@@ -152,9 +160,9 @@ fn local_psid(idx: NodeIndex) -> u64 {
 /// [`build_linkstate_split`](LinkstateNetwork::build_linkstate_split)). zenoh
 /// `make_msg` writes the list the same way (`network.rs:355-357`).
 ///
-/// The graph has no cap on its nodes, so a list can be past the bound of the
-/// codec's: `TooManyElements`, as is an entry that could not be built, and the
-/// list is not sent.
+/// The graph has no cap on its nodes, and the protocol bounds the list by
+/// nothing, so a list of any length is built. An entry that could not be built
+/// refuses the list, which is then not sent.
 fn into_list(
     entries: impl IntoIterator<Item = Result<LinkstateOwned, CodecError>>,
 ) -> Result<LinkstateListOwned, CodecError> {
@@ -165,8 +173,9 @@ fn into_list(
     })
 }
 
-/// `list` within the bound of the codec's list it fills, which a list of this
-/// graph's own nodes or links is not by construction.
+/// `list` within the bound of the codec's list it fills, refused as
+/// `TooManyElements` past it. The lists this graph fills have no bound, so
+/// none is refused today; the check stays for a list the protocol bounds.
 fn within_bound<T, const MAX: usize>(list: Vec<T>) -> Result<Bounded<Vec<T>, MAX>, CodecError> {
     Bounded::new(list).ok_or(CodecError::TooManyElements)
 }
@@ -185,11 +194,10 @@ fn within_bound<T, const MAX: usize>(list: Vec<T>) -> Result<Bounded<Vec<T>, MAX
 /// what a no-alloc receiver can decode is discharged HERE — the producer-side
 /// analog of the ingest's oversized-zid drop. Both bounds are sourced from
 /// `wz-codecs` ([`MAX_LOCATOR_LEN`] = what a wz node stores of one locator,
-/// [`MAX_LOCATORS_PER_NODE`] = the list `max-count`), so this never hand-copies
-/// a literal that could silently drift from them.
-fn locators_to_wire(
-    locators: &[String],
-) -> Option<Bounded<Vec<LocatorOwned>, MAX_LOCATORS_PER_NODE>> {
+/// [`MAX_LOCATORS_PER_NODE`] = how many locators of one entry a wz node
+/// stores), so this never hand-copies a literal that could silently drift from
+/// them. The protocol bounds the list by nothing; the cap is the receiver's.
+fn locators_to_wire(locators: &[String]) -> Option<Bounded<Vec<LocatorOwned>, { usize::MAX }>> {
     let owned: Vec<LocatorOwned> = locators
         .iter()
         .filter_map(|loc| {
@@ -211,8 +219,7 @@ fn locators_to_wire(
         })
         .take(MAX_LOCATORS_PER_NODE)
         .collect();
-    (!owned.is_empty())
-        .then(|| Bounded::new(owned).expect("`take` stopped the list at MAX_LOCATORS_PER_NODE"))
+    (!owned.is_empty()).then(|| Bounded::new(owned).expect("a list with no bound holds any count"))
 }
 
 /// Project a decoded entry's `LocatorOwned` list back into host `String`s for
@@ -1556,8 +1563,8 @@ impl LinkstateNetwork {
     /// addresses, advertised when it is first introduced); the ingest's
     /// preserve-on-None rule keeps them across the links-only updates that follow.
     ///
-    /// Self has no cap on its links, so its entry can be past the bound of the
-    /// codec's `links`: `TooManyElements`, and the list it belongs to is not sent.
+    /// Self has no cap on its links, and the protocol bounds the codec's `links`
+    /// by nothing, so the entry holds every one of them.
     fn make_link_state(
         &self,
         idx: NodeIndex,
@@ -3013,9 +3020,8 @@ mod tests {
     // ── c2b ingest ──────────────────────────────────────────────────
 
     use sce_forge_runtime::codec::SceCursor;
-    use wz_codecs::linkstate::LinkstateOwned;
+    use wz_codecs::lent::LinkstateList;
     use wz_codecs::linkstate_link::LinkstateLink;
-    use wz_codecs::linkstate_list::LinkstateList;
 
     /// Build a LinkState entry. The ingest reads the typed `Option` fields,
     /// not their flag bits, so `options` is left 0; the one bit it reads is G,
@@ -3968,7 +3974,7 @@ mod tests {
 
     /// Weights at the WIRE's width — the codec field is the full zint since
     /// R311y880, and [`entry_weighted`] takes the value width its callers mean.
-    fn alloc_weights(raw: &[u64]) -> Bounded<Vec<LinkstateWeight>, 64> {
+    fn alloc_weights(raw: &[u64]) -> Bounded<Vec<LinkstateWeight>, { usize::MAX }> {
         Bounded::new(
             raw.iter()
                 .map(|&weight| LinkstateWeight { weight })
@@ -5360,7 +5366,7 @@ mod tests {
         let mut cursor = SceCursor::new(&wire);
         let decoded = LinkstateList::decode(&mut cursor)
             .expect("decode A's link-state list")
-            .try_into_owned()
+            .try_into_owned_in::<Heap>()
             .expect("own the decoded list");
 
         let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
@@ -5411,7 +5417,7 @@ mod tests {
             .encode_to_vec();
         let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
             .expect("decode list wire")
-            .try_into_owned()
+            .try_into_owned_in::<Heap>()
             .expect("into owned");
         let own = decoded
             .link_states
@@ -5703,7 +5709,7 @@ mod tests {
         wire.extend_from_slice(&big);
         wire.push(0);
         assert_eq!(
-            wz_codecs::linkstate::Linkstate::decode(&mut SceCursor::new(&wire)).err(),
+            wz_codecs::lent::Linkstate::decode(&mut SceCursor::new(&wire)).err(),
             Some(CodecError::LengthOutOfRange),
             "a frame carrying an oversized zid is refused at decode"
         );
@@ -5758,7 +5764,7 @@ mod tests {
     #[test]
     fn build_encode_decode_ingest_round_trips_through_the_wire() {
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::linkstate_list::LinkstateList;
+        use wz_codecs::lent::LinkstateList;
         // A builds its list and serializes it through the REAL LinkStateList
         // codec; B decodes the wire bytes and ingests — exercising the
         // encode/decode round-trip the in-process convergence tests skip.
@@ -5771,7 +5777,7 @@ mod tests {
 
         let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
             .expect("decode list wire")
-            .try_into_owned()
+            .try_into_owned_in::<Heap>()
             .expect("into owned");
 
         let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
@@ -5852,11 +5858,13 @@ mod tests {
         );
     }
 
-    /// The graph has no cap on its nodes, so a list can be past the codec's
-    /// bound: it is refused when it is built, with the error its encode gave
-    /// before the bound was a type, and not cut short.
+    /// The graph has no cap on its nodes, and the protocol bounds the list by
+    /// nothing, so a list past the 64 entries a node stores is built and sent
+    /// whole. The wire judge (the heap decode) reads all of it back; a node's
+    /// storing decode (`Node`, 64 entries) refuses it as storage,
+    /// `CapacityExceeded`, which is the receiver's limit and not the sender's.
     #[test]
-    fn a_list_of_more_nodes_than_the_bound_is_refused_when_it_is_built() {
+    fn a_list_of_more_nodes_than_a_node_stores_is_built_and_read_back_whole() {
         let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         let mut nodes: Vec<Zid> = (0..64u8).map(|n| zid(0x10 + n)).collect();
         for node in &nodes {
@@ -5866,20 +5874,34 @@ mod tests {
             net.build_linkstate_gossip(&nodes)
                 .map(|list| list.link_states.len()),
             Ok(64),
-            "a list at the bound is built"
+            "a list of what a node stores is built"
         );
         nodes.push(zid(0x01));
+        let list = net
+            .build_linkstate_gossip(&nodes)
+            .expect("a list past what a node stores is built");
+        assert_eq!(list.link_states.len(), 65, "and is not cut short");
+
+        let wire = list.encode_to_vec();
+        let read = LinkstateListOwned::decode(&mut sce_forge_runtime::codec::SceCursor::new(&wire))
+            .expect("the heap decode reads the whole list");
+        assert_eq!(read.link_states.len(), 65);
         assert_eq!(
-            net.build_linkstate_gossip(&nodes)
-                .map(|list| list.link_states.len()),
-            Err(CodecError::TooManyElements)
+            wz_codecs::lent::LinkstateList::decode(&mut sce_forge_runtime::codec::SceCursor::new(
+                &wire
+            ))
+            .err(),
+            Some(CodecError::CapacityExceeded),
+            "a node stores 64 entries and refuses the 65th as storage"
         );
     }
 
-    /// Self has no cap on its links, so its own entry can be past the bound of
-    /// the codec's `links`, and any list carrying it is then refused the same way.
+    /// Self has no cap on its links, and the protocol bounds an entry's links by
+    /// nothing, so its own entry is built with every link it has. The heap
+    /// decode reads them all back; a node's storing decode (`Node`, 64 links an
+    /// entry) refuses the entry as storage, `CapacityExceeded`.
     #[test]
-    fn a_self_with_more_links_than_the_bound_is_refused_when_it_is_built() {
+    fn a_self_with_more_links_than_a_node_stores_is_built_and_read_back_whole() {
         let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         for n in 0..64u8 {
             net.add_link(zid(0x10 + n), WhatAmI::Peer);
@@ -5888,16 +5910,33 @@ mod tests {
             net.build_self_links_delta()
                 .map(|list| entry_links(&list.link_states[0]).len()),
             Ok(64),
-            "an entry at the bound is built"
+            "an entry of what a node stores is built"
         );
         net.add_link(zid(0x80), WhatAmI::Peer);
+        let delta = net
+            .build_self_links_delta()
+            .expect("an entry past what a node stores is built");
         assert_eq!(
-            net.build_self_links_delta().map(|_| ()),
-            Err(CodecError::TooManyElements)
+            entry_links(&delta.link_states[0]).len(),
+            65,
+            "with every link"
         );
+        assert!(
+            net.build_linkstate_split(&[zid(0x01)], &[]).is_ok(),
+            "a split list carrying the entry is built too"
+        );
+
+        let wire = delta.encode_to_vec();
+        let read = LinkstateListOwned::decode(&mut sce_forge_runtime::codec::SceCursor::new(&wire))
+            .expect("the heap decode reads the whole entry");
+        assert_eq!(entry_links(&read.link_states[0]).len(), 65);
         assert_eq!(
-            net.build_linkstate_split(&[zid(0x01)], &[]).map(|_| ()),
-            Err(CodecError::TooManyElements)
+            wz_codecs::lent::LinkstateList::decode(&mut sce_forge_runtime::codec::SceCursor::new(
+                &wire
+            ))
+            .err(),
+            Some(CodecError::CapacityExceeded),
+            "a node stores 64 links an entry and refuses the 65th as storage"
         );
     }
 }

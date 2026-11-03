@@ -36,6 +36,14 @@ pub trait JoinStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runt
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<JoinZidField>> JoinStorage for S {}
 
+/// What `JoinIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Join` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait JoinLentStorage: ::core::fmt::Debug + Clone + PartialEq {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq> JoinLentStorage for D {}
+
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside JoinStorage: how it stores each field of that frame.
 #[allow(dead_code)]
@@ -234,7 +242,7 @@ impl<S: JoinStorage> JoinIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Join::encode_source(self, w)
+        JoinWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -271,8 +279,8 @@ pub struct JoinS {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Join` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Join`
-/// computes those from what is ([`Join::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`JoinWire::encode_source`]).
 pub trait JoinSource {
     /// The `version` field.
     fn version(&self) -> u8;
@@ -384,10 +392,17 @@ impl<S: JoinStorage> JoinSource for JoinOwned<S> {
     }
 }
 
+/// The codec `Join` itself: what writes a value read through
+/// [`JoinSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct JoinWire;
+
 #[allow(dead_code)]
-impl<'a> Join<'a> {
+impl JoinWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Join::encode` writes for the value it holds, read through
     /// [`JoinSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -438,7 +453,7 @@ impl<'a> Join<'a> {
     }
 }
 
-impl<'a, S: JoinSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Join<'a> {
+impl<S: JoinSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for JoinWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -447,7 +462,7 @@ impl<'a, S: JoinSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for 
 }
 
 #[allow(dead_code)]
-impl<'a> Join<'a> {
+impl JoinWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -486,8 +501,16 @@ impl<'a> Join<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Self) -> Result<(), CodecError> {
-        _out.clone_from(self);
+    // A codec with no list holds every field alike at every profile, so the
+    // value at any `D` is filled field by field (docs/adr/0077 §7).
+    pub fn into_builder<D>(&self, _out: &mut JoinIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: JoinLentStorage {
+        _out.version = self.version;
+        _out.cbyte = self.cbyte;
+        _out.zid = self.zid;
+        _out.s = self.s;
+        _out.lease = self.lease;
+        _out.next_sn_reliable = self.next_sn_reliable;
+        _out.next_sn_best_effort = self.next_sn_best_effort;
         Ok(())
     }
 }
@@ -525,8 +548,11 @@ impl<'a> Join<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Join<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Join<'a> {
+impl<'a, D> JoinIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: JoinLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`JoinOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -565,8 +591,8 @@ impl<S: JoinStorage> JoinOwned<S> {
     /// borrowed view (the owned form is read-only), so an owned consumer
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
-    pub fn as_borrowed(&self) -> Join<'_> {
-        let mut _out = Join::default();
+    pub fn as_borrowed(&self) -> JoinIn<::sce_forge_runtime::codec::Lent<'_, S>> {
+        let mut _out = Default::default();
         self.as_borrowed_into(&mut _out);
         _out
     }
@@ -581,7 +607,7 @@ impl<S: JoinStorage> JoinOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn as_borrowed_into<'o>(&'o self, _out: &mut Join<'o>) {
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut JoinIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         _out.version = self.version;
         _out.cbyte = self.cbyte;
         _out.zid = self.zid.as_bytes();
@@ -606,7 +632,7 @@ impl<S: JoinStorage> JoinOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> Join<'a> {
+impl<'a, D> JoinIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: JoinLentStorage {
     /// Project this borrowed view into an owned [`JoinOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

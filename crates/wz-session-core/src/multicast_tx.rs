@@ -181,7 +181,7 @@ pub enum MulticastTxItem {
         /// The built `Declare` reply (a `DeclToken` for a held token, or the
         /// terminating `DeclFinal`), already owned via `Declare::try_into_owned`.
         /// Boxed (R311mb) to bound the enum size.
-        declare: Box<wz_codecs::declare::DeclareOwned>,
+        declare: Box<crate::transport_profile::owned::DeclareOwned>,
     },
     /// Open-debt item 913 — a declaration the session ANNOUNCES on the group, answering no
     /// interest: zenoh announces a session's subscriber on each group it holds
@@ -195,7 +195,7 @@ pub enum MulticastTxItem {
     #[cfg(all(feature = "alloc", feature = "codec-declare", feature = "codec-push"))]
     Declare {
         /// The built `Declare`, boxed to bound the enum size.
-        declare: Box<wz_codecs::declare::DeclareOwned>,
+        declare: Box<crate::transport_profile::owned::DeclareOwned>,
     },
     /// Open-debt item 913 — an `Interest` the session asks the group: zenoh-pico at
     /// `Z_FEATURE_MULTICAST_DECLARATIONS=1` asks its group for the members' keyexprs when it
@@ -207,7 +207,7 @@ pub enum MulticastTxItem {
     #[cfg(all(feature = "alloc", feature = "codec-push"))]
     Interest {
         /// The built `Interest`, boxed to bound the enum size.
-        interest: Box<wz_codecs::interest::InterestOwned>,
+        interest: Box<crate::transport_profile::owned::InterestOwned>,
     },
 }
 
@@ -510,9 +510,7 @@ where
         #[cfg(all(feature = "codec-push", feature = "codec-request"))]
         MulticastTxItem::Request { request } => push_frame(
             meta,
-            // A Request the encode refuses is refused by the body as well; the reservation for it
-            // is moot.
-            wz_codecs::request::Request::measure(&*request).map_or(0, |measured| measured.len()),
+            wz_codecs::request::RequestWire::measure(&*request).len(),
             crate::frame_encode::request_body(&request),
             tx_sn,
             params,
@@ -527,7 +525,7 @@ where
         MulticastTxItem::Response { response } => push_frame(
             // `meta.reliable` is pinned true for a reply (`frame_meta`).
             meta,
-            wz_codecs::response::Response::measure(&*response).len(),
+            wz_codecs::response::ResponseWire::measure(&*response).len(),
             crate::frame_encode::response_body(&response),
             tx_sn,
             params,
@@ -547,7 +545,7 @@ where
             let response_final = crate::response_final_build::build_response_final(request_id, qos);
             push_frame(
                 meta,
-                wz_codecs::response_final::ResponseFinal::measure(&response_final).len(),
+                wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len(),
                 crate::frame_encode::response_final_body(&response_final),
                 tx_sn,
                 params,
@@ -564,7 +562,7 @@ where
         // the frame `encode_frame_with_declare` writes.
         MulticastTxItem::DeclareReply { declare } => push_frame(
             meta,
-            wz_codecs::declare::Declare::measure(&*declare).len(),
+            wz_codecs::declare::DeclareWire::measure(&*declare).len(),
             crate::frame_encode::declare_body(&declare),
             tx_sn,
             params,
@@ -574,7 +572,7 @@ where
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => push_frame(
             meta,
-            wz_codecs::declare::Declare::measure(&*declare).len(),
+            wz_codecs::declare::DeclareWire::measure(&*declare).len(),
             crate::frame_encode::declare_body(&declare),
             tx_sn,
             params,
@@ -584,7 +582,7 @@ where
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Interest { interest } => push_frame(
             meta,
-            wz_codecs::interest::Interest::measure(&*interest).len(),
+            wz_codecs::interest::InterestWire::measure(&*interest).len(),
             crate::frame_encode::interest_body(&interest),
             tx_sn,
             params,
@@ -727,7 +725,7 @@ fn frame_meta(
         any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
-fn declare_frame_meta(declare: &wz_codecs::declare::DeclareOwned) -> FrameMeta {
+fn declare_frame_meta(declare: &crate::transport_profile::owned::DeclareOwned) -> FrameMeta {
     FrameMeta {
         priority: Priority::DEFAULT,
         ext_qos: None,

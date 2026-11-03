@@ -37,8 +37,6 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use sce_forge_runtime::codec::CodecError;
-use wz_codecs::linkstate_list::LinkstateListOwned;
-use wz_codecs::oam::OamOwned;
 use wz_codecs::whatami::WhatAmIMatcher;
 use wz_routing_graph::{
     AutoConnect, AutoConnectStrategies, LinkId, LinkstateNetwork, WhatAmI, Zid,
@@ -51,6 +49,7 @@ use wz_session_core::linkstate_oam::{
 };
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::session_actions::SessionLinkActions;
+use wz_session_core::transport_profile::owned::{LinkstateListOwned, OamOwned};
 
 use crate::accept_loop::{DialIntent, DialIntentOrigin, DialIntentSender};
 use crate::zenoh_config::ZenohNodeConfig;

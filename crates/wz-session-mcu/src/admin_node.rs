@@ -291,9 +291,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec;
 
-    use wz_codecs::push::{Push, PushVariant};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{Push, PushVariant, Wireexpr, WireexprNonlocal, WireexprVariant};
     use wz_runtime_coop::session_runtime::new_session_actions;
     use wz_runtime_coop::CoopRuntime;
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -365,7 +363,8 @@ mod tests {
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(
-                push.try_into_owned().unwrap(),
+                push.try_into_owned_in::<wz_session_core::wire::WireStorage>()
+                    .unwrap(),
             ))],
             has_ext: false,
             extensions: Vec::new(),

@@ -26,10 +26,10 @@
 #[cfg(any(feature = "routing-router-hat", test))]
 use hashbrown::HashMap;
 
-use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 
 /// Resolve the GOVERNED keyexpr a §5.16 ACL enforcer gates for `msg`, alias-aware

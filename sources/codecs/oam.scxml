@@ -27,10 +27,12 @@
                               subset of u64-VLE so the wider type
                               is wire-compatible for any value the
                               encoder will produce).
-       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain,
-                              max-depth=4 covers upstream's 2 ext
-                              slots (qos + timestamp) with safety
-                              margin; entry-flag-Z termination).
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain with
+                              no depth bound: upstream reads it until
+                              Z clears, past its 2 ext slots (qos +
+                              timestamp), and what a node stores is
+                              its deployment's capacity; entry-flag-Z
+                              termination).
        inner    : body       — variant dispatch on `header.enc`;
                               arm body codec is ext_unit/zint/zbuf.
 
@@ -60,7 +62,6 @@
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
     <sce:variant tag="header.enc">

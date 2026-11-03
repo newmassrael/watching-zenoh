@@ -1757,19 +1757,19 @@ pub(crate) mod tests_support {
         encoding_id: u16,
         payload: &[u8],
     ) -> Vec<u8> {
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                 // The `E` bit, which the codec's own `Default` does not set
                 // because a bare Put carries no encoding. NAMED rather than
                 // spelled: this fixture's first draft wrote `0x02` -- the wrong
                 // one of the three PUT flags -- and the record stopped decoding
                 // rather than merely losing its encoding (R311y617 added
                 // `FLAG_Z_PUT_E` on the strength of exactly that).
-                header: wz_codecs::msg_put::MsgPut::default().header
+                header: wz_codecs::lent::MsgPut::default().header
                     | wz_codecs::wire_const::FLAG_Z_PUT_E,
-                encoding: Some(wz_codecs::encoding::Encoding {
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: (encoding_id as u32) << 1,
                     schema_len: None,
                     schema: None,
@@ -1805,19 +1805,19 @@ pub(crate) mod tests_support {
     ) -> Vec<u8> {
         let (header, encoding) = match encoding {
             Some((id, schema)) => (
-                wz_codecs::msg_put::MsgPut::default().header | wz_codecs::wire_const::FLAG_Z_PUT_E,
-                Some(wz_codecs::encoding::Encoding {
+                wz_codecs::lent::MsgPut::default().header | wz_codecs::wire_const::FLAG_Z_PUT_E,
+                Some(wz_codecs::lent::Encoding {
                     packed_id: (u32::from(id) << 1) | u32::from(schema.is_some()),
                     schema_len: schema.map(|s| s.len() as u64),
                     schema: schema.map(|s| wz_codecs::Bounded::new(s).unwrap()),
                 }),
             ),
-            None => (wz_codecs::msg_put::MsgPut::default().header, None),
+            None => (wz_codecs::lent::MsgPut::default().header, None),
         };
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                 header,
                 encoding,
                 payload_len: Some(payload.len() as u64),
@@ -1846,14 +1846,14 @@ pub(crate) mod tests_support {
         encoding_id: u16,
         parts: &[&[u8]],
     ) -> Vec<u8> {
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header
                     | wz_codecs::wire_const::FLAG_Z_PUT_E
                     | wz_codecs::wire_const::FLAG_Z_PUT_Z,
-                encoding: Some(wz_codecs::encoding::Encoding {
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: u32::from(encoding_id) << 1,
                     schema_len: None,
                     schema: None,
@@ -1865,7 +1865,7 @@ pub(crate) mod tests_support {
                     slices: wz_codecs::Bounded::new(
                         parts
                             .iter()
-                            .map(|bytes| wz_codecs::zbuf_slice::ZbufSlice {
+                            .map(|bytes| wz_codecs::lent::ZbufSlice {
                                 kind: u32::from(wz_session_core::put_payload::SLICE_KIND_RAW),
                                 len: bytes.len() as u64,
                                 bytes: wz_codecs::Bounded::new(*bytes).unwrap(),
@@ -1906,12 +1906,12 @@ pub(crate) mod tests_support {
         encoding_id: u16,
         payload: &[u8],
     ) -> Vec<u8> {
-        wz_codecs::push::Push {
+        wz_codecs::lent::Push {
             keyexpr: fx::sender_space(alias_id, None),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header
                     | wz_codecs::wire_const::FLAG_Z_PUT_E,
-                encoding: Some(wz_codecs::encoding::Encoding {
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: (encoding_id as u32) << 1,
                     schema_len: None,
                     schema: None,
@@ -1940,14 +1940,14 @@ pub(crate) mod tests_support {
         encoding_id: u16,
         payload: &[u8],
     ) -> Vec<u8> {
-        wz_codecs::response::Response {
-            header: wz_codecs::response::Response::default().header
-                | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Response {
+            header: wz_codecs::lent::Response::default().header | wz_codecs::wire_const::FLAG_N_N,
             request_id: 7,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::response::ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
-                header: wz_codecs::err::Err::default().header | wz_codecs::wire_const::FLAG_Z_ERR_E,
-                encoding: Some(wz_codecs::encoding::Encoding {
+            body: wz_codecs::lent::ResponseVariant::CodecZenohErr(wz_codecs::lent::Err {
+                header: wz_codecs::lent::Err::default().header
+                    | wz_codecs::wire_const::FLAG_Z_ERR_E,
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: (encoding_id as u32) << 1,
                     schema_len: None,
                     schema: None,
@@ -1977,14 +1977,14 @@ pub(crate) mod tests_support {
         // the wire: one slice of kind SHM_PTR whose bytes are the descriptor, and
         // no inline pair. The arm holds the marker by its place, the chain's
         // whole content here.
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header
                     | wz_codecs::wire_const::FLAG_Z_PUT_E
                     | wz_codecs::wire_const::FLAG_Z_PUT_Z,
-                encoding: Some(wz_codecs::encoding::Encoding {
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: (encoding_id as u32) << 1,
                     schema_len: None,
                     schema: None,
@@ -1993,7 +1993,7 @@ pub(crate) mod tests_support {
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 {
                     extensions: Default::default(),
                     slices: wz_codecs::Bounded::new(
-                        core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
+                        core::iter::once(wz_codecs::lent::ZbufSlice {
                             kind: u32::from(wz_session_core::put_payload::SLICE_KIND_SHM_PTR),
                             len: descriptor.len() as u64,
                             bytes: wz_codecs::Bounded::new(descriptor).unwrap(),
@@ -2029,26 +2029,23 @@ pub(crate) mod tests_support {
         encoding_id: u16,
         payload: &[u8],
     ) -> Vec<u8> {
-        let foreign = wz_codecs::ext_entry::ExtEntry {
+        let foreign = wz_codecs::lent::ExtEntry {
             header: wz_session_core::ext_header::body_ext_id::SHM
                 | wz_session_core::ext_header::EXT_ENC_ZBUF,
-            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
-                wz_codecs::ext_zbuf::ExtZbuf {
-                    value_len: 1,
-                    value: wz_codecs::Bounded::new(&[0xABu8] as &[u8]).unwrap(),
-                },
-            ),
+            body: wz_codecs::lent::ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
+                value_len: 1,
+                value: wz_codecs::Bounded::new(&[0xABu8] as &[u8]).unwrap(),
+            }),
         };
-        wz_codecs::response::Response {
-            header: wz_codecs::response::Response::default().header
-                | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Response {
+            header: wz_codecs::lent::Response::default().header | wz_codecs::wire_const::FLAG_N_N,
             request_id: 7,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::response::ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
-                header: wz_codecs::err::Err::default().header
+            body: wz_codecs::lent::ResponseVariant::CodecZenohErr(wz_codecs::lent::Err {
+                header: wz_codecs::lent::Err::default().header
                     | wz_codecs::wire_const::FLAG_Z_ERR_E
                     | wz_codecs::wire_const::FLAG_Z_ERR_Z,
-                encoding: Some(wz_codecs::encoding::Encoding {
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: (encoding_id as u32) << 1,
                     schema_len: None,
                     schema: None,
@@ -4351,15 +4348,16 @@ mod census_tests {
     /// and none of them moves.
     #[test]
     fn the_payload_plane_holds_every_row_but_a_requests_and_counts_only_payloads() {
-        let del = wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
-            keyexpr: fx::sender_space(0, Some("t/del")),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgDel(
-                wz_codecs::msg_del::MsgDel::default(),
-            ),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let del =
+            wz_codecs::lent::Push {
+                header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+                keyexpr: fx::sender_space(0, Some("t/del")),
+                body: wz_codecs::lent::PushVariant::CodecZenohMsgDel(
+                    wz_codecs::lent::MsgDel::default(),
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec();
         let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = alloc::vec![
             (true, Some(1), push_declaring("t/put", ID_JSON, b"{}")),
             (true, Some(1), del),
@@ -4808,10 +4806,10 @@ mod census_tests {
     }
 
     fn push_no_encoding(keyexpr: &'static str, payload: &[u8]) -> Vec<u8> {
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                 payload_len: Some(payload.len() as u64),
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     extensions: None,
@@ -5000,12 +4998,12 @@ mod census_tests {
     /// UNDECIDED, so the census under that selector is a floor and says so.
     #[test]
     fn an_unresolvable_payload_keyexpr_is_undecided() {
-        let unnamed = wz_codecs::push::Push {
+        let unnamed = wz_codecs::lent::Push {
             keyexpr: fx::sender_space(77, None),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header
                     | wz_codecs::wire_const::FLAG_Z_PUT_E,
-                encoding: Some(wz_codecs::encoding::Encoding {
+                encoding: Some(wz_codecs::lent::Encoding {
                     packed_id: (ID_TEXT as u32) << 1,
                     schema_len: None,
                     schema: None,

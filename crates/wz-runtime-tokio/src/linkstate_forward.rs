@@ -33,7 +33,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use sce_forge_runtime::codec::CodecError;
-use wz_codecs::declare::DeclareOwned;
 use wz_session_core::declare_build::{build_declare_queryable, set_declare_queryable_info};
 use wz_session_core::declare_routing_context::set_declare_source;
 use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
@@ -43,6 +42,7 @@ use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
 use wz_session_core::queryable_info::QueryableInfo;
+use wz_session_core::transport_profile::owned::DeclareOwned;
 use wz_session_core::wire::PushOwned;
 use wz_session_core::wireexpr_resolve::wireexpr_names_a_declaration;
 

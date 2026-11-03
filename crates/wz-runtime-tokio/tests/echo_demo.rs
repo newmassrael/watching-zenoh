@@ -35,11 +35,12 @@
 //!   - Trust-class gating, io_uring path, pool-slot zero-copy
 //!     borrows (all deferred per docs/runtime-crate-tokio.md).
 
-use sce_forge_runtime::codec::{Bounded, SceCursor};
+use sce_forge_runtime::codec::{Bounded, Heap, SceCursor};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
+use wz_codecs::lent::MsgPut;
+use wz_codecs::msg_put::MsgPutExtensionsHas0x12;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame};
 
 const MID_Z_PUT: u8 = 0x01;
@@ -72,7 +73,7 @@ async fn echo_demo_msg_put_round_trip() {
         let mut cursor = SceCursor::new(&frame_bytes);
         let received = MsgPut::decode(&mut cursor)
             .expect("decode")
-            .try_into_owned()
+            .try_into_owned_in::<Heap>()
             .unwrap();
         driver.close().await.expect("subscriber close");
         received

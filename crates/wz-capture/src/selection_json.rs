@@ -632,8 +632,8 @@ pub(crate) mod tests {
     use crate::Dissection;
 
     use alloc::vec::Vec;
+    use wz_codecs::lent::Wireexpr;
     use wz_codecs::wire_const::FLAG_N_N;
-    use wz_codecs::wireexpr::Wireexpr;
 
     const LOW: [u8; 4] = [10, 0, 0, 1];
     const HIGH: [u8; 4] = [10, 0, 0, 2];
@@ -658,11 +658,11 @@ pub(crate) mod tests {
     /// A `Push` carrying a `MsgDel` under `keyexpr`.
     fn push_del(keyexpr: Wireexpr<'static>) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | n,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | n,
             keyexpr,
-            body: wz_codecs::push::PushVariant::CodecZenohMsgDel(
-                wz_codecs::msg_del::MsgDel::default(),
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgDel(
+                wz_codecs::lent::MsgDel::default(),
             ),
             ..Default::default()
         }
@@ -672,13 +672,13 @@ pub(crate) mod tests {
     /// A `Response` whose `Reply` carries a `MsgDel` rather than a put.
     fn response_reply_del(request_id: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
-        wz_codecs::response::Response {
-            header: wz_codecs::response::Response::default().header | n,
+        wz_codecs::lent::Response {
+            header: wz_codecs::lent::Response::default().header | n,
             request_id,
             keyexpr,
-            body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
-                body: wz_codecs::reply::ReplyVariant::CodecZenohMsgDel(
-                    wz_codecs::msg_del::MsgDel::default(),
+            body: wz_codecs::lent::ResponseVariant::CodecZenohReply(wz_codecs::lent::Reply {
+                body: wz_codecs::lent::ReplyVariant::CodecZenohMsgDel(
+                    wz_codecs::lent::MsgDel::default(),
                 ),
                 ..Default::default()
             }),
@@ -1314,17 +1314,16 @@ pub(crate) mod tests {
     /// decodes, so the dissection classifies it by its body.
     fn request_del(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
-        wz_codecs::request::Request {
-            header: wz_codecs::request::Request::default().header | n,
+        wz_codecs::lent::Request {
+            header: wz_codecs::lent::Request::default().header | n,
             rid,
             keyexpr,
-            body: wz_codecs::request::RequestVariant::CodecZenohMsgDel(
-                wz_codecs::msg_del::MsgDel::default(),
+            body: wz_codecs::lent::RequestVariant::CodecZenohMsgDel(
+                wz_codecs::lent::MsgDel::default(),
             ),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Request is encodable")
     }
 
     /// What a generated packet is to the exchange plane.

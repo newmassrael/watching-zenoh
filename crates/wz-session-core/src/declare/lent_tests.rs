@@ -23,10 +23,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use sce_forge_runtime::codec::SceCursor;
 use std::sync::{Arc, Mutex};
 
+use crate::transport_profile::owned::DeclareOwned;
 use hashbrown::HashMap;
-use wz_codecs::declare::DeclareOwned;
 
 use crate::decl_sink::DeclView;
 use crate::declare_build::{
@@ -72,7 +73,12 @@ fn both_declare(
     owned(IterationEvent::Poll(&frame(vec![NetworkMessage::Declare(
         Box::new(declare.clone()),
     )])));
-    let view = declare.try_as_borrowed().expect("a borrowed view");
+    // The record the in-place walk lends, read where the frame lies.
+    let wire = declare
+        .try_as_borrowed()
+        .expect("a borrowed view")
+        .encode_to_vec();
+    let view = wz_codecs::lent::Declare::decode(&mut SceCursor::new(&wire)).expect("it decodes");
     lent(IterationEvent::InPlace(InPlaceRecord::declare_of_frame(
         &view,
         true,
@@ -372,7 +378,12 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
             &table,
             &mut owned_pending,
         );
-        let view = interest.try_as_borrowed().expect("a borrowed view");
+        let wire = interest
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec();
+        let view =
+            wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
         let lent_refused = registry.dispatch_iteration_event(
             IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
                 &view,
@@ -395,7 +406,11 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
     let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
         BoundedVec::new();
     let first = build_interest_liveliness_get(5, 0, Some("live/**")).expect("build");
-    let view = first.try_as_borrowed().expect("a borrowed view");
+    let wire = first
+        .try_as_borrowed()
+        .expect("a borrowed view")
+        .encode_to_vec();
+    let view = wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
     registry.dispatch_iteration_event(
         IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
             &view,
@@ -448,7 +463,12 @@ fn a_lent_response_final_ends_the_pending_get_as_the_owned_one_does() {
             IterationEvent::Poll(&frame(vec![NetworkMessage::ResponseFinal(done.clone())])),
             &table,
         );
-        let view = done.try_as_borrowed().expect("a borrowed view");
+        let wire = done
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec();
+        let view =
+            wz_codecs::lent::ResponseFinal::decode(&mut SceCursor::new(&wire)).expect("it decodes");
         lent.dispatch_iteration_event(
             IterationEvent::InPlace(InPlaceRecord::response_final_of_frame(
                 &view,
@@ -513,7 +533,11 @@ fn a_lent_alias_and_a_lent_subscriber_interest_are_kept_as_the_owned_ones_are() 
     owned.dispatch_iteration_event(IterationEvent::Poll(&frame(vec![
         NetworkMessage::Interest(interest.clone()),
     ])));
-    let view = interest.try_as_borrowed().expect("a borrowed view");
+    let wire = interest
+        .try_as_borrowed()
+        .expect("a borrowed view")
+        .encode_to_vec();
+    let view = wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
     lent.dispatch_iteration_event(IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
         &view,
         true,
@@ -534,7 +558,11 @@ fn a_lent_alias_and_a_lent_subscriber_interest_are_kept_as_the_owned_ones_are() 
     owned.dispatch_iteration_event(IterationEvent::Poll(&frame(vec![
         NetworkMessage::Interest(done.clone()),
     ])));
-    let view = done.try_as_borrowed().expect("a borrowed view");
+    let wire = done
+        .try_as_borrowed()
+        .expect("a borrowed view")
+        .encode_to_vec();
+    let view = wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
     lent.dispatch_iteration_event(IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
         &view,
         true,

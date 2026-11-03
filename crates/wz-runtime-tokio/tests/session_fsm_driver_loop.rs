@@ -385,7 +385,7 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
 #[cfg(feature = "codec-push")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
-    use wz_codecs::push::Push;
+    use wz_codecs::lent::Push;
 
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
@@ -950,7 +950,7 @@ async fn a_batched_unit_delivers_every_message_it_carried() {
 #[cfg(feature = "codec-push")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
-    use wz_codecs::push::Push;
+    use wz_codecs::lent::Push;
 
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
@@ -1008,7 +1008,7 @@ async fn a_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
 #[cfg(feature = "codec-push")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
-    use wz_codecs::push::Push;
+    use wz_codecs::lent::Push;
     use wz_session_core::drive::{dispatch_datagram, dispatch_pending, DatagramPath};
     use wz_session_core::driver_loop::IterationEvent;
     use wz_session_core::network_message::new_record_buf;

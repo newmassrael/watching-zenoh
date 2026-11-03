@@ -423,9 +423,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use wz_codecs::push::{Push, PushVariant};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{Push, PushVariant, Wireexpr, WireexprNonlocal, WireexprVariant};
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::network_message::NetworkMessage;
 
@@ -450,7 +448,10 @@ mod tests {
                 payload: wz_codecs::Bounded::new(payload).unwrap(),
             };
         }
-        NetworkMessage::Push(Box::new(push.try_into_owned().unwrap()))
+        NetworkMessage::Push(Box::new(
+            push.try_into_owned_in::<wz_session_core::wire::WireStorage>()
+                .unwrap(),
+        ))
     }
 
     fn deliver(observer: &mut ApplicationLayerObserver, message: NetworkMessage) {

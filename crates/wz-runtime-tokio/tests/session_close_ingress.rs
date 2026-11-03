@@ -39,9 +39,8 @@ use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
 use std::cell::RefCell;
-use wz_codecs::push::{Push, PushOwnedVariant};
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_codecs::lent::{Push, Wireexpr, WireexprLocal, WireexprVariant};
+use wz_codecs::push::PushOwnedVariant;
 use wz_runtime_core::Runtime;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioRuntime;

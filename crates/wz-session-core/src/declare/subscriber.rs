@@ -30,13 +30,13 @@ use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
 use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use wz_codecs::declare::DeclareOwnedVariant;
+use crate::transport_profile::owned::DeclareOwnedVariant;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
     feature = "session-slot"
 ))]
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::lent::DeclareVariant;
 
 // The shared [`DeclObserverPair`] holds the bounded observer lists +
 // install/fire SSOT; `DeclSink` / `UndeclSink` (bounds) + `DeclView`
@@ -1264,8 +1264,8 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use crate::transport_profile::owned::DeclareOwnedVariant;
     use hashbrown::HashMap;
-    use wz_codecs::declare::DeclareOwnedVariant;
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;
@@ -1692,8 +1692,8 @@ mod tests {
         // UndeclKexpr) or the future RemoteQueryableRegistry path
         // (DeclQueryable).
         let body = DeclareOwnedVariant::CodecZenohDeclFinal(
-            wz_codecs::decl_final::DeclFinal::default()
-                .try_into_owned()
+            wz_codecs::lent::DeclFinal::default()
+                .try_into_owned_in::<crate::transport_profile::TransportStorage>()
                 .expect("DeclFinal::default owns no borrowed data"),
         );
         reg.dispatch_declare(&body, &HashMap::new());

@@ -17,7 +17,7 @@
 //! That state is the next Layer 3 extension; for R104 first contact
 //! we pin the is_final byte-equivalence.
 
-use wz_codecs::interest::Interest;
+use wz_codecs::lent::Interest;
 use zenoh_pico_sys::{
     _z_n_interest_encode, _z_n_msg_interest_t, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf,
     _z_zbuf_clear,

@@ -24,13 +24,11 @@ use sce_forge_runtime::codec::CodecError;
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-#[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::msg_put::{MsgPut, MsgPutExtensionsHas0x12};
-use wz_codecs::push::{Push, PushVariant};
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+#[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
+use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
+use wz_codecs::lent::{MsgPut, Push, PushVariant, Wireexpr, WireexprLocal, WireexprVariant};
+use wz_codecs::msg_put::MsgPutExtensionsHas0x12;
 
 /// The `N` flag of the Push header: a keyexpr suffix rides inline.
 const FLAG_PUSH_N: u8 = 0x20;
@@ -92,10 +90,10 @@ pub fn literal_del(keyexpr_suffix: &str) -> Result<Push<'_>, CodecError> {
             }),
         },
         extensions: None,
-        body: PushVariant::CodecZenohMsgDel(wz_codecs::msg_del::MsgDel {
+        body: PushVariant::CodecZenohMsgDel(wz_codecs::lent::MsgDel {
             // The Del's MID, with no timestamp and no extension.
             header: 0x02,
-            ..wz_codecs::msg_del::MsgDel::default()
+            ..wz_codecs::lent::MsgDel::default()
         }),
     })
 }
@@ -105,7 +103,7 @@ pub fn literal_del(keyexpr_suffix: &str) -> Result<Push<'_>, CodecError> {
 #[cfg(not(feature = "alloc"))]
 #[inline(never)]
 pub fn literal_del_len(keyexpr_suffix: &str) -> usize {
-    literal_del(keyexpr_suffix).map_or(0, |push| Push::measure(&push).len())
+    literal_del(keyexpr_suffix).map_or(0, |push| wz_codecs::push::PushWire::measure(&push).len())
 }
 
 /// The bytes [`literal_put`] encodes to for the same arguments: what a sender asks a link to
@@ -118,7 +116,8 @@ pub fn literal_del_len(keyexpr_suffix: &str) -> usize {
 #[cfg(feature = "tx-lend-only")]
 #[inline(never)]
 pub fn literal_put_len(keyexpr_suffix: &str, value: &[u8]) -> usize {
-    literal_put(keyexpr_suffix, value).map_or(0, |push| Push::measure(&push).len())
+    literal_put(keyexpr_suffix, value)
+        .map_or(0, |push| wz_codecs::push::PushWire::measure(&push).len())
 }
 
 /// [`literal_put`] carrying `qos` on the Push's outer extension chain, exactly where

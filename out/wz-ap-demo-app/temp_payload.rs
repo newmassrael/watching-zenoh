@@ -76,7 +76,7 @@ impl TempPayload {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        TempPayload::encode_source(self, w)
+        TempPayloadWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -101,8 +101,8 @@ impl TempPayload {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `TempPayload` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `TempPayload`
-/// computes those from what is ([`TempPayload::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`TempPayloadWire::encode_source`]).
 pub trait TempPayloadSource {
     /// The `celsius_centi` field.
     fn celsius_centi(&self) -> u16;
@@ -136,10 +136,17 @@ impl TempPayloadSource for TempPayload {
     }
 }
 
+/// The codec `TempPayload` itself: what writes a value read through
+/// [`TempPayloadSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TempPayloadWire;
+
 #[allow(dead_code)]
-impl TempPayload {
+impl TempPayloadWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `TempPayload::encode` writes for the value it holds, read through
     /// [`TempPayloadSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -165,7 +172,7 @@ impl TempPayload {
     }
 }
 
-impl<S: TempPayloadSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for TempPayload {
+impl<S: TempPayloadSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for TempPayloadWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -174,7 +181,7 @@ impl<S: TempPayloadSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> f
 }
 
 #[allow(dead_code)]
-impl TempPayload {
+impl TempPayloadWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size

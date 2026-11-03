@@ -32,11 +32,13 @@
                               UTF-8 schema bytes max=255. Same
                               codec consumed by msg_put L88).
        Z-gated:
-         chain  : codec_zenoh_ext_entry tlv-chain (max-depth=4
-                              covers upstream's single
-                              source_info slot — `_Z_MSG_EXT_ENC_
-                              ZBUF | 0x01` per L566 — with safety
-                              margin; entry-flag-Z termination per
+         chain  : codec_zenoh_ext_entry tlv-chain (no depth bound:
+                              upstream reads it until Z clears, past
+                              its single source_info slot —
+                              `_Z_MSG_EXT_ENC_ZBUF | 0x01` per L566 —
+                              and what a node stores is its
+                              deployment's capacity; entry-flag-Z
+                              termination per
                               Y3 atomic 1 grammar; chain is followed
                               by the always-present payload pair so
                               exhaust-or-depth termination wouldn't
@@ -75,7 +77,6 @@
     <sce:embed id="encoding" type="codec_zenoh_encoding" sce:byte="1"
                sce:present-if="header.E"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
     <sce:field id="payload_len" sce:type="uint64" sce:byte="3" sce:bit-size="vle"/>

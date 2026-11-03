@@ -520,7 +520,9 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
     if body.s.is_some() {
         flags |= wire_const::FLAG_T_INIT_S;
     }
-    let mut wire = Vec::with_capacity(1 + InitBody::measure(&body).len() + chain.len());
+    let mut wire = Vec::with_capacity(
+        1 + wz_codecs::init_body::InitBodyWire::measure(&body).len() + chain.len(),
+    );
     wire.push(flags | wire_const::T_MID_INIT);
     {
         let mut sink = VecSink::new(&mut wire);
@@ -567,7 +569,9 @@ pub fn compose_open(spec: &OpenSpec<'_>) -> Result<Vec<u8>, ComposeError> {
         cookie_len: cookie.map(|c| c.len() as u64),
         cookie: cookie.map(held_cookie).transpose()?,
     };
-    let mut wire = Vec::with_capacity(1 + OpenBody::measure(&body).len() + chain.len());
+    let mut wire = Vec::with_capacity(
+        1 + wz_codecs::open_body::OpenBodyWire::measure(&body).len() + chain.len(),
+    );
     wire.push(flags | wire_const::T_MID_OPEN);
     {
         let mut sink = VecSink::new(&mut wire);

@@ -37,22 +37,27 @@
 //! inert framing fields (`header`/`interest_id`/`extensions`)
 //! explicitly; the registries dispatch on `body` and never inspect them.
 
-use wz_codecs::decl_final::DeclFinal;
-use wz_codecs::decl_kexpr::{DeclKexpr, DeclKexprOwned};
-use wz_codecs::decl_queryable::{DeclQueryable, DeclQueryableOwned};
-use wz_codecs::decl_subscriber::{DeclSubscriber, DeclSubscriberOwned};
-use wz_codecs::decl_token::{DeclToken, DeclTokenOwned};
-use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::interest::{Interest, InterestHeaderCOrF, InterestOwned};
-use wz_codecs::interest_body::InterestBody;
-use wz_codecs::undecl_kexpr::{UndeclKexpr, UndeclKexprOwned};
-use wz_codecs::undecl_queryable::{UndeclQueryable, UndeclQueryableOwned};
-use wz_codecs::undecl_subscriber::{UndeclSubscriber, UndeclSubscriberOwned};
-use wz_codecs::undecl_token::{UndeclToken, UndeclTokenOwned};
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
-use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
-use wz_codecs::Bounded;
+use wz_codecs::declare::DeclareOwnedVariant;
+use wz_codecs::interest::InterestHeaderCOrF;
+use wz_codecs::lent::{
+    DeclFinal, DeclKexpr, DeclQueryable, DeclSubscriber, DeclToken, Interest, InterestBody,
+    UndeclKexpr, UndeclQueryable, UndeclSubscriber, UndeclToken, Wireexpr, WireexprLocal,
+    WireexprNonlocal, WireexprVariant,
+};
+use wz_codecs::{Bounded, Heap};
+
+// The fixtures are owned on the heap, the profile the registries under test
+// hold a decoded message in on every build that compiles them.
+type DeclKexprOwned = wz_codecs::decl_kexpr::DeclKexprOwned<Heap>;
+type DeclQueryableOwned = wz_codecs::decl_queryable::DeclQueryableOwned<Heap>;
+type DeclSubscriberOwned = wz_codecs::decl_subscriber::DeclSubscriberOwned<Heap>;
+type DeclTokenOwned = wz_codecs::decl_token::DeclTokenOwned<Heap>;
+type DeclareOwned = wz_codecs::declare::DeclareOwned<Heap>;
+type InterestOwned = wz_codecs::interest::InterestOwned<Heap>;
+type UndeclKexprOwned = wz_codecs::undecl_kexpr::UndeclKexprOwned<Heap>;
+type UndeclQueryableOwned = wz_codecs::undecl_queryable::UndeclQueryableOwned<Heap>;
+type UndeclSubscriberOwned = wz_codecs::undecl_subscriber::UndeclSubscriberOwned<Heap>;
+type UndeclTokenOwned = wz_codecs::undecl_token::UndeclTokenOwned<Heap>;
 
 /// `suffix` as a wire expression's suffix field, which the protocol bounds at a
 /// `u16` length. A fixture's key expression is far shorter.
@@ -73,7 +78,7 @@ pub fn decl_kexpr(id: u64, keyexpr: &str) -> DeclKexprOwned {
         keyexpr: keyexpr_wire,
         ..DeclKexpr::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .unwrap()
 }
 
@@ -91,7 +96,7 @@ pub fn decl_subscriber(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclSu
         keyexpr,
         ..DeclSubscriber::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .unwrap()
 }
 
@@ -134,7 +139,7 @@ pub fn interest_subscriber(
         (true, true) => Some(InterestHeaderCOrF::CF { body }),
         (false, false) => None,
     };
-    interest.try_into_owned().unwrap()
+    interest.try_into_owned_in::<Heap>().unwrap()
 }
 
 pub fn decl_subscriber_nonlocal(
@@ -155,7 +160,7 @@ pub fn decl_subscriber_nonlocal(
         keyexpr,
         ..DeclSubscriber::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .unwrap()
 }
 
@@ -164,7 +169,7 @@ pub fn undecl_kexpr(id: u64) -> UndeclKexprOwned {
         id,
         ..UndeclKexpr::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .expect("undecl_kexpr owns no borrowed data")
 }
 
@@ -173,7 +178,7 @@ pub fn undecl_subscriber(id: u64) -> UndeclSubscriberOwned {
         id,
         ..UndeclSubscriber::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .expect("undecl_subscriber owns no borrowed data")
 }
 
@@ -191,7 +196,7 @@ pub fn decl_queryable(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclQue
         keyexpr,
         ..DeclQueryable::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .unwrap()
 }
 
@@ -219,7 +224,7 @@ pub fn decl_queryable_nonlocal(
         keyexpr,
         ..DeclQueryable::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .unwrap()
 }
 
@@ -228,7 +233,7 @@ pub fn undecl_queryable(id: u64) -> UndeclQueryableOwned {
         id,
         ..UndeclQueryable::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .expect("undecl_queryable owns no borrowed data")
 }
 
@@ -246,7 +251,7 @@ pub fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOw
         keyexpr,
         ..DeclToken::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .unwrap()
 }
 
@@ -268,7 +273,7 @@ pub fn decl_token_nonlocal(id: u64, mapping_id: u64, suffix: Option<&str>) -> De
         keyexpr,
         ..DeclToken::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .unwrap()
 }
 
@@ -277,7 +282,7 @@ pub fn undecl_token(id: u64) -> UndeclTokenOwned {
         id,
         ..UndeclToken::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<Heap>()
     .expect("undecl_token owns no borrowed data")
 }
 
@@ -380,7 +385,7 @@ pub fn declare_envelope_decl_final_with_interest(interest_id: u64) -> DeclareOwn
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohDeclFinal(
             DeclFinal::default()
-                .try_into_owned()
+                .try_into_owned_in::<Heap>()
                 .expect("DeclFinal::default owns no borrowed data"),
         ),
     }

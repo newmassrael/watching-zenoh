@@ -2286,10 +2286,11 @@ mod tests {
 
     /// An inbound `DeclToken` for `ke`, as a peer's liveliness token arrives.
     /// R2816 hoisted it from the two tests that each carried a nested copy.
-    fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
-        use wz_codecs::decl_token::DeclToken;
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_local::WireexprLocal;
+    fn make_decl_token(
+        id: u64,
+        ke: &str,
+    ) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+        use wz_codecs::lent::{DeclToken, Wireexpr, WireexprLocal, WireexprVariant};
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -2297,12 +2298,12 @@ mod tests {
                 suffix: Some(wz_codecs::Bounded::new(ke).unwrap()),
             }),
         };
-        wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
+        wz_codecs::lent::DeclareVariant::CodecZenohDeclToken(DeclToken {
             id,
             keyexpr,
             ..DeclToken::default()
         })
-        .try_into_owned()
+        .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
         .unwrap()
     }
 
@@ -3767,13 +3768,15 @@ mod tests {
         // Replicas of the session-test liveliness injection helpers (session/
         // tests.rs:5874): build an inbound Decl/Undecl token wire frame whose
         // inline-literal keyexpr resolves with no peer table.
-        fn make_undecl_token(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
-            use wz_codecs::undecl_token::UndeclToken;
-            wz_codecs::declare::DeclareVariant::CodecZenohUndeclToken(UndeclToken {
+        fn make_undecl_token(
+            id: u64,
+        ) -> wz_codecs::declare::DeclareOwnedVariant<sce_forge_runtime::codec::Heap> {
+            use wz_codecs::lent::UndeclToken;
+            wz_codecs::lent::DeclareVariant::CodecZenohUndeclToken(UndeclToken {
                 id,
                 ..UndeclToken::default()
             })
-            .try_into_owned()
+            .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
             .unwrap()
         }
 

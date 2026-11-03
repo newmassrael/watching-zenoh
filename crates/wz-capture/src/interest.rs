@@ -884,7 +884,7 @@ impl InterestCensus {
         flow: &FlowKey,
         direction: Direction,
         anchor: usize,
-        interest: &wz_codecs::interest::InterestOwned,
+        interest: &wz_session_core::transport_profile::owned::InterestOwned,
     ) {
         let mode = InterestMode::of(interest.header);
         let dir = dir_index(direction);
@@ -947,7 +947,7 @@ impl InterestCensus {
         flow: &FlowKey,
         direction: Direction,
         anchor: usize,
-        declare: &wz_codecs::declare::DeclareOwned,
+        declare: &wz_session_core::transport_profile::owned::DeclareOwned,
     ) {
         use wz_codecs::declare::DeclareOwnedVariant as V;
         let dir = dir_index(direction);
@@ -2262,13 +2262,13 @@ mod tests {
     /// `zenoh-protocol/src/network/interest.rs:249`).
     #[test]
     fn an_interest_for_keyexpr_aliases_alone_is_not_unanswered() {
-        let interest = wz_codecs::interest::Interest {
+        let interest = wz_codecs::lent::Interest {
             header: wz_session_core::wire_const::N_MID_INTEREST | 0x20,
             interest_id: 8,
             header_c_or_f: wz_session_core::interest_build::interest_body_arm(
                 true,
                 false,
-                wz_codecs::interest_body::InterestBody {
+                wz_codecs::lent::InterestBody {
                     header: 0b0000_0001,
                     keyexpr: None,
                 },
@@ -2437,13 +2437,13 @@ mod tests {
     /// `zenoh-protocol/src/network/interest.rs:143`), which is what an
     /// observer meets.
     fn interest_unrestricted(id: u64) -> Vec<u8> {
-        wz_codecs::interest::Interest {
+        wz_codecs::lent::Interest {
             header: wz_session_core::wire_const::N_MID_INTEREST | 0x20,
             interest_id: id,
             header_c_or_f: wz_session_core::interest_build::interest_body_arm(
                 true,
                 false,
-                wz_codecs::interest_body::InterestBody {
+                wz_codecs::lent::InterestBody {
                     header: 0b0000_0010,
                     keyexpr: None,
                 },

@@ -17,7 +17,7 @@
 //! `wz-runtime-tokio::session_glue` so both runtime profiles share it;
 //! alloc + `codec-response-final` gated.
 
-use wz_codecs::response_final::ResponseFinalOwned;
+use crate::transport_profile::owned::ResponseFinalOwned;
 
 /// R121j-2 — build a `ResponseFinal` network-message that terminates
 /// the multi-Reply sequence for `request_id`. Mirrors zenoh-pico

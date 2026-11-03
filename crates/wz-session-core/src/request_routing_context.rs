@@ -297,7 +297,7 @@ mod tests {
         // this pins that the generated codec round-trips it and preserves the
         // Query body alongside the ext.
         use sce_forge_runtime::codec::SceCursor;
-        use wz_codecs::request::Request;
+        use wz_codecs::lent::Request;
         use wz_codecs_test_support::TestWire;
 
         let mut r = request();

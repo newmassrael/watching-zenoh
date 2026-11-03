@@ -136,6 +136,8 @@ use crate::wireexpr_resolve::resolve_wireexpr_in;
 // R311y739 — the two-space PAIR is `alloc`-only: the `dispatch_messages` /
 // `dispatch_iteration_event` signatures name it under that gate alone, while
 // only the `Response` arm inside them resolves and so carries `codec-response`.
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
+use crate::transport_profile::owned::ResponseFinalOwned;
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::{ResponseOwned, ResponseOwnedVariant};
 #[cfg(feature = "storage-profile")]
@@ -150,8 +152,6 @@ use crate::wireexpr_resolve::MappingSpaces;
     )
 ))]
 use wz_codecs::reply::ReplyOwnedVariant;
-#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-use wz_codecs::response_final::ResponseFinalOwned;
 
 // R307 — `query-queryable` gates the producer-side `QueryReply` enum
 // because it lives in `crate::query`, which is gated on the same
@@ -1978,16 +1978,10 @@ mod tests {
     use std::sync::Mutex;
     // Fixtures build the borrowed codec views then `.into_owned()` at
     // the dispatch boundary (which now takes the `*Owned` mirrors).
-    use wz_codecs::encoding::Encoding;
-    use wz_codecs::err::Err as ErrBody;
-    use wz_codecs::msg_del::MsgDel;
-    use wz_codecs::msg_put::MsgPut;
-    use wz_codecs::reply::{Reply, ReplyVariant};
-    use wz_codecs::response::{Response, ResponseVariant};
-    use wz_codecs::response_final::ResponseFinal;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{
+        Encoding, Err as ErrBody, MsgDel, MsgPut, Reply, ReplyVariant, Response, ResponseFinal,
+        ResponseVariant, Wireexpr, WireexprLocal, WireexprNonlocal, WireexprVariant,
+    };
 
     /// A fixture's borrowed field at the bounds of the field it fills.
     fn bounded<L: sce_forge_runtime::codec::Entries, const MAX: usize, const MIN: usize>(
@@ -2099,7 +2093,7 @@ mod tests {
             request_id: rid,
             ..ResponseFinal::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::transport_profile::TransportStorage>()
         .unwrap()
     }
 
@@ -2428,14 +2422,13 @@ mod tests {
         // The QoS extension is put on by hand: what an acknowledgement is owed at is
         // read from the wire whether or not any feature projects it.
         if let Some(raw) = qos {
-            let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+            let mut ext = wz_codecs::lent::ExtEntry::new();
             ext.set_ext_id(0x01); // QOS_EXT_ID
             ext.set_enc(0x01); // ENC_ZINT
-            ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZint(
-                wz_codecs::ext_zint::ExtZint {
+            ext.body =
+                wz_codecs::lent::ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint {
                     value: u64::from(raw),
-                },
-            );
+                });
             response.extensions = Some(crate::held_list::one_entry(
                 ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
             ));
@@ -4823,14 +4816,10 @@ mod decode_isolation_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use hashbrown::HashMap;
     use std::sync::Arc;
-    use wz_codecs::encoding::Encoding;
-    use wz_codecs::err::Err as ErrBody;
-    use wz_codecs::msg_del::MsgDel;
-    use wz_codecs::msg_put::MsgPut;
-    use wz_codecs::reply::{Reply, ReplyVariant};
-    use wz_codecs::response::{Response, ResponseVariant};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{
+        Encoding, Err as ErrBody, MsgDel, MsgPut, Reply, ReplyVariant, Response, ResponseVariant,
+        Wireexpr, WireexprLocal, WireexprVariant,
+    };
 
     /// A Put-bodied `Response(Reply)` for `suffix` (literal local
     /// wireexpr, id=0 → suffix resolves verbatim, no peer table).
@@ -5035,13 +5024,13 @@ mod reply_timestamp_decode_isolation_tests {
     /// which is precisely the foreign-peer shape being guarded.
     fn stamped_put_response(rid: u64, keyexpr: &str) -> crate::wire::ResponseOwned {
         let zid = [0x01u8, 0x02, 0x03, 0x04];
-        let put = wz_codecs::msg_put::MsgPut {
-            timestamp: Some(wz_codecs::timestamp::Timestamp {
+        let put = wz_codecs::lent::MsgPut {
+            timestamp: Some(wz_codecs::lent::Timestamp {
                 time: 0x0102_0304_0506_0708,
                 zid_len: zid.len() as u64,
                 zid: sce_forge_runtime::codec::Bounded::new(&zid[..]).unwrap(),
             }),
-            ..wz_codecs::msg_put::MsgPut::default()
+            ..wz_codecs::lent::MsgPut::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();

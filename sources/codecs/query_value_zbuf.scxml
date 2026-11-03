@@ -71,7 +71,7 @@
     <sce:field id="slice_count" sce:type="uint32" sce:byte="3" sce:bit-size="vle"
                sce:present-if="after_shm"/>
     <sce:repeat id="slices" type="codec_zenoh_zbuf_slice" sce:byte="4"
-                count="slice_count" max-count="4"
+                count="slice_count"
                 sce:present-if="after_shm"/>
   </datamodel>
 </scxml>

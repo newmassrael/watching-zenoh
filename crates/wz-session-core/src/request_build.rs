@@ -341,7 +341,7 @@ pub fn attach_query_value_shm(
         body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
             after_shm: QueryValueZbufAfterShm::AfterShm {
                 encoding: encoding_codec.try_into_owned_in::<crate::wire::WireStorage>()?,
-                slices: crate::put_payload::shm_slices::<crate::wire::WireStorage, _>(
+                slices: crate::put_payload::shm_slices::<crate::wire::WireStorage, _, _>(
                     &descriptor_bytes,
                 )?,
                 value_len: declared,
@@ -355,7 +355,7 @@ pub fn attach_query_value_shm(
         query
             .extensions
             .take()
-            .map(sce_forge_runtime::codec::Bounded::into_inner)
+            .map(|lawful| lawful.into_parts().1.into_inner())
             .unwrap_or_default(),
     );
     let last = chain.len() - 1;
@@ -367,7 +367,7 @@ pub fn attach_query_value_shm(
         };
     }
     query.header |= 0x80; // Q_Z: the chain is present
-    query.extensions = Some(crate::held_list::held(chain)?);
+    query.extensions = Some(crate::held_list::lawful(crate::held_list::held(chain)?)?);
     Ok(())
 }
 
@@ -520,10 +520,12 @@ pub fn relay_query_value_shm(
 fn query_chain(
     entries: Vec<crate::wire::parts::QueryExtEntryOwned>,
 ) -> Result<
-    sce_forge_runtime::codec::Bounded<Vec<crate::wire::parts::QueryExtEntryOwned>, 8, 1>,
+    wz_codecs::query::QueryExtensionsList<crate::wire::WireStorage>,
     crate::put_payload::RelayFault,
 > {
-    crate::held_list::held(entries).map_err(|_| crate::put_payload::RelayFault::Unrepresentable)
+    let unrepresentable = |_| crate::put_payload::RelayFault::Unrepresentable;
+    crate::held_list::lawful(crate::held_list::held(entries).map_err(unrepresentable)?)
+        .map_err(unrepresentable)
 }
 
 /// R121j-2a — fluent builder for `Request(Query)` that composes the
@@ -957,12 +959,12 @@ impl RequestQueryBuilder {
                 // ZBuf arm reads a value differently after a shared-memory
                 // marker). The three entries built above are all plain, so each
                 // becomes the plain shape of the Query's entry.
-                query.extensions = Some(crate::held_list::held(
+                query.extensions = Some(crate::held_list::lawful(crate::held_list::held(
                     query_exts
                         .into_iter()
                         .map(crate::ext_view::query_ext_from_generic)
                         .collect(),
-                )?);
+                )?)?);
             }
         } else {
             unreachable!(

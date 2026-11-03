@@ -11309,8 +11309,7 @@ mod datagram_tests {
         }
     }
 
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::lent::{Wireexpr, WireexprLocal, WireexprVariant};
 
     // R311y621 (§1.1k) — LIFTED here from `agg::tests`, which is gated on
     // `network-codecs`. The plane's behaviour WITHOUT the network codecs needs
@@ -11376,13 +11375,13 @@ mod datagram_tests {
         )
         .as_word();
         const ZID: [u8; 16] = [7u8; 16];
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | n_flag,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | n_flag,
             keyexpr,
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header
                     | wz_codecs::wire_const::FLAG_Z_PUT_T,
-                timestamp: Some(wz_codecs::timestamp::Timestamp {
+                timestamp: Some(wz_codecs::lent::Timestamp {
                     time: word,
                     zid_len: ZID.len() as u64,
                     zid: wz_codecs::Bounded::new(&ZID[..]).unwrap(),
@@ -11409,10 +11408,10 @@ mod datagram_tests {
         } else {
             0
         };
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | n_flag,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | n_flag,
             keyexpr,
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                 payload_len: Some(payload.len() as u64),
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     extensions: None,
@@ -13615,9 +13614,8 @@ mod datagram_tests {
     /// could not name a single data-plane message.
     #[cfg(feature = "network-codecs")]
     pub(crate) fn network_census() -> Vec<(&'static str, Vec<u8>)> {
+        use wz_codecs::lent::{Wireexpr, WireexprLocal, WireexprVariant};
         use wz_codecs::wire_const::FLAG_N_N;
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_local::WireexprLocal;
 
         // Every record is `Codec::default()` — the generated `Default` bakes
         // that codec's own wire MID into the header byte — with only the fields
@@ -13645,7 +13643,7 @@ mod datagram_tests {
         // it (the payload is gated on the extension chain, `msg_put.scxml`), so
         // the two records that hold a Put say it: an inline payload of no bytes,
         // which is what the default used to mean.
-        let empty_put = || wz_codecs::msg_put::MsgPut {
+        let empty_put = || wz_codecs::lent::MsgPut {
             payload_len: Some(0),
             extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,
@@ -13653,41 +13651,40 @@ mod datagram_tests {
             },
             ..Default::default()
         };
-        let push = wz_codecs::push::Push {
+        let push = wz_codecs::lent::Push {
             // N: the keyexpr carries a suffix.
-            header: wz_codecs::push::Push::default().header | FLAG_N_N,
+            header: wz_codecs::lent::Push::default().header | FLAG_N_N,
             keyexpr: literal("census/push"),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(empty_put()),
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(empty_put()),
             ..Default::default()
         }
         .encode_to_vec();
-        let request = wz_codecs::request::Request {
-            header: wz_codecs::request::Request::default().header | FLAG_N_N,
+        let request = wz_codecs::lent::Request {
+            header: wz_codecs::lent::Request::default().header | FLAG_N_N,
             rid: 1,
             keyexpr: literal("census/request"),
             ..Default::default()
         }
-        .encode_to_vec()
-        .expect("a fixture Request is encodable");
-        let response = wz_codecs::response::Response {
-            header: wz_codecs::response::Response::default().header | FLAG_N_N,
+        .encode_to_vec();
+        let response = wz_codecs::lent::Response {
+            header: wz_codecs::lent::Response::default().header | FLAG_N_N,
             request_id: 1,
             keyexpr: literal("census/response"),
-            body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
-                body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(empty_put()),
+            body: wz_codecs::lent::ResponseVariant::CodecZenohReply(wz_codecs::lent::Reply {
+                body: wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(empty_put()),
                 ..Default::default()
             }),
             ..Default::default()
         }
         .encode_to_vec();
-        let response_final = wz_codecs::response_final::ResponseFinal {
+        let response_final = wz_codecs::lent::ResponseFinal {
             request_id: 1,
             ..Default::default()
         }
         .encode_to_vec();
-        let declare = wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+        let declare = wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
                     id: 1,
@@ -13698,13 +13695,13 @@ mod datagram_tests {
             ..Default::default()
         }
         .encode_to_vec();
-        let interest = wz_codecs::interest::Interest {
+        let interest = wz_codecs::lent::Interest {
             interest_id: 1,
             header_c_or_f: None,
             ..Default::default()
         }
         .encode_to_vec();
-        let oam = wz_codecs::oam::Oam::default().encode_to_vec();
+        let oam = wz_codecs::lent::Oam::default().encode_to_vec();
 
         alloc::vec![
             ("Push", push),
@@ -14185,7 +14182,7 @@ mod datagram_tests {
     pub(crate) fn hello_with_locators() -> Vec<u8> {
         use wz_session_core::codec_owned::{owned_bytes, owned_string};
         let zid = [0x55u8, 0x66, 0x77, 0x88];
-        let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {
+        let owned: wz_codecs::hello::HelloOwned<wz_codecs::Heap> = wz_codecs::hello::HelloOwned {
             version: 0x09,
             cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
             zid: owned_bytes(&zid).expect("zid"),
@@ -14209,7 +14206,7 @@ mod datagram_tests {
     }
 
     fn hello_message() -> Vec<u8> {
-        let hello = wz_codecs::hello::Hello {
+        let hello = wz_codecs::lent::Hello {
             version: 0x09,
             cbyte: (3 << 4) | 0x01,
             zid: wz_codecs::Bounded::new(&[0x55u8, 0x66, 0x77, 0x88] as &[u8]).unwrap(),

@@ -28,13 +28,13 @@ use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use sce_forge_runtime::codec::Bounded;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use wz_codecs::linkstate::LinkstateOwned;
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_runtime_core::runtime::Runtime;
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::request_build::RequestQueryBuilder;
+use wz_session_core::transport_profile::owned::LinkstateOwned;
 use wz_session_core::wireexpr_resolve::id_and_suffix;
 
 pub(super) fn zid(b: u8) -> Zid {

@@ -16,8 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::wireexpr::Wireexpr;
-
 use super::wireexpr::WireexprView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -30,6 +28,14 @@ use super::wireexpr::WireexprOwned;
 pub trait InterestBodyStorage: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr::WireexprStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr::WireexprStorage> InterestBodyStorage for S {}
+
+/// What `InterestBodyIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `InterestBody` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait InterestBodyLentStorage: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr::WireexprLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr::WireexprLentStorage> InterestBodyLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside InterestBodyStorage: how it stores each field of that frame.
@@ -250,7 +256,7 @@ impl<S: InterestBodyStorage> InterestBodyIn<S> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 257;
+    pub const MAX_ENCODED_BYTES: usize = 65554;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -258,7 +264,7 @@ impl<S: InterestBodyStorage> InterestBodyIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        InterestBody::encode_source(self, w)
+        InterestBodyWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -342,8 +348,8 @@ impl InterestBodyOverrides {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `InterestBody` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `InterestBody`
-/// computes those from what is ([`InterestBody::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`InterestBodyWire::encode_source`]).
 pub trait InterestBodySource {
     /// The `header` field.
     fn header(&self) -> u8;
@@ -399,10 +405,17 @@ impl<'a> InterestBodySource for InterestBodyView<'a> {
     }
 }
 
+/// The codec `InterestBody` itself: what writes a value read through
+/// [`InterestBodySource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InterestBodyWire;
+
 #[allow(dead_code)]
-impl<'a> InterestBody<'a> {
+impl InterestBodyWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `InterestBody::encode` writes for the value it holds, read through
     /// [`InterestBodySource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -421,7 +434,7 @@ impl<'a> InterestBody<'a> {
     #[doc(hidden)]
     pub fn write_source_in<S: InterestBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &InterestBodyOverrides) -> Result<(), K::Error> {
         let _p_header_r_0: bool = src.keyexpr().is_some();
-        let _n_d_header_n_0: usize = src.keyexpr().map_or(0, |_b| usize::from(Wireexpr::input_n(_b)));
+        let _n_d_header_n_0: usize = src.keyexpr().map_or(0, |_b| usize::from(super::wireexpr::WireexprWire::input_n(_b)));
         let _f_d_header_n: Option<usize> = if src.keyexpr().is_some() { Some(_n_d_header_n_0) } else { None };
         let mut _c_header: u8 = (src.header() & !0x10) | (u8::from(_p_header_r_0) << 4);
         if let Some(_n) = _f_d_header_n {
@@ -447,7 +460,7 @@ impl<'a> InterestBody<'a> {
         }
         w.write_u8(_c_header)?;
         if let Some(_v) = src.keyexpr() {
-            Wireexpr::write_source(_v, w)?;
+            super::wireexpr::WireexprWire::write_source(_v, w)?;
         }
         Ok(())
     }
@@ -462,7 +475,7 @@ impl<'a> InterestBody<'a> {
     }
 }
 
-impl<'a, S: InterestBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for InterestBody<'a> {
+impl<S: InterestBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for InterestBodyWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -471,7 +484,7 @@ impl<'a, S: InterestBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite
 }
 
 #[allow(dead_code)]
-impl<'a> InterestBody<'a> {
+impl InterestBodyWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -567,10 +580,10 @@ impl<'a> InterestBodyView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut InterestBody<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut InterestBodyIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: InterestBodyLentStorage {
         _out.header = self.header;
         match &self.keyexpr {
-            Some(_b) => _b.into_builder(_out.keyexpr.insert(Wireexpr::default()))?,
+            Some(_b) => _b.into_builder(_out.keyexpr.insert(Default::default()))?,
             None => _out.keyexpr = None,
         }
         Ok(())
@@ -578,7 +591,7 @@ impl<'a> InterestBodyView<'a> {
 
     /// Worst-case encoded byte count for this codec, as
     /// [`InterestBody::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 257;
+    pub const MAX_ENCODED_BYTES: usize = 65554;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`InterestBody::encode`] writes for the value [`Self::into_builder`]
@@ -587,7 +600,7 @@ impl<'a> InterestBodyView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        InterestBody::encode_source(self, w)
+        InterestBodyWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -666,8 +679,11 @@ impl<'a> InterestBodyView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `InterestBody<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> InterestBody<'a> {
+impl<'a, D> InterestBodyIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: InterestBodyLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`InterestBodyOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -701,8 +717,8 @@ impl<S: InterestBodyStorage> InterestBodyOwned<S> {
     /// borrowed view (the owned form is read-only), so an owned consumer
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
-    pub fn as_borrowed(&self) -> InterestBody<'_> {
-        let mut _out = InterestBody::default();
+    pub fn as_borrowed(&self) -> InterestBodyIn<::sce_forge_runtime::codec::Lent<'_, S>> {
+        let mut _out = Default::default();
         self.as_borrowed_into(&mut _out);
         _out
     }
@@ -717,7 +733,7 @@ impl<S: InterestBodyStorage> InterestBodyOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn as_borrowed_into<'o>(&'o self, _out: &mut InterestBody<'o>) {
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut InterestBodyIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         _out.header = self.header;
         match &self.keyexpr {
             Some(_v) => _v.as_borrowed_into(_out.keyexpr.insert(Default::default())),
@@ -740,7 +756,7 @@ impl<S: InterestBodyStorage> InterestBodyOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> InterestBody<'a> {
+impl<'a, D> InterestBodyIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: InterestBodyLentStorage {
     /// Project this borrowed view into an owned [`InterestBodyOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

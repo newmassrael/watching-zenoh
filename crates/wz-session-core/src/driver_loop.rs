@@ -709,33 +709,33 @@ enum LentRecord<'a, 'f> {
         core::marker::PhantomData<(&'a (), &'f ())>,
     ),
     #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
-    Push(&'a wz_codecs::push::Push<'f>),
+    Push(&'a wz_codecs::lent::Push<'f>),
     #[cfg(feature = "codec-request")]
     Request(&'a wz_codecs::request::RequestView<'f>),
     #[cfg(all(
         feature = "codec-response",
         any(feature = "alloc", feature = "rx-response")
     ))]
-    Response(&'a wz_codecs::response::Response<'f>),
+    Response(&'a wz_codecs::lent::Response<'f>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-declare",
         feature = "rx-control"
     ))]
-    Declare(&'a wz_codecs::declare::Declare<'f>),
+    Declare(&'a wz_codecs::lent::Declare<'f>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-frame",
         feature = "codec-response-final",
         feature = "rx-response"
     ))]
-    ResponseFinal(&'a wz_codecs::response_final::ResponseFinal<'f>),
+    ResponseFinal(&'a wz_codecs::lent::ResponseFinal<'f>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-frame",
         feature = "rx-control"
     ))]
-    Interest(&'a wz_codecs::interest::Interest<'f>),
+    Interest(&'a wz_codecs::lent::Interest<'f>),
 }
 
 impl<'a, 'f> InPlaceRecord<'a, 'f> {
@@ -797,7 +797,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn push_of_frame(
-        push: &'a wz_codecs::push::Push<'f>,
+        push: &'a wz_codecs::lent::Push<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -848,7 +848,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn response_of_frame(
-        response: &'a wz_codecs::response::Response<'f>,
+        response: &'a wz_codecs::lent::Response<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -875,7 +875,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn declare_of_frame(
-        declare: &'a wz_codecs::declare::Declare<'f>,
+        declare: &'a wz_codecs::lent::Declare<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -903,7 +903,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn response_final_of_frame(
-        response_final: &'a wz_codecs::response_final::ResponseFinal<'f>,
+        response_final: &'a wz_codecs::lent::ResponseFinal<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -935,7 +935,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn interest_of_frame(
-        interest: &'a wz_codecs::interest::Interest<'f>,
+        interest: &'a wz_codecs::lent::Interest<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -963,7 +963,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     ///
     /// Always `None` in a build that reads no Push off the wire (`rx-push`).
     #[cfg(feature = "codec-push")]
-    pub fn push(&self) -> Option<&'a wz_codecs::push::Push<'f>> {
+    pub fn push(&self) -> Option<&'a wz_codecs::lent::Push<'f>> {
         match self.record {
             #[cfg(any(feature = "alloc", feature = "rx-push"))]
             LentRecord::Push(push) => Some(push),
@@ -989,7 +989,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     ///
     /// Always `None` in a build that reads no Response off the wire (`rx-response`).
     #[cfg(feature = "codec-response")]
-    pub fn response(&self) -> Option<&'a wz_codecs::response::Response<'f>> {
+    pub fn response(&self) -> Option<&'a wz_codecs::lent::Response<'f>> {
         match self.record {
             #[cfg(any(feature = "alloc", feature = "rx-response"))]
             LentRecord::Response(response) => Some(response),
@@ -1004,7 +1004,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
     ///
     /// Always `None` in a build that reads no control record off the wire (`rx-control`).
-    pub fn declare(&self) -> Option<&'a wz_codecs::declare::Declare<'f>> {
+    pub fn declare(&self) -> Option<&'a wz_codecs::lent::Declare<'f>> {
         match self.record {
             #[cfg(feature = "rx-control")]
             LentRecord::Declare(declare) => Some(declare),
@@ -1020,7 +1020,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         feature = "codec-frame",
         feature = "codec-response-final"
     ))]
-    pub fn response_final(&self) -> Option<&'a wz_codecs::response_final::ResponseFinal<'f>> {
+    pub fn response_final(&self) -> Option<&'a wz_codecs::lent::ResponseFinal<'f>> {
         match self.record {
             #[cfg(feature = "rx-response")]
             LentRecord::ResponseFinal(response_final) => Some(response_final),
@@ -1034,7 +1034,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     #[cfg(all(feature = "session-slot", feature = "codec-frame"))]
     ///
     /// Always `None` in a build that reads no control record off the wire (`rx-control`).
-    pub fn interest(&self) -> Option<&'a wz_codecs::interest::Interest<'f>> {
+    pub fn interest(&self) -> Option<&'a wz_codecs::lent::Interest<'f>> {
         match self.record {
             #[cfg(feature = "rx-control")]
             LentRecord::Interest(interest) => Some(interest),

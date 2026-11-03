@@ -1424,10 +1424,8 @@ pub(crate) mod tests {
     use crate::link::LINKTYPE_ETHERNET;
     use crate::Dissection;
 
+    use wz_codecs::lent::{Wireexpr, WireexprLocal, WireexprNonlocal, WireexprVariant};
     use wz_codecs::wire_const::FLAG_N_N;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
     const LOW: [u8; 4] = [10, 0, 0, 1];
     const HIGH: [u8; 4] = [10, 0, 0, 2];
@@ -1472,17 +1470,16 @@ pub(crate) mod tests {
     /// fixtures beside it, stop spelling `0x20`.
     pub(crate) fn request_query(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
-        wz_codecs::request::Request {
-            header: wz_codecs::request::Request::default().header | n,
+        wz_codecs::lent::Request {
+            header: wz_codecs::lent::Request::default().header | n,
             rid,
             keyexpr,
-            body: wz_codecs::request::RequestVariant::CodecZenohQuery(
-                wz_codecs::query::Query::default(),
+            body: wz_codecs::lent::RequestVariant::CodecZenohQuery(
+                wz_codecs::lent::Query::default(),
             ),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Request is encodable")
     }
 
     /// A `Request` carrying a `MsgPut` of `payload` — a put that expects an
@@ -1496,24 +1493,21 @@ pub(crate) mod tests {
     /// actually knows.
     pub(crate) fn request_put<'a>(rid: u64, keyexpr: Wireexpr<'a>, payload: &'a [u8]) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
-        wz_codecs::request::Request {
-            header: wz_codecs::request::Request::default().header | n,
+        wz_codecs::lent::Request {
+            header: wz_codecs::lent::Request::default().header | n,
             rid,
             keyexpr,
-            body: wz_codecs::request::RequestVariant::CodecZenohMsgPut(
-                wz_codecs::msg_put::MsgPut {
-                    payload_len: Some(payload.len() as u64),
-                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
-                        extensions: None,
-                        payload: wz_codecs::Bounded::new(payload).unwrap(),
-                    },
-                    ..Default::default()
+            body: wz_codecs::lent::RequestVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                payload_len: Some(payload.len() as u64),
+                extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                    extensions: None,
+                    payload: wz_codecs::Bounded::new(payload).unwrap(),
                 },
-            ),
+                ..Default::default()
+            }),
             ..Default::default()
         }
         .encode_to_vec()
-        .expect("a fixture Request is encodable")
     }
 
     /// A `Response` carrying a `Reply` with `payload`, echoing `request_id`.
@@ -1523,22 +1517,19 @@ pub(crate) mod tests {
         payload: &'a [u8],
     ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
-        wz_codecs::response::Response {
-            header: wz_codecs::response::Response::default().header | n,
+        wz_codecs::lent::Response {
+            header: wz_codecs::lent::Response::default().header | n,
             request_id,
             keyexpr,
-            body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
-                body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
-                    wz_codecs::msg_put::MsgPut {
-                        payload_len: Some(payload.len() as u64),
-                        extensions_has_0x12:
-                            wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
-                                extensions: None,
-                                payload: wz_codecs::Bounded::new(payload).unwrap(),
-                            },
-                        ..Default::default()
+            body: wz_codecs::lent::ResponseVariant::CodecZenohReply(wz_codecs::lent::Reply {
+                body: wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
+                    payload_len: Some(payload.len() as u64),
+                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                        extensions: None,
+                        payload: wz_codecs::Bounded::new(payload).unwrap(),
                     },
-                ),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1549,11 +1540,11 @@ pub(crate) mod tests {
     /// A `Response` carrying an `Err`, echoing `request_id`.
     fn response_err(request_id: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
-        wz_codecs::response::Response {
-            header: wz_codecs::response::Response::default().header | n,
+        wz_codecs::lent::Response {
+            header: wz_codecs::lent::Response::default().header | n,
             request_id,
             keyexpr,
-            body: wz_codecs::response::ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
+            body: wz_codecs::lent::ResponseVariant::CodecZenohErr(wz_codecs::lent::Err {
                 payload_len: 3,
                 payload: wz_codecs::Bounded::new(b"nak" as &[u8]).unwrap(),
                 ..Default::default()
@@ -1565,7 +1556,7 @@ pub(crate) mod tests {
 
     /// The closing `ResponseFinal`.
     pub(crate) fn response_final(request_id: u64) -> Vec<u8> {
-        wz_codecs::response_final::ResponseFinal {
+        wz_codecs::lent::ResponseFinal {
             request_id,
             ..Default::default()
         }
@@ -1574,9 +1565,9 @@ pub(crate) mod tests {
 
     /// `DeclKexpr`: bind `id` to `suffix` in the SENDER's space.
     pub(crate) fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
-        wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+        wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
                     id,

@@ -1005,7 +1005,13 @@ impl KeyexprSpaces {
     /// prefix would make every later reference to the new id confidently wrong,
     /// and so does an AMBIGUOUS one, which is why two disagreeing spaces bind
     /// nothing either.
-    pub fn absorb(&mut self, direction: Direction, declare: &wz_codecs::declare::DeclareOwned) {
+    pub fn absorb(
+        &mut self,
+        direction: Direction,
+        declare: &wz_codecs::declare::DeclareOwned<
+            wz_session_core::transport_profile::TransportStorage,
+        >,
+    ) {
         use wz_codecs::declare::DeclareOwnedVariant;
         match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
@@ -2800,8 +2806,7 @@ pub(crate) mod tests {
     use crate::link::LINKTYPE_ETHERNET;
     use crate::Dissection;
 
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{Wireexpr, WireexprNonlocal, WireexprVariant};
 
     /// The two endpoints. `.1` sorts below `.2`, so `.1 -> .2` is
     /// [`Direction::A`] — asserted rather than assumed by
@@ -2837,11 +2842,11 @@ pub(crate) mod tests {
         } else {
             0
         };
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | n_flag,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | n_flag,
             keyexpr,
-            body: wz_codecs::push::PushVariant::CodecZenohMsgDel(
-                wz_codecs::msg_del::MsgDel::default(),
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgDel(
+                wz_codecs::lent::MsgDel::default(),
             ),
             ..Default::default()
         }
@@ -2850,9 +2855,9 @@ pub(crate) mod tests {
 
     /// `DeclKexpr`: bind `id` to the literal `suffix` in the SENDER's space.
     fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
-        wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+        wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
                     id,
@@ -2877,10 +2882,10 @@ pub(crate) mod tests {
         id: u64,
         scope: u64,
         suffix: Option<&'static str>,
-    ) -> wz_codecs::declare::DeclareOwned {
-        wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+    ) -> wz_codecs::declare::DeclareOwned<wz_codecs::Heap> {
+        wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
                     id,
@@ -2890,7 +2895,7 @@ pub(crate) mod tests {
             ),
             ..Default::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<wz_codecs::Heap>()
         .expect("fixture fits the owned form")
     }
 
@@ -2954,9 +2959,9 @@ pub(crate) mod tests {
 
     /// `UndeclKexpr`: drop `id` from the SENDER's space.
     fn undeclare_kexpr(id: u64) -> Vec<u8> {
-        wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohUndeclKexpr(
-                wz_codecs::undecl_kexpr::UndeclKexpr {
+        wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohUndeclKexpr(
+                wz_codecs::lent::UndeclKexpr {
                     header: wz_session_core::wire_const::D_MID_UNDECL_KEXPR,
                     id,
                     extensions: None,
@@ -3117,32 +3122,35 @@ pub(crate) mod tests {
         // direct constructor for. `try_as_borrowed` is the codec's own
         // projection, so the fixture goes through the same narrowing a decode
         // does rather than around it.
-        let borrowed_default = wz_codecs::query::Query::default();
-        let mut owned: wz_codecs::query::QueryOwned = borrowed_default
+        let borrowed_default = wz_codecs::lent::Query::default();
+        let mut owned: wz_codecs::query::QueryOwned<wz_codecs::Heap> = borrowed_default
             .try_into_owned_in()
             .expect("an empty query owns trivially");
         if let Some(body) = value {
             // R3044 -- a Query's chain holds its own kind of entry; the plain one
             // is the generic entry's ZBuf body moved across.
-            owned.extensions = Some(wz_session_core::held_list::one_entry(
-                wz_session_core::ext_view::query_ext_from_generic(ExtEntryOwned {
-                    header: body_ext_id::QUERY_BODY | EXT_ENC_ZBUF,
-                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(
-                        wz_codecs::ext_zbuf::ExtZbufOwned {
-                            value_len: body.len() as u64,
-                            value: wz_session_core::codec_owned::owned_bytes(&body)
-                                .expect("the fixture value is within the owned bound"),
-                        },
-                    ),
-                }),
-            ));
+            owned.extensions = Some(
+                wz_session_core::held_list::lawful(wz_session_core::held_list::one_entry(
+                    wz_session_core::ext_view::query_ext_from_generic(ExtEntryOwned {
+                        header: body_ext_id::QUERY_BODY | EXT_ENC_ZBUF,
+                        body: ExtEntryOwnedVariant::CodecZenohExtZbuf(
+                            wz_codecs::ext_zbuf::ExtZbufOwned {
+                                value_len: body.len() as u64,
+                                value: wz_session_core::codec_owned::owned_bytes(&body)
+                                    .expect("the fixture value is within the owned bound"),
+                            },
+                        ),
+                    }),
+                ))
+                .expect("a chain of one entry follows its law"),
+            );
             owned.header |= 0x80;
         }
         // The Request is built owned around the owned query, and borrowed back to
         // encode: the borrowed form is invariant in its lifetime, so a `'static`
         // keyexpr and a query borrowed from a local cannot share one.
-        let encoded = wz_codecs::request::RequestOwned {
-            header: wz_codecs::request::Request::default().header | n_flag,
+        let encoded = wz_codecs::request::RequestOwned::<wz_codecs::Heap> {
+            header: wz_codecs::lent::Request::default().header | n_flag,
             rid,
             keyexpr: keyexpr.try_into_owned().expect("the fixture key owns"),
             body: wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(owned),
@@ -3150,8 +3158,7 @@ pub(crate) mod tests {
         }
         .try_as_borrowed()
         .expect("the chain is within bounds")
-        .encode_to_vec()
-        .expect("a fixture Request is encodable");
+        .encode_to_vec();
         encoded
     }
 
@@ -3361,8 +3368,8 @@ pub(crate) mod tests {
     }
 
     impl BodyExt {
-        fn entry(self) -> Option<wz_codecs::ext_entry::ExtEntry<'static>> {
-            use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+        fn entry(self) -> Option<wz_codecs::lent::ExtEntry<'static>> {
+            use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
             use wz_session_core::ext_header::{body_ext_id, EXT_ENC_ZBUF, EXT_FLAG_M};
             match self {
                 BodyExt::None => None,
@@ -3374,7 +3381,7 @@ pub(crate) mod tests {
                 }),
                 BodyExt::ForeignAtTheSameId => Some(ExtEntry {
                     header: body_ext_id::SHM | EXT_ENC_ZBUF,
-                    body: ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+                    body: ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
                         value_len: 1,
                         value: wz_codecs::Bounded::new(&[0xABu8] as &[u8]).unwrap(),
                     }),
@@ -3419,13 +3426,13 @@ pub(crate) mod tests {
             // whose bytes stand in for the descriptor, and no inline pair. The
             // marker is the chain's whole content, so the arm holds it by its
             // place and no other entry.
-            wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header | z_put,
+            wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header | z_put,
                 slice_count: Some(1),
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::Has0x12 {
                     extensions: Default::default(),
                     slices: wz_codecs::Bounded::new(
-                        core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
+                        core::iter::once(wz_codecs::lent::ZbufSlice {
                             kind: u32::from(wz_session_core::put_payload::SLICE_KIND_SHM_PTR),
                             len: payload.len() as u64,
                             bytes: wz_codecs::Bounded::new(payload).unwrap(),
@@ -3437,8 +3444,8 @@ pub(crate) mod tests {
                 ..Default::default()
             }
         } else {
-            wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header | z_put,
+            wz_codecs::lent::MsgPut {
+                header: wz_codecs::lent::MsgPut::default().header | z_put,
                 payload_len: Some(payload.len() as u64),
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     extensions: entry.clone().map(|e| {
@@ -3452,32 +3459,29 @@ pub(crate) mod tests {
         };
         let kexpr = sender_space(0, Some(keyexpr));
         match carrier {
-            Carrier::Push => wz_codecs::push::Push {
-                header: wz_codecs::push::Push::default().header | FLAG_N_N,
+            Carrier::Push => wz_codecs::lent::Push {
+                header: wz_codecs::lent::Push::default().header | FLAG_N_N,
                 keyexpr: kexpr,
-                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(put),
+                body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(put),
                 ..Default::default()
             }
             .encode_to_vec(),
-            Carrier::Request => wz_codecs::request::Request {
-                header: wz_codecs::request::Request::default().header | FLAG_N_N,
+            Carrier::Request => wz_codecs::lent::Request {
+                header: wz_codecs::lent::Request::default().header | FLAG_N_N,
                 rid: 11,
                 keyexpr: kexpr,
-                body: wz_codecs::request::RequestVariant::CodecZenohMsgPut(put),
+                body: wz_codecs::lent::RequestVariant::CodecZenohMsgPut(put),
                 ..Default::default()
             }
-            .encode_to_vec()
-            .expect("a fixture Request is encodable"),
-            Carrier::Reply => wz_codecs::response::Response {
-                header: wz_codecs::response::Response::default().header | FLAG_N_N,
+            .encode_to_vec(),
+            Carrier::Reply => wz_codecs::lent::Response {
+                header: wz_codecs::lent::Response::default().header | FLAG_N_N,
                 request_id: 11,
                 keyexpr: kexpr,
-                body: wz_codecs::response::ResponseVariant::CodecZenohReply(
-                    wz_codecs::reply::Reply {
-                        body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put),
-                        ..Default::default()
-                    },
-                ),
+                body: wz_codecs::lent::ResponseVariant::CodecZenohReply(wz_codecs::lent::Reply {
+                    body: wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(put),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }
             .encode_to_vec(),
@@ -3485,21 +3489,19 @@ pub(crate) mod tests {
             // `payload` as its own fields, and its own shm ext beside them.
             Carrier::Err => {
                 let z_err = if entry.is_some() { FLAG_Z_ERR_Z } else { 0 };
-                wz_codecs::response::Response {
-                    header: wz_codecs::response::Response::default().header | FLAG_N_N,
+                wz_codecs::lent::Response {
+                    header: wz_codecs::lent::Response::default().header | FLAG_N_N,
                     request_id: 11,
                     keyexpr: kexpr,
-                    body: wz_codecs::response::ResponseVariant::CodecZenohErr(
-                        wz_codecs::err::Err {
-                            header: wz_codecs::err::Err::default().header | z_err,
-                            extensions: entry.map(|e| {
-                                wz_codecs::Bounded::new(core::iter::once(e).collect()).unwrap()
-                            }),
-                            payload_len: payload.len() as u64,
-                            payload: wz_codecs::Bounded::new(payload).unwrap(),
-                            ..Default::default()
-                        },
-                    ),
+                    body: wz_codecs::lent::ResponseVariant::CodecZenohErr(wz_codecs::lent::Err {
+                        header: wz_codecs::lent::Err::default().header | z_err,
+                        extensions: entry.map(|e| {
+                            wz_codecs::Bounded::new(core::iter::once(e).collect()).unwrap()
+                        }),
+                        payload_len: payload.len() as u64,
+                        payload: wz_codecs::Bounded::new(payload).unwrap(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }
                 .encode_to_vec()
@@ -4156,9 +4158,9 @@ pub(crate) mod tests {
     /// table as it stands — zenoh's chained-declaration shape.
     #[test]
     fn a_declaration_may_itself_be_aliased() {
-        let chained = wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+        let chained = wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
                     id: 2,
@@ -4568,16 +4570,16 @@ pub(crate) mod tests {
             // closing marker, a control envelope, and a discovery request.
             (
                 false,
-                wz_codecs::response_final::ResponseFinal {
+                wz_codecs::lent::ResponseFinal {
                     request_id: 1,
                     ..Default::default()
                 }
                 .encode_to_vec(),
             ),
-            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
+            (true, wz_codecs::lent::Oam::default().encode_to_vec()),
             (
                 true,
-                wz_codecs::interest::Interest {
+                wz_codecs::lent::Interest {
                     interest_id: 1,
                     header_c_or_f: None,
                     ..Default::default()
@@ -4613,7 +4615,7 @@ pub(crate) mod tests {
             (true, declare_kexpr(1, "accounted/topic")),
             (true, push(sender_space(1, None), &[0u8; 4])),
             (true, undeclare_kexpr(1)),
-            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
+            (true, wz_codecs::lent::Oam::default().encode_to_vec()),
         ]);
 
         let (declared, undeclared) = table.declarations();

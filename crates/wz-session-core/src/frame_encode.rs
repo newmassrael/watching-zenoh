@@ -70,36 +70,26 @@ use crate::qos::Priority;
 use crate::tx_buf::{EncodeBuf, TxBuf, TxSink};
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use wz_codecs::declare::Declare;
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use wz_codecs::declare::DeclareOwned;
+use crate::transport_profile::owned::DeclareOwned;
 #[cfg(feature = "alloc")]
-use wz_codecs::interest::{Interest, InterestOwned};
+use crate::transport_profile::owned::InterestOwned;
 // R311y578 (G7) — tracks [`oam_body`]'s gate exactly, `session-unicast`
 // included: the import exists for that one signature, so any predicate the
 // function does not have makes the import unused under `-D warnings`.
+#[cfg(all(
+    feature = "codec-linkstate",
+    feature = "codec-push",
+    feature = "session-unicast"
+))]
+use crate::transport_profile::owned::OamOwned;
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
+use crate::transport_profile::owned::ResponseFinalOwned;
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 use crate::wire::PushOwned;
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::wire::RequestOwned;
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::ResponseOwned;
-#[cfg(all(
-    feature = "codec-linkstate",
-    feature = "codec-push",
-    feature = "session-unicast"
-))]
-use wz_codecs::oam::OamOwned;
-#[cfg(all(feature = "codec-push", feature = "alloc"))]
-use wz_codecs::push::Push;
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
-use wz_codecs::request::Request;
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
-use wz_codecs::response::Response;
-#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-use wz_codecs::response_final::ResponseFinal;
-#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-use wz_codecs::response_final::ResponseFinalOwned;
 
 /// R311jq — the FRAME parent-flags byte for a channel: `FLAG_T_FRAME_R`
 /// (0x20) when reliable, 0 otherwise, matching zenoh-pico's
@@ -346,7 +336,7 @@ where
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
-/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
@@ -354,16 +344,11 @@ where
 pub(crate) fn push_body(
     push: &PushOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    // Read through a reference to the projection: `Result::expect` moves the borrowed record out
-    // of its `Result`, and the record is a kilobyte (its extension vectors are inline), a copy
-    // of it per message that nothing needs.
-    move |sink| {
-        let projected = push.try_as_borrowed();
-        match &projected {
-            Ok(borrowed) => borrowed.encode(sink),
-            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
-        }
-    }
+    // Written straight from the owned fields, as `request_body` is. A borrowed projection holds its
+    // lists as the owner's profile holds them, so at `Heap` it would allocate a vector for the
+    // extension chain on every send (measured: one allocation and 40 bytes a subscriber on the
+    // router's forward).
+    move |sink| push.encode(sink)
 }
 
 /// The bytes `push` encodes to: what a frame buffer for it needs to reserve. It is the generated
@@ -386,13 +371,13 @@ pub(crate) fn push_body(
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 #[cfg_attr(not(feature = "session-multicast"), allow(dead_code))]
 pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
-    Push::measure(push).len()
+    wz_codecs::push::PushWire::measure(push).len()
 }
 
 /// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
 /// (c3d) floods a self-built OAM carrier through the same
-/// `dispatch_network_message_at` chokepoint as the data-plane senders. Same
-/// `try_as_borrowed().encode(sink)` projection as [`push_body`]. Co-gated on
+/// `dispatch_network_message_at` chokepoint as the data-plane senders. It
+/// encodes the owned message as [`push_body`] does. Co-gated on
 /// `codec-push` (the send path it feeds), so an encode-only `codec-linkstate`
 /// build does not compile this orphaned.
 ///
@@ -437,14 +422,12 @@ pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut TxSink<'_>) -> Result<(),
         if u64::from(wz_codecs::wire_const::oam_id_from_wire(oam.id)) != oam.id {
             return Err(CodecError::VleWidthOverflow);
         }
-        oam.try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
+        oam.encode(sink)
     }
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
-/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
@@ -452,16 +435,11 @@ pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut TxSink<'_>) -> Result<(),
 pub(crate) fn declare_body(
     declare: &DeclareOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| {
-        declare
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    }
+    move |sink| declare.encode(sink)
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
-/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
@@ -477,7 +455,7 @@ pub(crate) fn request_body(
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
-/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
@@ -489,7 +467,7 @@ pub(crate) fn response_body(
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
-/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
@@ -501,7 +479,7 @@ pub(crate) fn response_final_body(
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
-/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
@@ -509,12 +487,7 @@ pub(crate) fn response_final_body(
 pub(crate) fn interest_body(
     interest: &InterestOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| {
-        interest
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    }
+    move |sink| interest.encode(sink)
 }
 
 /// R121j-3 — build the wire bytes for a `Frame` transport-message
@@ -548,7 +521,7 @@ pub fn encode_frame_with_response_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Response::measure(&response).len(),
+        wz_codecs::response::ResponseWire::measure(&response).len(),
         ext_qos,
         response_body(&response),
     )
@@ -588,7 +561,7 @@ pub fn encode_frame_with_response_final_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        ResponseFinal::measure(&response_final).len(),
+        wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len(),
         ext_qos,
         response_final_body(&response_final),
     )
@@ -610,9 +583,7 @@ pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool)
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        // A Request the encode refuses is refused by the body below as well; the
-        // reservation for it is moot.
-        Request::measure(&request).map_or(0, |measured| measured.len()),
+        wz_codecs::request::RequestWire::measure(&request).len(),
         None,
         request_body(&request),
     )
@@ -638,7 +609,7 @@ pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool)
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Declare::measure(&declare).len(),
+        wz_codecs::declare::DeclareWire::measure(&declare).len(),
         None,
         declare_body(&declare),
     )
@@ -666,7 +637,7 @@ pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bo
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Interest::measure(&interest).len(),
+        wz_codecs::interest::InterestWire::measure(&interest).len(),
         None,
         interest_body(&interest),
     )
@@ -729,7 +700,7 @@ pub fn encode_frame_with_push_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        Push::measure(&push).len(),
+        wz_codecs::push::PushWire::measure(&push).len(),
         ext_qos,
         push_body(&push),
     )
@@ -1645,7 +1616,7 @@ mod tests {
     #[cfg(feature = "codec-response-final")]
     use crate::response_final_build::build_response_final;
     #[cfg(feature = "codec-push")]
-    use wz_codecs::push::Push;
+    use wz_codecs::lent::Push;
     // `vec!` and `Vec` for the tests that build a message of several shapes; `Vec` is the crate's
     // `alloc` one, which the module root already imports.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
@@ -1671,7 +1642,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     fn empty_payload_push() -> crate::wire::PushOwned {
         let mut push = Push::default();
-        if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
+        if let wz_codecs::lent::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
             put.payload_len = Some(0);
             put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,

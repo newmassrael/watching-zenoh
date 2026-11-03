@@ -899,10 +899,10 @@ mod tests {
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // One queued DeclFinal reply for interest id 9 — the trivial terminal of a
-        // liveliness interest-response, owned via try_into_owned (DeclFinal
+        // liveliness interest-response, owned at the transport profile (DeclFinal
         // borrows nothing). The pull-seam yields it once, then None.
         let declare = build_final_reply(9)
-            .try_into_owned()
+            .try_into_owned_in::<wz_session_core::transport_profile::TransportStorage>()
             .expect("DeclFinal reply carries no bounded fields");
         let mut pending = Some(MulticastTxItem::DeclareReply {
             declare: alloc::boxed::Box::new(declare),

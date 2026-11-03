@@ -1,4 +1,4 @@
-// SCE-MAP: push:69 :: _forge_body
+// SCE-MAP: push:71 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -15,11 +15,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-
-use super::wireexpr::Wireexpr;
-use super::ext_entry::ExtEntry;
-use super::msg_put::MsgPut;
-use super::msg_del::MsgDel;
 
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::wireexpr::WireexprView;
@@ -79,15 +74,23 @@ use super::msg_del::MsgDelOwned;
 #[allow(dead_code)]
 pub struct PushExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<PushExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `PushIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait PushStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<PushExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage + super::msg_put::MsgPutStorage + super::msg_del::MsgDelStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<PushExtensionsField> + super::wireexpr::WireexprStorage + super::ext_entry::ExtEntryStorage + super::msg_put::MsgPutStorage + super::msg_del::MsgDelStorage> PushStorage for S {}
+
+/// What `PushIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Push` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait PushLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<PushExtensionsField> + super::wireexpr::WireexprLentStorage + super::ext_entry::ExtEntryLentStorage + super::msg_put::MsgPutLentStorage + super::msg_del::MsgDelLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<PushExtensionsField> + super::wireexpr::WireexprLentStorage + super::ext_entry::ExtEntryLentStorage + super::msg_put::MsgPutLentStorage + super::msg_del::MsgDelLentStorage> PushLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside PushStorage: how it stores each field of that frame.
@@ -105,7 +108,7 @@ impl<'f, S: PushStorage + super::wireexpr::WireexprFrom<'f> + super::ext_entry::
 pub struct PushIn<S: PushStorage> {
     pub header: u8,
     pub keyexpr: WireexprOwned<S>,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<PushExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<PushExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
     pub body: PushVariantIn<S>,
 }
 
@@ -113,9 +116,11 @@ pub struct PushIn<S: PushStorage> {
 #[allow(dead_code)]
 pub type Push<'a> = PushIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type PushOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = PushIn<S>;
+pub type PushOwned<S> = PushIn<S>;
 
 impl<S: PushStorage> Default for PushIn<S> {
     fn default() -> Self {
@@ -155,7 +160,7 @@ pub enum PushVariantIn<S: PushStorage> {
 pub type PushVariant<'a> = PushVariantIn<::sce_forge_runtime::codec::Lent<'a>>;
 
 #[allow(dead_code)]
-pub type PushOwnedVariant<S = ::sce_forge_runtime::codec::DefaultStorage> = PushVariantIn<S>;
+pub type PushOwnedVariant<S> = PushVariantIn<S>;
 
 impl<S: PushStorage> Default for PushVariantIn<S> {
     fn default() -> Self {
@@ -236,7 +241,7 @@ impl<S: PushStorage> PushIn<S> {
         if (header & 0x80u8) != 0 {
             _out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _more = false;
-                for _ in 0..8u32 {
+                loop {
                     let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                     _more = _entry.z();
                     // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -247,9 +252,6 @@ impl<S: PushStorage> PushIn<S> {
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
-                }
-                if _more {
-                    return Err(CodecError::TooManyElements);
                 }
                 Ok(())
             })?;
@@ -348,7 +350,7 @@ impl<S: PushStorage> PushIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Push::encode_source(self, w)
+        PushWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -400,15 +402,15 @@ impl<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> PushVariantSource<'s, A0, A1, D> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Push` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Push`
-/// computes those from what is ([`Push::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`PushWire::encode_source`]).
 pub trait PushSource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `keyexpr` field.
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
     /// The arm of the variant this value holds.
     fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource>;
 }
@@ -420,7 +422,7 @@ impl<T: PushSource + ?Sized> PushSource for &T {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         (**self).keyexpr()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         (**self).extensions()
     }
     fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
@@ -449,7 +451,7 @@ pub struct PushParts<'a> {
     /// The `keyexpr` field.
     pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
     /// The arm of the variant this value holds.
     pub body: PushPartsBody<'a>,
 }
@@ -461,7 +463,7 @@ impl<'a> PushSource for PushParts<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
@@ -480,7 +482,7 @@ impl<S: PushStorage> PushSource for PushOwned<S> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.list_iter())
     }
     fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
@@ -499,7 +501,7 @@ impl<'a> PushSource for PushView<'a> {
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
         &self.keyexpr
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
@@ -511,10 +513,17 @@ impl<'a> PushSource for PushView<'a> {
     }
 }
 
+/// The codec `Push` itself: what writes a value read through
+/// [`PushSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PushWire;
+
 #[allow(dead_code)]
-impl<'a> Push<'a> {
+impl PushWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Push::encode` writes for the value it holds, read through
     /// [`PushSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -531,22 +540,22 @@ impl<'a> Push<'a> {
     #[doc(hidden)]
     pub fn write_source<S: PushSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
-        let _n_d_header_n_0: usize = usize::from(Wireexpr::input_n(src.keyexpr()));
+        let _n_d_header_n_0: usize = usize::from(super::wireexpr::WireexprWire::input_n(src.keyexpr()));
         let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(src.keyexpr()) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
         let _p_header_z_0: bool = src.extensions().is_some();
         let _v_header_n: u8 = _n_d_header_n_0 as u8;
         let _c_header: u8 = (((((src.header() & !0x20) | (_v_header_n << 5)) & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
-        Wireexpr::write_source(src.keyexpr(), w)?;
+        super::wireexpr::WireexprWire::write_source(src.keyexpr(), w)?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
-                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
             }
         }
         match src.body() {
-            PushVariantSource::CodecZenohMsgPut(_b) => MsgPut::write_source(_b, w)?,
-            PushVariantSource::CodecZenohMsgDel(_b) => MsgDel::write_source(_b, w)?,
-            PushVariantSource::Default { body: _b, .. } => MsgPut::write_source(_b, w)?,
+            PushVariantSource::CodecZenohMsgPut(_b) => super::msg_put::MsgPutWire::write_source(_b, w)?,
+            PushVariantSource::CodecZenohMsgDel(_b) => super::msg_del::MsgDelWire::write_source(_b, w)?,
+            PushVariantSource::Default { body: _b, .. } => super::msg_put::MsgPutWire::write_source(_b, w)?,
         }
         Ok(())
     }
@@ -561,7 +570,7 @@ impl<'a> Push<'a> {
     }
 }
 
-impl<'a, S: PushSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Push<'a> {
+impl<S: PushSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for PushWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -570,7 +579,7 @@ impl<'a, S: PushSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for 
 }
 
 #[allow(dead_code)]
-impl<'a> Push<'a> {
+impl PushWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -636,7 +645,7 @@ impl ListWalk<0> for PushExtensionsWalk {
 pub struct PushView<'a> {
     pub header: u8,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, PushExtensionsWalk, 0>, 8, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, PushExtensionsWalk, 0>, { usize::MAX }, 1>>,
     pub body: PushViewVariant<'a>,
 }
 
@@ -690,7 +699,7 @@ impl<'a> PushView<'a> {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -698,9 +707,6 @@ impl<'a> PushView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
@@ -751,14 +757,14 @@ impl<'a> PushView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Push<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut PushIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: PushLentStorage {
         _out.header = self.header;
         self.keyexpr.into_builder(&mut _out.keyexpr)?;
         match &self.extensions {
             Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -768,23 +774,23 @@ impl<'a> PushView<'a> {
         }
         match &self.body {
             PushViewVariant::CodecZenohMsgPut(_b) => {
-                _out.body = PushVariant::CodecZenohMsgPut(MsgPut::default());
-                if let PushVariant::CodecZenohMsgPut(_o) = &mut _out.body {
+                _out.body = PushVariantIn::CodecZenohMsgPut(Default::default());
+                if let PushVariantIn::CodecZenohMsgPut(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             PushViewVariant::CodecZenohMsgDel(_b) => {
-                _out.body = PushVariant::CodecZenohMsgDel(MsgDel::default());
-                if let PushVariant::CodecZenohMsgDel(_o) = &mut _out.body {
+                _out.body = PushVariantIn::CodecZenohMsgDel(Default::default());
+                if let PushVariantIn::CodecZenohMsgDel(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             PushViewVariant::Default { tag, body } => {
-                _out.body = PushVariant::Default {
+                _out.body = PushVariantIn::Default {
                     tag: *tag,
-                    body: MsgPut::default(),
+                    body: Default::default(),
                 };
-                if let PushVariant::Default { body: _o, .. } = &mut _out.body {
+                if let PushVariantIn::Default { body: _o, .. } = &mut _out.body {
                     body.into_builder(_o)?;
                 }
             }
@@ -800,7 +806,7 @@ impl<'a> PushView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Push::encode_source(self, w)
+        PushWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -864,22 +870,17 @@ impl<'a> PushView<'a> {
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
-impl<'a> PushVariant<'a> {
+impl<'a, D> PushVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: PushLentStorage {
     /// Deep-copy this borrowed variant body into its owned mirror at the
     /// given storage profile. Fallible because a borrowed arm body's own
     /// projection re-checks its declared capacities (the same bounds decode
     /// enforces) — on the growable profile no check can fire.
     pub fn try_into_owned_in<S: PushFrom<'a>>(self) -> Result<PushOwnedVariant<S>, CodecError> {
         Ok(match self {
-            PushVariant::CodecZenohMsgPut(_b) => PushOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in::<S>()?),
-            PushVariant::CodecZenohMsgDel(_b) => PushOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in::<S>()?),
-            PushVariant::Default { tag, body } => PushOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
+            Self::CodecZenohMsgPut(_b) => PushOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohMsgDel(_b) => PushOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in::<S>()?),
+            Self::Default { tag, body } => PushOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
         })
-    }
-
-    /// The same projection at the build's default storage profile.
-    pub fn try_into_owned(self) -> Result<PushOwnedVariant, CodecError> {
-        self.try_into_owned_in()
     }
 }
 
@@ -889,8 +890,8 @@ impl<S: PushStorage> PushOwnedVariant<S> {
     /// the inverse of the projection above. Reuses the borrowed view's
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
-    pub fn try_as_borrowed(&self) -> Result<PushVariant<'_>, CodecError> {
-        let mut _out = PushVariant::default();
+    pub fn try_as_borrowed(&self) -> Result<PushVariantIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -904,23 +905,23 @@ impl<S: PushStorage> PushOwnedVariant<S> {
     /// projection that returns one copies the declared maximum at every layer
     /// it passes through. A caller on a path where that shows projects into a
     /// destination it owns. On `Err`, `_out` holds what was projected so far.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut PushVariant<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut PushVariantIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         match self {
             PushOwnedVariant::CodecZenohMsgPut(_b) => {
-                *_out = PushVariant::CodecZenohMsgPut(Default::default());
-                if let PushVariant::CodecZenohMsgPut(_o) = _out {
+                *_out = PushVariantIn::CodecZenohMsgPut(Default::default());
+                if let PushVariantIn::CodecZenohMsgPut(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             PushOwnedVariant::CodecZenohMsgDel(_b) => {
-                *_out = PushVariant::CodecZenohMsgDel(Default::default());
-                if let PushVariant::CodecZenohMsgDel(_o) = _out {
+                *_out = PushVariantIn::CodecZenohMsgDel(Default::default());
+                if let PushVariantIn::CodecZenohMsgDel(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             PushOwnedVariant::Default { tag, body } => {
-                *_out = PushVariant::Default { tag: *tag, body: Default::default() };
-                if let PushVariant::Default { body: _o, .. } = _out {
+                *_out = PushVariantIn::Default { tag: *tag, body: Default::default() };
+                if let PushVariantIn::Default { body: _o, .. } = _out {
                     body.try_as_borrowed_into(_o)?;
                 }
             }
@@ -929,8 +930,11 @@ impl<S: PushStorage> PushOwnedVariant<S> {
     }
 }
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Push<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Push<'a> {
+impl<'a, D> PushIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: PushLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`PushOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -952,11 +956,9 @@ impl<'a> Push<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<PushOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -970,8 +972,8 @@ impl<S: PushStorage> PushOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<Push<'_>, CodecError> {
-        let mut _out = Push::default();
+    pub fn try_as_borrowed(&self) -> Result<PushIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -986,7 +988,7 @@ impl<S: PushStorage> PushOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Push<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut PushIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         self.keyexpr.as_borrowed_into(&mut _out.keyexpr);
         match &self.extensions {
@@ -1011,20 +1013,20 @@ impl<S: PushStorage> PushOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> PushVariant<'a> {
+impl<'a, D> PushVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: PushLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
     pub fn try_into_owned_in_origin<S: PushStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<PushOwnedVariant<S>, CodecError> {
         Ok(match self {
-            PushVariant::CodecZenohMsgPut(_b) => PushOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in_origin::<S>(origin)?),
-            PushVariant::CodecZenohMsgDel(_b) => PushOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in_origin::<S>(origin)?),
-            PushVariant::Default { tag, body } => PushOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },
+            Self::CodecZenohMsgPut(_b) => PushOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohMsgDel(_b) => PushOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::Default { tag, body } => PushOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },
         })
     }
 }
 
 #[allow(dead_code)]
-impl<'a> Push<'a> {
+impl<'a, D> PushIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: PushLentStorage {
     /// Project this borrowed view into an owned [`PushOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

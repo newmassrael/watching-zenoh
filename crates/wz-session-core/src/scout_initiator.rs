@@ -282,7 +282,7 @@ mod tests {
     /// locator list are two spellings of one fact, and bytes that disagree
     /// decode to a shape no window ever observes.
     fn hello_datagram(locators: &[&str]) -> Vec<u8> {
-        use wz_codecs::hello::HelloOwned;
+        use crate::transport_profile::owned::HelloOwned;
         use wz_codecs::locator::LocatorOwned;
 
         const ZID: &[u8] = &[0x07, 0x08];

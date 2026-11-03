@@ -16,17 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::ext_entry::ExtEntry;
-use super::decl_final::DeclFinal;
-use super::decl_kexpr::DeclKexpr;
-use super::undecl_kexpr::UndeclKexpr;
-use super::decl_subscriber::DeclSubscriber;
-use super::decl_queryable::DeclQueryable;
-use super::decl_token::DeclToken;
-use super::undecl_subscriber::UndeclSubscriber;
-use super::undecl_queryable::UndeclQueryable;
-use super::undecl_token::UndeclToken;
-
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 use super::decl_final::DeclFinalView;
@@ -97,15 +86,23 @@ use super::undecl_token::UndeclTokenOwned;
 #[allow(dead_code)]
 pub struct DeclareExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<DeclareExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `DeclareIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait DeclareStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclareExtensionsField> + super::ext_entry::ExtEntryStorage + super::decl_final::DeclFinalStorage + super::decl_kexpr::DeclKexprStorage + super::undecl_kexpr::UndeclKexprStorage + super::decl_subscriber::DeclSubscriberStorage + super::decl_queryable::DeclQueryableStorage + super::decl_token::DeclTokenStorage + super::undecl_subscriber::UndeclSubscriberStorage + super::undecl_queryable::UndeclQueryableStorage + super::undecl_token::UndeclTokenStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclareExtensionsField> + super::ext_entry::ExtEntryStorage + super::decl_final::DeclFinalStorage + super::decl_kexpr::DeclKexprStorage + super::undecl_kexpr::UndeclKexprStorage + super::decl_subscriber::DeclSubscriberStorage + super::decl_queryable::DeclQueryableStorage + super::decl_token::DeclTokenStorage + super::undecl_subscriber::UndeclSubscriberStorage + super::undecl_queryable::UndeclQueryableStorage + super::undecl_token::UndeclTokenStorage> DeclareStorage for S {}
+
+/// What `DeclareIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Declare` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait DeclareLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclareExtensionsField> + super::ext_entry::ExtEntryLentStorage + super::decl_final::DeclFinalLentStorage + super::decl_kexpr::DeclKexprLentStorage + super::undecl_kexpr::UndeclKexprLentStorage + super::decl_subscriber::DeclSubscriberLentStorage + super::decl_queryable::DeclQueryableLentStorage + super::decl_token::DeclTokenLentStorage + super::undecl_subscriber::UndeclSubscriberLentStorage + super::undecl_queryable::UndeclQueryableLentStorage + super::undecl_token::UndeclTokenLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<DeclareExtensionsField> + super::ext_entry::ExtEntryLentStorage + super::decl_final::DeclFinalLentStorage + super::decl_kexpr::DeclKexprLentStorage + super::undecl_kexpr::UndeclKexprLentStorage + super::decl_subscriber::DeclSubscriberLentStorage + super::decl_queryable::DeclQueryableLentStorage + super::decl_token::DeclTokenLentStorage + super::undecl_subscriber::UndeclSubscriberLentStorage + super::undecl_queryable::UndeclQueryableLentStorage + super::undecl_token::UndeclTokenLentStorage> DeclareLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside DeclareStorage: how it stores each field of that frame.
@@ -123,7 +120,7 @@ impl<'f, S: DeclareStorage + super::ext_entry::ExtEntryFrom<'f> + super::decl_fi
 pub struct DeclareIn<S: DeclareStorage> {
     pub header: u8,
     pub interest_id: Option<u64>,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<DeclareExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<DeclareExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
     pub body: DeclareVariantIn<S>,
 }
 
@@ -131,9 +128,11 @@ pub struct DeclareIn<S: DeclareStorage> {
 #[allow(dead_code)]
 pub type Declare<'a> = DeclareIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type DeclareOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = DeclareIn<S>;
+pub type DeclareOwned<S> = DeclareIn<S>;
 
 impl<S: DeclareStorage> Default for DeclareIn<S> {
     fn default() -> Self {
@@ -180,7 +179,7 @@ pub enum DeclareVariantIn<S: DeclareStorage> {
 pub type DeclareVariant<'a> = DeclareVariantIn<::sce_forge_runtime::codec::Lent<'a>>;
 
 #[allow(dead_code)]
-pub type DeclareOwnedVariant<S = ::sce_forge_runtime::codec::DefaultStorage> = DeclareVariantIn<S>;
+pub type DeclareOwnedVariant<S> = DeclareVariantIn<S>;
 
 impl<S: DeclareStorage> Default for DeclareVariantIn<S> {
     fn default() -> Self {
@@ -266,7 +265,7 @@ impl<S: DeclareStorage> DeclareIn<S> {
         if (header & 0x80u8) != 0 {
             _out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _more = false;
-                for _ in 0..8u32 {
+                loop {
                     let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                     _more = _entry.z();
                     // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -277,9 +276,6 @@ impl<S: DeclareStorage> DeclareIn<S> {
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
-                }
-                if _more {
-                    return Err(CodecError::TooManyElements);
                 }
                 Ok(())
             })?;
@@ -409,7 +405,7 @@ impl<S: DeclareStorage> DeclareIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Declare::encode_source(self, w)
+        DeclareWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -475,15 +471,15 @@ impl<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, A3: ?Sized, A4: ?Sized, A5: ?Sized,
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Declare` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Declare`
-/// computes those from what is ([`Declare::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`DeclareWire::encode_source`]).
 pub trait DeclareSource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `interest_id` field.
     fn interest_id(&self) -> Option<u64>;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
     /// The arm of the variant this value holds.
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource>;
 }
@@ -495,7 +491,7 @@ impl<T: DeclareSource + ?Sized> DeclareSource for &T {
     fn interest_id(&self) -> Option<u64> {
         (**self).interest_id()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         (**self).extensions()
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
@@ -531,7 +527,7 @@ pub struct DeclareParts<'a> {
     /// The `interest_id` field.
     pub interest_id: Option<u64>,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
     /// The arm of the variant this value holds.
     pub body: DeclarePartsBody<'a>,
 }
@@ -543,7 +539,7 @@ impl<'a> DeclareSource for DeclareParts<'a> {
     fn interest_id(&self) -> Option<u64> {
         self.interest_id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
@@ -569,7 +565,7 @@ impl<S: DeclareStorage> DeclareSource for DeclareOwned<S> {
     fn interest_id(&self) -> Option<u64> {
         self.interest_id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.list_iter())
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
@@ -595,7 +591,7 @@ impl<'a> DeclareSource for DeclareView<'a> {
     fn interest_id(&self) -> Option<u64> {
         self.interest_id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
     fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
@@ -614,10 +610,17 @@ impl<'a> DeclareSource for DeclareView<'a> {
     }
 }
 
+/// The codec `Declare` itself: what writes a value read through
+/// [`DeclareSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeclareWire;
+
 #[allow(dead_code)]
-impl<'a> Declare<'a> {
+impl DeclareWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Declare::encode` writes for the value it holds, read through
     /// [`DeclareSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -643,20 +646,20 @@ impl<'a> Declare<'a> {
         }
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
-                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
             }
         }
         match src.body() {
-            DeclareVariantSource::CodecZenohDeclKexpr(_b) => DeclKexpr::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohUndeclKexpr(_b) => UndeclKexpr::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohDeclSubscriber(_b) => DeclSubscriber::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohUndeclSubscriber(_b) => UndeclSubscriber::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohDeclQueryable(_b) => DeclQueryable::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohUndeclQueryable(_b) => UndeclQueryable::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohDeclToken(_b) => DeclToken::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohUndeclToken(_b) => UndeclToken::write_source(_b, w)?,
-            DeclareVariantSource::CodecZenohDeclFinal(_b) => DeclFinal::write_source(_b, w)?,
-            DeclareVariantSource::Default { body: _b, .. } => DeclFinal::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclKexpr(_b) => super::decl_kexpr::DeclKexprWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclKexpr(_b) => super::undecl_kexpr::UndeclKexprWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclSubscriber(_b) => super::decl_subscriber::DeclSubscriberWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclSubscriber(_b) => super::undecl_subscriber::UndeclSubscriberWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclQueryable(_b) => super::decl_queryable::DeclQueryableWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclQueryable(_b) => super::undecl_queryable::UndeclQueryableWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclToken(_b) => super::decl_token::DeclTokenWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclToken(_b) => super::undecl_token::UndeclTokenWire::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclFinal(_b) => super::decl_final::DeclFinalWire::write_source(_b, w)?,
+            DeclareVariantSource::Default { body: _b, .. } => super::decl_final::DeclFinalWire::write_source(_b, w)?,
         }
         Ok(())
     }
@@ -671,7 +674,7 @@ impl<'a> Declare<'a> {
     }
 }
 
-impl<'a, S: DeclareSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Declare<'a> {
+impl<S: DeclareSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for DeclareWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -680,7 +683,7 @@ impl<'a, S: DeclareSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> f
 }
 
 #[allow(dead_code)]
-impl<'a> Declare<'a> {
+impl DeclareWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -753,7 +756,7 @@ impl ListWalk<0> for DeclareExtensionsWalk {
 pub struct DeclareView<'a> {
     pub header: u8,
     pub interest_id: Option<u64>,
-    pub extensions: Option<Bounded<ListView<'a, DeclareExtensionsWalk, 0>, 8, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, DeclareExtensionsWalk, 0>, { usize::MAX }, 1>>,
     pub body: DeclareViewVariant<'a>,
 }
 
@@ -812,7 +815,7 @@ impl<'a> DeclareView<'a> {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -820,9 +823,6 @@ impl<'a> DeclareView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
@@ -916,14 +916,14 @@ impl<'a> DeclareView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Declare<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut DeclareIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: DeclareLentStorage {
         _out.header = self.header;
         _out.interest_id = self.interest_id;
         match &self.extensions {
             Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -933,65 +933,65 @@ impl<'a> DeclareView<'a> {
         }
         match &self.body {
             DeclareViewVariant::CodecZenohDeclKexpr(_b) => {
-                _out.body = DeclareVariant::CodecZenohDeclKexpr(DeclKexpr::default());
-                if let DeclareVariant::CodecZenohDeclKexpr(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohDeclKexpr(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclKexpr(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohUndeclKexpr(_b) => {
-                _out.body = DeclareVariant::CodecZenohUndeclKexpr(UndeclKexpr::default());
-                if let DeclareVariant::CodecZenohUndeclKexpr(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohUndeclKexpr(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclKexpr(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohDeclSubscriber(_b) => {
-                _out.body = DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber::default());
-                if let DeclareVariant::CodecZenohDeclSubscriber(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohDeclSubscriber(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclSubscriber(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohUndeclSubscriber(_b) => {
-                _out.body = DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber::default());
-                if let DeclareVariant::CodecZenohUndeclSubscriber(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohUndeclSubscriber(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclSubscriber(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohDeclQueryable(_b) => {
-                _out.body = DeclareVariant::CodecZenohDeclQueryable(DeclQueryable::default());
-                if let DeclareVariant::CodecZenohDeclQueryable(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohDeclQueryable(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclQueryable(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohUndeclQueryable(_b) => {
-                _out.body = DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable::default());
-                if let DeclareVariant::CodecZenohUndeclQueryable(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohUndeclQueryable(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclQueryable(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohDeclToken(_b) => {
-                _out.body = DeclareVariant::CodecZenohDeclToken(DeclToken::default());
-                if let DeclareVariant::CodecZenohDeclToken(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohDeclToken(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclToken(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohUndeclToken(_b) => {
-                _out.body = DeclareVariant::CodecZenohUndeclToken(UndeclToken::default());
-                if let DeclareVariant::CodecZenohUndeclToken(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohUndeclToken(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclToken(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::CodecZenohDeclFinal(_b) => {
-                _out.body = DeclareVariant::CodecZenohDeclFinal(DeclFinal::default());
-                if let DeclareVariant::CodecZenohDeclFinal(_o) = &mut _out.body {
+                _out.body = DeclareVariantIn::CodecZenohDeclFinal(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclFinal(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             DeclareViewVariant::Default { tag, body } => {
-                _out.body = DeclareVariant::Default {
+                _out.body = DeclareVariantIn::Default {
                     tag: *tag,
-                    body: DeclFinal::default(),
+                    body: Default::default(),
                 };
-                if let DeclareVariant::Default { body: _o, .. } = &mut _out.body {
+                if let DeclareVariantIn::Default { body: _o, .. } = &mut _out.body {
                     body.into_builder(_o)?;
                 }
             }
@@ -1007,7 +1007,7 @@ impl<'a> DeclareView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Declare::encode_source(self, w)
+        DeclareWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -1067,29 +1067,24 @@ impl<'a> DeclareView<'a> {
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
-impl<'a> DeclareVariant<'a> {
+impl<'a, D> DeclareVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclareLentStorage {
     /// Deep-copy this borrowed variant body into its owned mirror at the
     /// given storage profile. Fallible because a borrowed arm body's own
     /// projection re-checks its declared capacities (the same bounds decode
     /// enforces) — on the growable profile no check can fire.
     pub fn try_into_owned_in<S: DeclareFrom<'a>>(self) -> Result<DeclareOwnedVariant<S>, CodecError> {
         Ok(match self {
-            DeclareVariant::CodecZenohDeclKexpr(_b) => DeclareOwnedVariant::CodecZenohDeclKexpr(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohUndeclKexpr(_b) => DeclareOwnedVariant::CodecZenohUndeclKexpr(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohDeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohDeclSubscriber(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohUndeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohDeclQueryable(_b) => DeclareOwnedVariant::CodecZenohDeclQueryable(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohDeclToken(_b) => DeclareOwnedVariant::CodecZenohDeclToken(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::Default { tag, body } => DeclareOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
+            Self::CodecZenohDeclKexpr(_b) => DeclareOwnedVariant::CodecZenohDeclKexpr(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohUndeclKexpr(_b) => DeclareOwnedVariant::CodecZenohUndeclKexpr(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohDeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohDeclSubscriber(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohUndeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohDeclQueryable(_b) => DeclareOwnedVariant::CodecZenohDeclQueryable(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohDeclToken(_b) => DeclareOwnedVariant::CodecZenohDeclToken(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b.try_into_owned_in::<S>()?),
+            Self::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b.try_into_owned_in::<S>()?),
+            Self::Default { tag, body } => DeclareOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
         })
-    }
-
-    /// The same projection at the build's default storage profile.
-    pub fn try_into_owned(self) -> Result<DeclareOwnedVariant, CodecError> {
-        self.try_into_owned_in()
     }
 }
 
@@ -1099,8 +1094,8 @@ impl<S: DeclareStorage> DeclareOwnedVariant<S> {
     /// the inverse of the projection above. Reuses the borrowed view's
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
-    pub fn try_as_borrowed(&self) -> Result<DeclareVariant<'_>, CodecError> {
-        let mut _out = DeclareVariant::default();
+    pub fn try_as_borrowed(&self) -> Result<DeclareVariantIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -1114,65 +1109,65 @@ impl<S: DeclareStorage> DeclareOwnedVariant<S> {
     /// projection that returns one copies the declared maximum at every layer
     /// it passes through. A caller on a path where that shows projects into a
     /// destination it owns. On `Err`, `_out` holds what was projected so far.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut DeclareVariant<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut DeclareVariantIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         match self {
             DeclareOwnedVariant::CodecZenohDeclKexpr(_b) => {
-                *_out = DeclareVariant::CodecZenohDeclKexpr(Default::default());
-                if let DeclareVariant::CodecZenohDeclKexpr(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohDeclKexpr(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclKexpr(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(_b) => {
-                *_out = DeclareVariant::CodecZenohUndeclKexpr(Default::default());
-                if let DeclareVariant::CodecZenohUndeclKexpr(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohUndeclKexpr(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclKexpr(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohDeclSubscriber(_b) => {
-                *_out = DeclareVariant::CodecZenohDeclSubscriber(Default::default());
-                if let DeclareVariant::CodecZenohDeclSubscriber(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohDeclSubscriber(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclSubscriber(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b) => {
-                *_out = DeclareVariant::CodecZenohUndeclSubscriber(Default::default());
-                if let DeclareVariant::CodecZenohUndeclSubscriber(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohUndeclSubscriber(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclSubscriber(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohDeclQueryable(_b) => {
-                *_out = DeclareVariant::CodecZenohDeclQueryable(Default::default());
-                if let DeclareVariant::CodecZenohDeclQueryable(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohDeclQueryable(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclQueryable(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => {
-                *_out = DeclareVariant::CodecZenohUndeclQueryable(Default::default());
-                if let DeclareVariant::CodecZenohUndeclQueryable(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohUndeclQueryable(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclQueryable(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohDeclToken(_b) => {
-                *_out = DeclareVariant::CodecZenohDeclToken(Default::default());
-                if let DeclareVariant::CodecZenohDeclToken(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohDeclToken(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclToken(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(_b) => {
-                *_out = DeclareVariant::CodecZenohUndeclToken(Default::default());
-                if let DeclareVariant::CodecZenohUndeclToken(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohUndeclToken(Default::default());
+                if let DeclareVariantIn::CodecZenohUndeclToken(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::CodecZenohDeclFinal(_b) => {
-                *_out = DeclareVariant::CodecZenohDeclFinal(Default::default());
-                if let DeclareVariant::CodecZenohDeclFinal(_o) = _out {
+                *_out = DeclareVariantIn::CodecZenohDeclFinal(Default::default());
+                if let DeclareVariantIn::CodecZenohDeclFinal(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             DeclareOwnedVariant::Default { tag, body } => {
-                *_out = DeclareVariant::Default { tag: *tag, body: Default::default() };
-                if let DeclareVariant::Default { body: _o, .. } = _out {
+                *_out = DeclareVariantIn::Default { tag: *tag, body: Default::default() };
+                if let DeclareVariantIn::Default { body: _o, .. } = _out {
                     body.try_as_borrowed_into(_o)?;
                 }
             }
@@ -1181,8 +1176,11 @@ impl<S: DeclareStorage> DeclareOwnedVariant<S> {
     }
 }
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Declare<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Declare<'a> {
+impl<'a, D> DeclareIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclareLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`DeclareOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -1204,11 +1202,9 @@ impl<'a> Declare<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<DeclareOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -1222,8 +1218,8 @@ impl<S: DeclareStorage> DeclareOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<Declare<'_>, CodecError> {
-        let mut _out = Declare::default();
+    pub fn try_as_borrowed(&self) -> Result<DeclareIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -1238,7 +1234,7 @@ impl<S: DeclareStorage> DeclareOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Declare<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut DeclareIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         _out.interest_id = self.interest_id;
         match &self.extensions {
@@ -1263,27 +1259,27 @@ impl<S: DeclareStorage> DeclareOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> DeclareVariant<'a> {
+impl<'a, D> DeclareVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclareLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
     pub fn try_into_owned_in_origin<S: DeclareStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<DeclareOwnedVariant<S>, CodecError> {
         Ok(match self {
-            DeclareVariant::CodecZenohDeclKexpr(_b) => DeclareOwnedVariant::CodecZenohDeclKexpr(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohUndeclKexpr(_b) => DeclareOwnedVariant::CodecZenohUndeclKexpr(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohDeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohDeclSubscriber(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohUndeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohDeclQueryable(_b) => DeclareOwnedVariant::CodecZenohDeclQueryable(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohDeclToken(_b) => DeclareOwnedVariant::CodecZenohDeclToken(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b.try_into_owned_in_origin::<S>(origin)?),
-            DeclareVariant::Default { tag, body } => DeclareOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },
+            Self::CodecZenohDeclKexpr(_b) => DeclareOwnedVariant::CodecZenohDeclKexpr(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohUndeclKexpr(_b) => DeclareOwnedVariant::CodecZenohUndeclKexpr(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohDeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohDeclSubscriber(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohUndeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohDeclQueryable(_b) => DeclareOwnedVariant::CodecZenohDeclQueryable(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohDeclToken(_b) => DeclareOwnedVariant::CodecZenohDeclToken(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::Default { tag, body } => DeclareOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },
         })
     }
 }
 
 #[allow(dead_code)]
-impl<'a> Declare<'a> {
+impl<'a, D> DeclareIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclareLentStorage {
     /// Project this borrowed view into an owned [`DeclareOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

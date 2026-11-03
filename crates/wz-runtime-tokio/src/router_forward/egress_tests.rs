@@ -547,9 +547,7 @@ fn only_a_reliable_blocking_put_from_a_face_or_a_link_state_message_goes_through
 }
 
 /// A link-state message with nothing in it, which is all these tests need of one.
-fn empty_link_state() -> wz_codecs::oam::OamOwned {
-    use wz_codecs::linkstate_list::LinkstateListOwned;
-
+fn empty_link_state() -> OamOwned {
     wz_session_core::linkstate_oam::build_linkstate_oam_owned(&LinkstateListOwned {
         num_link_states: 0,
         link_states: Default::default(),

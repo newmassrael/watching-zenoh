@@ -35,7 +35,7 @@
 //! `is_local` check then sets M=1, matching the R106-baked wz
 //! default.
 
-use wz_codecs::push::Push;
+use wz_codecs::lent::Push;
 use zenoh_pico_sys::{
     _z_bytes_from_buf, _z_bytes_t, _z_id_t, _z_n_msg_push_t, _z_push_encode, _z_slice_t,
     _z_timestamp_t, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
@@ -82,7 +82,7 @@ fn layer3_push_default_byte_equivalent() {
     // neither layout and the encoder refuses it. The shape pico's encoder is
     // driven with here is a Put with an EMPTY inline payload, so say that.
     let mut push = Push::default();
-    if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
+    if let wz_codecs::lent::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
         put.payload_len = Some(0);
         put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
             extensions: None,

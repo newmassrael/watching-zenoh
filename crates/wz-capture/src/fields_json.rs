@@ -6267,9 +6267,9 @@ mod tests {
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
         const ID: u64 = 7;
 
-        let declare = wz_codecs::declare::Declare {
-            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                wz_codecs::decl_kexpr::DeclKexpr {
+        let declare = wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
                     id: ID,
@@ -12631,11 +12631,11 @@ mod tests {
     /// payload slot.
     #[cfg(feature = "network-codecs")]
     fn push_del(keyexpr: &'static str) -> Vec<u8> {
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::lent::Push {
+            header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: crate::exchange::tests::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgDel(
-                wz_codecs::msg_del::MsgDel::default(),
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgDel(
+                wz_codecs::lent::MsgDel::default(),
             ),
             ..Default::default()
         }
@@ -12966,10 +12966,10 @@ mod tests {
     #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     fn body_population() -> Vec<(&'static str, Option<&'static str>, Vec<u8>)> {
         use crate::datagram_tests::{push, sender_space};
-        use wz_codecs::declare::{Declare, DeclareVariant};
-        use wz_codecs::reply::{Reply, ReplyVariant};
-        use wz_codecs::request::{Request, RequestVariant};
-        use wz_codecs::response::{Response, ResponseVariant};
+        use wz_codecs::lent::{
+            Declare, DeclareVariant, Reply, ReplyVariant, Request, RequestVariant, Response,
+            ResponseVariant,
+        };
         use wz_codecs::wire_const::FLAG_N_N;
 
         let literal = |suffix: &'static str| sender_space(0, Some(suffix));
@@ -12980,7 +12980,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let empty_put = || wz_codecs::msg_put::MsgPut {
+        let empty_put = || wz_codecs::lent::MsgPut {
             payload_len: Some(0),
             extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,
@@ -12997,7 +12997,6 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
-            .expect("a fixture Request is encodable")
         };
         let response = |body: ResponseVariant<'static>| {
             Response {
@@ -13025,7 +13024,7 @@ mod tests {
                 "Declare",
                 Some("decl_kexpr"),
                 declare(DeclareVariant::CodecZenohDeclKexpr(
-                    wz_codecs::decl_kexpr::DeclKexpr {
+                    wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
                         id: 7,
@@ -13038,7 +13037,7 @@ mod tests {
                 "Declare",
                 Some("undecl_kexpr"),
                 declare(DeclareVariant::CodecZenohUndeclKexpr(
-                    wz_codecs::undecl_kexpr::UndeclKexpr {
+                    wz_codecs::lent::UndeclKexpr {
                         id: 7,
                         ..Default::default()
                     },
@@ -13048,7 +13047,7 @@ mod tests {
                 "Declare",
                 Some("decl_subscriber"),
                 declare(DeclareVariant::CodecZenohDeclSubscriber(
-                    wz_codecs::decl_subscriber::DeclSubscriber {
+                    wz_codecs::lent::DeclSubscriber {
                         id: 7,
                         keyexpr: key(),
                         ..Default::default()
@@ -13059,7 +13058,7 @@ mod tests {
                 "Declare",
                 Some("undecl_subscriber"),
                 declare(DeclareVariant::CodecZenohUndeclSubscriber(
-                    wz_codecs::undecl_subscriber::UndeclSubscriber {
+                    wz_codecs::lent::UndeclSubscriber {
                         id: 7,
                         ..Default::default()
                     },
@@ -13069,7 +13068,7 @@ mod tests {
                 "Declare",
                 Some("decl_queryable"),
                 declare(DeclareVariant::CodecZenohDeclQueryable(
-                    wz_codecs::decl_queryable::DeclQueryable {
+                    wz_codecs::lent::DeclQueryable {
                         id: 7,
                         keyexpr: key(),
                         ..Default::default()
@@ -13080,7 +13079,7 @@ mod tests {
                 "Declare",
                 Some("undecl_queryable"),
                 declare(DeclareVariant::CodecZenohUndeclQueryable(
-                    wz_codecs::undecl_queryable::UndeclQueryable {
+                    wz_codecs::lent::UndeclQueryable {
                         id: 7,
                         ..Default::default()
                     },
@@ -13090,7 +13089,7 @@ mod tests {
                 "Declare",
                 Some("decl_token"),
                 declare(DeclareVariant::CodecZenohDeclToken(
-                    wz_codecs::decl_token::DeclToken {
+                    wz_codecs::lent::DeclToken {
                         id: 7,
                         keyexpr: key(),
                         ..Default::default()
@@ -13101,7 +13100,7 @@ mod tests {
                 "Declare",
                 Some("undecl_token"),
                 declare(DeclareVariant::CodecZenohUndeclToken(
-                    wz_codecs::undecl_token::UndeclToken {
+                    wz_codecs::lent::UndeclToken {
                         id: 7,
                         ..Default::default()
                     },
@@ -13111,14 +13110,14 @@ mod tests {
                 "Declare",
                 Some("decl_final"),
                 declare(DeclareVariant::CodecZenohDeclFinal(
-                    wz_codecs::decl_final::DeclFinal::default(),
+                    wz_codecs::lent::DeclFinal::default(),
                 )),
             ),
             (
                 "Request",
                 Some("query"),
                 request(RequestVariant::CodecZenohQuery(
-                    wz_codecs::query::Query::default(),
+                    wz_codecs::lent::Query::default(),
                 )),
             ),
             (
@@ -13135,13 +13134,13 @@ mod tests {
                 "Response",
                 Some("reply"),
                 response(reply(ReplyVariant::CodecZenohMsgDel(
-                    wz_codecs::msg_del::MsgDel::default(),
+                    wz_codecs::lent::MsgDel::default(),
                 ))),
             ),
             (
                 "Response",
                 Some("err"),
-                response(ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
+                response(ResponseVariant::CodecZenohErr(wz_codecs::lent::Err {
                     payload_len: 2,
                     payload: wz_codecs::Bounded::new(b"no" as &[u8]).unwrap(),
                     ..Default::default()
@@ -13150,7 +13149,7 @@ mod tests {
             (
                 "ResponseFinal",
                 None,
-                wz_codecs::response_final::ResponseFinal {
+                wz_codecs::lent::ResponseFinal {
                     request_id: 1,
                     ..Default::default()
                 }
@@ -13159,7 +13158,7 @@ mod tests {
             (
                 "Interest",
                 None,
-                wz_codecs::interest::Interest {
+                wz_codecs::lent::Interest {
                     interest_id: 1,
                     header_c_or_f: None,
                     ..Default::default()
@@ -13181,7 +13180,7 @@ mod tests {
                 .expect("re-borrow")
                 .encode_to_vec(),
             ),
-            ("Oam", None, wz_codecs::oam::Oam::default().encode_to_vec()),
+            ("Oam", None, wz_codecs::lent::Oam::default().encode_to_vec()),
         ]
     }
 
@@ -13290,8 +13289,7 @@ mod tests {
         use super::*;
         use crate::datagram_tests::{frame_carrying, init_datagram, push, sender_space};
         use crate::node::tests::init_wire;
-        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        use wz_codecs::lent::{Wireexpr, WireexprNonlocal, WireexprVariant};
         use wz_session_core::json5::{self, Json5Value};
 
         const LOW: [u8; 4] = [10, 0, 0, 1];
@@ -13313,9 +13311,9 @@ mod tests {
         /// A `DeclareKeyExpr` binding `id` to `scope` + `suffix`. The header
         /// carries N and nothing else: this message has no M bit to set.
         fn declare_kexpr(id: u64, scope: u64, suffix: &'static str) -> Vec<u8> {
-            wz_codecs::declare::Declare {
-                body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-                    wz_codecs::decl_kexpr::DeclKexpr {
+            wz_codecs::lent::Declare {
+                body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                    wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
                         id,

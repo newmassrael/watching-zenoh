@@ -33,8 +33,7 @@
 #[cfg(feature = "alloc")]
 use core::cell::OnceCell;
 
-use wz_codecs::response::{Response, ResponseVariant};
-use wz_codecs::timestamp::Timestamp;
+use wz_codecs::lent::{Response, ResponseVariant, Timestamp};
 
 use super::ReplyRegistry;
 use crate::bounded::Storage;
@@ -158,7 +157,7 @@ enum Fallback {
     feature = "pubsub-delete",
     feature = "query-reply"
 ))]
-fn lent_source_info(exts: &[wz_codecs::ext_entry::ExtEntry<'_>]) -> Option<SourceInfo> {
+fn lent_source_info(exts: &[wz_codecs::lent::ExtEntry<'_>]) -> Option<SourceInfo> {
     #[cfg(feature = "reply-source-info")]
     {
         crate::sample::extract_source_info(exts)
@@ -192,7 +191,7 @@ enum AttachmentOf {
     feature = "query-reply"
 ))]
 fn lent_attachment<'r>(
-    exts: &'r [wz_codecs::ext_entry::ExtEntry<'_>],
+    exts: &'r [wz_codecs::lent::ExtEntry<'_>],
     of: AttachmentOf,
 ) -> Option<&'r [u8]> {
     #[cfg(feature = "pubsub-attachment")]
@@ -233,7 +232,7 @@ fn lent_timestamp<'r, 'f>(ts: Option<&'r Timestamp<'f>>) -> Option<&'r Timestamp
 
 /// An encoding read where its frame lies, as the id word and the schema text a lent reply
 /// carries.
-fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Option<&'r str>) {
+fn encoding_parts<'r>(encoding: &wz_codecs::lent::Encoding<'r>) -> (u32, Option<&'r str>) {
     (
         encoding.packed_id,
         encoding.schema.map(|schema| schema.into_inner()),
@@ -247,13 +246,13 @@ fn lent_body<'r, 'f>(response: &'r Response<'f>) -> Result<Option<LentBody<'r, '
     match &response.body {
         ResponseVariant::CodecZenohReply(reply) => match &reply.body {
             #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
-            wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put) => {
+            wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(put) => {
                 let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
                     &put.extensions_has_0x12
                 else {
                     return Err(Fallback::Sliced);
                 };
-                let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = crate::put_payload::chain(put);
+                let exts: &[wz_codecs::lent::ExtEntry<'f>] = crate::put_payload::chain(put);
                 Ok(Some(LentBody {
                     kind: ReplyKind::Put,
                     payload: payload.into_inner(),
@@ -268,8 +267,8 @@ fn lent_body<'r, 'f>(response: &'r Response<'f>) -> Result<Option<LentBody<'r, '
                 }))
             }
             #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
-            wz_codecs::reply::ReplyVariant::CodecZenohMsgDel(del) => {
-                let exts: &[wz_codecs::ext_entry::ExtEntry<'f>] = del
+            wz_codecs::lent::ReplyVariant::CodecZenohMsgDel(del) => {
+                let exts: &[wz_codecs::lent::ExtEntry<'f>] = del
                     .extensions
                     .as_ref()
                     .map_or(&[][..], |chain| chain.as_slice());
@@ -341,7 +340,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         let Some(body) = lent_body(response)? else {
             return Ok(());
         };
-        let extensions: &[wz_codecs::ext_entry::ExtEntry<'_>] = response
+        let extensions: &[wz_codecs::lent::ExtEntry<'_>] = response
             .extensions
             .as_ref()
             .map_or(&[][..], |chain| chain.as_slice());

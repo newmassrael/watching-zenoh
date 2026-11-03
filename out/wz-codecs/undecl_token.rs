@@ -16,8 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::ext_entry::ExtEntry;
-
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 
@@ -31,15 +29,23 @@ use super::ext_entry::ExtEntryOwned;
 #[allow(dead_code)]
 pub struct UndeclTokenExtensionsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<UndeclTokenExtensionsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `extensions`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `UndeclTokenIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait UndeclTokenStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclTokenExtensionsField> + super::ext_entry::ExtEntryStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclTokenExtensionsField> + super::ext_entry::ExtEntryStorage> UndeclTokenStorage for S {}
+
+/// What `UndeclTokenIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `UndeclToken` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait UndeclTokenLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclTokenExtensionsField> + super::ext_entry::ExtEntryLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<UndeclTokenExtensionsField> + super::ext_entry::ExtEntryLentStorage> UndeclTokenLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside UndeclTokenStorage: how it stores each field of that frame.
@@ -57,16 +63,18 @@ impl<'f, S: UndeclTokenStorage + super::ext_entry::ExtEntryFrom<'f>> UndeclToken
 pub struct UndeclTokenIn<S: UndeclTokenStorage> {
     pub header: u8,
     pub id: u64,
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<UndeclTokenExtensionsField>>::List<ExtEntryOwned<S>>, 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<UndeclTokenExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
 }
 
 /// The eager form: bytes and text borrowed from the frame, lists held inline.
 #[allow(dead_code)]
 pub type UndeclToken<'a> = UndeclTokenIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type UndeclTokenOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = UndeclTokenIn<S>;
+pub type UndeclTokenOwned<S> = UndeclTokenIn<S>;
 
 impl<S: UndeclTokenStorage> Default for UndeclTokenIn<S> {
     fn default() -> Self {
@@ -151,7 +159,7 @@ impl<S: UndeclTokenStorage> UndeclTokenIn<S> {
         if (header & 0x80u8) != 0 {
             _out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _more = false;
-                for _ in 0..8u32 {
+                loop {
                     let _entry = ExtEntryOwned::<S>::decode(cursor)?;
                     _more = _entry.z();
                     // The loop walks the chain's depth and `_vec` holds the capacity, so
@@ -162,9 +170,6 @@ impl<S: UndeclTokenStorage> UndeclTokenIn<S> {
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
-                }
-                if _more {
-                    return Err(CodecError::TooManyElements);
                 }
                 Ok(())
             })?;
@@ -209,7 +214,7 @@ impl<S: UndeclTokenStorage> UndeclTokenIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        UndeclToken::encode_source(self, w)
+        UndeclTokenWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -234,15 +239,15 @@ impl<S: UndeclTokenStorage> UndeclTokenIn<S> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `UndeclToken` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `UndeclToken`
-/// computes those from what is ([`UndeclToken::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`UndeclTokenWire::encode_source`]).
 pub trait UndeclTokenSource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `id` field.
     fn id(&self) -> u64;
     /// The `extensions` field.
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>>;
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
 }
 
 impl<T: UndeclTokenSource + ?Sized> UndeclTokenSource for &T {
@@ -252,7 +257,7 @@ impl<T: UndeclTokenSource + ?Sized> UndeclTokenSource for &T {
     fn id(&self) -> u64 {
         (**self).id()
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         (**self).extensions()
     }
 }
@@ -268,7 +273,7 @@ pub struct UndeclTokenParts<'a> {
     /// The `id` field.
     pub id: u64,
     /// The `extensions` field.
-    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], 8, 1>>,
+    pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
 }
 
 impl<'a> UndeclTokenSource for UndeclTokenParts<'a> {
@@ -278,7 +283,7 @@ impl<'a> UndeclTokenSource for UndeclTokenParts<'a> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
@@ -290,7 +295,7 @@ impl<S: UndeclTokenStorage> UndeclTokenSource for UndeclTokenOwned<S> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.list_iter())
     }
 }
@@ -302,15 +307,22 @@ impl<'a> UndeclTokenSource for UndeclTokenView<'a> {
     fn id(&self) -> u64 {
         self.id
     }
-    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, 8, 1>> {
+    fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
         self.extensions.as_ref().map(|_l| _l.iter())
     }
 }
 
+/// The codec `UndeclToken` itself: what writes a value read through
+/// [`UndeclTokenSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UndeclTokenWire;
+
 #[allow(dead_code)]
-impl<'a> UndeclToken<'a> {
+impl UndeclTokenWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `UndeclToken::encode` writes for the value it holds, read through
     /// [`UndeclTokenSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -328,7 +340,7 @@ impl<'a> UndeclToken<'a> {
         w.write_vle_u64(src.id())?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
-                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
             }
         }
         Ok(())
@@ -344,7 +356,7 @@ impl<'a> UndeclToken<'a> {
     }
 }
 
-impl<'a, S: UndeclTokenSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for UndeclToken<'a> {
+impl<S: UndeclTokenSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for UndeclTokenWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -353,7 +365,7 @@ impl<'a, S: UndeclTokenSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<
 }
 
 #[allow(dead_code)]
-impl<'a> UndeclToken<'a> {
+impl UndeclTokenWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -402,7 +414,7 @@ impl ListWalk<0> for UndeclTokenExtensionsWalk {
 pub struct UndeclTokenView<'a> {
     pub header: u8,
     pub id: u64,
-    pub extensions: Option<Bounded<ListView<'a, UndeclTokenExtensionsWalk, 0>, 8, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, UndeclTokenExtensionsWalk, 0>, { usize::MAX }, 1>>,
 }
 
 impl<'a> Default for UndeclTokenView<'a> {
@@ -459,7 +471,7 @@ impl<'a> UndeclTokenView<'a> {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
-            for _ in 0..8u32 {
+            loop {
                 let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
                 _count += 1;
@@ -467,9 +479,6 @@ impl<'a> UndeclTokenView<'a> {
             }
             if _more && cursor.remaining() == 0 {
                 return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TooManyElements);
             }
             _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
@@ -490,14 +499,14 @@ impl<'a> UndeclTokenView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut UndeclToken<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut UndeclTokenIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: UndeclTokenLentStorage {
         _out.header = self.header;
         _out.id = self.id;
         match &self.extensions {
             Some(_l) => _out.extensions.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(ExtEntry::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -516,7 +525,7 @@ impl<'a> UndeclTokenView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        UndeclToken::encode_source(self, w)
+        UndeclTokenWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -571,8 +580,11 @@ impl<'a> UndeclTokenView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `UndeclToken<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> UndeclToken<'a> {
+impl<'a, D> UndeclTokenIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: UndeclTokenLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`UndeclTokenOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -593,11 +605,9 @@ impl<'a> UndeclToken<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<UndeclTokenOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -611,8 +621,8 @@ impl<S: UndeclTokenStorage> UndeclTokenOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<UndeclToken<'_>, CodecError> {
-        let mut _out = UndeclToken::default();
+    pub fn try_as_borrowed(&self) -> Result<UndeclTokenIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -627,7 +637,7 @@ impl<S: UndeclTokenStorage> UndeclTokenOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut UndeclToken<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut UndeclTokenIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         _out.id = self.id;
         match &self.extensions {
@@ -651,7 +661,7 @@ impl<S: UndeclTokenStorage> UndeclTokenOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> UndeclToken<'a> {
+impl<'a, D> UndeclTokenIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: UndeclTokenLentStorage {
     /// Project this borrowed view into an owned [`UndeclTokenOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

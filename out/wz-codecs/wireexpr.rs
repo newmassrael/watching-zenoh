@@ -16,9 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::wireexpr_local::WireexprLocal;
-use super::wireexpr_nonlocal::WireexprNonlocal;
-
 use super::wireexpr_local::WireexprLocalView;
 use super::wireexpr_nonlocal::WireexprNonlocalView;
 
@@ -33,6 +30,14 @@ use super::wireexpr_nonlocal::WireexprNonlocalOwned;
 pub trait WireexprStorage: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr_local::WireexprLocalStorage + super::wireexpr_nonlocal::WireexprNonlocalStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr_local::WireexprLocalStorage + super::wireexpr_nonlocal::WireexprNonlocalStorage> WireexprStorage for S {}
+
+/// What `WireexprIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Wireexpr` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait WireexprLentStorage: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr_local::WireexprLocalLentStorage + super::wireexpr_nonlocal::WireexprNonlocalLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + super::wireexpr_local::WireexprLocalLentStorage + super::wireexpr_nonlocal::WireexprNonlocalLentStorage> WireexprLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside WireexprStorage: how it stores each field of that frame.
@@ -202,7 +207,7 @@ impl<S: WireexprStorage> WireexprIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Wireexpr::encode_source(self, w)
+        WireexprWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -252,8 +257,8 @@ impl<'s, A0: ?Sized, A1: ?Sized> WireexprVariantSource<'s, A0, A1> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Wireexpr` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Wireexpr`
-/// computes those from what is ([`Wireexpr::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`WireexprWire::encode_source`]).
 pub trait WireexprSource {
     /// The arm of the variant this value holds.
     fn body(&self) -> WireexprVariantSource<'_, impl super::wireexpr_nonlocal::WireexprNonlocalSource, impl super::wireexpr_local::WireexprLocalSource>;
@@ -310,10 +315,17 @@ impl<'a> WireexprSource for WireexprView<'a> {
     }
 }
 
+/// The codec `Wireexpr` itself: what writes a value read through
+/// [`WireexprSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WireexprWire;
+
 #[allow(dead_code)]
-impl<'a> Wireexpr<'a> {
+impl WireexprWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Wireexpr::encode` writes for the value it holds, read through
     /// [`WireexprSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -325,7 +337,7 @@ impl<'a> Wireexpr<'a> {
     /// A parent hands the decode this bit and derives it from here for the
     /// encode.
     pub fn input_n<S: WireexprSource + ?Sized>(src: &S) -> bool {
-        match WireexprSource::body(src) { WireexprVariantSource::WireexprNonlocal(_b) => WireexprNonlocal::input_n(_b), WireexprVariantSource::WireexprLocal(_b) => WireexprLocal::input_n(_b), }
+        match WireexprSource::body(src) { WireexprVariantSource::WireexprNonlocal(_b) => super::wireexpr_nonlocal::WireexprNonlocalWire::input_n(_b), WireexprVariantSource::WireexprLocal(_b) => super::wireexpr_local::WireexprLocalWire::input_n(_b), }
     }
 
     /// The tag of the arm `src` holds ([`WireexprVariantSource::tag`]).
@@ -337,8 +349,8 @@ impl<'a> Wireexpr<'a> {
     #[doc(hidden)]
     pub fn write_source<S: WireexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
         match src.body() {
-            WireexprVariantSource::WireexprNonlocal(_b) => WireexprNonlocal::write_source(_b, w)?,
-            WireexprVariantSource::WireexprLocal(_b) => WireexprLocal::write_source(_b, w)?,
+            WireexprVariantSource::WireexprNonlocal(_b) => super::wireexpr_nonlocal::WireexprNonlocalWire::write_source(_b, w)?,
+            WireexprVariantSource::WireexprLocal(_b) => super::wireexpr_local::WireexprLocalWire::write_source(_b, w)?,
         }
         Ok(())
     }
@@ -353,7 +365,7 @@ impl<'a> Wireexpr<'a> {
     }
 }
 
-impl<'a, S: WireexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Wireexpr<'a> {
+impl<S: WireexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for WireexprWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -362,7 +374,7 @@ impl<'a, S: WireexprSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> 
 }
 
 #[allow(dead_code)]
-impl<'a> Wireexpr<'a> {
+impl WireexprWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -479,17 +491,17 @@ impl<'a> WireexprView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Wireexpr<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut WireexprIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: WireexprLentStorage {
         match &self.body {
             WireexprViewVariant::WireexprNonlocal(_b) => {
-                _out.body = WireexprVariant::WireexprNonlocal(WireexprNonlocal::default());
-                if let WireexprVariant::WireexprNonlocal(_o) = &mut _out.body {
+                _out.body = WireexprVariantIn::WireexprNonlocal(Default::default());
+                if let WireexprVariantIn::WireexprNonlocal(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             WireexprViewVariant::WireexprLocal(_b) => {
-                _out.body = WireexprVariant::WireexprLocal(WireexprLocal::default());
-                if let WireexprVariant::WireexprLocal(_o) = &mut _out.body {
+                _out.body = WireexprVariantIn::WireexprLocal(Default::default());
+                if let WireexprVariantIn::WireexprLocal(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
@@ -508,7 +520,7 @@ impl<'a> WireexprView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Wireexpr::encode_source(self, w)
+        WireexprWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -555,15 +567,15 @@ impl<'a> WireexprView<'a> {
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
-impl<'a> WireexprVariant<'a> {
+impl<'a, D> WireexprVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprLentStorage {
     /// Deep-copy this borrowed variant body into its owned mirror at the
     /// given storage profile. Fallible because a borrowed arm body's own
     /// projection re-checks its declared capacities (the same bounds decode
     /// enforces) — on the growable profile no check can fire.
     pub fn try_into_owned_in<S: WireexprFrom<'a>>(self) -> Result<WireexprOwnedVariant<S>, CodecError> {
         Ok(match self {
-            WireexprVariant::WireexprNonlocal(_b) => WireexprOwnedVariant::WireexprNonlocal(_b.try_into_owned_in::<S>()?),
-            WireexprVariant::WireexprLocal(_b) => WireexprOwnedVariant::WireexprLocal(_b.try_into_owned_in::<S>()?),
+            Self::WireexprNonlocal(_b) => WireexprOwnedVariant::WireexprNonlocal(_b.try_into_owned_in::<S>()?),
+            Self::WireexprLocal(_b) => WireexprOwnedVariant::WireexprLocal(_b.try_into_owned_in::<S>()?),
         })
     }
 
@@ -579,8 +591,8 @@ impl<S: WireexprStorage> WireexprOwnedVariant<S> {
     /// the inverse of the projection above. Reuses the borrowed view's
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
-    pub fn as_borrowed(&self) -> WireexprVariant<'_> {
-        let mut _out = WireexprVariant::default();
+    pub fn as_borrowed(&self) -> WireexprVariantIn<::sce_forge_runtime::codec::Lent<'_, S>> {
+        let mut _out = Default::default();
         self.as_borrowed_into(&mut _out);
         _out
     }
@@ -594,17 +606,17 @@ impl<S: WireexprStorage> WireexprOwnedVariant<S> {
     /// projection that returns one copies the declared maximum at every layer
     /// it passes through. A caller on a path where that shows projects into a
     /// destination it owns. On `Err`, `_out` holds what was projected so far.
-    pub fn as_borrowed_into<'o>(&'o self, _out: &mut WireexprVariant<'o>) {
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut WireexprVariantIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         match self {
             WireexprOwnedVariant::WireexprNonlocal(_b) => {
-                *_out = WireexprVariant::WireexprNonlocal(Default::default());
-                if let WireexprVariant::WireexprNonlocal(_o) = _out {
+                *_out = WireexprVariantIn::WireexprNonlocal(Default::default());
+                if let WireexprVariantIn::WireexprNonlocal(_o) = _out {
                     _b.as_borrowed_into(_o);
                 }
             }
             WireexprOwnedVariant::WireexprLocal(_b) => {
-                *_out = WireexprVariant::WireexprLocal(Default::default());
-                if let WireexprVariant::WireexprLocal(_o) = _out {
+                *_out = WireexprVariantIn::WireexprLocal(Default::default());
+                if let WireexprVariantIn::WireexprLocal(_o) = _out {
                     _b.as_borrowed_into(_o);
                 }
             }
@@ -613,8 +625,11 @@ impl<S: WireexprStorage> WireexprOwnedVariant<S> {
     }
 }
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Wireexpr<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Wireexpr<'a> {
+impl<'a, D> WireexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`WireexprOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -647,8 +662,8 @@ impl<S: WireexprStorage> WireexprOwned<S> {
     /// borrowed view (the owned form is read-only), so an owned consumer
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
-    pub fn as_borrowed(&self) -> Wireexpr<'_> {
-        let mut _out = Wireexpr::default();
+    pub fn as_borrowed(&self) -> WireexprIn<::sce_forge_runtime::codec::Lent<'_, S>> {
+        let mut _out = Default::default();
         self.as_borrowed_into(&mut _out);
         _out
     }
@@ -663,7 +678,7 @@ impl<S: WireexprStorage> WireexprOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn as_borrowed_into<'o>(&'o self, _out: &mut Wireexpr<'o>) {
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut WireexprIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         self.body.as_borrowed_into(&mut _out.body);
         
     }
@@ -682,19 +697,19 @@ impl<S: WireexprStorage> WireexprOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> WireexprVariant<'a> {
+impl<'a, D> WireexprVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
     pub fn try_into_owned_in_origin<S: WireexprStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprOwnedVariant<S>, CodecError> {
         Ok(match self {
-            WireexprVariant::WireexprNonlocal(_b) => WireexprOwnedVariant::WireexprNonlocal(_b.try_into_owned_in_origin::<S>(origin)?),
-            WireexprVariant::WireexprLocal(_b) => WireexprOwnedVariant::WireexprLocal(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::WireexprNonlocal(_b) => WireexprOwnedVariant::WireexprNonlocal(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::WireexprLocal(_b) => WireexprOwnedVariant::WireexprLocal(_b.try_into_owned_in_origin::<S>(origin)?),
         })
     }
 }
 
 #[allow(dead_code)]
-impl<'a> Wireexpr<'a> {
+impl<'a, D> WireexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprLentStorage {
     /// Project this borrowed view into an owned [`WireexprOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

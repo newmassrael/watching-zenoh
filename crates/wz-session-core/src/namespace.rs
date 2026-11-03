@@ -236,7 +236,7 @@ pub fn apply_egress_response(
 /// interest is left untouched.
 pub fn apply_egress_interest(
     ns: &OwnedNonWildKeyExpr,
-    i: &mut wz_codecs::interest::InterestOwned,
+    i: &mut crate::transport_profile::owned::InterestOwned,
 ) -> Result<(), CodecError> {
     if let Some(we) = interest_body_mut(&mut i.header_c_or_f).and_then(|b| b.keyexpr.as_mut()) {
         if let Some(new) = literal_prefix(ns, we) {
@@ -270,9 +270,9 @@ fn literal_prefix<S: WireexprStorage>(
 #[cfg(feature = "codec-declare")]
 pub fn apply_egress_declare(
     ns: &OwnedNonWildKeyExpr,
-    d: &mut wz_codecs::declare::DeclareOwned,
+    d: &mut crate::transport_profile::owned::DeclareOwned,
 ) -> Result<(), CodecError> {
-    use wz_codecs::declare::DeclareOwnedVariant as DV;
+    use crate::transport_profile::owned::DeclareOwnedVariant as DV;
     match &mut d.body {
         // DeclareKeyExpr definition: ALWAYS prepend (new_keyexpr_declare=true) —
         // the namespace must be baked into the alias so every later aliased use
@@ -601,8 +601,8 @@ impl NamespaceIngress {
     /// matching blocked set, so the later id-only `Undeclare*` (wz undeclare
     /// bodies carry no keyexpr) is correlated and dropped too.
     #[cfg(feature = "codec-declare")]
-    fn declare_ingress(&mut self, d: &mut wz_codecs::declare::DeclareOwned) -> bool {
-        use wz_codecs::declare::DeclareOwnedVariant as DV;
+    fn declare_ingress(&mut self, d: &mut crate::transport_profile::owned::DeclareOwned) -> bool {
+        use crate::transport_profile::owned::DeclareOwnedVariant as DV;
         match &mut d.body {
             DV::CodecZenohDeclKexpr(m) => self.strip(&mut m.keyexpr, Some(m.id)),
             // A parked (non-matching) DeclareKeyExpr's undeclare is dropped; one
@@ -668,7 +668,7 @@ impl NamespaceIngress {
     /// mis-tagged variant loses the mapping and nothing else. Reading it here
     /// makes [`Self::strip_mapped`]'s Receiver arm reachable for interests, with
     /// no change to the pinned `out/**` codegen.
-    fn interest_ingress(&mut self, i: &mut wz_codecs::interest::InterestOwned) -> bool {
+    fn interest_ingress(&mut self, i: &mut crate::transport_profile::owned::InterestOwned) -> bool {
         let is_final = (i.header & INTEREST_C) == 0 && (i.header & INTEREST_F) == 0;
         if is_final {
             return !self.blocked_interests.remove(&i.interest_id);
@@ -811,8 +811,8 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn ingress_blocked_undeclare_correlation() {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         let mut ing = NamespaceIngress::new(ns("myns"));
         let decl_sub = |id, ke| {
             NetworkMessage::Declare(Box::new(DeclareOwned {
@@ -861,8 +861,8 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn reset_clears_blocked_ids_keeps_namespace() {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         let mut ing = NamespaceIngress::new(ns("myns"));
         let decl_sub = |id, ke| {
             NetworkMessage::Declare(Box::new(DeclareOwned {
@@ -935,7 +935,7 @@ mod tests {
     }
 
     fn interest(header: u8, id: u64, ke: Option<&str>) -> NetworkMessage {
-        NetworkMessage::Interest(wz_codecs::interest::InterestOwned {
+        NetworkMessage::Interest(crate::transport_profile::owned::InterestOwned {
             header,
             interest_id: id,
             header_c_or_f: interest_body_arm(
@@ -1015,8 +1015,8 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn egress_declare_kexpr_subscriber_and_aliased() {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         let n = ns("myns");
         let wrap = |body| {
             NetworkMessage::Declare(Box::new(DeclareOwned {
@@ -1122,8 +1122,8 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn ingress_undecl_kexpr_correlation() {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         let mut ing = NamespaceIngress::new(ns("myns"));
         // park id=5 via a non-matching DeclareKeyExpr definition ("my" < "myns").
         assert!(!ing.strip(&mut literal("my"), Some(5)));
@@ -1149,8 +1149,8 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn ingress_queryable_token_block_correlation() {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
         use alloc::boxed::Box;
-        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         let mut ing = NamespaceIngress::new(ns("myns"));
         let wrap = |body| {
             NetworkMessage::Declare(Box::new(DeclareOwned {
@@ -1218,7 +1218,7 @@ mod tests {
     #[test]
     fn a_sourced_undeclare_queryables_ext_keyexpr_is_decorated() {
         use crate::declare_ext_keyexpr::read_ext_keyexpr;
-        use wz_codecs::declare::DeclareOwnedVariant as DV;
+        use crate::transport_profile::owned::DeclareOwnedVariant as DV;
         let n = ns("myns");
         let mut d = crate::declare_build::build_undeclare_queryable_with_keyexpr("demo/q")
             .expect("build the sourced retraction");
@@ -1245,7 +1245,7 @@ mod tests {
     #[test]
     fn the_subscriber_and_token_ext_keyexprs_are_left_alone_as_upstream_leaves_them() {
         use crate::declare_ext_keyexpr::read_ext_keyexpr;
-        use wz_codecs::declare::DeclareOwnedVariant as DV;
+        use crate::transport_profile::owned::DeclareOwnedVariant as DV;
         let n = ns("myns");
 
         let mut sub = crate::declare_build::build_undeclare_subscriber_with_keyexpr("demo/s")
@@ -1280,7 +1280,7 @@ mod tests {
     #[test]
     fn an_interest_alias_is_read_by_its_own_mapping_bit_not_by_the_decoded_variant() {
         fn interest_with(body_header: u8, we: WireexprOwned) -> NetworkMessage {
-            NetworkMessage::Interest(wz_codecs::interest::InterestOwned {
+            NetworkMessage::Interest(crate::transport_profile::owned::InterestOwned {
                 header: INTEREST_C,
                 interest_id: 1,
                 header_c_or_f: Some(wz_codecs::interest::InterestHeaderCOrF::C {

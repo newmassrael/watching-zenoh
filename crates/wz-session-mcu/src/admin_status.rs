@@ -405,10 +405,9 @@ mod tests {
     use alloc::rc::Rc;
     use alloc::vec;
 
-    use wz_codecs::query::Query;
-    use wz_codecs::request::{Request, RequestVariant};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{
+        Query, Request, RequestVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
+    };
     use wz_runtime_coop::session_drive::{IpEndpoint, SessionDatagramLink};
     use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -502,7 +501,9 @@ mod tests {
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Request(Box::new(
-                request.try_into_owned().unwrap(),
+                request
+                    .try_into_owned_in::<wz_session_core::wire::WireStorage>()
+                    .unwrap(),
             ))],
             has_ext: false,
             extensions: Vec::new(),

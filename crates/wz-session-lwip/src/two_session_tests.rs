@@ -157,7 +157,7 @@ fn put_payloads(event: &IterationEvent<'_, '_>) -> Vec<Vec<u8>> {
             }
         }
         IterationEvent::InPlace(record) => {
-            use wz_codecs::push::PushVariant;
+            use wz_codecs::lent::PushVariant;
             if let Some(
                 PushVariant::CodecZenohMsgPut(put) | PushVariant::Default { body: put, .. },
             ) = record.push().map(|push| &push.body)

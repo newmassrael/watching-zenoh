@@ -18,7 +18,6 @@ use sce_forge_runtime::codec::VecSink;
 
 use super::ext_unit::ExtUnit;
 use super::ext_zint::ExtZint;
-use super::query_value_zbuf::QueryValueZbuf;
 
 use super::ext_unit::ExtUnitView;
 use super::ext_zint::ExtZintView;
@@ -73,6 +72,14 @@ use super::query_value_zbuf::QueryValueZbufOwned;
 pub trait QueryExtEntryStorage: ::core::fmt::Debug + Clone + PartialEq + super::query_value_zbuf::QueryValueZbufStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + super::query_value_zbuf::QueryValueZbufStorage> QueryExtEntryStorage for S {}
+
+/// What `QueryExtEntryIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `QueryExtEntry` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait QueryExtEntryLentStorage: ::core::fmt::Debug + Clone + PartialEq + super::query_value_zbuf::QueryValueZbufLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + super::query_value_zbuf::QueryValueZbufLentStorage> QueryExtEntryLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside QueryExtEntryStorage: how it stores each field of that frame.
@@ -304,7 +311,7 @@ impl<S: QueryExtEntryStorage> QueryExtEntryIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        QueryExtEntry::encode_source(self, w)
+        QueryExtEntryWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. It reserves nothing, since the
@@ -385,8 +392,8 @@ impl QueryExtEntryOverrides {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `QueryExtEntry` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `QueryExtEntry`
-/// computes those from what is ([`QueryExtEntry::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`QueryExtEntryWire::encode_source`]).
 pub trait QueryExtEntrySource {
     /// The `header` field.
     fn header(&self) -> u8;
@@ -468,10 +475,17 @@ impl<'a> QueryExtEntrySource for QueryExtEntryView<'a> {
     }
 }
 
+/// The codec `QueryExtEntry` itself: what writes a value read through
+/// [`QueryExtEntrySource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QueryExtEntryWire;
+
 #[allow(dead_code)]
-impl<'a> QueryExtEntry<'a> {
+impl QueryExtEntryWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `QueryExtEntry::encode` writes for the value it holds, read through
     /// [`QueryExtEntrySource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -483,7 +497,7 @@ impl<'a> QueryExtEntry<'a> {
     /// A parent hands the decode this bit and derives it from here for the
     /// encode.
     pub fn input_after_shm<S: QueryExtEntrySource + ?Sized>(src: &S) -> Option<bool> {
-        match QueryExtEntrySource::body(src) { QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_b) => Some(QueryValueZbuf::input_after_shm(_b)), _ => None, }
+        match QueryExtEntrySource::body(src) { QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_b) => Some(super::query_value_zbuf::QueryValueZbufWire::input_after_shm(_b)), _ => None, }
     }
 
     /// The tag of the arm `src` holds ([`QueryExtEntryVariantSource::tag`]).
@@ -511,10 +525,10 @@ impl<'a> QueryExtEntry<'a> {
         }
         w.write_u8(_c_header)?;
         match src.body() {
-            QueryExtEntryVariantSource::CodecZenohExtUnit(_b) => ExtUnit::write_source(_b, w)?,
-            QueryExtEntryVariantSource::CodecZenohExtZint(_b) => ExtZint::write_source(_b, w)?,
-            QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_b) => QueryValueZbuf::write_source(_b, w)?,
-            QueryExtEntryVariantSource::Default { body: _b, .. } => ExtUnit::write_source(_b, w)?,
+            QueryExtEntryVariantSource::CodecZenohExtUnit(_b) => super::ext_unit::ExtUnitWire::write_source(_b, w)?,
+            QueryExtEntryVariantSource::CodecZenohExtZint(_b) => super::ext_zint::ExtZintWire::write_source(_b, w)?,
+            QueryExtEntryVariantSource::CodecZenohQueryValueZbuf(_b) => super::query_value_zbuf::QueryValueZbufWire::write_source(_b, w)?,
+            QueryExtEntryVariantSource::Default { body: _b, .. } => super::ext_unit::ExtUnitWire::write_source(_b, w)?,
         }
         Ok(())
     }
@@ -529,7 +543,7 @@ impl<'a> QueryExtEntry<'a> {
     }
 }
 
-impl<'a, S: QueryExtEntrySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for QueryExtEntry<'a> {
+impl<S: QueryExtEntrySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for QueryExtEntryWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -538,7 +552,7 @@ impl<'a, S: QueryExtEntrySource + ?Sized> ::sce_forge_runtime::codec::SourceWrit
 }
 
 #[allow(dead_code)]
-impl<'a> QueryExtEntry<'a> {
+impl QueryExtEntryWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -675,33 +689,33 @@ impl<'a> QueryExtEntryView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut QueryExtEntry<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut QueryExtEntryIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: QueryExtEntryLentStorage {
         _out.header = self.header;
         match &self.body {
             QueryExtEntryViewVariant::CodecZenohExtUnit(_b) => {
-                _out.body = QueryExtEntryVariant::CodecZenohExtUnit(ExtUnit::default());
-                if let QueryExtEntryVariant::CodecZenohExtUnit(_o) = &mut _out.body {
+                _out.body = QueryExtEntryVariantIn::CodecZenohExtUnit(Default::default());
+                if let QueryExtEntryVariantIn::CodecZenohExtUnit(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             QueryExtEntryViewVariant::CodecZenohExtZint(_b) => {
-                _out.body = QueryExtEntryVariant::CodecZenohExtZint(ExtZint::default());
-                if let QueryExtEntryVariant::CodecZenohExtZint(_o) = &mut _out.body {
+                _out.body = QueryExtEntryVariantIn::CodecZenohExtZint(Default::default());
+                if let QueryExtEntryVariantIn::CodecZenohExtZint(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(_b) => {
-                _out.body = QueryExtEntryVariant::CodecZenohQueryValueZbuf(QueryValueZbuf::default());
-                if let QueryExtEntryVariant::CodecZenohQueryValueZbuf(_o) = &mut _out.body {
+                _out.body = QueryExtEntryVariantIn::CodecZenohQueryValueZbuf(Default::default());
+                if let QueryExtEntryVariantIn::CodecZenohQueryValueZbuf(_o) = &mut _out.body {
                     _b.into_builder(_o)?;
                 }
             }
             QueryExtEntryViewVariant::Default { tag, body } => {
-                _out.body = QueryExtEntryVariant::Default {
+                _out.body = QueryExtEntryVariantIn::Default {
                     tag: *tag,
-                    body: ExtUnit::default(),
+                    body: Default::default(),
                 };
-                if let QueryExtEntryVariant::Default { body: _o, .. } = &mut _out.body {
+                if let QueryExtEntryVariantIn::Default { body: _o, .. } = &mut _out.body {
                     body.into_builder(_o)?;
                 }
             }
@@ -717,7 +731,7 @@ impl<'a> QueryExtEntryView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        QueryExtEntry::encode_source(self, w)
+        QueryExtEntryWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
@@ -781,17 +795,17 @@ impl<'a> QueryExtEntryView<'a> {
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
 #[allow(dead_code)]
-impl<'a> QueryExtEntryVariant<'a> {
+impl<'a, D> QueryExtEntryVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryExtEntryLentStorage {
     /// Deep-copy this borrowed variant body into its owned mirror at the
     /// given storage profile. Fallible because a borrowed arm body's own
     /// projection re-checks its declared capacities (the same bounds decode
     /// enforces) — on the growable profile no check can fire.
     pub fn try_into_owned_in<S: QueryExtEntryFrom<'a>>(self) -> Result<QueryExtEntryOwnedVariant<S>, CodecError> {
         Ok(match self {
-            QueryExtEntryVariant::CodecZenohExtUnit(_b) => QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b),
-            QueryExtEntryVariant::CodecZenohExtZint(_b) => QueryExtEntryOwnedVariant::CodecZenohExtZint(_b),
-            QueryExtEntryVariant::CodecZenohQueryValueZbuf(_b) => QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b.try_into_owned_in::<S>()?),
-            QueryExtEntryVariant::Default { tag, body } => QueryExtEntryOwnedVariant::Default { tag, body },
+            Self::CodecZenohExtUnit(_b) => QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b),
+            Self::CodecZenohExtZint(_b) => QueryExtEntryOwnedVariant::CodecZenohExtZint(_b),
+            Self::CodecZenohQueryValueZbuf(_b) => QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b.try_into_owned_in::<S>()?),
+            Self::Default { tag, body } => QueryExtEntryOwnedVariant::Default { tag, body },
         })
     }
 
@@ -807,8 +821,8 @@ impl<S: QueryExtEntryStorage> QueryExtEntryOwnedVariant<S> {
     /// the inverse of the projection above. Reuses the borrowed view's
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
-    pub fn try_as_borrowed(&self) -> Result<QueryExtEntryVariant<'_>, CodecError> {
-        let mut _out = QueryExtEntryVariant::default();
+    pub fn try_as_borrowed(&self) -> Result<QueryExtEntryVariantIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -822,29 +836,29 @@ impl<S: QueryExtEntryStorage> QueryExtEntryOwnedVariant<S> {
     /// projection that returns one copies the declared maximum at every layer
     /// it passes through. A caller on a path where that shows projects into a
     /// destination it owns. On `Err`, `_out` holds what was projected so far.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut QueryExtEntryVariant<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut QueryExtEntryVariantIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         match self {
             QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b) => {
-                *_out = QueryExtEntryVariant::CodecZenohExtUnit(Default::default());
-                if let QueryExtEntryVariant::CodecZenohExtUnit(_o) = _out {
+                *_out = QueryExtEntryVariantIn::CodecZenohExtUnit(Default::default());
+                if let QueryExtEntryVariantIn::CodecZenohExtUnit(_o) = _out {
                     *_o = _b.clone();
                 }
             }
             QueryExtEntryOwnedVariant::CodecZenohExtZint(_b) => {
-                *_out = QueryExtEntryVariant::CodecZenohExtZint(Default::default());
-                if let QueryExtEntryVariant::CodecZenohExtZint(_o) = _out {
+                *_out = QueryExtEntryVariantIn::CodecZenohExtZint(Default::default());
+                if let QueryExtEntryVariantIn::CodecZenohExtZint(_o) = _out {
                     *_o = _b.clone();
                 }
             }
             QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b) => {
-                *_out = QueryExtEntryVariant::CodecZenohQueryValueZbuf(Default::default());
-                if let QueryExtEntryVariant::CodecZenohQueryValueZbuf(_o) = _out {
+                *_out = QueryExtEntryVariantIn::CodecZenohQueryValueZbuf(Default::default());
+                if let QueryExtEntryVariantIn::CodecZenohQueryValueZbuf(_o) = _out {
                     _b.try_as_borrowed_into(_o)?;
                 }
             }
             QueryExtEntryOwnedVariant::Default { tag, body } => {
-                *_out = QueryExtEntryVariant::Default { tag: *tag, body: Default::default() };
-                if let QueryExtEntryVariant::Default { body: _o, .. } = _out {
+                *_out = QueryExtEntryVariantIn::Default { tag: *tag, body: Default::default() };
+                if let QueryExtEntryVariantIn::Default { body: _o, .. } = _out {
                     *_o = body.clone();
                 }
             }
@@ -853,8 +867,11 @@ impl<S: QueryExtEntryStorage> QueryExtEntryOwnedVariant<S> {
     }
 }
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `QueryExtEntry<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> QueryExtEntry<'a> {
+impl<'a, D> QueryExtEntryIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryExtEntryLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`QueryExtEntryOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -892,8 +909,8 @@ impl<S: QueryExtEntryStorage> QueryExtEntryOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<QueryExtEntry<'_>, CodecError> {
-        let mut _out = QueryExtEntry::default();
+    pub fn try_as_borrowed(&self) -> Result<QueryExtEntryIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -908,7 +925,7 @@ impl<S: QueryExtEntryStorage> QueryExtEntryOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut QueryExtEntry<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut QueryExtEntryIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.header = self.header;
         self.body.try_as_borrowed_into(&mut _out.body)?;
         Ok(())
@@ -928,21 +945,21 @@ impl<S: QueryExtEntryStorage> QueryExtEntryOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> QueryExtEntryVariant<'a> {
+impl<'a, D> QueryExtEntryVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryExtEntryLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
     pub fn try_into_owned_in_origin<S: QueryExtEntryStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryExtEntryOwnedVariant<S>, CodecError> {
         Ok(match self {
-            QueryExtEntryVariant::CodecZenohExtUnit(_b) => QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b),
-            QueryExtEntryVariant::CodecZenohExtZint(_b) => QueryExtEntryOwnedVariant::CodecZenohExtZint(_b),
-            QueryExtEntryVariant::CodecZenohQueryValueZbuf(_b) => QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b.try_into_owned_in_origin::<S>(origin)?),
-            QueryExtEntryVariant::Default { tag, body } => QueryExtEntryOwnedVariant::Default { tag, body },
+            Self::CodecZenohExtUnit(_b) => QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b),
+            Self::CodecZenohExtZint(_b) => QueryExtEntryOwnedVariant::CodecZenohExtZint(_b),
+            Self::CodecZenohQueryValueZbuf(_b) => QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b.try_into_owned_in_origin::<S>(origin)?),
+            Self::Default { tag, body } => QueryExtEntryOwnedVariant::Default { tag, body },
         })
     }
 }
 
 #[allow(dead_code)]
-impl<'a> QueryExtEntry<'a> {
+impl<'a, D> QueryExtEntryIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryExtEntryLentStorage {
     /// Project this borrowed view into an owned [`QueryExtEntryOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

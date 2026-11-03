@@ -493,11 +493,10 @@ mod tests {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use wz_codecs::push::{Push, PushVariant};
-    use wz_codecs::query::Query;
-    use wz_codecs::request::{Request, RequestVariant};
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_codecs::lent::{
+        Push, PushVariant, Query, Request, RequestVariant, Wireexpr, WireexprNonlocal,
+        WireexprVariant,
+    };
     use wz_runtime_coop::session_drive::{IpEndpoint, SessionDatagramLink};
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::link::BoxedLinkDriver;

@@ -85,6 +85,7 @@ use wz_session_core::attachment::{
     decode_attachment_ext, ATTACHMENT_EXT_ID_DEL, ATTACHMENT_EXT_ID_PUSH, ATTACHMENT_EXT_ID_QUERY,
 };
 use wz_session_core::ext_view::{query_value_payload_len, ExtEntryView};
+use wz_session_core::held_list::HeldList;
 use wz_session_core::keyexpr_match::keyexpr_includes_target;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::put_payload::payload_len as put_payload_len;
@@ -287,8 +288,8 @@ fn attachment_len<E: ExtEntryView>(extensions: &[E], ext_id: u8) -> usize {
 }
 
 /// The entries of a chain held as an optional list, none for a message without one.
-fn entries<E>(extensions: Option<&Vec<E>>) -> &[E] {
-    extensions.map(Vec::as_slice).unwrap_or_default()
+fn entries<E>(extensions: &impl HeldList<E>) -> &[E] {
+    extensions.entries().unwrap_or_default()
 }
 
 /// The query-body payload byte count — zenoh's
@@ -301,9 +302,11 @@ fn entries<E>(extensions: Option<&Vec<E>>) -> &[E] {
 /// name, as a sliced Put's payload is, so a large value in shared memory is not
 /// under the limit for want of bytes on the wire (R3045).
 fn query_value_len<S: QueryExtEntryStorage>(
-    extensions: Option<&Vec<QueryExtEntryOwned<S>>>,
+    extensions: &impl HeldList<QueryExtEntryOwned<S>>,
 ) -> usize {
-    extensions.map_or(0, |exts| query_value_payload_len(exts))
+    extensions
+        .entries()
+        .map_or(0, |exts| query_value_payload_len(exts))
 }
 
 /// Classify `msg` into `(kind, payload bytes, attachment bytes)`, or `None` for
@@ -333,18 +336,15 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             PushOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(entries(del.extensions.as_deref()), ATTACHMENT_EXT_ID_DEL),
+                attachment_len(entries(&del.extensions), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
         NetworkMessage::Request(r) => match &r.body {
             RequestOwnedVariant::CodecZenohQuery(query) => Some((
                 LowPassMessage::Query,
-                query_value_len(query.extensions.as_deref()),
-                attachment_len(
-                    entries(query.extensions.as_deref()),
-                    ATTACHMENT_EXT_ID_QUERY,
-                ),
+                query_value_len(&query.extensions),
+                attachment_len(entries(&query.extensions), ATTACHMENT_EXT_ID_QUERY),
             )),
             RequestOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
@@ -357,7 +357,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             RequestOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(entries(del.extensions.as_deref()), ATTACHMENT_EXT_ID_DEL),
+                attachment_len(entries(&del.extensions), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
@@ -374,7 +374,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => Some((
                     LowPassMessage::Reply,
                     0,
-                    attachment_len(entries(del.extensions.as_deref()), ATTACHMENT_EXT_ID_DEL),
+                    attachment_len(entries(&del.extensions), ATTACHMENT_EXT_ID_DEL),
                 )),
                 _ => None,
             },

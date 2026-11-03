@@ -62,39 +62,20 @@ use sce_forge_runtime::codec::{Bounded, CodecError};
 #[cfg(feature = "codec-declare")]
 use sce_forge_runtime::codec::{SceSink, SliceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::interest::Interest;
-use wz_codecs::interest_body::InterestBody;
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_codecs::lent::{
+    ExtEntry, ExtEntryVariant, Interest, InterestBody, Wireexpr, WireexprLocal, WireexprVariant,
+};
 
 #[cfg(feature = "declare-final")]
-use wz_codecs::decl_final::DeclFinal;
+use wz_codecs::lent::DeclFinal;
 #[cfg(feature = "codec-declare")]
-use wz_codecs::decl_kexpr::DeclKexpr;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::decl_queryable::DeclQueryable;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::decl_subscriber::DeclSubscriber;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::decl_token::DeclToken;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::declare::{Declare, DeclareVariant};
-#[cfg(feature = "codec-declare")]
-use wz_codecs::ext_zbuf::ExtZbuf;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::undecl_kexpr::UndeclKexpr;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::undecl_queryable::UndeclQueryable;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::undecl_subscriber::UndeclSubscriber;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::undecl_token::UndeclToken;
+use wz_codecs::lent::{
+    DeclKexpr, DeclQueryable, DeclSubscriber, DeclToken, Declare, DeclareVariant, ExtZbuf,
+    UndeclKexpr, UndeclQueryable, UndeclSubscriber, UndeclToken, WireexprNonlocal,
+};
 #[cfg(feature = "codec-declare")]
 use wz_codecs::wire_const;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
 use crate::declare_ext_qos::{QOS_DECLARE, QOS_EXT_HEADER};
 use crate::interest_build::{
@@ -105,11 +86,18 @@ use crate::sample::QosLevel;
 /// The chain a control message carries when it carries one extension: the one
 /// entry, in the codec's own fixed-capacity list. The capacity of that list is
 /// eight, so one entry always fits and the push cannot fail.
-fn chain_of<'a>(entry: ExtEntry<'a>) -> Bounded<HeaplessVec<ExtEntry<'a>, 8>, 8, 1> {
+fn chain_of<'a, const MAX: usize, const MIN: usize>(
+    entry: ExtEntry<'a>,
+) -> Bounded<HeaplessVec<ExtEntry<'a>, 8>, MAX, MIN> {
+    const { assert!(MAX >= 1, "a list of one entry needs a bound of one or more") };
+    const { assert!(MIN <= 1, "a list of one entry holds at most one entry") };
     let mut chain = HeaplessVec::new();
-    // One entry in a list of eight.
+    // One entry in the eight a node holds of a chain.
     let _ = chain.push(entry);
-    Bounded::new(chain).expect("one entry is within the chain's bounds")
+    match Bounded::new(chain) {
+        Some(chain) => chain,
+        None => unreachable!("the bounds are checked when this is compiled"),
+    }
 }
 
 /// An `ext_qos` entry carrying `qos`: `zextz64!(0x1, false)`, terminal (no
@@ -737,7 +725,7 @@ pub fn interest_final_propagated<'a>(interest_id: u64) -> Interest<'a> {
 #[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
 #[inline(never)]
 pub fn response_final_len(request_id: u64, qos: QosLevel) -> usize {
-    wz_codecs::response_final::ResponseFinal::measure(&response_final(request_id, qos)).len()
+    wz_codecs::response_final::ResponseFinalWire::measure(&response_final(request_id, qos)).len()
 }
 
 /// A `ResponseFinal` closing the reply stream of `request_id`, carrying `qos` as
@@ -745,16 +733,13 @@ pub fn response_final_len(request_id: u64, qos: QosLevel) -> usize {
 /// [`crate::declare_ext_qos::set_response_final_qos`]).
 /// [`crate::response_final_build::build_response_final`], written in place.
 #[cfg(feature = "codec-response-final")]
-pub fn response_final<'a>(
-    request_id: u64,
-    qos: QosLevel,
-) -> wz_codecs::response_final::ResponseFinal<'a> {
+pub fn response_final<'a>(request_id: u64, qos: QosLevel) -> wz_codecs::lent::ResponseFinal<'a> {
     let (header, extensions) = if qos == QosLevel::DEFAULT {
         (0x1A, None)
     } else {
         (with_z(0x1A), Some(chain_of(qos_entry(qos))))
     };
-    wz_codecs::response_final::ResponseFinal {
+    wz_codecs::lent::ResponseFinal {
         header,
         request_id,
         extensions,
@@ -777,9 +762,8 @@ mod tests {
     use crate::declare_build as owned;
     use crate::interest_build as ibuild;
     use crate::queryable_info::QueryableInfo;
+    use crate::transport_profile::owned::{DeclareOwned, InterestOwned};
     use alloc::vec::Vec;
-    use wz_codecs::declare::DeclareOwned;
-    use wz_codecs::interest::InterestOwned;
 
     /// The bytes of an owned `Declare`, through the borrowed view that owns encode.
     fn owned_declare(declare: &DeclareOwned) -> Vec<u8> {
@@ -1262,14 +1246,14 @@ mod tests {
     /// the envelope.
     #[test]
     fn what_is_written_decodes_to_the_message_it_describes() {
-        use wz_codecs::declare::{Declare as DeclareView, DeclareOwnedVariant};
-        use wz_codecs::interest::Interest as InterestView;
+        use wz_codecs::declare::DeclareOwnedVariant;
+        use wz_codecs::lent::{Declare as DeclareView, Interest as InterestView};
         let declare = declare_queryable(4, 9, Some("q/k"), QueryableInfo::local(true)).unwrap();
         let bytes = declare.encode_to_vec();
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&bytes);
         let decoded = DeclareView::decode(&mut cursor)
             .expect("decodes")
-            .try_into_owned()
+            .try_into_owned_in::<crate::transport_profile::TransportStorage>()
             .expect("owns");
         assert_eq!(decoded.interest_id, None);
         assert_eq!(
@@ -1306,7 +1290,7 @@ mod tests {
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&bytes);
         let decoded = InterestView::decode(&mut cursor)
             .expect("decodes")
-            .try_into_owned()
+            .try_into_owned_in::<crate::transport_profile::TransportStorage>()
             .expect("owns");
         assert_eq!(decoded.interest_id, 8);
         assert!(decoded.c() && decoded.f() && decoded.z());

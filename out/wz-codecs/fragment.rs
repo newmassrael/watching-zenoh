@@ -36,6 +36,14 @@ pub trait FragmentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<FragmentPayloadField>> FragmentStorage for S {}
 
+/// What `FragmentIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Fragment` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait FragmentLentStorage: ::core::fmt::Debug + Clone + PartialEq {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq> FragmentLentStorage for D {}
+
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside FragmentStorage: how it stores each field of that frame.
 #[allow(dead_code)]
@@ -164,7 +172,7 @@ impl<S: FragmentStorage> FragmentIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Fragment::encode_source(self, w)
+        FragmentWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -189,8 +197,8 @@ impl<S: FragmentStorage> FragmentIn<S> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Fragment` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Fragment`
-/// computes those from what is ([`Fragment::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`FragmentWire::encode_source`]).
 pub trait FragmentSource {
     /// The `sn` field.
     fn sn(&self) -> u64;
@@ -237,10 +245,17 @@ impl<S: FragmentStorage> FragmentSource for FragmentOwned<S> {
     }
 }
 
+/// The codec `Fragment` itself: what writes a value read through
+/// [`FragmentSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FragmentWire;
+
 #[allow(dead_code)]
-impl<'a> Fragment<'a> {
+impl FragmentWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Fragment::encode` writes for the value it holds, read through
     /// [`FragmentSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -266,7 +281,7 @@ impl<'a> Fragment<'a> {
     }
 }
 
-impl<'a, S: FragmentSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Fragment<'a> {
+impl<S: FragmentSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for FragmentWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -275,7 +290,7 @@ impl<'a, S: FragmentSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> 
 }
 
 #[allow(dead_code)]
-impl<'a> Fragment<'a> {
+impl FragmentWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -314,8 +329,11 @@ impl<'a> Fragment<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Self) -> Result<(), CodecError> {
-        _out.clone_from(self);
+    // A codec with no list holds every field alike at every profile, so the
+    // value at any `D` is filled field by field (docs/adr/0077 §7).
+    pub fn into_builder<D>(&self, _out: &mut FragmentIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: FragmentLentStorage {
+        _out.sn = self.sn;
+        _out.payload = self.payload;
         Ok(())
     }
 }
@@ -353,8 +371,11 @@ impl<'a> Fragment<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Fragment<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Fragment<'a> {
+impl<'a, D> FragmentIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: FragmentLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`FragmentOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -388,8 +409,8 @@ impl<S: FragmentStorage> FragmentOwned<S> {
     /// borrowed view (the owned form is read-only), so an owned consumer
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
-    pub fn as_borrowed(&self) -> Fragment<'_> {
-        let mut _out = Fragment::default();
+    pub fn as_borrowed(&self) -> FragmentIn<::sce_forge_runtime::codec::Lent<'_, S>> {
+        let mut _out = Default::default();
         self.as_borrowed_into(&mut _out);
         _out
     }
@@ -404,7 +425,7 @@ impl<S: FragmentStorage> FragmentOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn as_borrowed_into<'o>(&'o self, _out: &mut Fragment<'o>) {
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut FragmentIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         _out.sn = self.sn;
         _out.payload = self.payload.as_bytes();
         
@@ -424,7 +445,7 @@ impl<S: FragmentStorage> FragmentOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> Fragment<'a> {
+impl<'a, D> FragmentIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: FragmentLentStorage {
     /// Project this borrowed view into an owned [`FragmentOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

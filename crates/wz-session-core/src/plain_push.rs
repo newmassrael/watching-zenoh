@@ -324,8 +324,7 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
 mod tests {
     use super::*;
     use sce_forge_runtime::codec::SceCursor;
-    use wz_codecs::push::{Push, PushVariant};
-    use wz_codecs::wireexpr::WireexprVariant;
+    use wz_codecs::lent::{Push, PushVariant, WireexprVariant};
 
     /// The id, whether the mapping is the sender's, the suffix, the payload, the QoS byte and
     /// the length of the record: what the generated codec reads out of one.
@@ -366,9 +365,7 @@ mod tests {
                 .iter()
                 .find(|ext| ext.header & 0x7f == 0x21)
                 .and_then(|ext| match &ext.body {
-                    wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZint(z) => {
-                        Some(z.value as u8)
-                    }
+                    wz_codecs::lent::ExtEntryVariant::CodecZenohExtZint(z) => Some(z.value as u8),
                     _ => None,
                 })
         });

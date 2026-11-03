@@ -307,7 +307,7 @@ pub(crate) fn decode_handshake_ext_chain_into(
     #[cfg(feature = "session-slot")]
     {
         use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
-        use wz_codecs::ext_entry::ExtEntry;
+        use wz_codecs::lent::ExtEntry;
 
         for _ in 0..MAX_EXT_CHAIN_DEPTH {
             let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
@@ -335,27 +335,22 @@ pub(crate) fn decode_handshake_ext_chain_into(
     }
 }
 
-/// The `max-depth` every entry-flag ext chain in the network and zenoh-payload
-/// layers is generated with (`sources/codecs/*.scxml`).
-///
-/// R311y582 — this constant exists because the hand-written walker in
-/// [`crate::dissect`] has to be told the bound the generated decode gets from
-/// its container type, and it was told fourteen times, as the literal `4`. One
-/// fact reachable by two paths always drifts (this workspace has paid for that
-/// four times in one session before), and here the drift would be silent in the
-/// worst way: a walker whose bound is LOWER than the codec's rejects wire the
-/// codec accepts, and one whose bound is HIGHER walks into bytes the codec
-/// never read.
+/// How many entries a wz node stores of every entry-flag ext chain in the
+/// network and zenoh-payload layers: the capacity `deploy/codec_node.yaml` gives
+/// the `Node` profile. The protocol bounds a chain by nothing; this is a fact of
+/// the storing decode at `Node`, which refuses an entry past it as
+/// `CapacityExceeded`, and not of the wire, which the dissector reads to the
+/// entry whose `Z` flag is clear.
 ///
 /// It is not derived from the generated type because a const generic parameter
 /// has no name to import. What closes the loop instead is
-/// `the_generated_chain_capacities_match_the_constants` in [`crate::dissect`],
-/// which asks each generated container for its own `capacity()` — so a
-/// regenerated codec with a different depth reds a test rather than silently
-/// disagreeing with the walker.
-// Callers, exactly: the `dissect` walkers, and this crate's own
-// chain-saturation tests — which live in `network_message` behind
-// `all(test, codec-frame, codec-push)`.
+/// `the_node_chain_capacities_match_the_constant` in [`crate::dissect`], which
+/// reads each lent form's list capacity back out of its type, so a deploy file
+/// with a different capacity reds a test rather than silently disagreeing with
+/// the tests that build a chain one entry past it.
+// Readers, exactly: the `dissect` tests, and this crate's own chain-saturation
+// tests, which live in `network_message` behind `all(test, codec-frame,
+// codec-push)`.
 //
 // R311y588 — the gate was `any(dissect, test)`, and a full local sweep found
 // the hole in SEVEN lanes: a `--lib` TEST build without `dissect` makes `test`
@@ -364,20 +359,17 @@ pub(crate) fn decode_handshake_ext_chain_into(
 // the R311y579 (G7) class in one session, and the first one no per-crate check
 // could have seen — every arm run by hand had either `dissect` or `codec-push`
 // in it.
-#[cfg(any(
-    feature = "dissect",
-    all(test, feature = "codec-frame", feature = "codec-push")
+//
+// The dissector itself no longer reads it, since it walks a chain as the wire
+// says, so the constant is test-only.
+#[cfg(all(
+    test,
+    any(
+        feature = "dissect",
+        all(feature = "codec-frame", feature = "codec-push")
+    )
 ))]
 pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;
-
-/// `Query`'s chain has a depth of its own, a number the SCXML declares apart from
-/// the network messages'. Separate constant rather than a second use of
-/// [`NETWORK_EXT_CHAIN_DEPTH`]: they are declared in different documents for
-/// different reasons, and collapsing them would make a future divergence
-/// invisible. Until R3046 the chain also read to the end of the frame where the
-/// others stop at the entry whose Z flag is clear; it stops there now.
-#[cfg(feature = "dissect")]
-pub const QUERY_EXT_CHAIN_DEPTH: usize = 8;
 
 /// Encode an ext chain to bytes: each entry's `ExtEntry` encoding with the
 /// chain-continuation Z bit (`0x80`) set on every entry but the last (Z clear =
@@ -436,15 +428,19 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
 /// The bytes [`encode_ext_chain_into`] writes for `entries`, as each entry's codec
 /// counts it. The continuation bit that encode sets or clears on each header
 /// changes no length.
+// Its readers are the Init and Open sizers, whose one caller is the lend-only
+// send in `session_actions`, so the gate carries that module's too.
 #[cfg(all(
     feature = "tx-lend-only",
+    feature = "storage-profile",
+    feature = "session-unicast",
     any(feature = "codec-init-body", feature = "codec-open-body"),
     any(feature = "session-unicast-open", feature = "session-unicast-accept")
 ))]
 pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
     entries
         .iter()
-        .map(|entry| wz_codecs::ext_entry::ExtEntry::measure(entry).len())
+        .map(|entry| wz_codecs::ext_entry::ExtEntryWire::measure(entry).len())
         .sum()
 }
 
@@ -488,7 +484,7 @@ pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
     use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
-    use wz_codecs::ext_entry::ExtEntry;
+    use wz_codecs::lent::ExtEntry;
 
     let mut entries = Vec::new();
     for _ in 0..MAX_EXT_CHAIN_DEPTH {

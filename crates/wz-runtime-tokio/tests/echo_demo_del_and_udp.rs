@@ -15,15 +15,15 @@
 //!     boundaries — no 4-byte length prefix needed. Reliability
 //!     hint sets BestEffort (the natural UDP semantic).
 
-use sce_forge_runtime::codec::SceCursor;
+use sce_forge_runtime::codec::{Heap, SceCursor};
 use std::time::Duration;
 #[cfg(feature = "transport-link-udp")]
 use tokio::net::UdpSocket;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use wz_codecs::msg_del::MsgDel;
+use wz_codecs::lent::MsgDel;
 #[cfg(feature = "transport-link-udp")]
-use wz_codecs::msg_put::MsgPut;
+use wz_codecs::lent::MsgPut;
 #[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::UdpDriver;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame};
@@ -51,7 +51,7 @@ async fn echo_msg_del_tcp_round_trip() {
         let mut cursor = SceCursor::new(&frame_bytes);
         let received = MsgDel::decode(&mut cursor)
             .expect("decode")
-            .try_into_owned()
+            .try_into_owned_in::<Heap>()
             .unwrap();
         driver.close().await.expect("close");
         received
@@ -109,7 +109,7 @@ async fn echo_msg_put_udp_round_trip() {
         let mut cursor = SceCursor::new(&frame_bytes);
         let received = MsgPut::decode(&mut cursor)
             .expect("decode")
-            .try_into_owned()
+            .try_into_owned_in::<Heap>()
             .unwrap();
         driver.close().await.expect("close");
         received

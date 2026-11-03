@@ -183,8 +183,12 @@ pub fn encode_init_into(
 /// constant that bounds it (its cookie's length is upstream's u16). A message
 /// `init_message` refuses counts as zero: the encoder that follows refuses it
 /// with the same error.
+// Its one caller is `SessionLinkActions::send_init_lent`, so the gate carries
+// `session_actions`' own (`storage-profile` and `session-unicast`).
 #[cfg(all(
     feature = "tx-lend-only",
+    feature = "storage-profile",
+    feature = "session-unicast",
     feature = "codec-init-body",
     any(feature = "session-unicast-open", feature = "session-unicast-accept")
 ))]
@@ -197,7 +201,8 @@ pub(crate) fn init_frame_len(
 ) -> usize {
     match init_message(params, caps, is_ack, extensions, cookie_override) {
         Ok((_header, body)) => {
-            1 + InitBody::measure(&body).len() + crate::ext_chain::ext_chain_len(extensions)
+            1 + wz_codecs::init_body::InitBodyWire::measure(&body).len()
+                + crate::ext_chain::ext_chain_len(extensions)
         }
         Err(_) => 0,
     }
@@ -314,8 +319,12 @@ pub fn encode_open_into(
 /// [`init_frame_len`] is for Init: exact, since an Open body has no size constant
 /// (its cookie's length is a `u32`), and zero for a message `open_message`
 /// refuses.
+// Its callers are the lend-only Open sends in `session_actions`, so the gate
+// carries that module's own (`storage-profile` and `session-unicast`).
 #[cfg(all(
     feature = "tx-lend-only",
+    feature = "storage-profile",
+    feature = "session-unicast",
     feature = "codec-open-body",
     any(feature = "session-unicast-open", feature = "session-unicast-accept")
 ))]
@@ -328,7 +337,8 @@ pub(crate) fn open_frame_len(
 ) -> usize {
     match open_message(params, initial_sn, is_ack, cookie_override, extensions) {
         Ok((_header, body)) => {
-            1 + OpenBody::measure(&body).len() + crate::ext_chain::ext_chain_len(extensions)
+            1 + wz_codecs::open_body::OpenBodyWire::measure(&body).len()
+                + crate::ext_chain::ext_chain_len(extensions)
         }
         Err(_) => 0,
     }

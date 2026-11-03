@@ -115,7 +115,7 @@ impl_test_wire_owned!(
 /// chain. A Put whose chain carries the shared-memory marker holds the sliced
 /// layout instead, which has no inline payload to empty, and is left as it is.
 #[cfg(any(feature = "codec-push", feature = "codec-response"))]
-fn empty_inline_payload(put: &mut wz_codecs::msg_put::MsgPut<'_>) {
+fn empty_inline_payload(put: &mut wz_codecs::lent::MsgPut<'_>) {
     if let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
         &mut put.extensions_has_0x12
     {
@@ -131,8 +131,8 @@ fn empty_inline_payload(put: &mut wz_codecs::msg_put::MsgPut<'_>) {
 /// through this, once, instead of each one setting the fields by hand. A Del or
 /// unknown body is returned untouched.
 #[cfg(feature = "codec-push")]
-pub fn with_empty_inline_put(mut push: wz_codecs::push::Push<'_>) -> wz_codecs::push::Push<'_> {
-    if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
+pub fn with_empty_inline_put(mut push: wz_codecs::lent::Push<'_>) -> wz_codecs::lent::Push<'_> {
+    if let wz_codecs::lent::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
         empty_inline_payload(put);
     }
     push
@@ -143,10 +143,10 @@ pub fn with_empty_inline_put(mut push: wz_codecs::push::Push<'_>) -> wz_codecs::
 /// body, a Del reply or an unknown body is returned untouched.
 #[cfg(feature = "codec-response")]
 pub fn with_empty_inline_put_reply(
-    mut response: wz_codecs::response::Response<'_>,
-) -> wz_codecs::response::Response<'_> {
-    if let wz_codecs::response::ResponseVariant::CodecZenohReply(reply) = &mut response.body {
-        if let wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put) = &mut reply.body {
+    mut response: wz_codecs::lent::Response<'_>,
+) -> wz_codecs::lent::Response<'_> {
+    if let wz_codecs::lent::ResponseVariant::CodecZenohReply(reply) = &mut response.body {
+        if let wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(put) = &mut reply.body {
             empty_inline_payload(put);
         }
     }

@@ -40,6 +40,6 @@
   <datamodel>
     <sce:field id="num_link_states" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
     <sce:repeat id="link_states" type="codec_zenoh_linkstate" sce:byte="1"
-                count="num_link_states" max-count="64"/>
+                count="num_link_states"/>
   </datamodel>
 </scxml>

@@ -53,7 +53,7 @@ use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::SceCursor;
 use sce_rust_runtime::Engine;
-use wz_codecs::hello::Hello;
+use wz_codecs::lent::Hello;
 use wz_codecs::scout::Scout;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;

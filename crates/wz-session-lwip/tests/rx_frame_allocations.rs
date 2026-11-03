@@ -811,7 +811,6 @@ mod query_and_reply {
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec()
-            .expect("an encoded query")
     }
 
     /// What the shared batch decoder reads out of a payload of Responses: each
@@ -1039,7 +1038,7 @@ fn a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it() {
         "the copying loop owns the chain of every frame (the instrument's control)"
     );
 
-    let oam = wz_codecs::oam::Oam {
+    let oam = wz_codecs::lent::Oam {
         id: 7,
         ..Default::default()
     }

@@ -135,7 +135,7 @@ pub fn finals_in_event(
 ) {
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::network_message::NetworkMessage;
-    use wz_codecs::declare::DeclareOwnedVariant;
+    use crate::transport_profile::owned::DeclareOwnedVariant;
 
     let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
         return;

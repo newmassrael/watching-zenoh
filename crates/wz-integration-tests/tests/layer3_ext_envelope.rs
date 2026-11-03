@@ -18,7 +18,7 @@
 //!   wire = 0x01 0x80 0xB1 0x2A 0x52 0x02 0xAB 0xCD
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::ext_envelope::ExtEnvelope;
+use wz_codecs::lent::ExtEnvelope;
 use zenoh_pico_sys::{
     _z_msg_ext_encode, _z_msg_ext_make_unit, _z_msg_ext_make_zbuf, _z_msg_ext_make_zint,
     _z_slice_t, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,

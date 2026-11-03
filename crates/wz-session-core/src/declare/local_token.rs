@@ -80,12 +80,10 @@ use crate::registry_error::RegisterError;
 // (`encode<S: SceSink>`) borrowed projections; `liveliness-token` (this
 // module's gate) implies `codec-declare`, so they are always available
 // here without `alloc`.
-use wz_codecs::decl_final::DeclFinal;
-use wz_codecs::decl_token::DeclToken;
-use wz_codecs::declare::{Declare, DeclareVariant};
+use wz_codecs::lent::{
+    DeclFinal, DeclToken, Declare, DeclareVariant, Wireexpr, WireexprLocal, WireexprVariant,
+};
 use wz_codecs::wire_const;
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
@@ -94,7 +92,7 @@ use alloc::string::String;
 // it themselves to stand in for the peer's id space.
 
 #[cfg(feature = "alloc")]
-use wz_codecs::interest::InterestOwned;
+use crate::transport_profile::owned::InterestOwned;
 
 #[cfg(feature = "alloc")]
 use crate::driver_loop::DriverLoopOutcome;
@@ -377,7 +375,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
     #[cfg(all(feature = "storage-profile", feature = "session-slot"))]
     pub fn respond_to_interest_view<'a, 'f>(
         &self,
-        interest: &wz_codecs::interest::Interest<'f>,
+        interest: &wz_codecs::lent::Interest<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> Result<(), CapacityFull<()>> {
@@ -514,8 +512,9 @@ fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
 #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
 #[inline(never)]
 pub fn token_reply_len(token_id: u64, keyexpr: &str, interest_id: u64) -> usize {
-    build_token_reply(token_id, keyexpr, interest_id)
-        .map_or(0, |declare| Declare::measure(&declare).len())
+    build_token_reply(token_id, keyexpr, interest_id).map_or(0, |declare| {
+        wz_codecs::declare::DeclareWire::measure(&declare).len()
+    })
 }
 
 /// R311ho — build the borrowed `Declare(DeclToken)` interest-response for

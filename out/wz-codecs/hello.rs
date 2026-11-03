@@ -16,8 +16,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use super::locator::Locator;
-
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::locator::LocatorView;
 
@@ -40,15 +38,23 @@ impl ::sce_forge_runtime::codec::HoldsBytes<HelloZidField> for ::sce_forge_runti
 #[allow(dead_code)]
 pub struct HelloLocatorsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 64> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `locators`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `HelloIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait HelloStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<HelloZidField> + ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField> + super::locator::LocatorStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<HelloZidField> + ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField> + super::locator::LocatorStorage> HelloStorage for S {}
+
+/// What `HelloIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Hello` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait HelloLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField> + super::locator::LocatorLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField> + super::locator::LocatorLentStorage> HelloLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside HelloStorage: how it stores each field of that frame.
@@ -68,16 +74,18 @@ pub struct HelloIn<S: HelloStorage> {
     pub cbyte: u8,
     pub zid: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<HelloZidField>>::Bytes, 16, 1>,
     pub num_locators: Option<u64>,
-    pub locators: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField>>::List<LocatorOwned<S>>, 64>>,
+    pub locators: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField>>::List<LocatorOwned<S>>, { usize::MAX }>>,
 }
 
 /// The eager form: bytes and text borrowed from the frame, lists held inline.
 #[allow(dead_code)]
 pub type Hello<'a> = HelloIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type HelloOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = HelloIn<S>;
+pub type HelloOwned<S> = HelloIn<S>;
 
 impl<S: HelloStorage> Default for HelloIn<S> {
     fn default() -> Self {
@@ -189,9 +197,6 @@ impl<S: HelloStorage> HelloIn<S> {
         };
         if (l & 0x01u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            if _n > 64 {
-                return Err(CodecError::TooManyElements);
-            }
             _out.locators.insert(Default::default()).refill(|_vec| {
                 for _ in 0.._n {
                     ::sce_forge_runtime::codec::SceList::try_push(_vec, LocatorOwned::<S>::decode(cursor)?)?;
@@ -230,11 +235,6 @@ impl<S: HelloStorage> HelloIn<S> {
         self.cbyte = (self.cbyte & !0xF0) | ((v & 0x0F) << 4);
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 16923;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -242,12 +242,12 @@ impl<S: HelloStorage> HelloIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Hello::encode_source(self, w)
+        HelloWire::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
     /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
     /// no value and the vector cannot run out of room. Callers targeting
     /// zero-alloc hot paths should call `encode` directly against a
@@ -259,7 +259,7 @@ impl<S: HelloStorage> HelloIn<S> {
     /// primary `encode`.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -267,8 +267,8 @@ impl<S: HelloStorage> HelloIn<S> {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Hello` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Hello`
-/// computes those from what is ([`Hello::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`HelloWire::encode_source`]).
 pub trait HelloSource {
     /// The `version` field.
     fn version(&self) -> u8;
@@ -277,7 +277,7 @@ pub trait HelloSource {
     /// The `zid` field.
     fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1>;
     /// The `locators` field.
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>>;
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>>;
 }
 
 impl<T: HelloSource + ?Sized> HelloSource for &T {
@@ -290,7 +290,7 @@ impl<T: HelloSource + ?Sized> HelloSource for &T {
     fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         (**self).zid()
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         (**self).locators()
     }
 }
@@ -308,7 +308,7 @@ pub struct HelloParts<'a> {
     /// The `zid` field.
     pub zid: ::sce_forge_runtime::codec::Bytes<'a, 16, 1>,
     /// The `locators` field.
-    pub locators: Option<::sce_forge_runtime::codec::Bounded<&'a [super::locator::LocatorParts<'a>], 64>>,
+    pub locators: Option<::sce_forge_runtime::codec::Bounded<&'a [super::locator::LocatorParts<'a>], { usize::MAX }>>,
 }
 
 impl<'a> HelloSource for HelloParts<'a> {
@@ -321,7 +321,7 @@ impl<'a> HelloSource for HelloParts<'a> {
     fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         self.zid
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         self.locators.as_ref().map(|_l| _l.iter())
     }
 }
@@ -336,7 +336,7 @@ impl<S: HelloStorage> HelloSource for HelloOwned<S> {
     fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         self.zid.as_bytes()
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         self.locators.as_ref().map(|_l| _l.list_iter())
     }
 }
@@ -351,15 +351,22 @@ impl<'a> HelloSource for HelloView<'a> {
     fn zid(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 16, 1> {
         self.zid
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         self.locators.as_ref().map(|_l| _l.iter())
     }
 }
 
+/// The codec `Hello` itself: what writes a value read through
+/// [`HelloSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HelloWire;
+
 #[allow(dead_code)]
-impl<'a> Hello<'a> {
+impl HelloWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Hello::encode` writes for the value it holds, read through
     /// [`HelloSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -392,7 +399,7 @@ impl<'a> Hello<'a> {
         }
         if let Some(_v) = src.locators() {
             for _e in _v {
-                Locator::write_source(&_e, w)?;
+                super::locator::LocatorWire::write_source(&_e, w)?;
             }
         }
         Ok(())
@@ -408,7 +415,7 @@ impl<'a> Hello<'a> {
     }
 }
 
-impl<'a, S: HelloSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Hello<'a> {
+impl<S: HelloSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for HelloWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -417,7 +424,7 @@ impl<'a, S: HelloSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for
 }
 
 #[allow(dead_code)]
-impl<'a> Hello<'a> {
+impl HelloWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -468,7 +475,7 @@ pub struct HelloView<'a> {
     pub cbyte: u8,
     pub zid: ::sce_forge_runtime::codec::Bytes<'a, 16, 1>,
     pub num_locators: Option<u64>,
-    pub locators: Option<Bounded<ListView<'a, HelloLocatorsWalk, 0>, 64>>,
+    pub locators: Option<Bounded<ListView<'a, HelloLocatorsWalk, 0>, { usize::MAX }>>,
 }
 
 #[allow(dead_code)]
@@ -538,15 +545,9 @@ impl<'a> HelloView<'a> {
         };
         if (l & 0x01u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            if _n > 64 {
-                return Err(CodecError::TooManyElements);
-            }
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             for _ in 0.._n {
-                if _count == 64 {
-                    return Err(CodecError::TooManyElements);
-                }
                 LocatorView::decode(cursor)?;
                 _count += 1;
             }
@@ -571,7 +572,7 @@ impl<'a> HelloView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Hello<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut HelloIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: HelloLentStorage {
         _out.version = self.version;
         _out.cbyte = self.cbyte;
         _out.zid = self.zid;
@@ -579,8 +580,8 @@ impl<'a> HelloView<'a> {
         match &self.locators {
             Some(_l) => _out.locators.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(Locator::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -591,9 +592,6 @@ impl<'a> HelloView<'a> {
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec, as
-    /// [`Hello::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 16923;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`Hello::encode`] writes for the value [`Self::into_builder`]
@@ -602,14 +600,14 @@ impl<'a> HelloView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Hello::encode_source(self, w)
+        HelloWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
     /// value (docs/adr/0065).
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -657,8 +655,11 @@ impl<'a> HelloView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Hello<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Hello<'a> {
+impl<'a, D> HelloIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: HelloLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`HelloOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -681,11 +682,9 @@ impl<'a> Hello<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<HelloOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -699,8 +698,8 @@ impl<S: HelloStorage> HelloOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<Hello<'_>, CodecError> {
-        let mut _out = Hello::default();
+    pub fn try_as_borrowed(&self) -> Result<HelloIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -715,7 +714,7 @@ impl<S: HelloStorage> HelloOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Hello<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut HelloIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.version = self.version;
         _out.cbyte = self.cbyte;
         _out.zid = self.zid.as_bytes();
@@ -741,7 +740,7 @@ impl<S: HelloStorage> HelloOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> Hello<'a> {
+impl<'a, D> HelloIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: HelloLentStorage {
     /// Project this borrowed view into an owned [`HelloOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

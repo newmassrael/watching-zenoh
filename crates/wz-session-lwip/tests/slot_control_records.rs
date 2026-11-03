@@ -332,7 +332,7 @@ mod record {
 
     /// The bytes of an owned `Declare`, through the borrowed view that owns the
     /// encoder.
-    fn declare_bytes(declare: &wz_codecs::declare::DeclareOwned) -> Vec<u8> {
+    fn declare_bytes(declare: &wz_session_core::transport_profile::owned::DeclareOwned) -> Vec<u8> {
         declare
             .try_as_borrowed()
             .expect("a borrowed view")
@@ -340,7 +340,9 @@ mod record {
     }
 
     /// The bytes of an owned `Interest`.
-    fn interest_bytes(interest: &wz_codecs::interest::InterestOwned) -> Vec<u8> {
+    fn interest_bytes(
+        interest: &wz_session_core::transport_profile::owned::InterestOwned,
+    ) -> Vec<u8> {
         interest
             .try_as_borrowed()
             .expect("a borrowed view")
@@ -389,7 +391,7 @@ mod record {
 
     /// A `ResponseFinal` of request `rid`.
     pub fn response_final(rid: u64) -> Vec<u8> {
-        fn bytes(done: &wz_codecs::response_final::ResponseFinalOwned) -> Vec<u8> {
+        fn bytes(done: &wz_session_core::transport_profile::owned::ResponseFinalOwned) -> Vec<u8> {
             done.try_as_borrowed()
                 .expect("a borrowed view")
                 .encode_to_vec()
@@ -399,7 +401,7 @@ mod record {
 
     /// An Oam of id `id` with the UNIT body.
     pub fn oam(id: u64) -> Vec<u8> {
-        use wz_codecs::oam::Oam;
+        use wz_codecs::lent::Oam;
         Oam {
             id,
             ..Oam::default()

@@ -333,7 +333,13 @@ fn the_slot_stays_out_while_the_delivered_message_is_kept_and_goes_home_after() 
             let wz_session_core::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
                 panic!("a literal push carries a Put");
             };
-            kept = put.payload.clone();
+            // A Put with no shared-memory marker holds its payload inline.
+            let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
+                &put.extensions_has_0x12
+            else {
+                panic!("a literal Put carries its payload inline");
+            };
+            kept = Some(payload.clone());
         }
     };
     report_outcome_reassembling(last, &mut reasm, &actions, 0, &mut keep);

@@ -18,7 +18,6 @@ use sce_forge_runtime::codec::VecSink;
 
 use super::linkstate_link::LinkstateLink;
 use super::linkstate_weight::LinkstateWeight;
-use super::locator::Locator;
 
 use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
 use super::linkstate_link::LinkstateLinkView;
@@ -44,33 +43,41 @@ impl ::sce_forge_runtime::codec::HoldsBytes<LinkstateZidField> for ::sce_forge_r
 #[allow(dead_code)]
 pub struct LinkstateLocatorsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<LinkstateLocatorsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 64> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `locators`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// The field `links` of `Linkstate`, which a storage profile
 /// answers for by this type.
 #[allow(dead_code)]
 pub struct LinkstateLinksField;
 
-impl ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 64> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `links`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// The field `weights` of `Linkstate`, which a storage profile
 /// answers for by this type.
 #[allow(dead_code)]
 pub struct LinkstateWeightsField;
 
-impl ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField> for ::sce_forge_runtime::codec::Inline {
-    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 64> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
-}
+// `Inline` does not answer for `weights`: the protocol states no bound of
+// it, so it is held only by a profile whose container grows, or by a deployment
+// that gives it a capacity (docs/adr/0077 §7).
 
 /// What `LinkstateIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
 pub trait LinkstateStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<LinkstateZidField> + ::sce_forge_runtime::codec::HoldsList<LinkstateLocatorsField> + ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField> + ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField> + super::locator::LocatorStorage {}
 
 impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<LinkstateZidField> + ::sce_forge_runtime::codec::HoldsList<LinkstateLocatorsField> + ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField> + ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField> + super::locator::LocatorStorage> LinkstateStorage for S {}
+
+/// What `LinkstateIn<Lent<'a, D>>` asks of the profile `D`: how it holds
+/// the lists of `Linkstate` and of the codecs it holds, since the lent
+/// form borrows every byte string and text from the frame (docs/adr/0077 §7).
+#[allow(dead_code)]
+pub trait LinkstateLentStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<LinkstateLocatorsField> + ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField> + ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField> + super::locator::LocatorLentStorage {}
+
+impl<D: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsList<LinkstateLocatorsField> + ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField> + ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField> + super::locator::LocatorLentStorage> LinkstateLentStorage for D {}
 
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside LinkstateStorage: how it stores each field of that frame.
@@ -82,7 +89,7 @@ impl<'f, S: LinkstateStorage + ::sce_forge_runtime::codec::StoresBytes<'f, Links
 /// The group `LinkstateOptionsH` as `LinkstateOwned` holds it, in the storage
 /// profile `S`.
 #[allow(dead_code)]
-pub type LinkstateOptionsHOwned<S> = LinkstateOptionsH<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, 64>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, 64>>;
+pub type LinkstateOptionsHOwned<S> = LinkstateOptionsH<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, { usize::MAX }>, ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, { usize::MAX }>>;
 
 // `LinkstateIn<S>` is the one value this codec has, at the storage
 // profile `S` (docs/adr/0077 §7). `Linkstate<'a>` is it on `Lent`, which
@@ -98,7 +105,7 @@ pub struct LinkstateIn<S: LinkstateStorage> {
     pub zid: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<LinkstateZidField>>::Bytes, 16>>,
     pub whatami: Option<u8>,
     pub num_locators: Option<u64>,
-    pub locators: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateLocatorsField>>::List<LocatorOwned<S>>, 64>>,
+    pub locators: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateLocatorsField>>::List<LocatorOwned<S>>, { usize::MAX }>>,
     pub links_len: u64,
     pub options_h: LinkstateOptionsHOwned<S>,
 }
@@ -107,9 +114,11 @@ pub struct LinkstateIn<S: LinkstateStorage> {
 #[allow(dead_code)]
 pub type Linkstate<'a> = LinkstateIn<::sce_forge_runtime::codec::Lent<'a>>;
 
-/// The value at a profile that holds its bytes and text.
+/// The value at a profile that holds its bytes and text, named
+/// with the profile: the build's default on the heap-free tier is `Inline`, which
+/// holds no field whose protocol states no bound (docs/adr/0077 §7).
 #[allow(dead_code)]
-pub type LinkstateOwned<S = ::sce_forge_runtime::codec::DefaultStorage> = LinkstateIn<S>;
+pub type LinkstateOwned<S> = LinkstateIn<S>;
 
 impl<S: LinkstateStorage> Default for LinkstateIn<S> {
     fn default() -> Self {
@@ -236,9 +245,6 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
         };
         if (options & 0x04u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            if _n > 64 {
-                return Err(CodecError::TooManyElements);
-            }
             _out.locators.insert(Default::default()).refill(|_vec| {
                 for _ in 0.._n {
                     ::sce_forge_runtime::codec::SceList::try_push(_vec, LocatorOwned::<S>::decode(cursor)?)?;
@@ -249,22 +255,16 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
             _out.locators = None;
         }
         let links_len = cursor.read_vle_u64()?;
-        let mut links: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, 64> = Default::default();
-        if links_len > 64 {
-                return Err(CodecError::TooManyElements);
-            }
-            links.refill(|_vec| {
+        let mut links: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, { usize::MAX }> = Default::default();
+        links.refill(|_vec| {
             for _ in 0..links_len {
                 ::sce_forge_runtime::codec::SceList::try_push(_vec, LinkstateLink::decode(cursor)?)?;
             }
             Ok(())
         })?;
-        let mut weights: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, 64>> = None;
+        let mut weights: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, { usize::MAX }>> = None;
         if (options & 0x08u8) != 0 {
             let _n = links_len;
-            if _n > 64 {
-                return Err(CodecError::TooManyElements);
-            }
             weights.insert(Default::default()).refill(|_vec| {
                 for _ in 0.._n {
                     ::sce_forge_runtime::codec::SceList::try_push(_vec, LinkstateWeight::decode(cursor)?)?;
@@ -352,11 +352,6 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
         }
     }
 
-    /// Worst-case encoded byte count for this codec — the upper bound
-    /// against which `VecSink::new` reserves capacity in the
-    /// `encode_to_vec` facade, and the natural reserve hint for
-    /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 18115;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -364,12 +359,12 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        Linkstate::encode_source(self, w)
+        LinkstateWire::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade. Pre-reserves
-    /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
-    /// most one allocation, then delegates to `encode` over a
+    /// Heap-backed convenience facade. It reserves nothing, since the
+    /// largest frame passes `u32` (docs/adr/0077 §7), and delegates to
+    /// `encode` over a
     /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
     /// no value and the vector cannot run out of room. Callers targeting
     /// zero-alloc hot paths should call `encode` directly against a
@@ -381,7 +376,7 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
     /// primary `encode`.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -432,8 +427,8 @@ impl LinkstateOverrides {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `Linkstate` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `Linkstate`
-/// computes those from what is ([`Linkstate::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`LinkstateWire::encode_source`]).
 pub trait LinkstateSource {
     /// The `options` field.
     fn options(&self) -> u8;
@@ -446,9 +441,9 @@ pub trait LinkstateSource {
     /// The `whatami` field.
     fn whatami(&self) -> Option<u8>;
     /// The `locators` field.
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>>;
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>>;
     /// The fields `options.H` decides, held together (docs/adr/0065 §6 R4).
-    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>>;
+    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, { usize::MAX }>>;
 }
 
 impl<T: LinkstateSource + ?Sized> LinkstateSource for &T {
@@ -467,10 +462,10 @@ impl<T: LinkstateSource + ?Sized> LinkstateSource for &T {
     fn whatami(&self) -> Option<u8> {
         (**self).whatami()
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         (**self).locators()
     }
-    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
+    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, { usize::MAX }>> {
         (**self).options_h()
     }
 }
@@ -492,13 +487,13 @@ pub struct LinkstateParts<'a> {
     /// The `whatami` field.
     pub whatami: Option<u8>,
     /// The `locators` field.
-    pub locators: Option<::sce_forge_runtime::codec::Bounded<&'a [super::locator::LocatorParts<'a>], 64>>,
+    pub locators: Option<::sce_forge_runtime::codec::Bounded<&'a [super::locator::LocatorParts<'a>], { usize::MAX }>>,
     /// The fields `options.H` decides, held together (docs/adr/0065 §6 R4).
-    pub options_h: LinkstateOptionsH<::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_link::LinkstateLinkParts], 64>, ::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_weight::LinkstateWeightParts], 64>>,
+    pub options_h: LinkstateOptionsH<::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_link::LinkstateLinkParts], { usize::MAX }>, ::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_weight::LinkstateWeightParts], { usize::MAX }>>,
 }
 
 impl<'a> LinkstateSource for LinkstateParts<'a> {
-    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
+    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, { usize::MAX }>> {
         match &self.options_h {
             LinkstateOptionsH::H { links_weights } => LinkstateOptionsH::H { links_weights: ::sce_forge_runtime::codec::Aligned::new(links_weights.first().iter(), links_weights.second().iter()).expect("a walk keeps its list's count") },
             LinkstateOptionsH::NotH { links } => LinkstateOptionsH::NotH { links: links.iter() },
@@ -519,13 +514,13 @@ impl<'a> LinkstateSource for LinkstateParts<'a> {
     fn whatami(&self) -> Option<u8> {
         self.whatami
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         self.locators.as_ref().map(|_l| _l.iter())
     }
 }
 
 impl<S: LinkstateStorage> LinkstateSource for LinkstateOwned<S> {
-    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
+    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, { usize::MAX }>> {
         match &self.options_h {
             LinkstateOptionsH::H { links_weights } => LinkstateOptionsH::H { links_weights: ::sce_forge_runtime::codec::Aligned::new(links_weights.first().list_iter(), links_weights.second().list_iter()).expect("a walk keeps its list's count") },
             LinkstateOptionsH::NotH { links } => LinkstateOptionsH::NotH { links: links.list_iter() },
@@ -546,13 +541,13 @@ impl<S: LinkstateStorage> LinkstateSource for LinkstateOwned<S> {
     fn whatami(&self) -> Option<u8> {
         self.whatami
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         self.locators.as_ref().map(|_l| _l.list_iter())
     }
 }
 
 impl<'a> LinkstateSource for LinkstateView<'a> {
-    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, 64>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, 64>> {
+    fn options_h(&self) -> LinkstateOptionsH<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone, { usize::MAX }>, ::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone, { usize::MAX }>> {
         match &self.options_h {
             LinkstateOptionsH::H { links_weights } => LinkstateOptionsH::H { links_weights: ::sce_forge_runtime::codec::Aligned::new(links_weights.first().iter(), links_weights.second().iter()).expect("a walk keeps its list's count") },
             LinkstateOptionsH::NotH { links } => LinkstateOptionsH::NotH { links: links.iter() },
@@ -573,15 +568,22 @@ impl<'a> LinkstateSource for LinkstateView<'a> {
     fn whatami(&self) -> Option<u8> {
         self.whatami
     }
-    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, 64>> {
+    fn locators(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::locator::LocatorSource> + Clone, { usize::MAX }>> {
         self.locators.as_ref().map(|_l| _l.iter())
     }
 }
 
+/// The codec `Linkstate` itself: what writes a value read through
+/// [`LinkstateSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LinkstateWire;
+
 #[allow(dead_code)]
-impl<'a> Linkstate<'a> {
+impl LinkstateWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `Linkstate::encode` writes for the value it holds, read through
     /// [`LinkstateSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -640,18 +642,18 @@ impl<'a> Linkstate<'a> {
         }
         if let Some(_v) = src.locators() {
             for _e in _v {
-                Locator::write_source(&_e, w)?;
+                super::locator::LocatorWire::write_source(&_e, w)?;
             }
         }
         w.write_vle_u64(_d_links_len)?;
         if let Some(_v) = _m_links.clone() {
             for _e in _v {
-                LinkstateLink::write_source(&_e, w)?;
+                super::linkstate_link::LinkstateLinkWire::write_source(&_e, w)?;
             }
         }
         if let Some(_v) = _m_weights.clone() {
             for _e in _v {
-                LinkstateWeight::write_source(&_e, w)?;
+                super::linkstate_weight::LinkstateWeightWire::write_source(&_e, w)?;
             }
         }
         Ok(())
@@ -667,7 +669,7 @@ impl<'a> Linkstate<'a> {
     }
 }
 
-impl<'a, S: LinkstateSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Linkstate<'a> {
+impl<S: LinkstateSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for LinkstateWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -676,7 +678,7 @@ impl<'a, S: LinkstateSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S>
 }
 
 #[allow(dead_code)]
-impl<'a> Linkstate<'a> {
+impl LinkstateWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size
@@ -756,9 +758,9 @@ pub struct LinkstateView<'a> {
     pub zid: Option<::sce_forge_runtime::codec::Bytes<'a, 16>>,
     pub whatami: Option<u8>,
     pub num_locators: Option<u64>,
-    pub locators: Option<Bounded<ListView<'a, LinkstateLocatorsWalk, 0>, 64>>,
+    pub locators: Option<Bounded<ListView<'a, LinkstateLocatorsWalk, 0>, { usize::MAX }>>,
     pub links_len: u64,
-    pub options_h: LinkstateOptionsH<Bounded<ListView<'a, LinkstateLinksWalk, 0>, 64>, Bounded<ListView<'a, LinkstateWeightsWalk, 0>, 64>>,
+    pub options_h: LinkstateOptionsH<Bounded<ListView<'a, LinkstateLinksWalk, 0>, { usize::MAX }>, Bounded<ListView<'a, LinkstateWeightsWalk, 0>, { usize::MAX }>>,
 }
 
 #[allow(dead_code)]
@@ -838,15 +840,9 @@ impl<'a> LinkstateView<'a> {
         };
         if (options & 0x04u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            if _n > 64 {
-                return Err(CodecError::TooManyElements);
-            }
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             for _ in 0.._n {
-                if _count == 64 {
-                    return Err(CodecError::TooManyElements);
-                }
                 LocatorView::decode(cursor)?;
                 _count += 1;
             }
@@ -856,35 +852,23 @@ impl<'a> LinkstateView<'a> {
         }
         let links_len = cursor.read_vle_u64()?;
         #[allow(clippy::needless_late_init)]
-        let links: Bounded<ListView<'a, LinkstateLinksWalk, 0>, 64>;
+        let links: Bounded<ListView<'a, LinkstateLinksWalk, 0>, { usize::MAX }>;
         {
-            if links_len > 64 {
-                return Err(CodecError::TooManyElements);
-            }
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             for _ in 0..links_len {
-                if _count == 64 {
-                    return Err(CodecError::TooManyElements);
-                }
                 LinkstateLinkView::decode(cursor)?;
                 _count += 1;
             }
             links = Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?;
         }
         #[allow(clippy::needless_late_init)]
-        let weights: Option<Bounded<ListView<'a, LinkstateWeightsWalk, 0>, 64>>;
+        let weights: Option<Bounded<ListView<'a, LinkstateWeightsWalk, 0>, { usize::MAX }>>;
         if (options & 0x08u8) != 0 {
             let _n = links_len;
-            if _n > 64 {
-                return Err(CodecError::TooManyElements);
-            }
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             for _ in 0.._n {
-                if _count == 64 {
-                    return Err(CodecError::TooManyElements);
-                }
                 LinkstateWeightView::decode(cursor)?;
                 _count += 1;
             }
@@ -914,7 +898,7 @@ impl<'a> LinkstateView<'a> {
     // alone; a crate that includes this module privately is asked to rename
     // it, and the one name is what lets a codec reach every view it holds.
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_builder(&self, _out: &mut Linkstate<'a>) -> Result<(), CodecError> {
+    pub fn into_builder<D>(&self, _out: &mut LinkstateIn<::sce_forge_runtime::codec::Lent<'a, D>>) -> Result<(), CodecError> where D: LinkstateLentStorage {
         _out.options = self.options;
         _out.psid = self.psid;
         _out.sn = self.sn;
@@ -925,8 +909,8 @@ impl<'a> LinkstateView<'a> {
         match &self.locators {
             Some(_l) => _out.locators.insert(Default::default()).refill(|_vec| {
                     for _e in _l.iter() {
-                        _vec.push(Locator::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -937,21 +921,21 @@ impl<'a> LinkstateView<'a> {
         _out.links_len = self.links_len;
         match &self.options_h {
             LinkstateOptionsH::H { links_weights } => {
-                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, 64> = Default::default();
+                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a, D> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, { usize::MAX }> = Default::default();
                 _o_links.refill(|_vec| {
                     for _e in links_weights.first().iter() {
-                        _vec.push(LinkstateLink::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
                     Ok(())
                 })?;
-                let mut _o_weights: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a> as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, 64> = Default::default();
+                let mut _o_weights: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a, D> as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, { usize::MAX }> = Default::default();
                 _o_weights.refill(|_vec| {
                     for _e in links_weights.second().iter() {
-                        _vec.push(LinkstateWeight::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -960,11 +944,11 @@ impl<'a> LinkstateView<'a> {
                 _out.options_h = LinkstateOptionsH::H { links_weights: ::sce_forge_runtime::codec::Aligned::new(_o_links, _o_weights).expect("a projection keeps a list's count") };
             }
             LinkstateOptionsH::NotH { links } => {
-                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, 64> = Default::default();
+                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'a, D> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, { usize::MAX }> = Default::default();
                 _o_links.refill(|_vec| {
                     for _e in links.iter() {
-                        _vec.push(LinkstateLink::default()).map_err(|_| CodecError::CapacityExceeded)?;
-                        if let Some(_slot) = _vec.last_mut() {
+                        ::sce_forge_runtime::codec::SceList::try_push(_vec, Default::default())?;
+                        if let Some(_slot) = ::sce_forge_runtime::codec::SceList::last_mut(_vec) {
                             _e.into_builder(_slot)?;
                         }
                     }
@@ -976,9 +960,6 @@ impl<'a> LinkstateView<'a> {
         Ok(())
     }
 
-    /// Worst-case encoded byte count for this codec, as
-    /// [`Linkstate::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 18115;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`Linkstate::encode`] writes for the value [`Self::into_builder`]
@@ -987,14 +968,14 @@ impl<'a> LinkstateView<'a> {
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
-        Linkstate::encode_source(self, w)
+        LinkstateWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`], which refuses no
     /// value (docs/adr/0065).
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_v: Vec<u8> = Vec::new();
         let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
@@ -1054,8 +1035,11 @@ impl<'a> LinkstateView<'a> {
 // site repeats a capacity. A capacity is not in this file at all except as
 // what `Inline` holds: a deployment answers for the same tags from its own.
 
+// The lent value at any profile `D` that holds its lists: what a decode of a
+// frame gives where bytes and text borrow it, `Linkstate<'a>` being it
+// at `Inline` (docs/adr/0077 §7).
 #[allow(dead_code)]
-impl<'a> Linkstate<'a> {
+impl<'a, D> LinkstateIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: LinkstateLentStorage {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
     /// [`LinkstateOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
@@ -1083,11 +1067,9 @@ impl<'a> Linkstate<'a> {
         })
     }
 
-    /// The same projection at the build's default storage profile — growable
-    /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<LinkstateOwned, CodecError> {
-        self.try_into_owned_in()
-    }
+    // No projection at the build's default profile: on the heap-free tier
+    // that is `Inline`, which holds no field whose protocol states no bound
+    // (docs/adr/0077 §7). Name the profile, `try_into_owned_in::<S>()`.
 }
 
 #[allow(dead_code)]
@@ -1101,8 +1083,8 @@ impl<S: LinkstateStorage> LinkstateOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<Linkstate<'_>, CodecError> {
-        let mut _out = Linkstate::default();
+    pub fn try_as_borrowed(&self) -> Result<LinkstateIn<::sce_forge_runtime::codec::Lent<'_, S>>, CodecError> {
+        let mut _out = Default::default();
         self.try_as_borrowed_into(&mut _out)?;
         Ok(_out)
     }
@@ -1117,7 +1099,7 @@ impl<S: LinkstateStorage> LinkstateOwned<S> {
     /// caller on a path where that shows projects into a destination it owns,
     /// then encodes from it. On `Err`, `_out` holds what was projected so far
     /// and is not to be read.
-    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Linkstate<'o>) -> Result<(), CodecError> {
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut LinkstateIn<::sce_forge_runtime::codec::Lent<'o, S>>) -> Result<(), CodecError> {
         _out.options = self.options;
         _out.psid = self.psid;
         _out.sn = self.sn;
@@ -1132,14 +1114,14 @@ impl<S: LinkstateStorage> LinkstateOwned<S> {
         _out.links_len = self.links_len;
         match &self.options_h {
             LinkstateOptionsH::H { links_weights } => {
-                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, 64> = Default::default();
+                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o, S> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, { usize::MAX }> = Default::default();
                 _o_links.refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, links_weights.first().inner(), |_e| Ok(_e.clone())))?;
-                let mut _o_weights: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o> as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, 64> = Default::default();
+                let mut _o_weights: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o, S> as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, { usize::MAX }> = Default::default();
                 _o_weights.refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, links_weights.second().inner(), |_e| Ok(_e.clone())))?;
                 _out.options_h = LinkstateOptionsH::H { links_weights: ::sce_forge_runtime::codec::Aligned::new(_o_links, _o_weights).expect("a projection keeps a list's count") };
             }
             LinkstateOptionsH::NotH { links } => {
-                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, 64> = Default::default();
+                let mut _o_links: ::sce_forge_runtime::codec::Bounded<<::sce_forge_runtime::codec::Lent<'o, S> as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, { usize::MAX }> = Default::default();
                 _o_links.refill(|_d| ::sce_forge_runtime::codec::try_project_bounded_into(_d, links.inner(), |_e| Ok(_e.clone())))?;
                 _out.options_h = LinkstateOptionsH::NotH { links: _o_links };
             }
@@ -1161,7 +1143,7 @@ impl<S: LinkstateStorage> LinkstateOwned<S> {
 }
 
 #[allow(dead_code)]
-impl<'a> Linkstate<'a> {
+impl<'a, D> LinkstateIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: LinkstateLentStorage {
     /// Project this borrowed view into an owned [`LinkstateOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the

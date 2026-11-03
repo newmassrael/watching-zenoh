@@ -73,7 +73,7 @@ impl ExtUnit {
     /// has insufficient remaining capacity, and none from a sink that cannot
     /// refuse (`VecSink`, `CountSink`).
     pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
-        ExtUnit::encode_source(self, w)
+        ExtUnitWire::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
@@ -98,8 +98,8 @@ impl ExtUnit {
 
 // ── Source (ADR 0058) ────────────────────────────────────────────────
 /// What a value of `ExtUnit` says: its presented fields. A length, a count
-/// or the flag a gated field is announced by is not among them; `ExtUnit`
-/// computes those from what is ([`ExtUnit::encode_source`]).
+/// or the flag a gated field is announced by is not among them; the
+/// encode computes those from what is ([`ExtUnitWire::encode_source`]).
 pub trait ExtUnitSource {
 }
 
@@ -120,10 +120,17 @@ impl ExtUnitSource for ExtUnitParts {
 impl ExtUnitSource for ExtUnit {
 }
 
+/// The codec `ExtUnit` itself: what writes a value read through
+/// [`ExtUnitSource`], holding no value and naming no storage profile. Every
+/// form of the value, a parent and a view write through it, so a profile
+/// that cannot hold some field is never asked for here (docs/adr/0077 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExtUnitWire;
+
 #[allow(dead_code)]
-impl ExtUnit {
+impl ExtUnitWire {
     /// Encode what `src` says into the caller-owned sink: the bytes
-    /// [`Self::encode`] writes for the value it holds, read through
+    /// `ExtUnit::encode` writes for the value it holds, read through
     /// [`ExtUnitSource`]. A length, a count or a gate flag is computed from what
     /// `src` presents. Every value `src` can present has a frame, so the
     /// only error is the sink's (docs/adr/0065).
@@ -148,7 +155,7 @@ impl ExtUnit {
     }
 }
 
-impl<S: ExtUnitSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for ExtUnit {
+impl<S: ExtUnitSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for ExtUnitWire {
     type Error<E> = E;
 
     fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
@@ -157,7 +164,7 @@ impl<S: ExtUnitSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for E
 }
 
 #[allow(dead_code)]
-impl ExtUnit {
+impl ExtUnitWire {
     /// The size of the frame [`Self::encode_source`] writes for `src`, found
     /// with nothing written: the encode refuses no value, so neither does
     /// this. The result writes the frame into a window of exactly that size

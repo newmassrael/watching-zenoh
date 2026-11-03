@@ -149,6 +149,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     use wz_codecs::init_body::InitBody;
     use wz_codecs::open_body::OpenBody;
     use wz_runtime_tokio::session_glue::InboundFrame;
+    use wz_session_core::transport_profile::HandshakeStorage;
 
     let init_syn = InboundFrame::Init {
         is_ack: false,
@@ -175,7 +176,9 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     let open_syn = InboundFrame::Open {
         is_ack: false,
         has_ext: false,
-        body: OpenBody::default().try_into_owned().unwrap(),
+        body: OpenBody::default()
+            .try_into_owned_in::<HandshakeStorage>()
+            .unwrap(),
         extensions: Vec::new(),
     };
     assert_eq!(
@@ -186,7 +189,9 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     let open_ack = InboundFrame::Open {
         is_ack: true,
         has_ext: false,
-        body: OpenBody::default().try_into_owned().unwrap(),
+        body: OpenBody::default()
+            .try_into_owned_in::<HandshakeStorage>()
+            .unwrap(),
         extensions: Vec::new(),
     };
     assert_eq!(
@@ -473,7 +478,7 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
 #[cfg(feature = "codec-request")]
 #[test]
 fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
-    use wz_codecs::request::Request;
+    use wz_codecs::lent::Request;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R88 — exact byte-count round-trip Request envelope using plain
@@ -493,9 +498,7 @@ fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
         header: 0x1C,
         ..Request::default()
     };
-    let bytes = req
-        .encode_to_vec()
-        .expect("a default-armed Request encodes");
+    let bytes = req.encode_to_vec();
     assert_eq!(
         bytes.len(),
         4,
@@ -523,7 +526,7 @@ fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
 ))]
 #[test]
 fn parse_frame_payload_decodes_request_then_unknown_chain() {
-    use wz_codecs::request::Request;
+    use wz_codecs::lent::Request;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R88 — chain test simplified alongside the Request roundtrip.
@@ -533,9 +536,7 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
         header: 0x1C,
         ..Request::default()
     };
-    let mut bytes = req
-        .encode_to_vec()
-        .expect("a default-armed Request encodes");
+    let mut bytes = req.encode_to_vec();
     let request_len = bytes.len();
     // Append an Unknown MID — synthetic 0x00 outside the {0x19..0x1F}
     // typed catalog. Pre-R115 this slot used 0x1E (DECLARE) as the
@@ -574,7 +575,7 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
 #[cfg(feature = "codec-push")]
 #[test]
 fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
-    use wz_codecs::push::Push;
+    use wz_codecs::lent::Push;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R90 — round-trip-safe Push using plain `Push::default()`.
@@ -605,8 +606,8 @@ fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
 #[cfg(all(feature = "codec-push", feature = "codec-request"))]
 #[test]
 fn parse_frame_payload_decodes_push_then_request_chain() {
-    use wz_codecs::push::Push;
-    use wz_codecs::request::Request;
+    use wz_codecs::lent::Push;
+    use wz_codecs::lent::Request;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R90 — multi-codec batch: PUSH + REQUEST in one Frame.payload.
@@ -620,10 +621,7 @@ fn parse_frame_payload_decodes_push_then_request_chain() {
         ..Request::default()
     };
     let mut bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
-    bytes.extend_from_slice(
-        &req.encode_to_vec()
-            .expect("a default-armed Request encodes"),
-    );
+    bytes.extend_from_slice(&req.encode_to_vec());
 
     let parsed = parse_frame_payload(&bytes).expect("Push+Request batch parses");
     assert_eq!(parsed.len(), 2, "two records: Push then Request");
@@ -634,7 +632,7 @@ fn parse_frame_payload_decodes_push_then_request_chain() {
 #[cfg(feature = "codec-response-final")]
 #[test]
 fn parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder() {
-    use wz_codecs::response_final::ResponseFinal;
+    use wz_codecs::lent::ResponseFinal;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R91 — round-trip-safe ResponseFinal using plain
@@ -666,7 +664,7 @@ fn parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder()
 
 #[test]
 fn parse_frame_payload_dispatches_oam_mid_to_oam_decoder() {
-    use wz_codecs::oam::Oam;
+    use wz_codecs::lent::Oam;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R92 — round-trip-safe OAM with default header.enc=00 (UNIT)
@@ -691,7 +689,7 @@ fn parse_frame_payload_dispatches_oam_mid_to_oam_decoder() {
 
 #[test]
 fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
-    use wz_codecs::interest::Interest;
+    use wz_codecs::lent::Interest;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R93 — round-trip-safe Interest envelope with default header
@@ -726,7 +724,7 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
 #[cfg(feature = "codec-response")]
 #[test]
 fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
-    use wz_codecs::response::Response;
+    use wz_codecs::lent::Response;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R97 — round-trip-safe Response envelope with declared-default
@@ -759,8 +757,8 @@ fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
 
 #[test]
 fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
-    use wz_codecs::interest::{Interest, InterestHeaderCOrF};
-    use wz_codecs::interest_body::InterestBody;
+    use wz_codecs::interest::InterestHeaderCOrF;
+    use wz_codecs::lent::{Interest, InterestBody};
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
     // R94 — non-final Interest exercises the

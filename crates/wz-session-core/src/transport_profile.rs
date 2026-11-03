@@ -45,3 +45,5 @@ pub type HandshakeStorage = TransportStorage;
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 #[cfg(feature = "session-slot")]
 pub type HandshakeStorage = wz_codecs::node::Node;
+
+pub mod owned;

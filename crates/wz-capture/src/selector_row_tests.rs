@@ -32,16 +32,14 @@ impl RowCoordinates for Numbered {
 
 /// A `Declare` binding id 1 to `suffix`.
 fn declare(suffix: &'static str) -> Vec<u8> {
-    wz_codecs::declare::Declare {
-        body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
-            wz_codecs::decl_kexpr::DeclKexpr {
-                header: wz_session_core::wire_const::D_MID_KEXPR
-                    | wz_session_core::wire_const::FLAG_D_N,
-                id: 1,
-                keyexpr: fx::sender_space(0, Some(suffix)),
-                extensions: None,
-            },
-        ),
+    wz_codecs::lent::Declare {
+        body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(wz_codecs::lent::DeclKexpr {
+            header: wz_session_core::wire_const::D_MID_KEXPR
+                | wz_session_core::wire_const::FLAG_D_N,
+            id: 1,
+            keyexpr: fx::sender_space(0, Some(suffix)),
+            extensions: None,
+        }),
         ..Default::default()
     }
     .encode_to_vec()

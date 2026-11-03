@@ -21,9 +21,9 @@
 #![cfg(feature = "codec-linkstate")]
 
 use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::linkstate::{Linkstate, LinkstateOptionsH};
+use wz_codecs::lent::{Linkstate, LinkstateList};
+use wz_codecs::linkstate::LinkstateOptionsH;
 use wz_codecs::linkstate_link::LinkstateLink;
-use wz_codecs::linkstate_list::LinkstateList;
 
 /// The links of `ls`, in whichever arm of the weights flag it was read.
 fn links_of<'l>(ls: &'l Linkstate<'_>) -> &'l [LinkstateLink] {

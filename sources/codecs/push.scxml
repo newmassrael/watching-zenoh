@@ -33,10 +33,12 @@
                               </sce:requires-parent-flags>` matching
                               this envelope's header carrier verbatim
                               per Y0a Case B parent-flag pass-through).
-       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
-                              depth=4 covers upstream's 2 ext slots
-                              (qos + timestamp per network.c) with
-                              safety margin; entry-flag-Z termination
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain with no
+                              depth bound: upstream reads it until Z
+                              clears, past its 2 ext slots (qos +
+                              timestamp per network.c), and what a
+                              node stores is its deployment's
+                              capacity; entry-flag-Z termination
                               since the body variant follows the
                               chain — Y3 atomic 1 grammar).
        inner    : body       — peek-byte primitive dispatches on the
@@ -88,7 +90,6 @@
     </sce:flags>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="1"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
     <sce:variant tag="peek.mid">

@@ -33,11 +33,12 @@
          byte 1 : consolidation (uint8 0..3)
        Q_P-gated:
          bytes  : parameters_len (VLE u64) + parameters (UTF-8 bytes,
-                                                          max 4294967295)
+                                                          no bound)
        Z-gated:
          chain  : codec_zenoh_query_ext_entry tlv-chain (entry-flag
-                  termination on Z; max-depth=8 covers query's 3 ext
-                  slots with safety margin). The chain tells each entry whether the entry
+                  termination on Z; no depth bound: upstream reads it until
+                  Z clears, past query's 3 ext slots, and what a node stores is
+                  its deployment's capacity). The chain tells each entry whether the entry
                   BEFORE it was the shared-memory marker,
                   because upstream reads the value extension (ext_id 3)
                   as an encoding and a list of slices when it was and as
@@ -89,11 +90,11 @@
      dispatch header — the wire byte 0 here IS the request body's
      dispatch header from the request envelope's perspective.
 
-     parameters max-size=4294967295: upstream reads a `String` with the
+     parameters states no max-size: upstream reads a `String` with the
      default codec, a usize length (`commons/zenoh-codec/src/zenoh/query.rs`
-     @ `parameters = self.codec.read(&mut *reader)?;`). 4294967295 stands
-     in for usize: it is usize on a 32-bit target and no zenoh frame
-     passes 4 GiB. All other fields match upstream wire 1:1.
+     @ `parameters = self.codec.read(&mut *reader)?;`), so the bound is the
+     width of the length, and a u64 length is no bound. What a node stores
+     is its deployment's capacity. All other fields match upstream wire 1:1.
 
      Deliberate divergence from SCE upstream codec_zenoh_query
      (R88 variant-default-uniformity closure): wz bakes
@@ -115,7 +116,7 @@
      name + <sce:import src=> retargeted to wz-stem. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="query">
+       sce:kind="codec" sce:default-endian="big" name="query">
   <sce:import src="query_ext_entry.scxml" kind="codec" as="codec_zenoh_query_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
@@ -129,10 +130,9 @@
     <sce:field id="parameters_len" sce:type="uint64" sce:byte="2" sce:bit-size="vle"
                sce:present-if="header.P"/>
     <sce:field id="parameters" sce:type="bytes" sce:byte="3" sce:bit-size="length-ref"
-               sce:length-field="parameters_len" sce:max-size="4294967295"
+               sce:length-field="parameters_len"
                sce:present-if="header.P"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_query_ext_entry" sce:byte="4"
-                   max-depth="8"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"
                    entry-id="header" entry-id-except="header.Z">

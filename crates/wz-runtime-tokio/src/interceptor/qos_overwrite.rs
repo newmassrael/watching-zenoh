@@ -291,9 +291,10 @@ pub fn message_qos(msg: &NetworkMessage) -> Option<QosLevel> {
     }
 }
 
-/// Write `qos` into `msg`'s QoS extension. A message that carries none is left as it was. An `Err`
-/// is a chain at its bound with no room for the entry, which the edit has taken out of the message:
-/// the caller drops the message, as its encode refused it before the bound was a type.
+/// Write `qos` into `msg`'s QoS extension. A message that carries none is left as it was. The
+/// protocol bounds a chain by nothing and the message's chain is on the heap, so the entry always
+/// fits there; an `Err` is a chain a fixed profile could not hold with the entry, which the edit has
+/// taken out of the message, and the caller drops the message.
 pub fn apply_qos(msg: &mut NetworkMessage, qos: QosLevel) -> Result<(), CodecError> {
     match msg {
         NetworkMessage::Push(push) => set_push_qos(push, qos),
@@ -747,29 +748,29 @@ mod tests {
         }
     }
 
-    /// Every forwarder drops a message on this `Err`: a chain at its bound has no room for a QoS
-    /// entry, and the edit has taken the chain out of the message, so what is left is not the
-    /// message that arrived and does not carry the QoS the rule gave it.
+    /// The protocol bounds a chain by nothing and the message's chain is on the heap, so a chain of
+    /// eight entries, what a node stores, has room for the QoS entry: the rewrite applies, and the
+    /// chain holds the eight entries it had and the QoS after them.
     #[test]
-    fn a_rewrite_with_no_room_in_a_chain_at_its_bound_is_refused() {
+    fn a_rewrite_into_a_chain_of_eight_adds_the_qos_entry() {
         let qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
         let mut msg = put_with_units(8);
-        assert_eq!(chain_len(&msg), Some(8), "the chain is at its bound");
-        assert_eq!(apply_qos(&mut msg, qos), Err(CodecError::TooManyElements));
-        assert_eq!(chain_len(&msg), None, "the chain is gone from the message");
-        assert_ne!(message_qos(&msg), Some(qos), "and the QoS is not on it");
+        assert_eq!(chain_len(&msg), Some(8), "the chain holds eight entries");
+        assert_eq!(apply_qos(&mut msg, qos), Ok(()));
+        assert_eq!(chain_len(&msg), Some(9), "the eight entries and the QoS");
+        assert_eq!(message_qos(&msg), Some(qos), "and the QoS is the rule's");
     }
 
-    /// The control of the test above, which would pass as well if every rewrite were refused: a
-    /// chain at its bound that already holds a QoS entry has that entry replaced, grows by nothing,
-    /// and keeps every other entry.
+    /// The control of the test above, which would pass as well if every rewrite added an entry: a
+    /// chain of eight that already holds a QoS entry has that entry replaced, grows by nothing, and
+    /// keeps every other entry.
     #[test]
-    fn a_rewrite_that_replaces_the_qos_entry_of_a_chain_at_its_bound_goes_through() {
+    fn a_rewrite_that_replaces_the_qos_entry_of_a_chain_of_eight_goes_through() {
         let first = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
         let second = QosLevel::from_parts(Priority::Control, CongestionControl::Block, false);
         let mut msg = put_with_units(7);
         apply_qos(&mut msg, first).expect("the eighth entry fits");
-        assert_eq!(chain_len(&msg), Some(8), "the chain is at its bound");
+        assert_eq!(chain_len(&msg), Some(8), "the chain holds eight entries");
         assert_eq!(apply_qos(&mut msg, second), Ok(()));
         assert_eq!(chain_len(&msg), Some(8));
         assert_eq!(message_qos(&msg), Some(second));

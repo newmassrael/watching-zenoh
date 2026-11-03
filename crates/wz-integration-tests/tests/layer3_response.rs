@@ -27,7 +27,7 @@
 //! response_header (MID 0x1B | M flag) + rid VLE + wireexpr.id VLE +
 //! reply_header + msg_put_header + payload_len VLE.
 
-use wz_codecs::response::Response;
+use wz_codecs::lent::Response;
 use zenoh_pico_sys::{
     _z_bytes_from_buf, _z_bytes_t, _z_n_msg_response_t, _z_response_encode, _z_slice_t,
     _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
@@ -77,8 +77,8 @@ fn layer3_response_default_byte_equivalent() {
     // encoder refuses it, so the Put inside the default Reply gets the empty
     // inline payload pico's encoder is driven with.
     let mut response = Response::default();
-    if let wz_codecs::response::ResponseVariant::CodecZenohReply(reply) = &mut response.body {
-        if let wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put) = &mut reply.body {
+    if let wz_codecs::lent::ResponseVariant::CodecZenohReply(reply) = &mut response.body {
+        if let wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(put) = &mut reply.body {
             put.payload_len = Some(0);
             put.extensions_has_0x12 = wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                 extensions: None,

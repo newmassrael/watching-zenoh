@@ -177,17 +177,17 @@ mod tests {
         // the header's `N` flag, which would make this fixture a statement
         // about the codec's flag derivation instead. An id-only `WireexprLocal`
         // is a record the walker names in full, which is all this needs.
-        let record = wz_codecs::push::Push {
-            keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
-                    wz_codecs::wireexpr_local::WireexprLocal {
+        let record = wz_codecs::lent::Push {
+            keyexpr: wz_codecs::lent::Wireexpr {
+                body: wz_codecs::lent::WireexprVariant::WireexprLocal(
+                    wz_codecs::lent::WireexprLocal {
                         id: 0,
                         suffix_len: None,
                         suffix: None,
                     },
                 ),
             },
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+            body: wz_codecs::lent::PushVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
                 payload_len: Some(8),
                 extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
                     extensions: None,

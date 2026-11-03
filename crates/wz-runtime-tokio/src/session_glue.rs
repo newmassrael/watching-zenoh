@@ -5622,8 +5622,8 @@ mod reconnect_tx_tests {
             interest_id: Some(14),
             extensions: None,
             body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(
-                wz_codecs::decl_final::DeclFinal::default()
-                    .try_into_owned()
+                wz_codecs::lent::DeclFinal::default()
+                    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
                     .expect("DeclFinal::default owns no borrowed data"),
             ),
         };
@@ -5927,8 +5927,8 @@ mod reconnect_tx_tests {
             interest_id,
             extensions: None,
             body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(
-                wz_codecs::decl_final::DeclFinal::default()
-                    .try_into_owned()
+                wz_codecs::lent::DeclFinal::default()
+                    .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
                     .expect("DeclFinal::default owns no borrowed data"),
             ),
         };

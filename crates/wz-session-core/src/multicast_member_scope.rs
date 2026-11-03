@@ -24,7 +24,7 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use wz_codecs::declare::DeclareOwnedVariant;
+use crate::transport_profile::owned::DeclareOwnedVariant;
 
 use crate::network_message::NetworkMessage;
 
