@@ -307938,6 +307938,36 @@
         "Read the hosted Layer Z run for the 9 legs of the partition test file once a run on the current main completes; the last completed CI run predates several landings and had reds in C1bzr rustdoc links of wz-session-core and decl_listener, which are other sessions' items. Open: the C interface reports gateway/south as mapped although its engine holds no region hat (overlay for key_state); stale LinkstateForwarder comments; the router's interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 4183": {
+      "decision_summary": "The consumer that feeds bytes to wz-capi-c reported that crates/wz-fuzz covered the dissect and replay doors but not the config verdict rows or the end-to-end sender, and that its own fuzzers cannot see coverage inside wz. Two targets are added over those doors, called as a C caller calls them. config walks wz_capi_c_config_validate_rows, _for_build_rows and _topology_rows and every wz_capi_c_config_verdict_* reader, holding the answer to the rows documentation (a refusal has a row, findings are numbered in order, an index past the end is refused, text is UTF-8, a second drop is a no-op). sender drives e2e_sender_new, _wrap, _next and _set, holding that a refused frame consumes no counter value and that a built frame opens under its profile with the CRC checking. Both run in the per-push regression and the nightly matrix.",
+      "changes_bullets": [
+        "crates/wz-fuzz: fuzz_targets/config.rs and fuzz_targets/sender.rs, two [[bin]] entries, the wz-capi-c dependency (e2e-sender only) and its Cargo.lock; frame_of moved to src/lib.rs.",
+        "scripts/lib/fuzz_seeds.py: the two targets, 8 and 6 seeds; .github/workflows/fuzz.yml: the matrix; scripts/fuzz.sh: its header."
+      ],
+      "verification_bullets": [
+        "On a build host: fuzz.sh build passes; regress runs config 8, sender 6 and e2e 4 inputs and passes; 120 s of each new target ran 1.36 million and 1.79 million inputs (coverage 2531 and 2709) with no finding; cargo fmt --check and clippy -D warnings of the crate are clean. Not run: the hosted regress time and the first nightly with the two targets."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the hosted time of fuzz-regress now that the fuzz build links wz-capi-c, and the first nightly over config and sender. The consumer closes its claim when its pin moves to this commit; tell it to pin."
+      ],
+      "publishable_decision_summary": "The consumer that feeds bytes to wz-capi-c reported that crates/wz-fuzz covered the dissect and replay doors but not the config verdict rows or the end-to-end sender, and that its own fuzzers cannot see coverage inside wz. Two targets are added over those doors, called as a C caller calls them. config walks wz_capi_c_config_validate_rows, _for_build_rows and _topology_rows and every wz_capi_c_config_verdict_* reader, holding the answer to the rows documentation (a refusal has a row, findings are numbered in order, an index past the end is refused, text is UTF-8, a second drop is a no-op). sender drives e2e_sender_new, _wrap, _next and _set, holding that a refused frame consumes no counter value and that a built frame opens under its profile with the CRC checking. Both run in the per-push regression and the nightly matrix.",
+      "publishable_changes_bullets": [
+        "crates/wz-fuzz: fuzz_targets/config.rs and fuzz_targets/sender.rs, two [[bin]] entries, the wz-capi-c dependency (e2e-sender only) and its Cargo.lock; frame_of moved to src/lib.rs.",
+        "scripts/lib/fuzz_seeds.py: the two targets, 8 and 6 seeds; .github/workflows/fuzz.yml: the matrix; scripts/fuzz.sh: its header."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: fuzz.sh build passes; regress runs config 8, sender 6 and e2e 4 inputs and passes; 120 s of each new target ran 1.36 million and 1.79 million inputs (coverage 2531 and 2709) with no finding; cargo fmt --check and clippy -D warnings of the crate are clean. Not run: the hosted regress time and the first nightly with the two targets."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the hosted time of fuzz-regress now that the fuzz build links wz-capi-c, and the first nightly over config and sender. The consumer closes its claim when its pin moves to this commit; tell it to pin."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
