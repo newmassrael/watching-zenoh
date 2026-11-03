@@ -24842,6 +24842,12 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh session open and close)" 25 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_api_session || return 1
+    # A peer that listens and declares a publisher before a router dials it, in both orders, with an
+    # upstream router and an upstream client behind it: the two crates deliver alike. Two tests, the
+    # comparison and the control that a peer which delivers nothing is a difference.
+    _runci_guarded_test "Layer E18 (differential, zenoh peer publisher before a router)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_api_peer_publisher_before_router || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_ts_stack_stamp || return 1
