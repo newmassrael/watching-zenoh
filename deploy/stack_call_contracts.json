@@ -1,6 +1,9 @@
 {
-  "about": "Who a call through a register may reach, for the stack bound of the fixed-memory images (scripts/lib/stack_bound_gate.py, docs/text-ownership.md). A register can hold only an address the image holds somewhere (a data word, a literal pool, a movw/movt pair, an adr), so a rule names, among those functions, the ones its site may call. Every call by register in a function the bound reaches needs a rule; there is no reading of the vtable slot or of the method named on the line. `where` is a source file (the end of its path) and line, or, for C, a regex on the function's name. `callees` is a regex on the demangled name without generic arguments, or WAKER (the four functions of the executor's RawWakerVTable, read from the image), or TRAIT_METHODS (every trait-impl method the image holds, for a site that is shallow), or NONE. A NONE rule states a premise, and `absent` (a regex on the functions the image holds an address of) or `absent_reached` (on the functions the bound reaches) is that premise: the gate fails when it stops being true. A rule is written by a person and read against the code; the gate holds it to the image.",
+  "about": "Who a call through a register may reach, for the stack bound of the fixed-memory images (scripts/lib/stack_bound_gate.py, docs/text-ownership.md). A register can hold only an address the image holds somewhere (a data word, a literal pool, a movw/movt pair, an adr), so a rule names, among those functions, the ones its site may call. Every call by register in a function the bound reaches needs a rule; there is no reading of the vtable slot or of the method named on the line. `where` is a source file (the end of its path) and one of: nothing more (every call by register of the file, whose number the image pins in `site_pins`); `anchor`, a fragment of the source of the line the call is on (it follows the call when lines are added above it, and the contract check fails when no line of the file holds it); `line` with `library`, a position in a file this repository does not hold, which is a fact of one version of it and so names the library, pinned to its commit in `libraries` (the compiler's core library at the toolchain's commit; a site of another commit is not claimed and the gate says so); or `function`, a regex on the demangled name of the function that makes the call (for C, on its name). A position in a file of this repository is refused. `callees` is a regex on the demangled name without generic arguments, or WAKER (the four functions of the executor's RawWakerVTable, read from the image), or TRAIT_METHODS (every trait-impl method the image holds, for a site that is shallow), or NONE. A NONE rule states a premise, and `absent` (a regex on the functions the image holds an address of) or `absent_reached` (on the functions the bound reaches) is that premise: the gate fails when it stops being true. A rule is written by a person and read against the code; the gate holds it to the image.",
   "schema": 1,
+  "libraries": {
+    "rustc": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3"
+  },
   "cold": [
     "^core::str::slice_error_fail"
   ],
@@ -11,7 +14,7 @@
   },
   "site_pins": {
     "engine-turn": {"zephyr-client-fixed": 36, "zephyr-client-heap": 36, "zephyr-client-fixed-batching": 36, "zephyr-client-fixed-get": 36},
-    "engine-host": {"zephyr-client-fixed": 5, "zephyr-client-heap": 5, "zephyr-client-fixed-batching": 5, "zephyr-client-fixed-get": 5},
+    "engine-host": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
     "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1},
     "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
     "engine-behaviour": {"zephyr-client-fixed": 11, "zephyr-client-heap": 11, "zephyr-client-fixed-batching": 11, "zephyr-client-fixed-get": 11},
@@ -21,7 +24,7 @@
     "planner-emit": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
     "record": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 3},
     "own-mapping": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 1},
-    "answer-reply": {"zephyr-client-fixed": 7, "zephyr-client-heap": 7, "zephyr-client-fixed-batching": 7, "zephyr-client-fixed-get": 7},
+    "answer-reply": {"zephyr-client-fixed": 6, "zephyr-client-heap": 6, "zephyr-client-fixed-batching": 6, "zephyr-client-fixed-get": 6},
     "byte-cells": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
     "fmt-builders": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 5},
     "app-main": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0},
@@ -60,7 +63,7 @@
   "rules": [
     {
       "id": "exec-poll",
-      "where": {"file": "static_executor.rs", "line": 465},
+      "where": {"file": "static_executor.rs", "anchor": "(ops.poll)("},
       "callees": "^wz_runtime_coop::executor_static::poll_erased$",
       "why": "the task cell's poll"
     },
@@ -72,7 +75,7 @@
     },
     {
       "id": "slot-release",
-      "where": {"file": "session_slot.rs", "line": 119},
+      "where": {"file": "session_slot.rs", "anchor": "unsafe { release(self) }"},
       "callees": "session_slot::release_cell$",
       "why": "the release function a slot's claim set"
     },
@@ -84,7 +87,7 @@
     },
     {
       "id": "queryable",
-      "where": {"file": "query_sink.rs", "line": 988},
+      "where": {"file": "query_sink.rs", "anchor": "(self.call)(&mut self.state, query, out)"},
       "callees": "slot_client::answer",
       "why": "the function a queryable was registered with"
     },
@@ -102,7 +105,7 @@
     },
     {
       "id": "engine-clock",
-      "where": {"file": "engine.rs", "line": 1369},
+      "where": {"file": "engine.rs", "anchor": "SceClock::Source(read) => read()"},
       "callees": "mac_cyt4bf::now_us$",
       "why": "the clock source the engine was given"
     },
@@ -139,13 +142,13 @@
     },
     {
       "id": "entropy-make",
-      "where": {"file": "slot_node.rs", "line": 768},
+      "where": {"file": "slot_node.rs", "anchor": "(self.entropy)()"},
       "callees": "ZephyrEntropy|^trng_get_entropy$|fixed_client::run::\\{closure#1\\}",
       "why": "the function that makes the node's entropy source"
     },
     {
       "id": "entropy-draw",
-      "where": {"file": "session_actions.rs", "line": 6228},
+      "where": {"file": "session_actions.rs", "anchor": "src.try_next_u64().ok()"},
       "callees": "EntropySource>::try_next_u64$",
       "why": "the draw of the session's initial value"
     },
@@ -170,14 +173,14 @@
     },
     {
       "id": "latest-put",
-      "where": {"file": "latest.rs", "line": 206},
+      "where": {"file": "latest.rs", "anchor": "self.slots.put("},
       "callees": "NONE",
       "absent": "LatestSlots",
       "why": "the image holds no implementation of LatestSlots"
     },
     {
       "id": "latest-with",
-      "where": {"file": "slot_client.rs", "line": 534},
+      "where": {"file": "slot_client.rs", "anchor": "cell.slots.with(cell.index"},
       "callees": "NONE",
       "absent": "LatestSlots",
       "why": "the image holds no implementation of LatestSlots"
@@ -196,109 +199,91 @@
     },
     {
       "id": "txbuf-len",
-      "where": {"file": "tx_buf.rs", "line": 205},
+      "where": {"file": "tx_buf.rs", "anchor": "self.inner.len()"},
       "callees": "TxBuf>::len$",
-      "why": "the capped buffer asks the buffer it wraps for its length"
-    },
-    {
-      "id": "txbuf-len-217",
-      "where": {"file": "tx_buf.rs", "line": 217},
-      "callees": "TxBuf>::len$",
-      "why": "the capped buffer asks the buffer it wraps for its length"
-    },
-    {
-      "id": "txbuf-len-226",
-      "where": {"file": "tx_buf.rs", "line": 226},
-      "callees": "TxBuf>::len$",
-      "why": "the capped buffer asks the buffer it wraps for its length"
-    },
-    {
-      "id": "txbuf-len-234",
-      "where": {"file": "tx_buf.rs", "line": 234},
-      "callees": "TxBuf>::len$",
-      "why": "the capped buffer asks the buffer it wraps for its length"
+      "why": "the capped buffer asks the buffer it wraps for its length, in its own length and in each of the three checks of its cap (one call written four times, so one rule: a fifth would be the same call)"
     },
     {
       "id": "txbuf-append-byte",
-      "where": {"file": "tx_buf.rs", "line": 229},
+      "where": {"file": "tx_buf.rs", "anchor": "self.inner.append_byte("},
       "callees": "TxBuf>::append_byte$",
       "why": "the capped buffer appends to the buffer it wraps"
     },
     {
       "id": "txbuf-append-byte-sink",
-      "where": {"file": "tx_buf.rs", "line": 322},
+      "where": {"file": "tx_buf.rs", "anchor": "self.buf.append_byte("},
       "callees": "TxBuf>::append_byte$",
       "why": "the codec's sink appends to the buffer it writes"
     },
     {
       "id": "txbuf-append",
-      "where": {"file": "tx_buf.rs", "line": 318},
+      "where": {"file": "tx_buf.rs", "anchor": "self.buf.append(bytes)"},
       "callees": "TxBuf>::append$",
       "why": "the codec's sink appends a slice to the buffer it writes"
     },
     {
       "id": "txbuf-reserve",
-      "where": {"file": "tx_buf.rs", "line": 308},
+      "where": {"file": "tx_buf.rs", "anchor": "self.buf.reserve(n)"},
       "callees": "TxBuf>::reserve$",
       "why": "the codec's sink reserves in the buffer it writes"
     },
     {
       "id": "fmt-arg",
-      "where": {"file": "fmt/mod.rs", "line": 1665},
+      "where": {"file": "fmt/mod.rs", "line": 1665, "library": "rustc"},
       "callees": "::fmt$",
       "why": "a formatting argument's own fmt function"
     },
     {
       "id": "fmt-arg-1677",
-      "where": {"file": "fmt/mod.rs", "line": 1677},
+      "where": {"file": "fmt/mod.rs", "line": 1677, "library": "rustc"},
       "callees": "::fmt$",
       "why": "a formatting argument's own fmt function"
     },
     {
       "id": "fmt-arg-rt",
-      "where": {"file": "fmt/rt.rs", "line": 152},
+      "where": {"file": "fmt/rt.rs", "line": 152, "library": "rustc"},
       "callees": "::fmt$",
       "why": "a formatting argument's own fmt function"
     },
     {
       "id": "fmt-write-1757",
-      "where": {"file": "fmt/mod.rs", "line": 1757},
+      "where": {"file": "fmt/mod.rs", "line": 1757, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
     },
     {
       "id": "fmt-write-1849",
-      "where": {"file": "fmt/mod.rs", "line": 1849},
+      "where": {"file": "fmt/mod.rs", "line": 1849, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
     },
     {
       "id": "fmt-write-1867",
-      "where": {"file": "fmt/mod.rs", "line": 1867},
+      "where": {"file": "fmt/mod.rs", "line": 1867, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
     },
     {
       "id": "fmt-write-1875",
-      "where": {"file": "fmt/mod.rs", "line": 1875},
+      "where": {"file": "fmt/mod.rs", "line": 1875, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
     },
     {
       "id": "fmt-write-1939",
-      "where": {"file": "fmt/mod.rs", "line": 1939},
+      "where": {"file": "fmt/mod.rs", "line": 1939, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
     },
     {
       "id": "fmt-write-1967",
-      "where": {"file": "fmt/mod.rs", "line": 1967},
+      "where": {"file": "fmt/mod.rs", "line": 1967, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
     },
     {
       "id": "fmt-write-2100",
-      "where": {"file": "fmt/mod.rs", "line": 2100},
+      "where": {"file": "fmt/mod.rs", "line": 2100, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
     },

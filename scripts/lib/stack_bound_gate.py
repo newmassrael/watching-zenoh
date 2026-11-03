@@ -14,8 +14,10 @@ the method named on the line, because a reading is what the earlier figure was.
 
 What it asserts of an image, in this order:
 
-1. every call by register in a function the bound reaches has a rule (a source file and line from the
-   line table, or a C function's name), and a rule that names nobody for a site that uses it is refused;
+1. every call by register in a function the bound reaches has a rule (the source file and line the line
+   table gives, matched by a fragment of that line's text, or, for the compiler's library, by its position
+   at the pinned commit; or the function that makes the call, or a C function's name), and a rule that names
+   nobody for a site that uses it is refused;
 2. the premise of every rule that says "nobody" (`absent`, `absent_reached`) still holds;
 3. no cycle in the call graph other than the recursion the contract declares, with its depth;
 4. the bound, which is the worst chain's frames in bytes, equals the figure committed in
@@ -37,6 +39,8 @@ depth it declares; a panic path ends in an abort and is cold. The image has to b
 
     stack_bound_gate.py --check KEY --elf ELF     the gate, for an image of stack_frame_gate.IMAGES
     stack_bound_gate.py --emit KEY --elf ELF      the bound and the worst chain, nothing asserted
+                                                  (--sites: every call each rule claims, with its source line)
+    stack_bound_gate.py --contract                the rules against the source, with no image
     stack_bound_gate.py --list                    the images whose row commits a bound
     stack_bound_gate.py --selftest                each rule of the gate driven on a small model
 """
@@ -51,6 +55,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -85,6 +90,14 @@ class Func:
     sites: list[int] = field(default_factory=list)  # addresses of its calls by register
 
 
+#: The source of a line the line table names: `text(path, line)`, or None when this machine does not hold it.
+SourceText = Callable[[str, "int | None"], "str | None"]
+
+
+def _no_text(path: str, line: int | None) -> str | None:
+    return None
+
+
 @dataclass
 class Model:
     funcs: dict[int, Func]
@@ -92,6 +105,50 @@ class Model:
     waker: set[int]  # the four functions of the executor's RawWakerVTable
     where: dict[int, tuple[str, int | None]]  # a call by register: its source file and line
     entry: str
+    text: SourceText = _no_text  # the text of a line of the source, for a rule that names its site by it
+
+
+#: A directory of the repository, as it stands in a path of the line table. The build that made an image
+#: may have run anywhere (a workstation, a hosted runner, a build machine), so the text of a source line
+#: is read from THIS checkout at the part of the path from the first of these on.
+REPO_DIRS = ("crates", "vendor", "deploy", "third-party", "xtask", "conformance")
+#: The compiler's own library, which the line table names `/rustc/<commit>/library/...` and this machine
+#: does not hold the source of (the `rust-src` component is not in the pinned toolchain).
+LIBRARY_PATH = re.compile(r"^/rustc/([0-9a-f]{40})/")
+
+
+class Sources:
+    """The text of the lines of the repository's own source, read once per file."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self._files: dict[str, list[str] | None] = {}
+
+    def _find(self, path: str) -> Path | None:
+        if LIBRARY_PATH.match(path):
+            return None
+        direct = Path(path)
+        if direct.is_file():
+            return direct
+        parts = Path(path).parts
+        for i, part in enumerate(parts):
+            if part in REPO_DIRS:
+                cand = self.root.joinpath(*parts[i:])
+                if cand.is_file():
+                    return cand
+        return None
+
+    def lines(self, path: str) -> list[str] | None:
+        if path not in self._files:
+            found = self._find(path)
+            self._files[path] = found.read_text(errors="replace").splitlines() if found else None
+        return self._files[path]
+
+    def text(self, path: str, line: int | None) -> str | None:
+        lines = self.lines(path)
+        if lines is None or line is None or not 1 <= line <= len(lines):
+            return None
+        return lines[line - 1]
 
 
 def norm(name: str) -> str:
@@ -187,7 +244,7 @@ def load(elf: str, entry: str) -> Model:
                             waker.add(v - 1)
 
     sites = [a for fn in funcs.values() if "::" in fn.name for a in fn.sites]
-    return Model(funcs, taken, waker, _locate(elf, sites), entry)
+    return Model(funcs, taken, waker, _locate(elf, sites), entry, Sources(ROOT).text)
 
 
 def _owner(starts: list[int], addr: int) -> int | None:
@@ -255,9 +312,30 @@ class Result:
     edges: dict[int, set[int]] = field(default_factory=dict)
     cold: set[int] = field(default_factory=set)
     root: int = 0
+    # Each rule's sites in the functions reached, as (function, "file:line", the source of the line):
+    # what the pins count, and what a reader of a rule checks it against.
+    claimed: dict[str, list[tuple[str, str, str]]] = field(default_factory=dict)
+    # The compiler commits of the library rules' sites that are not the commit the contract pins.
+    drift: set[str] = field(default_factory=set)
 
 
-def _match_rule(rules: list[dict], fn: Func, where: tuple[str, int | None] | None) -> dict | None:
+def _match_rule(
+    rules: list[dict],
+    fn: Func,
+    where: tuple[str, int | None] | None,
+    text: SourceText = _no_text,
+    libraries: dict[str, str] | None = None,
+    drift: set[str] | None = None,
+) -> dict | None:
+    """The first rule that claims a call by register.
+
+    A rule names its site by (1) the function it is in (`function`), (2) a file alone, which claims every
+    call of that file, (3) a file and `anchor`, a fragment of the source of the line the call is on, which
+    follows the call when lines are added above it and fails when the call is gone, or (4) a file, `line`
+    and `library`, for a file this repository does not hold (the compiler's own library): a position in
+    a file is only a fact of one version of it, so the rule says which, and a site of another version is
+    not claimed by it (`libraries` is the contract's pin of each library to its commit).
+    """
     for rule in rules:
         w = rule["where"]
         if "function" in w:
@@ -265,8 +343,25 @@ def _match_rule(rules: list[dict], fn: Func, where: tuple[str, int | None] | Non
                 return rule
         elif where is not None:
             path, line = where
-            if path.endswith(w["file"]) and (w.get("line") is None or w["line"] == line):
+            if not path.endswith(w["file"]):
+                continue
+            if "anchor" in w:
+                source = text(path, line)
+                if source is not None and w["anchor"] in source:
+                    return rule
+                continue
+            if w.get("line") is None:
                 return rule
+            if w["line"] != line:
+                continue
+            if "library" in w and libraries is not None:
+                lib = LIBRARY_PATH.match(path)
+                pinned = libraries.get(w["library"])
+                if lib and pinned and lib.group(1) != pinned:
+                    if drift is not None:
+                        drift.add(lib.group(1))
+                    continue
+            return rule
     return None
 
 
@@ -286,18 +381,27 @@ def analyse(model: Model, contract: dict) -> Result:
     used: set[str] = set()
     edges: dict[int, set[int]] = {}
     claimed_by: dict[int, list[dict]] = {}
+    claimed_at: dict[int, list[tuple[str, str, str]]] = defaultdict(list)
     unclaimed: dict[int, list[str]] = defaultdict(list)
     empty: set[str] = set()
+    libraries = contract.get("libraries")
     for start, fn in model.funcs.items():
         out = set(fn.calls)
         for addr in fn.sites:
             where = model.where.get(addr)
-            rule = _match_rule(rules, fn, where)
+            rule = _match_rule(rules, fn, where, model.text, libraries, res.drift)
             if rule is None:
                 unclaimed[start].append(f"{where[0].rpartition('/')[2]}:{where[1]}" if where else "no line")
                 continue
             used.add(rule["id"])
             claimed_by.setdefault(start, []).append(rule)
+            claimed_at[start].append(
+                (
+                    fn.norm,
+                    f"{where[0].rpartition('/')[2]}:{where[1]}" if where else "no line",
+                    (model.text(*where) or "").strip() if where else "",
+                )
+            )
             callees = rule["callees"]
             if callees == "NONE":
                 continue
@@ -334,8 +438,9 @@ def analyse(model: Model, contract: dict) -> Result:
     for s in sorted(reach):
         for w in unclaimed.get(s, []):
             res.unclaimed.append((model.funcs[s].norm, w))
-        for r in claimed_by.get(s, []):
+        for r, site in zip(claimed_by.get(s, []), claimed_at.get(s, [])):
             res.claims[r["id"]] = res.claims.get(r["id"], 0) + 1
+            res.claimed.setdefault(r["id"], []).append(site)
     for rule_id in sorted(empty):
         users = [s for s in reach for r in claimed_by.get(s, []) if r["id"] == rule_id]
         if users:
@@ -428,7 +533,7 @@ def verdicts(
     # a change of it is the moment the rule is read again.
     pins = (contract or {}).get("site_pins", {})
     for rule in (contract or {}).get("rules", []):
-        if "line" in rule["where"]:
+        if "line" in rule["where"] or "anchor" in rule["where"]:
             continue
         n, pinned = res.claims.get(rule["id"], 0), pins.get(rule["id"], {}).get(key)
         if n and pinned is None:
@@ -438,6 +543,14 @@ def verdicts(
                 f"rule `{rule['id']}` claims {n} call(s) through a register in {key} and pins {pinned}: "
                 f"read the new ones against its callees, then move the pin"
             )
+    if contract is not None:
+        bad.extend(contract_problems(contract))
+    for commit in sorted(res.drift):
+        bad.append(
+            f"the image holds the compiler library of rustc commit {commit}, and {CONTRACTS.name} pins the lines "
+            f"of {(contract or {}).get('libraries', {}).get('rustc')}: read the library rules against the new "
+            f"library and move `libraries.rustc` in the commit that moves the toolchain"
+        )
     for fn, where in res.unclaimed[:12]:
         bad.append(
             f"`{fn}` calls through a register at {where} and no rule of {CONTRACTS.name} claims the site"
@@ -475,6 +588,67 @@ def verdicts(
     return bad
 
 
+def _tracked_sources() -> list[str]:
+    """The Rust sources of the repository and of its submodules, as paths from the root."""
+    out = _run("git", "-C", str(ROOT), "ls-files", "--recurse-submodules", "--", "*.rs")
+    return [p for p in out.splitlines() if p]
+
+
+def contract_problems(contract: dict, tracked: list[str] | None = None) -> list[str]:
+    """What is wrong with the contract itself, with no image: a rule that cannot name its site, or whose site is gone.
+
+    An image only exercises the rules its functions reach, so a stale position in a rule no image reaches
+    is found by nobody until an image does; these are checked against the source here, every time.
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+    libraries = contract.get("libraries", {})
+    files: list[str] | None = tracked
+    cache: dict[str, list[str]] = {}
+    for rule in contract.get("rules", []):
+        rid, w = rule["id"], rule["where"]
+        if rid in seen:
+            bad.append(f"rule id `{rid}` is used twice")
+        seen.add(rid)
+        if "line" in w:
+            if "anchor" in w:
+                bad.append(f"rule `{rid}` names its site by a line and an anchor: it is the anchor")
+            elif "library" not in w:
+                bad.append(
+                    f"rule `{rid}` names its site by line {w['line']} of {w['file']}, a position in a file of this "
+                    f"repository that moves whenever a line is added above it: name the call by `anchor`, a "
+                    f"fragment of its source line (`library` is for a file this repository does not hold)"
+                )
+            elif w["library"] not in libraries:
+                bad.append(f"rule `{rid}` is a position in the library `{w['library']}`, which `libraries` does not pin")
+        if "library" in w and "line" not in w:
+            bad.append(f"rule `{rid}` names a library and no line")
+        if "anchor" in w:
+            if not w["anchor"].strip():
+                bad.append(f"rule `{rid}` has an empty anchor")
+                continue
+            if files is None:
+                files = _tracked_sources()
+            suffix = "/" + w["file"]
+            found = [p for p in files if ("/" + p).endswith(suffix)]
+            if not found:
+                bad.append(f"rule `{rid}` anchors in {w['file']}, which no source of the repository is")
+                continue
+            held = False
+            for p in found:
+                if p not in cache:
+                    cache[p] = (ROOT / p).read_text(errors="replace").splitlines() if (ROOT / p).is_file() else []
+                if any(w["anchor"] in text for text in cache[p]):
+                    held = True
+                    break
+            if not held:
+                bad.append(
+                    f"rule `{rid}` anchors on `{w['anchor']}`, which no line of {w['file']} holds: the call it names "
+                    f"was changed or removed, so read the rule against the code and move the anchor"
+                )
+    return bad
+
+
 def _contract() -> dict:
     return json.loads(CONTRACTS.read_text())
 
@@ -506,9 +680,23 @@ def main() -> int:
     ap.add_argument("--elf")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--list", action="store_true", help="the images whose row commits a bound")
+    ap.add_argument("--contract", action="store_true", help="the contract against the source, with no image")
+    ap.add_argument("--sites", action="store_true", help="with --emit: every call a rule claims, with its source line")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
+    if args.contract:
+        problems = contract_problems(_contract())
+        for p in problems:
+            print(f"stack-bound: contract: {p}")
+        if not problems:
+            rules = _contract()["rules"]
+            print(
+                f"stack-bound: contract OK: {len(rules)} rule(s), "
+                f"{sum('anchor' in r['where'] for r in rules)} by anchor, "
+                f"{sum('library' in r['where'] for r in rules)} by a position in a pinned library"
+            )
+        return 1 if problems else 0
     if args.list:
         rows = json.loads(BUDGET.read_text()).get("images", {})
         print("\n".join(k for k, row in rows.items() if "static_bound_bytes" in row))
@@ -527,8 +715,12 @@ def main() -> int:
         for a, b in res.cycles:
             print(f"   CYCLE {a} -> {b}")
         for rule in contract["rules"]:
-            if "line" not in rule["where"] and res.claims.get(rule["id"]):
+            if "line" not in rule["where"] and "anchor" not in rule["where"] and res.claims.get(rule["id"]):
                 print(f"   SITES {rule['id']} {res.claims[rule['id']]}")
+        if args.sites:
+            for rid, found in sorted(res.claimed.items()):
+                for fn, at, source in found:
+                    print(f"   CLAIM {rid} | {fn[:70]} | {at} | {source[:90]}")
         print(f"   STACK declared {g.declared_stack(image, ROOT)}, derived {derived_stack(res.bound)}")
         return 0
     row = _row(key)
@@ -632,6 +824,52 @@ def selftest() -> int:
     eq("a pinned rule holds", verdicts(res_b, "k", 390, 300, 1000, pinned), [])
     moved = {**broad, "site_pins": {"b": {"k": 2}}}
     eq("a pin that moved is a rule to read again", len(verdicts(res_b, "k", 390, 300, 1000, moved)), 1)
+    # a rule that names its site by a fragment of the line follows the call when the line moves
+    def holding(line: int, source: str | None) -> Model:
+        m = _model()
+        m.where[0x210] = ("crates/x/src/lib.rs", line)
+        m.text = lambda path, ln: source if ln == line else None
+        return m
+
+    by_anchor = {"rules": [{**rule, "where": {"file": "lib.rs", "anchor": "call_it("}}]}
+    eq("an anchor claims the line that holds it", analyse(holding(7, "x.call_it(y)"), by_anchor).unclaimed, [])
+    eq("and the same call 24 lines lower", analyse(holding(31, "x.call_it(y)"), by_anchor).unclaimed, [])
+    eq("a line the anchor is not on is unclaimed", len(analyse(holding(7, "other()"), by_anchor).unclaimed), 1)
+    eq("a source this machine does not hold claims nothing", len(analyse(holding(7, None), by_anchor).unclaimed), 1)
+    eq("the claimed site carries its source line", analyse(holding(7, " x.call_it(y)"), by_anchor).claimed["r"][0][2], "x.call_it(y)")
+    # a position in a library is a fact of one commit of it
+    pinned_lib = "a" * 40
+    lib = {
+        "libraries": {"rustc": pinned_lib},
+        "rules": [{**rule, "where": {"file": "lib.rs", "line": 7, "library": "rustc"}}],
+    }
+    lib_model = _model()
+    lib_model.where[0x210] = (f"/rustc/{pinned_lib}/library/core/src/lib.rs", 7)
+    eq("a library position of the pinned commit is claimed", analyse(lib_model, lib).unclaimed, [])
+    drifted = _model()
+    drifted.where[0x210] = (f"/rustc/{'b' * 40}/library/core/src/lib.rs", 7)
+    res_drift = analyse(drifted, lib)
+    eq("a library position of another commit is not claimed", len(res_drift.unclaimed), 1)
+    eq("and the commit is named", res_drift.drift, {"b" * 40})
+    eq("the verdict says the toolchain moved", len(verdicts(res_drift, "k", None, None, 1000, lib)) >= 2, True)
+    # the contract is checked against the source, with no image
+    tracked = ["scripts/lib/stack_bound_gate.py"]
+
+    def problems(where: dict, **extra) -> list[str]:
+        return contract_problems({"rules": [{"id": "r", "where": where, "callees": "x", "why": "t"}], **extra}, tracked)
+
+    eq("a position in a file of the repository is refused", len(problems({"file": "lib.rs", "line": 7})), 1)
+    eq("a library position needs the library pinned", len(problems({"file": "lib.rs", "line": 7, "library": "rustc"})), 1)
+    eq(
+        "a pinned library position is fine",
+        problems({"file": "lib.rs", "line": 7, "library": "rustc"}, libraries={"rustc": pinned_lib}),
+        [],
+    )
+    eq("an anchor in a file that is not there is refused", len(problems({"file": "nowhere.rs", "anchor": "x"})), 1)
+    eq("an anchor no line holds is refused", len(problems({"file": "stack_bound_gate.py", "anchor": "no such " + "text 42"})), 1)
+    eq("an anchor a line holds is fine", problems({"file": "stack_bound_gate.py", "anchor": "def selftest"}), [])
+    twice = {"rules": [{"id": "r", "where": {"file": "f.rs"}, "callees": "x", "why": "t"}] * 2}
+    eq("a rule id used twice is refused", len(contract_problems(twice, tracked)), 1)
     # norm drops generic arguments and keeps a qualified path
     eq("norm: generics", norm("a::b::<T>::c"), "a::b::c")
     eq("norm: qualified path", norm("<X<Y> as T>::m"), "<X as T>::m")

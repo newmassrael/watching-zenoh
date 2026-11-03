@@ -2084,6 +2084,12 @@ layer_c0_test_discipline() {
     # The stack bound of the fixed-memory images with the calls through a register followed: its rules driven
     # on a small model here; the images themselves are held by `kit-lane.sh build`, where the ELF is.
     python3 scripts/lib/stack_bound_gate.py --selftest || return 1
+    # The contract of those rules against the source, with no image: a rule names its site by a fragment of
+    # the line (or, for the compiler's library, by a position pinned to its commit), and every fragment has
+    # to be on a line of the file still. A stale position is no error of an image: the call falls to the
+    # rule of the whole file and is claimed with that rule's callees, and the image passes. Two had: the
+    # clock source of the engine (claimed as a call of the host) and the latest-slot read (as a reply).
+    python3 scripts/lib/stack_bound_gate.py --contract || return 1
     # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
     # exit an obligation a TYPE enforces and closed that one invariant; the
     # register carried "the other multi-exit sites have not been looked at" as
