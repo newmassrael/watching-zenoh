@@ -307224,6 +307224,34 @@
         "Open: the nondefault-tests census was not run for the new skip row of tls_handshake_drop_event, and the new lane line of run-ci.sh was run by hand with the same command and not through run-ci.sh; a key store with no free slot is read to map to the channel's out-of-memory and was not measured (it needs more than 198 held sessions on the host provider); STALLED and NO_ROOM are not exercised through the ABI. The wz peer publisher a router dials is measured and not pinned for want of a lane that checks for zenohd. The hosted runs of recent rounds are mostly cancelled while queued."
       ]
     },
+    "Round 4161": {
+      "decision_summary": "The Z8 harness ran on Linux only: it raised the open-files limit through a module and a fork hook that Windows lacks, and wrote the host's own path separators into a TOML string, where a backslash is an escape. It now skips the first where there is no fork and writes the second with forward slashes, and the upstream suite ran against the patched graph on Windows for the first time, on the owner's Windows host reached by ssh (not through bx, which the registry keeps off this repository there): 21 of 31 files pass, four are empty because upstream's own file is gated to unix, and six fail, whose causes are in the carry.",
+      "changes_bullets": [
+        "scripts/lib/z8_upstream_suite.py: raise_open_files_limit returns where the resource module is absent; run passes preexec_fn only on posix; the manifest writes ROOT.as_posix() into both path entries."
+      ],
+      "verification_bullets": [
+        "The harness selftest passes on Linux after the change. On the Windows host (Windows 11, the pinned 1.97.0 toolchain, 4 build jobs): generate, then measure of every file but regions and open_time. The cause of the session and shm failures was checked against a plain socket on the host: a join of 224.0.0.1 and a send to it fail with 10065 there, a join of 224.0.0.224 succeeds. Not run: regions on Windows, and upstream's own zenoh as the control of the six."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Windows Z8 (first run, pc6): pass 21 of 31 files; empty 4 (acl, interceptors, low_pass, qos_overwrite: upstream gates the file to unix). Fail 6: session 4 of 5 and shm 8 of 10 (the multicast test opens udp/224.0.0.1:0 and Windows itself refuses 224.0.0.1, shown with a plain socket; shm's two are the same open error); liveliness 45 of 46 (regression_3, the assertion Linux fixed in round 4050); qos 0 of 2 and queryable 1 of 3 (a receive times out, cause not found; the OS loops multicast back on the host); routing 7 of 8 (scouting_delay_regression: open took 537 ms, bound 400). The controls with upstream's zenoh on Windows are owed, as is regions."
+      ],
+      "publishable_decision_summary": "The Z8 harness ran on Linux only: it raised the open-files limit through a module and a fork hook that Windows lacks, and wrote the host's own path separators into a TOML string, where a backslash is an escape. It now skips the first where there is no fork and writes the second with forward slashes, and the upstream suite ran against the patched graph on Windows for the first time, on the owner's Windows host reached by ssh (not through bx, which the registry keeps off this repository there): 21 of 31 files pass, four are empty because upstream's own file is gated to unix, and six fail, whose causes are in the carry.",
+      "publishable_changes_bullets": [
+        "scripts/lib/z8_upstream_suite.py: raise_open_files_limit returns where the resource module is absent; run passes preexec_fn only on posix; the manifest writes ROOT.as_posix() into both path entries."
+      ],
+      "publishable_verification_bullets": [
+        "The harness selftest passes on Linux after the change. On the Windows host (Windows 11, the pinned 1.97.0 toolchain, 4 build jobs): generate, then measure of every file but regions and open_time. The cause of the session and shm failures was checked against a plain socket on the host: a join of 224.0.0.1 and a send to it fail with 10065 there, a join of 224.0.0.224 succeeds. Not run: regions on Windows, and upstream's own zenoh as the control of the six."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Windows Z8 (first run, pc6): pass 21 of 31 files; empty 4 (acl, interceptors, low_pass, qos_overwrite: upstream gates the file to unix). Fail 6: session 4 of 5 and shm 8 of 10 (the multicast test opens udp/224.0.0.1:0 and Windows itself refuses 224.0.0.1, shown with a plain socket; shm's two are the same open error); liveliness 45 of 46 (regression_3, the assertion Linux fixed in round 4050); qos 0 of 2 and queryable 1 of 3 (a receive times out, cause not found; the OS loops multicast back on the host); routing 7 of 8 (scouting_delay_regression: open took 537 ms, bound 400). The controls with upstream's zenoh on Windows are owed, as is regions."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
