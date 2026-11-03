@@ -60,7 +60,7 @@
   "rules": [
     {
       "id": "exec-poll",
-      "where": {"file": "static_executor.rs", "line": 450},
+      "where": {"file": "static_executor.rs", "line": 465},
       "callees": "^wz_runtime_coop::executor_static::poll_erased$",
       "why": "the task cell's poll"
     },
