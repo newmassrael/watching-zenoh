@@ -360,6 +360,14 @@ transport-link-unixpipe,transport-link-ws|"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
     "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot|"
+    # The node a `z_open` holds behind a session handle (`router-node`): the roles file's one test
+    # that opens a config keeping its south apart as the node that places a remote by it. The hosted
+    # census refused the tree with "wz-capi-c has 12 test(s) only a feature build reaches ... leaving
+    # 1 claimed by NOTHING: a_gateway_south_of_subregions_opens_a_node_that_carries_little_yet", the
+    # test being `cfg(feature = "router-node")` and no row naming that feature for this crate. The
+    # filter is the integration target, so a test added to it under the feature is claimed without
+    # touching the row; the `cfg(not(..))` twin it replaces runs in the default build.
+    "wz-capi-c|hook|router-node|--test=session_roles"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the
