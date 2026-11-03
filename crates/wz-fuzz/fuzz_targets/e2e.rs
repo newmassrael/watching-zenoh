@@ -18,7 +18,7 @@ use core::ffi::{c_char, c_int, CStr};
 
 use libfuzzer_sys::fuzz_target;
 use wz_capi_dissect::*;
-use wz_fuzz::{is_dissect_code, string_answer, string_door, Reader};
+use wz_fuzz::{frame_of, is_dissect_code, string_answer, string_door, Reader};
 
 fuzz_target!(|data: &[u8]| {
     let mut r = Reader::new(data);
@@ -79,29 +79,4 @@ fn wrap(p: *const c_char, s: *const c_char, b: *const u8, n: usize) -> Option<Ve
     // SAFETY: `out` started null and only the door wrote it.
     unsafe { string_answer("e2e_wrap", rc, out) };
     frame
-}
-
-/// The frame of a wrap document that built one, from its `"frame"` hex.
-fn frame_of(doc: &str) -> Option<Vec<u8>> {
-    let value: serde_json::Value = serde_json::from_str(doc).ok()?;
-    if value.get("ok")? != &serde_json::Value::Bool(true) {
-        return None;
-    }
-    let hex = value.get("frame")?.as_str()?;
-    let digits = hex.as_bytes();
-    assert!(
-        digits.len() % 2 == 0,
-        "e2e_wrap: a frame of odd hex length: {hex}"
-    );
-    let nibble = |c: u8| {
-        (c as char)
-            .to_digit(16)
-            .unwrap_or_else(|| panic!("e2e_wrap: a frame that is not hex: {hex}")) as u8
-    };
-    Some(
-        digits
-            .chunks(2)
-            .map(|pair| nibble(pair[0]) << 4 | nibble(pair[1]))
-            .collect(),
-    )
 }

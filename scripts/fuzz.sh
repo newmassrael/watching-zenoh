@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # fuzz.sh -- build, replay and run the fuzz targets of `crates/wz-fuzz`, the
-# C ABI doors of `wz-capi-dissect` and `wz-capi-replay` a consumer hands
-# outside bytes to.
+# C ABI doors of `wz-capi-dissect`, `wz-capi-replay` and `wz-capi-c` (the
+# config verdict and the end-to-end sender) a consumer hands outside bytes to.
 #
 #   bash scripts/fuzz.sh build                     build every target (ASan)
 #   bash scripts/fuzz.sh regress [TARGET...]       every seed and every committed

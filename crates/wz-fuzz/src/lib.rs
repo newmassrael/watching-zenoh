@@ -262,6 +262,33 @@ pub fn link_type(pick: u8, raw: u32) -> u32 {
     }
 }
 
+/// The frame of a wrap document that built one, from its `"frame"` hex. A
+/// document that did not build one answers `None`; a frame that is not whole
+/// hex is a defect of the door that wrote it.
+pub fn frame_of(doc: &str) -> Option<Vec<u8>> {
+    let value: serde_json::Value = serde_json::from_str(doc).ok()?;
+    if value.get("ok")? != &serde_json::Value::Bool(true) {
+        return None;
+    }
+    let hex = value.get("frame")?.as_str()?;
+    let digits = hex.as_bytes();
+    assert!(
+        digits.len() % 2 == 0,
+        "e2e_wrap: a frame of odd hex length: {hex}"
+    );
+    let nibble = |c: u8| {
+        (c as char)
+            .to_digit(16)
+            .unwrap_or_else(|| panic!("e2e_wrap: a frame that is not hex: {hex}")) as u8
+    };
+    Some(
+        digits
+            .chunks(2)
+            .map(|pair| nibble(pair[0]) << 4 | nibble(pair[1]))
+            .collect(),
+    )
+}
+
 /// Selectors a door is handed beside the fuzzer's own: valid ones that reach
 /// the filtering, and the empty one, which selects everything.
 pub const SELECTORS: &[&str] = &[

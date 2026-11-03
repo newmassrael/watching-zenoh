@@ -44,7 +44,7 @@ jobs:
       matrix:
         # The targets `scripts/fuzz.sh targets` prints; Layer C0 does not read
         # this list, so a target added there is added here in the same commit.
-        target: [pcap, live, transport, text, proto, e2e, replay]
+        target: [pcap, live, transport, text, proto, e2e, replay, config, sender]
     env:
       WZ_FUZZ_SECONDS: ${{ github.event.inputs.seconds || '1200' }}
     steps:

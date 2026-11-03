@@ -22,6 +22,9 @@ Each seed is the input layout its target's header comment states:
   (`crates/wz-capi-dissect/tests/c_abi_consumer.c`, `src/lib.rs`), written here
   in the target's layout, and the `.proto` files of
   `crates/wz-capture/testdata/nanopb/`.
+- `config`, `sender`: config texts of the line form `zc_config_from_str` reads
+  and the sender calls of `crates/wz-capi-c/tests/e2e_sender_roundtrip.rs`,
+  written here in the target's layout.
 
 The output is a pure function of the tree: names are the SHA-256 of the
 bytes, so writing twice changes nothing.
@@ -44,7 +47,7 @@ MAX_CAPTURE = 64 * 1024
 # How many packet payloads the `transport` target is seeded with.
 MAX_PAYLOADS = 256
 
-TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay")
+TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay", "config", "sender")
 
 # Inputs that once made a target fail and are made of a tracked capture: the
 # arguments and the capture's path under `captures/`, so the reproducer is
@@ -95,6 +98,39 @@ E2E_BODY = (
     b'{"kind": 3, "counter": 7, "ident": {"hi": 1, "lo": 2}, "@body": {"files": [{"name": "pose.proto", '
     b'"text": "syntax = \\"proto3\\";\\npackage demo;\\nmessage Pose { sint32 x = 1; string label = 2; }"}], '
     b'"message": "demo.Pose", "values": {"x": -3, "label": "hi"}}}'
+)
+
+# (config texts, node names, external endpoints) of the `config` target. The
+# texts are the line form `zc_config_from_str` reads: `key:value`, json5 values.
+CONFIGS = (
+    ((), (), b""),
+    ((b"mode:\"router\"\nlisten/endpoints:[\"tcp/127.0.0.1:7447\"]",), (b"",), b""),
+    ((b"mode:\"peer\"\nconnect/endpoints:[\"tcp/127.0.0.1:7447\"]",), (b"edge",), b"tcp/10.0.0.9:7447\0"),
+    (
+        (
+            b"mode:\"router\"\nlisten/endpoints:[\"tcp/127.0.0.1:7447\"]",
+            b"mode:\"router\"\nlisten/endpoints:[\"tcp/127.0.0.1:7447\"]",
+            b"mode:\"client\"\nconnect/endpoints:[\"tcp/127.0.0.1:7447\"]",
+        ),
+        (b"a", b"b", b""),
+        b"",
+    ),
+    ((b"mode:\"peer\"\nscouting/multicast/enabled:false",), (b"",), b""),
+    ((b"mode:\"nonsense\"",), (b"",), b""),
+    ((b"not a config line",), (b"x",), b""),
+    ((b"listen/endpoints:[\"quic/127.0.0.1:7447\", \"udp/127.0.0.1:7447\"]\nmode:\"router\"",), (b"",), b""),
+)
+
+# (choices, first counter, values, payload) of the `sender` target: the
+# rollover that wraps and the one that refuses, a refusal asked for, a refused
+# frame, and a payload given both ways.
+SENDERS = (
+    (4, 7, E2E_VALUES, b"hi"),
+    (5, 255, E2E_VALUES, b"hi"),
+    (4, 0, b'{"kind": 3, "ident": {"hi": 1, "lo": 2}}', b""),
+    (4, 0, b'{"nope": 1}', b"x"),
+    (12, 3, E2E_VALUES, b"hi"),
+    (6, 1, E2E_VALUES, b"hi"),
 )
 
 PROTO_ROOT = (
@@ -231,6 +267,13 @@ def derived(target: str) -> list[bytes]:
             plan = struct.pack("<bQdQQB", 1, 10, 1.0, 1000, 60000, 8) + bytes([3]) + struct.pack("<3Q", 0, 5, 12)
             out.append(args + plan + b"payload bytes")
         return out
+    if target == "config":
+        return [bytes([len(texts)]) + b"".join(t + b"\0" for t in texts) + b"".join(n + b"\0" for n in names) + external
+                for texts, names, external in CONFIGS]
+    if target == "sender":
+        # The choices byte, the first counter, the profile, the values, the payload.
+        return [bytes([choices]) + struct.pack("<Q", first) + E2E_PROFILE + b"\0" + values + b"\0" + payload
+                for choices, first, values, payload in SENDERS]
     raise SystemExit(f"fuzz_seeds: no target `{target}`; the targets are {', '.join(TARGETS)}")
 
 

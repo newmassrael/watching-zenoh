@@ -3,7 +3,8 @@
 #
 # Coverage-guided fuzz targets for the C ABI doors a consumer hands outside
 # bytes to: the capture, live, transport, text, schema and E2E doors of
-# `wz-capi-dissect` and the mutation and plan doors of `wz-capi-replay`.
+# `wz-capi-dissect`, the mutation and plan doors of `wz-capi-replay`, and the
+# config-verdict and end-to-end sender doors of `wz-capi-c`.
 #
 # ## Why the doors and not the Rust beneath them
 #
@@ -41,6 +42,7 @@ members = ["."]
 [dependencies]
 libfuzzer-sys = "0.4.10"
 serde_json = "1"
+wz-capi-c = { path = "../wz-capi-c", default-features = false, features = ["e2e-sender"] }
 wz-capi-dissect = { path = "../wz-capi-dissect" }
 wz-capi-replay = { path = "../wz-capi-replay" }
 
@@ -89,6 +91,20 @@ bench = false
 [[bin]]
 name = "replay"
 path = "fuzz_targets/replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sender"
+path = "fuzz_targets/sender.rs"
 test = false
 doc = false
 bench = false
