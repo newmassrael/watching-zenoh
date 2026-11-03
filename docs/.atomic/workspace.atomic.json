@@ -307662,6 +307662,48 @@
         "Open: the loopback witness images' arenas (98,304 each) report nothing and are tests; the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb; the limits the admin overlay leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's); a hosted reading of Layer Qzk."
       ]
     },
+    "Round 4175": {
+      "decision_summary": "The server layer leaves wz-session-core for crates of its own in this workspace, at the owner's request: wz-storage takes the ten storage_* modules, wz-admin the admin space (adminspace, admin_reply, admin_config_space, admin_connect), wz-auth the auth methods (extauth_usrpwd); auth_dispatch and extauth stay, being the transport handshake's sub-extension the drive loop demuxes per frame. Layers in one repository rather than a repository above wz, because the session API still moves (the last SCE pin touched about 1000 sites across 20 crates), Kconfig wants one feature namespace, there is one land.sh and one gate pipeline, and upstream keeps its storage manager in its own tree; a separate repository is reconsidered once the session API is stable or the upper layer has another consumer, cadence or license. This round adds only the gate the split answers to, in ratchet mode: the core names no upper crate in its manifest or its source, and the list of server modules still in it only shrinks. Each module moves in its own round, usrpwd first; the core's pub(crate) items a moved module needs are widened in the round that moves it, not ahead of a caller.",
+      "changes_bullets": [
+        "scripts/lib/layer_direction_gate.py: new. IN_CORE lists the 15 server modules still in the core; the module rule refuses a new one and a listed one that moved; the graph rule reads cargo metadata (no edge of any kind from the core to wz-auth, wz-storage or wz-admin, and each such member built on the core); the source rule refuses an upper crate's path in the core. Its selftest has 18 rows, the zero populations among them.",
+        "scripts/run-ci.sh (Layer C0) and .githooks/pre-push (round-fed gates): the gate's selftest and check."
+      ],
+      "verification_bullets": [
+        "layer_direction_gate.py --selftest: 18 rows held, each refusal red-first against a fixture; --check on the tree: 15 server modules in the core of 15 listed, 0 of 3 upper crates built, 254 core Rust files read, OK.",
+        "The deferred static gates ran with the two new entries, 127 of 127 pass; python_floor_lint and root_relative_exclusion_lint refused the first draft (tomllib is not on the 3.10 floor, an exclusion read an absolute path) and pass on this one, which reads the graph from cargo metadata.",
+        "No Rust changed, so no build or test was run."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Owed, the split's own steps: wz-auth with extauth_usrpwd (its dissect test moves with it and reads a frame the core's own encoder writes); wz-storage, storage_manager first; wz-admin with a session row extension trait in place of the admin rows session_actions builds; then the core's storage features go and the gate's IN_CORE is empty.",
+        "Each move also updates the run-ci feature lines that name the core, the census path pins, the workspace members and the store citations, the last through the typed primitives."
+      ],
+      "publishable_decision_summary": "The server layer leaves wz-session-core for crates of its own in this workspace, at the owner's request: wz-storage takes the ten storage_* modules, wz-admin the admin space (adminspace, admin_reply, admin_config_space, admin_connect), wz-auth the auth methods (extauth_usrpwd); auth_dispatch and extauth stay, being the transport handshake's sub-extension the drive loop demuxes per frame. Layers in one repository rather than a repository above wz, because the session API still moves (the last SCE pin touched about 1000 sites across 20 crates), Kconfig wants one feature namespace, there is one land.sh and one gate pipeline, and upstream keeps its storage manager in its own tree; a separate repository is reconsidered once the session API is stable or the upper layer has another consumer, cadence or license. This round adds only the gate the split answers to, in ratchet mode: the core names no upper crate in its manifest or its source, and the list of server modules still in it only shrinks. Each module moves in its own round, usrpwd first; the core's pub(crate) items a moved module needs are widened in the round that moves it, not ahead of a caller.",
+      "publishable_changes_bullets": [
+        "scripts/lib/layer_direction_gate.py: new. IN_CORE lists the 15 server modules still in the core; the module rule refuses a new one and a listed one that moved; the graph rule reads cargo metadata (no edge of any kind from the core to wz-auth, wz-storage or wz-admin, and each such member built on the core); the source rule refuses an upper crate's path in the core. Its selftest has 18 rows, the zero populations among them.",
+        "scripts/run-ci.sh (Layer C0) and .githooks/pre-push (round-fed gates): the gate's selftest and check."
+      ],
+      "publishable_verification_bullets": [
+        "layer_direction_gate.py --selftest: 18 rows held, each refusal red-first against a fixture; --check on the tree: 15 server modules in the core of 15 listed, 0 of 3 upper crates built, 254 core Rust files read, OK.",
+        "The deferred static gates ran with the two new entries, 127 of 127 pass; python_floor_lint and root_relative_exclusion_lint refused the first draft (tomllib is not on the 3.10 floor, an exclusion read an absolute path) and pass on this one, which reads the graph from cargo metadata.",
+        "No Rust changed, so no build or test was run."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, the split's own steps: wz-auth with extauth_usrpwd (its dissect test moves with it and reads a frame the core's own encoder writes); wz-storage, storage_manager first; wz-admin with a session row extension trait in place of the admin rows session_actions builds; then the core's storage features go and the gate's IN_CORE is empty.",
+        "Each move also updates the run-ci feature lines that name the core, the census path pins, the workspace members and the store citations, the last through the typed primitives."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
