@@ -92,6 +92,42 @@ packages = [
 min_ram_gb = 16
 min_free_gb = 20
 
+# THE ZEPHYR TOOLCHAIN the Qz and Qzk lanes build the kit's images with, asked of a machine only for a
+# run whose command line names one of those lanes (`needed_by`): a run of any other layer goes to a
+# machine that has no Zephyr. A lane that finds no workspace fails after the checkout is sent and
+# the build has begun ("No such file"), and a machine lost its workspace once (2026-10-23) with
+# nothing saying so; a candidate is now judged before anything is sent.
+#
+# Two tools, because a tool is one tree: the SDK, whose compiler prints the pinned SDK version, and
+# the workspace's venv, whose `west` has to RUN (a venv whose interpreter is gone still has an
+# executable `west`, so a file test would pass it). The SDK version is CI's pin
+# (`ZEPHYR_SDK_VERSION`), written here because the workflow states it in two jobs and bx reads a
+# version from a file only where one line matches; `scripts/provision-zephyr.sh` refuses to run
+# when this copy differs from the workflow's. The workspace's REVISION (`ZEPHYR_REF`) is not printed by any program, so it
+# stays `scripts/provision-zephyr.sh --check`'s to verify; this declaration says "a toolchain of
+# the pinned SDK is here and its venv runs", not "the workspace is at the pin".
+#
+# No `install`: both are put in place by `bash scripts/provision-zephyr.sh` (11 GB, needs the
+# network), run on the machine by hand, which is how the machines that have it got it on
+# 2026-11-03. Having bx keep them (`install` with the script as `install_inputs`, the workspace as
+# a `prefix_link`) would rebuild the three hand-made installs into the tool store and needs the
+# script to take a prefix; that is a separate change, not made here.
+#
+# A full `bash scripts/run-ci.sh` with no `--layer` runs Qz too and its command line names no lane,
+# so bx cannot tell it from a run of another layer: place such a run with `--host` on a machine
+# that has the toolchain.
+[tools.zephyr-sdk]
+version = "1.0.1"
+path = "~/zephyr-sdk-{version}/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc"
+check = "Zephyr SDK {version}"
+needed_by = ["Qz"]
+
+[tools.zephyr-venv]
+version = "1"
+path = "~/zephyrproject/.venv/bin/west"
+check = "West version"
+needed_by = ["Qz"]
+
 [commands]
 # NOT `cargo test --workspace`: this tree refuses a whole-workspace build on
 # purpose (`sce-rust-runtime` raises a `compile_error!`), so the workspace form
