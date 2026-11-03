@@ -3849,19 +3849,28 @@ mod tests {
     /// few bytes at a time and sometimes none: whichever thread takes a frame writes it before
     /// another thread takes the next, and what a sender could not finish the writer does first.
     /// The bytes that reach the link are every frame, once, in each sender's order, and no
-    /// frame is cut by another's. Run 25 times over fresh queues, since what it looks for
-    /// is a race that one run may not meet.
+    /// frame is cut by another's. Run over fresh queues, since what it looks for is a race
+    /// that one run may not meet: at least 25 rounds, and more until enough of them have
+    /// reached a sender's own flush, because how often the role is won depends on how many
+    /// cores the machine leaves the five threads (a loaded runner won it 90 times in 25).
     #[test]
     fn senders_that_write_their_own_messages_and_the_writer_keep_the_stream_in_order() {
-        let mut inline_flushes = 0;
-        for _round in 0..25 {
-            inline_flushes += one_race_of_senders_and_the_writer();
-        }
+        const MIN_ROUNDS: usize = 25;
+        const MAX_ROUNDS: usize = 400;
         // Most attempts find the role held (four senders and a writer contend for it); a few
         // hundred that get it are each a flush whose rest the writer must finish.
+        const ENOUGH_INLINE_FLUSHES: usize = 100;
+        let mut inline_flushes = 0;
+        let mut rounds = 0;
+        while rounds < MIN_ROUNDS
+            || (inline_flushes <= ENOUGH_INLINE_FLUSHES && rounds < MAX_ROUNDS)
+        {
+            inline_flushes += one_race_of_senders_and_the_writer();
+            rounds += 1;
+        }
         assert!(
-            inline_flushes > 100,
-            "the race must reach the senders' own flush ({inline_flushes} of 150000 tries)"
+            inline_flushes > ENOUGH_INLINE_FLUSHES,
+            "the race must reach the senders' own flush ({inline_flushes} in {rounds} rounds)"
         );
     }
 
