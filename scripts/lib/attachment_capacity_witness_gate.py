@@ -49,9 +49,23 @@ meaning "over capacity". That is the tripwire-vs-copy split this tree has paid
 for before (R2540, open-debt item 690): a constant that spells a pinned value
 is only a tripwire while something compares it to the pin.
 
+## Where the capacity is written since the SCE pin of 85f794fa03
+
+SCE ADR 0077 section 7 split a field's bound in two. The document states only
+the protocol's bound: `ext_zbuf.scxml` now declares `sce:max-size="4294967295"`
+on `value`, the width of its `u32` length field, which is zenoh's unbounded
+attachment said in the document's own terms. What a node holds inline moved to
+the codec deployment, `deploy/codec_node.yaml` (`codecs.ext_zbuf.capacity.value`,
+still 32), from which `xtask regen` writes `out/wz-codecs/node.rs`. The number
+this gate grades is the second one: it is the heap-free capacity the witnesses
+must exceed. Read off the SCXML after that move, the gate compared the Rust
+mirror with four billion and found no witness over it, on a tree where nothing
+had changed but the place the 32 is written.
+
 ## What it derives rather than declares
 
-  * the capacity comes from the SCXML attribute, parsed off the `value` field;
+  * the capacity comes from the Node deployment, parsed off the `ext_zbuf`
+    entry's `value` capacity;
   * the carrier set comes from the `pub const ATTACHMENT_EXT_ID_*` declarations
     in the attachment SSOT module — not a list here, so a fourth carrier is
     covered the moment it is declared;
@@ -77,7 +91,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
-SCXML = "sources/codecs/ext_zbuf.scxml"
+NODE_DEPLOYMENT = "deploy/codec_node.yaml"
+NODE_CODEC = "ext_zbuf"
+NODE_FIELD = "value"
 ATTACHMENT_SSOT = "crates/wz-session-core/src/attachment.rs"
 # R2840 — where the ids those carriers name are written as numbers.
 EXT_HEADER = "crates/wz-session-core/src/ext_header.rs"
@@ -94,23 +110,34 @@ class GateError(Exception):
 
 # ── source readers ───────────────────────────────────────────────────
 
-def declared_capacity(scxml_text: str) -> int:
-    """The `sce:max-size` on the ext-zbuf body's `value` field.
+def node_capacity(deployment_text: str) -> int:
+    """The Node profile's inline capacity of the ext-zbuf body's `value` field.
 
-    Anchored on the field id so a second `max-size` appearing in the file
-    (a sibling field, or the prose header that explains the number) cannot be
-    picked up instead.
+    The deployment is a fixed shape (`codecs:` / `<codec>:` / `capacity:` /
+    `<field>: <n>`, two spaces a level), read by indentation rather than by a
+    YAML library the Python floor does not ship. Anchored on the codec's own
+    entry, so the same field name under a sibling codec (`query_value_zbuf`
+    also has a `value`) cannot be picked up instead.
     """
-    field = re.search(
-        r'<sce:field\b[^>]*\bid="value"[^>]*>', scxml_text, re.S
+    entry = re.search(
+        rf"^  {re.escape(NODE_CODEC)}:[ \t]*\n((?:    .*\n|[ \t]*\n)*)",
+        deployment_text,
+        re.M,
     )
-    if field is None:
-        raise GateError(f"{SCXML}: no `<sce:field id=\"value\" …>` to read")
-    cap = re.search(r'sce:max-size="(\d+)"', field.group(0))
+    if entry is None:
+        raise GateError(f"{NODE_DEPLOYMENT}: no `{NODE_CODEC}:` codec entry to read")
+    capacity = re.search(
+        r"^    capacity:[ \t]*\n((?:      .*\n|[ \t]*\n)*)", entry.group(1), re.M
+    )
+    if capacity is None:
+        raise GateError(f"{NODE_DEPLOYMENT}: `{NODE_CODEC}` states no `capacity:`")
+    cap = re.search(
+        rf"^      {re.escape(NODE_FIELD)}:[ \t]*(\d+)[ \t]*$", capacity.group(1), re.M
+    )
     if cap is None:
         raise GateError(
-            f"{SCXML}: the `value` field declares no `sce:max-size` — the "
-            "capacity this gate grades has no source"
+            f"{NODE_DEPLOYMENT}: `{NODE_CODEC}` holds no `{NODE_FIELD}` capacity — "
+            "the capacity this gate grades has no source"
         )
     return int(cap.group(1))
 
@@ -336,7 +363,7 @@ def witnesses(root: Path, carriers: dict[str, int], cap: int) -> dict[str, list[
 
 def grade(root: Path) -> list[str]:
     """`[]` when every carrier is witnessed and the mirror is bound."""
-    cap = declared_capacity((root / SCXML).read_text(encoding="utf-8"))
+    cap = node_capacity((root / NODE_DEPLOYMENT).read_text(encoding="utf-8"))
     ext_header = root / EXT_HEADER
     carriers = carrier_ids(
         (root / ATTACHMENT_SSOT).read_text(encoding="utf-8"),
@@ -352,15 +379,15 @@ def grade(root: Path) -> list[str]:
     if mirror != cap:
         failures.append(
             f"{QUERY_CAP_CONST_FILE}: {QUERY_CAP_CONST} = {mirror} but "
-            f"{SCXML} declares sce:max-size={cap}. The Rust constant is a "
-            "TRIPWIRE for the codegen capacity, not a copy of it — move both "
+            f"{NODE_DEPLOYMENT} gives `{NODE_CODEC}.{NODE_FIELD}` a capacity of {cap}. "
+            "The Rust constant is a TRIPWIRE for the codegen capacity, not a copy of it — move both "
             "in one commit, and re-check that every boundary witness still "
             "carries a payload longer than the new number."
         )
 
     seen = witnesses(root, carriers, cap)
     print(
-        f"attachment capacity witness: cap={cap} from {SCXML}; "
+        f"attachment capacity witness: cap={cap} from {NODE_DEPLOYMENT}; "
         f"{len(carriers)} carrier(s) declared"
     )
     for name, ext_id in sorted(carriers.items(), key=lambda kv: kv[1]):
@@ -387,12 +414,24 @@ def _selftest() -> int:
 
     def build(tmp: Path, *, cap: int, mirror: int, witness_ids: list[int]) -> Path:
         root = tmp / "tree"
-        (root / "sources/codecs").mkdir(parents=True, exist_ok=True)
+        (root / "deploy").mkdir(parents=True, exist_ok=True)
         (root / "crates/wz-session-core/src").mkdir(parents=True, exist_ok=True)
-        (root / SCXML).write_text(
-            '<scxml><datamodel><sce:field id="value_len"/>'
-            f'<sce:field id="value" sce:max-size="{cap}"/>'
-            "</datamodel></scxml>\n"
+        # A sibling codec with the same field name comes FIRST and holds a
+        # different number, so a reader that does not anchor on the codec's
+        # own entry picks it up and the mirror arms below tell.
+        (root / NODE_DEPLOYMENT).write_text(
+            "# header prose: value: 7\n"
+            "codecs:\n"
+            "  query_value_zbuf:\n"
+            "    capacity:\n"
+            f"      value: {cap + 1}\n"
+            "      slices: 4\n"
+            f"  {NODE_CODEC}:\n"
+            "    capacity:\n"
+            f"      {NODE_FIELD}: {cap}\n"
+            "  query:\n"
+            "    capacity:\n"
+            "      parameters: 256\n"
         )
         (root / ATTACHMENT_SSOT).write_text(
             "pub const ATTACHMENT_EXT_ID_PUSH: u8 = 0x03;\n"

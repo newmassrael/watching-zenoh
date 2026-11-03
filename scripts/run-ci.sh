@@ -1547,7 +1547,27 @@ layer_b_verify_codegen() {
     #             `zenoh`, `wz_shm_query_reply_zenohd_interop`) are the wire
     #             check. Remove this entry the day the upstream resource
     #             carries the layout; the array is read only on a failing pair.
-    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr msg_put query)
+    #   encoding, locator, ext_zbuf, open_body, hello, ext_envelope,
+    #   msg_del, ext_entry -- the SCE pin of 85f794fa03 (ADR 0077 §7: a
+    #             document states the protocol's bound, a deployment states
+    #             the profile's) moved these sources to upstream's wire width
+    #             and SCE's own resources (vendor/sce/tests/forge/resources/
+    #             codec_zenoh_<stem>.scxml) still state the profile's number.
+    #             MEASURED, not assumed: with comments and whitespace removed
+    #             and the names the normalizer maps set aside, the element
+    #             bodies differ in exactly one attribute each -- `max-size`
+    #             on encoding's `schema` and locator's `locator` (128 there,
+    #             255 here: the u8 length upstream reads them with), on
+    #             ext_zbuf's `value` (32 there, 4294967295 here) and on
+    #             open_body's `cookie` (128 there, none here); `max-count="64"`
+    #             on hello's `locators` and `max-depth="8"` on the chains of
+    #             ext_envelope and msg_del (there, none here). ext_entry's own
+    #             body is equal; it differs only through the ext_zbuf it
+    #             imports. The Node profile's numbers live in
+    #             deploy/codec_node.yaml, which verify-codegen.sh's c11 emit reads. Remove
+    #             each stem the day its upstream resource states the wire width.
+    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr msg_put query
+        encoding locator ext_zbuf open_body hello ext_envelope msg_del ext_entry)
 
     local fail=0
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
@@ -3057,7 +3077,8 @@ layer_c0_test_discipline() {
     #
     # A truncating damage probe measured which carriers were covered: it redded
     # the Query witness and the reply's, and NOTHING on the two push-body arms.
-    # The gate also holds `QUERY_EXT_ZBUF_MAX_LEN` equal to the SCXML capacity,
+    # The gate also holds `QUERY_EXT_ZBUF_MAX_LEN` equal to the Node deployment's
+    # capacity (`deploy/codec_node.yaml`; the SCXML states the wire width since 85f794fa03),
     # since a hand-written mirror of a codegen number is a tripwire only while
     # something compares the two. Its selftest drives both arms plus the
     # empty-population refusal. Same lane and the same reason as gate 2d above:
@@ -7483,8 +7504,9 @@ layer_c1ah_cargo_test_time_hlc() {
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib timestamp_source:: --quiet || return 1
     # 23 -> 25: two tests that landed without moving this guard (hosted run 41411911409 expected
-    # 23; the build host printed `25 passed`).
-    _runci_guarded_test "C1ah node_clock" 25 \
+    # 23; the build host printed `25 passed`). 25 -> 28: a112baa068 added the three reply-stamp
+    # tests (`node_clock/tests.rs`) and left the guard; the hosted run of d7dc86a826 printed 28.
+    _runci_guarded_test "C1ah node_clock" 28 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
@@ -15516,13 +15538,10 @@ layer_c1bn_passive_dissection_features() {
     listing="$(cd crates && cargo test -p wz-session-core \
         --features dissect,session-extauth,transport-multilink dissect:: -- --list 2>&1)" \
         || { echo "$listing"; return 1; }
-    for name in \
-        dissect::tests::the_auth_walker_agrees_with_this_trees_own_mux
-    do
-        grep -qF "$name: test" <<<"$listing" || {
-            echo "  C1bn FAIL: $name is absent from the auth-union dissect build"
-            echo "$listing"; return 1; }
-    done
+    name=dissect::tests::the_auth_walker_agrees_with_this_trees_own_mux
+    grep -qF "$name: test" <<<"$listing" || {
+        echo "  C1bn FAIL: $name is absent from the auth-union dissect build"
+        echo "$listing"; return 1; }
     out="$(cd crates && cargo test -p wz-session-core \
         --features dissect,session-extauth,transport-multilink dissect:: --quiet 2>&1)" \
         || { echo "$out"; return 1; }

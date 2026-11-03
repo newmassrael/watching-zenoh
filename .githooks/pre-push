@@ -707,7 +707,7 @@ fi
 # grades: worktree
 #
 # R2546, closing the last clause of the `attachment-bytes` atom. The ext-zbuf
-# body's `sce:max-size="32"` is the INLINE profile's capacity and is ADVISORY
+# body's `value` capacity of 32 is the INLINE profile's and is ADVISORY
 # under `alloc` — that advisory-ness is the whole of wz's parity with zenoh's
 # unbounded attachment, and it is a claim about behaviour, so it needs a
 # witness. The carriers are not one: the attachment ext is declared at a
@@ -717,10 +717,12 @@ fi
 # MEASURED, not assumed: truncating the encoder at the declared capacity redded
 # exactly two tests — the Query carrier's and the reply's inner MsgPut — so a
 # publisher's own `put()` and `del()` had no witness at all. The gate is static
-# (an SCXML attribute, a `pub const` set, and `#[test]` bodies) and costs ~2s,
-# so it sits here for the same reason gate 2d does rather than behind a build.
+# (the Node deployment's capacity, a `pub const` set, and `#[test]` bodies) and
+# costs ~2s, so it sits here for the same reason gate 2d does rather than behind a
+# build. The 32 is `deploy/codec_node.yaml`'s since 85f794fa03: the SCXML now
+# states the protocol's bound, the width of the length field.
 #
-# It also holds `QUERY_EXT_ZBUF_MAX_LEN` to the SCXML: a Rust constant spelling
+# It also holds `QUERY_EXT_ZBUF_MAX_LEN` to that capacity: a Rust constant spelling
 # a codegen capacity is a tripwire only while something compares the two, which
 # is gate 2y's rule one file over.
 if ! python3 scripts/lib/attachment_capacity_witness_gate.py; then

@@ -71,7 +71,9 @@ pub enum DeclEvent {
     ///
     /// Never delivered in a build without the capability. A listener declared after the peer
     /// finished is not told, as it was not given the declarations that came before: it reads
-    /// [`Session::peer_declarations_final`].
+    /// `Session::peer_declarations_final`, named as code because it exists only with
+    /// `declare-subscriber` (which the event's own feature turns on), and this variant is in
+    /// every build.
     #[non_exhaustive]
     Synced {
         /// The peer that finished (`remote-declaration-watch`), as [`DeclEvent::peer`] says.

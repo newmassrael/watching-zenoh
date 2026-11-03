@@ -10,13 +10,17 @@
 //! A refusal count says a pool was too small; it does not say by how much, or whether a pool that
 //! never refused came within one entry of it. The mark that says so is the high-water mark.
 //!
-//! * [`PoolStat`] is what a pool answers: its name, its capacity, the entries it holds, the most
-//!   it has held, and the entries it refused.
-//! * [`PoolGauge`] is how a pool answers. The pool does not know its name (a table is the same
-//!   type in two places in a session), so its owner gives it.
-//! * [`HighWater`] is the mark. It is the one thing a pool stores for this, and it stores
-//!   nothing in a build without the `pool-monitor` feature: the type has no field there, so a
-//!   table that holds one is the size it was.
+//! * [`PoolStat`](crate::pool_gauge::PoolStat) is what a pool answers: its name, its capacity,
+//!   the entries it holds, the most it has held, and the entries it refused.
+//! * [`PoolGauge`](crate::pool_gauge::PoolGauge) is how a pool answers. The pool does not know
+//!   its name (a table is the same type in two places in a session), so its owner gives it.
+//! * [`HighWater`](crate::pool_gauge::HighWater) is the mark. It is the one thing a pool stores
+//!   for this, and it stores nothing in a build without the `pool-monitor` feature: the type has
+//!   no field there, so a table that holds one is the size it was.
+//!
+//! The links above name the crate path, as `id_map` and `bounded` do: this module also has an
+//! outer doc in `lib.rs`, and with the bare names rustdoc resolved none of the three in any
+//! reduced configuration (Layer C1bzr), reporting them with no place.
 
 /// What one pool says of itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -214,6 +214,20 @@ emit() {
     if [[ "$backend" == "cpp" ]]; then
         extra_args+=("--no-format")
     fi
+    # SCE ADR 0077 section 7 (the pins of 85f794fa03 and 78e443084b): a document states a list's
+    # bound only where the protocol does, so most codec lists now state none, and two backends
+    # refuse such a codec unless told how it is held. Rust judges a frame past a profile's
+    # capacity by the codec's VIEW, so it generates with views (`--views`), as `xtask regen`
+    # generates the whole set. C11 holds every list in an array of its capacity, so it reads the
+    # capacities of the Node deployment (`--deploy deploy/codec_node.yaml`), the file `xtask
+    # regen` writes the Rust deployment from. Without them the rust and c11 emits of every codec
+    # with an unbounded list exited 7 and 3, on both sides of the golden compare alike.
+    if [[ "$backend" == "rust" ]]; then
+        extra_args+=("--views")
+    fi
+    if [[ "$backend" == "c11" ]]; then
+        extra_args+=("--deploy" "$ROOT/deploy/codec_node.yaml")
+    fi
 
     # R311y756 — NAME THE WORKSPACE ROOT; do not let it be discovered.
     #

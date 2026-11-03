@@ -28,6 +28,7 @@ rm -rf "$out"
 mkdir -p "$out"
 install -m 0644 "$prefix/lib/libzenohc.so" "$out/libzenohc.so"
 for ex in "${EXAMPLES[@]}"; do
+    # shellcheck disable=SC2016  # `$ORIGIN` is the dynamic linker's, kept literal for the rpath
     cc -O2 -I "$prefix/include" -I "$src" "$src/$ex.c" -L "$out" -lzenohc \
         -Wl,-rpath,'$ORIGIN' -o "$out/$ex"
 done

@@ -61,9 +61,11 @@ capture() {
 }
 
 client() {
-    echo "client: $*" >> "$LOG"
-    timeout 180 docker run --rm --network "$NET" "$@" >> "$LOG" 2>&1
-    echo "client exit $?" >> "$LOG"
+    {
+        echo "client: $*"
+        timeout 180 docker run --rm --network "$NET" "$@" 2>&1
+        echo "client exit $?"
+    } >> "$LOG"
 }
 
 finish() {
@@ -97,6 +99,7 @@ nats)
     server nats:2-alpine
     ready 4222 || exit 1
     capture
+    # shellcheck disable=SC2016  # the container's shell expands `$i`, not this one
     client natsio/nats-box:latest sh -c \
         'nats -s nats://srv:4222 sub "demo.>" --count 5 & sleep 2; for i in 1 2 3 4 5; do nats -s nats://srv:4222 pub demo.a "hello $i"; done; wait' ;;
 rabbitmq)
@@ -244,6 +247,7 @@ syslog)
         'apk add -q rsyslog && printf "module(load=\"imudp\")\ninput(type=\"imudp\" port=\"514\")\nmodule(load=\"imtcp\")\ninput(type=\"imtcp\" port=\"514\")\n*.* /tmp/all\n" > /etc/rsyslog.conf && exec rsyslogd -n'
     ready 514 || exit 1
     capture
+    # shellcheck disable=SC2016  # the container's shell expands `$i`, not this one
     client alpine:3.20 sh -c \
         'apk add -q util-linux-misc && for i in 1 2 3; do logger -n srv -P 514 -d "udp $i"; logger -n srv -P 514 -T "tcp $i"; done' ;;
 sip)

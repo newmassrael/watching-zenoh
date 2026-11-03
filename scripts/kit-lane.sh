@@ -156,7 +156,7 @@ image_spec() {
         # host asks the verbs through the router. Its rows are set by its first runs on the kit.
         zephyr-admin-fixed-tls)
             OVERLAYS="overlays/t2g_zeth.conf;overlays/qemu_admin_fixed_tls.conf;overlays/t2g_admin_fixed_tls.conf"
-            KIND=admin
+            KIND="admin" # quoted: a bare `admin` reads as the POSIX command to shellcheck (SC2209)
             READY_TAG="ZEPHYR-WZ-ADMIN READY"
             ;;
         *) return 1 ;;

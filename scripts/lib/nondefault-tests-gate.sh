@@ -1095,6 +1095,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # `event-ring` joins for the snapshot service's test of the event log it is handed
     # (`resource_snapshot_host::tests`), which asks for that feature beside `resource-snapshot`;
     # the census of the hosted run of 549d294fa named it unclaimed.
+    # `declarations-synced-event` and `remote-declaration-watch` join for the declaration
+    # listener's synced event and the peer it names (`session::tests`, three tests); the census
+    # of the hosted run of d7dc86a826 named all three unclaimed.
     "wz-runtime-tokio|lane|\
         access-acl,\
         access-acl-multicast,\
@@ -1112,6 +1115,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         adminspace-router-linkstate,\
         adminspace-write,\
         config-mutate-runtime,\
+        declarations-synced-event,\
         event-ring,\
         ext-pubsub-advanced-cache,\
         ext-pubsub-advanced-history,\
@@ -1128,6 +1132,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         plugin-dynamic-loading,\
         pubsub-ts-stack,\
         reassembly,\
+        remote-declaration-watch,\
         reply-source-info,\
         resource-snapshot,\
         router-connect-reconcile,\
