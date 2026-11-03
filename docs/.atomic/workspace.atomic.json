@@ -308026,6 +308026,36 @@
         "Open: the census with every crate listed has still not been seen to pass for this tree (pc2 ran out of disk four times while listing; the hosted shard 0 of 2 had not run); the wz peer publisher a router dials is measured (47 against upstream 47) and not pinned as a test, for want of a lane that checks for zenohd with a wz_zenoh publisher; hosted runs not read to the end."
       ]
     },
+    "Round 4186": {
+      "decision_summary": "Item 751 step (b), the first shape the refusal of an uncarried south gave back to the node. A peer that keeps a south apart (gateway/south names subregions) is now a forwarding node whether or not it accepts a session: the remotes it dials are placed by the partition as the ones that dial it are, so it has a south on the links it opens itself. A peer that keeps none still fits a node only as one that accepts sessions. carries_south follows peer_fits_node, so the refusal of Round 4184 no longer covers this shape; it still covers a client with no listener or router, the C ABI and a build without router-node. The test takes a gateway that dials two listeners into two subregions and requires a put of one to reach the subscriber of the other with gossip off on all three, and fails with the open forced to the registry of faces, which a first version with gossip on did not (the listeners found each other by gossip).",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: peer_fits_node takes a peer with a custom south and no listener, its doc and the decision test follow. crates/wz-zenoh/src/api/session.rs: the refusal test now states a client with no listener, and a new test opens two listeners and a gateway that dials both into two subregions. docs/zenoh-api-on-the-engine.md: the shape recorded as the first the node took."
+      ],
+      "verification_bullets": [
+        "wz-zenoh lib: the gateway test passes, with the refusal test and the partitioned-peer open test (3 of 3). Control: with the node fit and the refusal both reverted, the same test fails with the put not crossing; the first control, with gossip on, passed and was not a control. wz-capi-core open_plan tests pass with router-node (3). Clippy -D warnings clean for wz-capi-core and wz-capi-c, all targets. Z8 regions was not rerun: it passed 126 of 126 in Round 4184 with the refusal, and the shape changed here (a peer with a south and no listener) was refused then and is opened now, so no regions test could have been in it. Not run: the Layer Z legs and the wz-capi-c tests other than the Round 4184 one."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Next shapes of the refusal: a client with a south and no listener or router has no remote to place, so the partition does nothing there and upstream accepts it; decide whether it is carried vacuously or taken as a node. The C ABI last: its session handle is the registry's SessionState and cannot hold a RouterState. The dialled-subregion case is witnessed in process only; no stock zenohd witness of a peer node that dials into a south. Read the hosted run for the Z8 lane and the 9 legs of the partition test file. Open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "Item 751 step (b), the first shape the refusal of an uncarried south gave back to the node. A peer that keeps a south apart (gateway/south names subregions) is now a forwarding node whether or not it accepts a session: the remotes it dials are placed by the partition as the ones that dial it are, so it has a south on the links it opens itself. A peer that keeps none still fits a node only as one that accepts sessions. carries_south follows peer_fits_node, so the refusal of Round 4184 no longer covers this shape; it still covers a client with no listener or router, the C ABI and a build without router-node. The test takes a gateway that dials two listeners into two subregions and requires a put of one to reach the subscriber of the other with gossip off on all three, and fails with the open forced to the registry of faces, which a first version with gossip on did not (the listeners found each other by gossip).",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: peer_fits_node takes a peer with a custom south and no listener, its doc and the decision test follow. crates/wz-zenoh/src/api/session.rs: the refusal test now states a client with no listener, and a new test opens two listeners and a gateway that dials both into two subregions. docs/zenoh-api-on-the-engine.md: the shape recorded as the first the node took."
+      ],
+      "publishable_verification_bullets": [
+        "wz-zenoh lib: the gateway test passes, with the refusal test and the partitioned-peer open test (3 of 3). Control: with the node fit and the refusal both reverted, the same test fails with the put not crossing; the first control, with gossip on, passed and was not a control. wz-capi-core open_plan tests pass with router-node (3). Clippy -D warnings clean for wz-capi-core and wz-capi-c, all targets. Z8 regions was not rerun: it passed 126 of 126 in Round 4184 with the refusal, and the shape changed here (a peer with a south and no listener) was refused then and is opened now, so no regions test could have been in it. Not run: the Layer Z legs and the wz-capi-c tests other than the Round 4184 one."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next shapes of the refusal: a client with a south and no listener or router has no remote to place, so the partition does nothing there and upstream accepts it; decide whether it is carried vacuously or taken as a node. The C ABI last: its session handle is the registry's SessionState and cannot hold a RouterState. The dialled-subregion case is witnessed in process only; no stock zenohd witness of a peer node that dials into a south. Read the hosted run for the Z8 lane and the 9 legs of the partition test file. Open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
