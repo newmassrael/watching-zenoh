@@ -515,7 +515,19 @@ IMAGES = (
         # made (it was not among the largest frames before), under `dispatch_copied`, with the
         # application layer's dispatch of 520 beneath it. The cause of the frame was not found. 6,888
         # with the word of `str.w rN, [sp, #-4]!` counted.
-        peak=6888,
+        #
+        # 4,280 bytes over 13 frames once the cause of that frame was found: the final of a get
+        # (`ReplyRegistry::fire_final_for`) took the pending entries that reach zero as a table of
+        # their own, by value (`BoundedVec::drain_partition`), and moved each out of it again to fire
+        # it, so the frame held the table, the copy being built and the entry, each entry holding a
+        # sink and a keyexpr; it takes one entry at a time now (`take_next_where`), and the same shape
+        # of the timeout sweep and of the liveliness get is mended with it. The GET's own send (the
+        # closure of `send_get_parts`, a frame of 3,328 bytes) was a second copy of the same kind: it
+        # built the lent `Query` and `Request`, which hold the deployment's extension lists inline at
+        # their capacity (1,656 and 2,064 bytes), where the codec's parts form (references and a slice
+        # of at most three entries) holds a few words. The largest frames of the chain are now the two
+        # decodes of the lent reply, 1,432 (`lend_response`) and 1,416 (`MsgPutIn::decode_into`).
+        peak=4280,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
