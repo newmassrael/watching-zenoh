@@ -273,6 +273,23 @@ router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast
     # leg that relies on the default set to reach its own subject loses that
     # subject silently the day the default set moves.
     "wz-runtime-tokio|hook|storage-mgr-multi-storage-host,session-reconnect|storage_manager_service::"
+    # The `declarations-synced-event` tests of the tokio session (`session/tests.rs`). The hosted and
+    # the pc2 census both refused the tree with "wz-runtime-tokio has 1898 test(s) only a feature build
+    # reaches; legs run 1893 and SKIPS excuses 2, leaving 3 claimed by NOTHING": each test is under a
+    # `cfg(all(..))` that no row spelled, so no leg compiled them. The feature list is that
+    # `cfg(all(..))` whole (the longest of the three, `liveliness-token` and `declare-queryable`
+    # included, plus `remote-declaration-watch` for the third); a shorter list would compile fewer of
+    # them and report the rest as a population of zero. The filters are the three full names because
+    # the module has no narrower path: `session::tests::` would run every unit test of the session.
+    "wz-runtime-tokio|hook|declarations-synced-event,remote-declaration-watch,session-reconnect,\
+codec-declare,declare-interest,declare-subscriber,declare-queryable,liveliness-token|\
+session::tests::each_listener_is_told_once_when_the_peers_initial_declarations_are_final"
+    "wz-runtime-tokio|hook|declarations-synced-event,remote-declaration-watch,session-reconnect,\
+codec-declare,declare-interest,declare-subscriber,declare-queryable,liveliness-token|\
+session::tests::a_listener_declared_after_the_peer_finished_reads_the_fact_and_is_not_told"
+    "wz-runtime-tokio|hook|declarations-synced-event,remote-declaration-watch,session-reconnect,\
+codec-declare,declare-interest,declare-subscriber,declare-queryable,liveliness-token|\
+session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_arrived"
     # The demo's half of the same surface. Its
     # `a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied` is a
     # ZERO-POPULATION guard over the keys this build drops, which is exactly why
