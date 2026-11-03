@@ -307516,6 +307516,36 @@
         "Open: the wz peer publisher a router dials is measured (47 against upstream 47) and not pinned as a test, for want of a lane that checks for zenohd; STALLED and NO_ROOM are not exercised through the C ABI, and a full key store is not told apart from other handshake failures by the code (the held count and the arena's peak do). The new lane line of run-ci.sh for the drop event was run by hand with the same command and not through run-ci.sh. The hosted runs of recent rounds are mostly cancelled while queued, so no hosted verdict is readable."
       ]
     },
+    "Round 4170": {
+      "decision_summary": "A Qz or Qzk run sent to a build machine without the Zephyr toolchain failed after the checkout was sent and the build had begun, and a machine that lost its workspace said nothing until a lane died. bx.toml now declares two tools, the SDK (its compiler must print the pinned SDK version) and the workspace venv (its west must run), each asked only of a run whose command line names a Qz lane. The workspace revision is still verified by provision-zephyr.sh --check, since no program prints it. The SDK version is written in bx.toml because the workflow states it in two jobs and bx reads a version from a file only where one line matches; provision-zephyr.sh now refuses to run when that copy differs from the workflow's.",
+      "changes_bullets": [
+        "bx.toml: [tools.zephyr-sdk] and [tools.zephyr-venv], needed_by Qz, no install.",
+        "scripts/provision-zephyr.sh: reads [tools.zephyr-sdk] version from bx.toml and stops (exit 2) when it differs from the workflow's ZEPHYR_SDK_VERSION."
+      ],
+      "verification_bullets": [
+        "bx-fleet decl validate bx.toml: valid; bx --explain-declaration lists both tools. A Qz command to a machine without Zephyr is refused before anything is sent (no tool at its version); the same command on a machine with it runs (rc 0); a command that names no Qz lane runs on the machine without Zephyr (rc 0). provision-zephyr.sh --dry-run passes the new guard; shellcheck clean. Not run: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: a full run-ci.sh without --layer names no lane, so bx cannot tell it from a run of another layer; it must be placed with --host on a machine that has Zephyr. Having bx keep the toolchain (install with the script as install_inputs, the workspace as a prefix_link) rebuilds the hand-made installs and needs the script to take a prefix; not made."
+      ],
+      "publishable_decision_summary": "A Qz or Qzk run sent to a build machine without the Zephyr toolchain failed after the checkout was sent and the build had begun, and a machine that lost its workspace said nothing until a lane died. bx.toml now declares two tools, the SDK (its compiler must print the pinned SDK version) and the workspace venv (its west must run), each asked only of a run whose command line names a Qz lane. The workspace revision is still verified by provision-zephyr.sh --check, since no program prints it. The SDK version is written in bx.toml because the workflow states it in two jobs and bx reads a version from a file only where one line matches; provision-zephyr.sh now refuses to run when that copy differs from the workflow's.",
+      "publishable_changes_bullets": [
+        "bx.toml: [tools.zephyr-sdk] and [tools.zephyr-venv], needed_by Qz, no install.",
+        "scripts/provision-zephyr.sh: reads [tools.zephyr-sdk] version from bx.toml and stops (exit 2) when it differs from the workflow's ZEPHYR_SDK_VERSION."
+      ],
+      "publishable_verification_bullets": [
+        "bx-fleet decl validate bx.toml: valid; bx --explain-declaration lists both tools. A Qz command to a machine without Zephyr is refused before anything is sent (no tool at its version); the same command on a machine with it runs (rc 0); a command that names no Qz lane runs on the machine without Zephyr (rc 0). provision-zephyr.sh --dry-run passes the new guard; shellcheck clean. Not run: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: a full run-ci.sh without --layer names no lane, so bx cannot tell it from a run of another layer; it must be placed with --host on a machine that has Zephyr. Having bx keep the toolchain (install with the script as install_inputs, the workspace as a prefix_link) rebuilds the hand-made installs and needs the script to take a prefix; not made."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
