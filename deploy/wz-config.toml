@@ -976,6 +976,20 @@ abis = ["core"]
 implies = []
 help = "Tell a declaration listener when the peer has sent everything it held, so what follows is live."
 
+# A declaration event names the peer it came from (docs/remote-declaration-watch.md). A session
+# is one link, and a session that reconnects can meet another peer, so a listener that outlives
+# the link needs the identity beside each event rather than a separate read it could not order
+# against them. wz's own, so off in every original.
+[[capability]]
+id = "remote-declaration-watch"
+kconfig = "WZ_CAP_REMOTE_DECLARATION_WATCH"
+os_needs = []
+upstream_off = []
+default = "off"
+abis = ["core"]
+implies = []
+help = "Name the peer a declaration event came from, as the zenoh id the session learned at the handshake."
+
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"

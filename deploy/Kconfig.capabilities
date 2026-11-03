@@ -160,6 +160,13 @@ config WZ_CAP_DECLARATIONS_SYNCED_EVENT
 	  Tell a declaration listener when the peer has sent everything it held, so what follows is live.
 	  Exported by: .
 
+config WZ_CAP_REMOTE_DECLARATION_WATCH
+	bool "remote-declaration-watch"
+	default n
+	help
+	  Name the peer a declaration event came from, as the zenoh id the session learned at the handshake.
+	  Exported by: .
+
 config WZ_CAP_GROUP
 	bool "group"
 	default y

@@ -12451,9 +12451,10 @@ fn remote_subscriber_listener_delivers_decl_and_undecl_events() {
         vec![
             DeclEvent::Declared {
                 id: 5,
-                keyexpr: "home/temp".to_string()
+                keyexpr: "home/temp".to_string(),
+                peer: None,
             },
-            DeclEvent::Undeclared { id: 5 },
+            DeclEvent::Undeclared { id: 5, peer: None },
         ],
         "both directions arrive as owned events in wire order"
     );
@@ -12507,9 +12508,10 @@ fn remote_queryable_listener_delivers_decl_and_undecl_events() {
         vec![
             DeclEvent::Declared {
                 id: 7,
-                keyexpr: "home/temp".to_string()
+                keyexpr: "home/temp".to_string(),
+                peer: None,
             },
-            DeclEvent::Undeclared { id: 7 },
+            DeclEvent::Undeclared { id: 7, peer: None },
         ]
     );
     assert!(listener.undeclare());
@@ -12587,9 +12589,10 @@ fn remote_token_listener_delivers_decl_and_undecl_events() {
         vec![
             DeclEvent::Declared {
                 id: 9,
-                keyexpr: "liveliness/x".to_string()
+                keyexpr: "liveliness/x".to_string(),
+                peer: None,
             },
-            DeclEvent::Undeclared { id: 9 },
+            DeclEvent::Undeclared { id: 9, peer: None },
         ]
     );
     assert!(listener.undeclare());
@@ -12661,7 +12664,8 @@ fn decl_listener_callback_may_reenter_session_apis() {
         *outer_log.lock().unwrap(),
         vec![DeclEvent::Declared {
             id: 2,
-            keyexpr: "home/temp".to_string()
+            keyexpr: "home/temp".to_string(),
+            peer: None,
         }],
         "callback ran once without deadlocking"
     );
@@ -12676,7 +12680,7 @@ fn decl_listener_callback_may_reenter_session_apis() {
     );
     assert_eq!(
         *inner_log.lock().unwrap(),
-        vec![DeclEvent::Undeclared { id: 2 }],
+        vec![DeclEvent::Undeclared { id: 2, peer: None }],
         "the listener registered from inside a callback is live"
     );
 }
@@ -13268,7 +13272,8 @@ fn dispatch_iteration_event_fans_and_drains_in_one_call() {
         *log.lock().unwrap(),
         vec![DeclEvent::Declared {
             id: 4,
-            keyexpr: "home/temp".to_string()
+            keyexpr: "home/temp".to_string(),
+            peer: None,
         }],
         "one SSOT call fanned the declare AND drained the deferred fire"
     );
@@ -15717,13 +15722,17 @@ fn each_listener_is_told_once_when_the_peers_initial_declarations_are_final() {
     session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&initial));
     assert!(session.peer_declarations_final());
     for plane in [&subscribers, &queryables, &tokens] {
-        assert_eq!(told(plane), [DeclEvent::Synced]);
+        assert_eq!(told(plane), [DeclEvent::Synced { peer: None }]);
     }
 
     // A peer that says it again has said nothing new.
     session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&initial));
     for plane in [&subscribers, &queryables, &tokens] {
-        assert_eq!(told(plane), [DeclEvent::Synced], "told once, not twice");
+        assert_eq!(
+            told(plane),
+            [DeclEvent::Synced { peer: None }],
+            "told once, not twice"
+        );
     }
 
     // A listener undeclared before the next establishment is not told of it; the others are.
@@ -15735,13 +15744,10 @@ fn each_listener_is_told_once_when_the_peers_initial_declarations_are_final() {
         .flush_declarations_on_link_loss();
     assert!(!session.peer_declarations_final(), "the link was lost");
     session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&initial));
-    assert_eq!(told(&subscribers), [DeclEvent::Synced, DeclEvent::Synced]);
-    assert_eq!(told(&tokens), [DeclEvent::Synced, DeclEvent::Synced]);
-    assert_eq!(
-        told(&queryables),
-        [DeclEvent::Synced],
-        "undeclared, so told no more"
-    );
+    let synced = || DeclEvent::Synced { peer: None };
+    assert_eq!(told(&subscribers), [synced(), synced()]);
+    assert_eq!(told(&tokens), [synced(), synced()]);
+    assert_eq!(told(&queryables), [synced()], "undeclared, so told no more");
 
     // Undeclaring removes the observer, not only silences it.
     assert!(subscriber_listener.undeclare());
@@ -15783,6 +15789,92 @@ fn a_listener_declared_after_the_peer_finished_reads_the_fact_and_is_not_told() 
         seen.lock().unwrap().is_empty(),
         "and nothing was staged for it"
     );
+}
+
+/// Drive one declaration, its undeclaration and the peer's final through a session whose peer the
+/// handshake has named, and return what a subscriber listener was told.
+#[cfg(all(
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest",
+    feature = "declare-subscriber"
+))]
+fn told_by_a_named_peer(peer: &[u8]) -> Vec<DeclEvent> {
+    use sce_forge_runtime::codec::Heap;
+    use std::sync::{Arc, Mutex};
+    use wz_codecs::declare::DeclareOwnedVariant;
+    let (session, _driver) = build_session();
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(peer.to_vec());
+    let seen = Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
+    let writer = seen.clone();
+    let listener = session
+        .declare_remote_subscriber_listener(move |e| writer.lock().unwrap().push(e))
+        .unwrap();
+    let dispatch = |body: &DeclareOwnedVariant<Heap>| {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(body, &hashbrown::HashMap::new());
+        session.drain_deferred_fires();
+    };
+    dispatch(&make_decl_subscriber(5, "home/temp"));
+    dispatch(&make_undecl_subscriber(5));
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&peer_final_for(
+        wz_session_core::extbound::INITIAL_INTEREST_ID,
+    )));
+    assert!(listener.undeclare());
+    let told = seen.lock().unwrap().clone();
+    told
+}
+
+/// `remote-declaration-watch`: every event names the peer the session held when it arrived, the
+/// final of the initial interest included, and a peer that is another one on the next
+/// establishment is named as that one.
+#[cfg(all(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event",
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest",
+    feature = "declare-subscriber"
+))]
+#[test]
+fn a_declaration_event_names_the_peer_that_was_connected_when_it_arrived() {
+    let first = [0x11; 16];
+    let told = told_by_a_named_peer(&first);
+    assert_eq!(told.len(), 3, "declared, undeclared and synced: {told:?}");
+    for event in &told {
+        assert_eq!(event.peer(), Some(&first[..]), "{event:?}");
+    }
+
+    let second = [0x22; 16];
+    for event in told_by_a_named_peer(&second) {
+        assert_eq!(event.peer(), Some(&second[..]), "{event:?}");
+    }
+}
+
+/// Without the capability the identity is read by nobody: the events are the same events, with
+/// nothing to say about the peer, even though the session knows it.
+#[cfg(all(
+    not(feature = "remote-declaration-watch"),
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest",
+    feature = "declare-subscriber"
+))]
+#[test]
+fn a_declaration_event_names_no_peer_in_a_build_without_the_capability() {
+    let told = told_by_a_named_peer(&[0x11; 16]);
+    assert!(!told.is_empty(), "the listener was told something");
+    for event in &told {
+        assert_eq!(event.peer(), None, "{event:?}");
+    }
 }
 
 /// Stable is synced and unchanged for one interval: a session with nothing owed is stable, and one

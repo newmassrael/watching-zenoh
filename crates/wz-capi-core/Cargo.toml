@@ -382,6 +382,9 @@ pool-monitor = ["wz-session-core/pool-monitor"]
 # (`deploy/wz-config.toml`, off by default, no door of an ABI). The sinks are in `wz-session-core`
 # and the session that raises the event is the runtime's.
 declarations-synced-event = ["wz-session-core/declarations-synced-event", "wz-runtime-tokio/declarations-synced-event"]
+# A declaration event names the peer it came from (`deploy/wz-config.toml`, off by default, no
+# door of an ABI). The event and the session that stages it are the runtime's.
+remote-declaration-watch = ["wz-runtime-tokio/remote-declaration-watch"]
 local-subscriber = []
 local-queryable = []
 

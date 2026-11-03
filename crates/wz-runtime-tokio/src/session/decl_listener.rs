@@ -44,17 +44,23 @@ use super::*;
 pub enum DeclEvent {
     /// Peer declared an entity: the peer-assigned declaration id + the
     /// resolved keyexpr literal it was declared on.
+    #[non_exhaustive]
     Declared {
         /// Peer-assigned declaration id (the `DeclX.id` wire field).
         id: u64,
         /// Resolved keyexpr literal (peer DECLARE-table lookup applied).
         keyexpr: String,
+        /// The peer that declared it (`remote-declaration-watch`), as [`DeclEvent::peer`] says.
+        peer: Option<Vec<u8>>,
     },
     /// Peer undeclared the entity it previously declared under `id`.
     /// The wire `UndeclX` body carries no keyexpr.
+    #[non_exhaustive]
     Undeclared {
         /// Peer-assigned declaration id of the prior declaration.
         id: u64,
+        /// The peer that undeclared it (`remote-declaration-watch`), as [`DeclEvent::peer`] says.
+        peer: Option<Vec<u8>>,
     },
     /// The peer ended its initial declarations (`declarations-synced-event`,
     /// `docs/declarations-synced-event.md`): it sent the `DeclareFinal` of the initial interest,
@@ -66,7 +72,28 @@ pub enum DeclEvent {
     /// Never delivered in a build without the capability. A listener declared after the peer
     /// finished is not told, as it was not given the declarations that came before: it reads
     /// [`Session::peer_declarations_final`].
-    Synced,
+    #[non_exhaustive]
+    Synced {
+        /// The peer that finished (`remote-declaration-watch`), as [`DeclEvent::peer`] says.
+        peer: Option<Vec<u8>>,
+    },
+}
+
+impl DeclEvent {
+    /// The zenoh id of the peer the event came from (`remote-declaration-watch`,
+    /// `docs/remote-declaration-watch.md`), as the session learned it at the handshake.
+    ///
+    /// Read when the event is staged, so it names the peer that was connected when the event
+    /// arrived: a session that reconnects to another peer reports each event under its own.
+    /// `None` in a build without the capability, and when the session no longer holds an
+    /// identity (the link was lost between the event and its reading).
+    pub fn peer(&self) -> Option<&[u8]> {
+        match self {
+            Self::Declared { peer, .. } | Self::Undeclared { peer, .. } | Self::Synced { peer } => {
+                peer.as_deref()
+            }
+        }
+    }
 }
 
 /// R311lc — the type-erased user callback a decl listener's deferred
@@ -234,7 +261,33 @@ impl core::fmt::Display for DeclListenerError {
 
 impl core::error::Error for DeclListenerError {}
 
-impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast>
+where
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    /// The reading of the peer an event is stamped with (`remote-declaration-watch`): the session's
+    /// own identity of its peer, taken when the event is staged. Without the capability it reads
+    /// nothing, and holds nothing of the session.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token"
+    ))]
+    fn peer_reading(&self) -> impl Fn() -> Option<Vec<u8>> + Send + 'static {
+        #[cfg(feature = "remote-declaration-watch")]
+        let actions = self.actions().clone();
+        move || {
+            #[cfg(feature = "remote-declaration-watch")]
+            {
+                actions.peer_zid()
+            }
+            #[cfg(not(feature = "remote-declaration-watch"))]
+            {
+                None
+            }
+        }
+    }
+
     /// R311lc — build the listener cell + the two staging sinks one
     /// `declare_remote_*_listener` surface installs: the decl sink
     /// stages an owned [`DeclEvent::Declared`] (copying the borrowed
@@ -260,19 +313,23 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
         let queue = self.fires.clone();
         let cell_for_decl = cell.clone();
+        let peer = self.peer_reading();
         let decl_sink = wz_session_core::decl_sink::BoxedDeclSink::new(move |view| {
             let event = DeclEvent::Declared {
                 id: view.id(),
                 keyexpr: view.keyexpr().to_string(),
+                peer: peer(),
             };
             let cell = cell_for_decl.clone();
             cell.stage(&queue, move |cb| cb(event));
         });
         let queue = self.fires.clone();
         let cell_for_undecl = cell.clone();
+        let peer = self.peer_reading();
         let undecl_sink = wz_session_core::decl_sink::BoxedUndeclSink::new(move |id| {
             let cell = cell_for_undecl.clone();
-            cell.stage(&queue, move |cb| cb(DeclEvent::Undeclared { id }));
+            let event = DeclEvent::Undeclared { id, peer: peer() };
+            cell.stage(&queue, move |cb| cb(event));
         });
         (cell, decl_sink, undecl_sink)
     }
@@ -295,9 +352,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         {
             let queue = self.fires.clone();
             let cell = cell.clone();
+            let peer = self.peer_reading();
             Some(obs.declarations_final.install(move || {
                 let cell = cell.clone();
-                cell.stage(&queue, move |cb| cb(DeclEvent::Synced));
+                let event = DeclEvent::Synced { peer: peer() };
+                cell.stage(&queue, move |cb| cb(event));
             }))
         }
         #[cfg(not(feature = "declarations-synced-event"))]

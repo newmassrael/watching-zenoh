@@ -361,6 +361,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "declarations-synced-event",
             "ext-pubsub-sample-miss-detection",
             "multicast-declarations",
+            # `remote-declaration-watch` gates the reading of the peer an event is stamped
+            # with, inside a private function; the event's field and `DeclEvent::peer` exist
+            # in every build and say `None` without it.
+            "remote-declaration-watch",
             "reply-source-info",
             # R2684 — TWO features this package declared and no table decided
             # about, both added by recent rounds that did not come back for the

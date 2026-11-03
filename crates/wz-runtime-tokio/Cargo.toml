@@ -210,6 +210,9 @@ declare-undeclare = ["codec-declare", "wz-session-core/declare-undeclare"]
 # (`docs/declarations-synced-event.md`). The fact is read from the subscriber plane, which tracks
 # the peer's `DeclareFinal` of the initial interest, so that plane is part of it.
 declarations-synced-event = ["declare-subscriber", "wz-session-core/declarations-synced-event"]
+# A declaration event names the peer it came from (`docs/remote-declaration-watch.md`). The
+# identity is the session's own, read when the event is staged, so nothing else is needed.
+remote-declaration-watch = []
 # `query-get` implies `query-reply` (the get-side ReplyRegistry tracks
 # pending entries) + `codec-request` (R311j — the wire-emit path
 # `send_request_query` builds on Request/Query types gated by
