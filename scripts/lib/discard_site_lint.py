@@ -411,6 +411,15 @@ ALLOWED = [
         "nothing captured is in it",
     ),
     (
+        "wz-capture/selector_path_tests.rs",
+        "while let Some(node) = stack.pop() {",
+        "a test's depth-first walk of a dissected row, each node checked "
+        "against the selector tree before its children are pushed. The "
+        "stack is a local holding borrows of the row, and a node reached "
+        "is asserted on, not dropped; the final `checked > 40` fails a walk "
+        "that visited too little",
+    ),
+    (
         "wz-capture/proto_describe.rs",
         ".remove(&idx)",
         "R3306 -- the description of a schema takes each message's computed "
