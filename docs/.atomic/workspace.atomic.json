@@ -307282,6 +307282,34 @@
         "Open: the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the limits the overlay still leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's) and the Mbed TLS arena (98,304 bytes, 37 percent of the .bss), which a measurement of one inbound and one dialled session at their peak could size; a hosted reading of Layer Qzk."
       ]
     },
+    "Round 4163": {
+      "decision_summary": "The capability pool-monitor (G6 of the switch catalogue), first step. A fixed pool counted its refusals in a field of its own, and nothing listed the pools or kept how full any had been: a refusal says a pool was too small, not by how much, nor how near a pool that never refused came. pool_gauge names one answer for every pool (capacity, held, most held, refused) and one mark, HighWater, which has no field without the feature, so a pool is the size it was and the slot record does not move. A mark that is not kept reads None, not zero. The peer id tables and the session slot table answer first. The listing of a node's pools and the document that serves it come with their first reader, so neither exists without one.",
+      "changes_bullets": [
+        "deploy/wz-config.toml declares WZ_CAP_POOL_MONITOR (core only, off); Kconfig.capabilities is regenerated and wz-session-core and wz-capi-core spell the feature. wz-session-core: pool_gauge.rs with PoolStat, PoolGauge, HighWater; FixedIdMap and SessionSlots keep the mark and answer as pools. docs/pool-monitor.md states the model, its cost and what is not yet a pool. Tests: three model tests, one id table test, and the session pool exhaustion test reads the slot table as a pool, with the mark off and on."
+      ],
+      "verification_bullets": [
+        "On the build machines: the model and id table tests pass with the feature on (3 and 1) and off (2 and 1); clippy -D warnings passes for wz-session-core with default and all features; the session pool exhaustion test passes 5 of 5 with the mark off and 5 of 5 with it on (the mark lies between what is held and the capacity, and is one past it where a later table refused after the slot was taken). wz_config.py --check passes (36 capabilities, 3 manifests agree) and so does the prose identifier gate. Layer Q passes: the typed slot is 36848 and 36840 bytes, equal to the record, the stack rows are unchanged, and every footprint row reads the same as before this change."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Owed for pool-monitor: the reply stage tables, the reassembly slots, the pump and task cells and the listener lanes still keep their own counters and do not answer as pools; nothing lists a node's pools and nothing serves them. The listing trait and the document (the resource snapshot's admin-space route, keyed under the node's wz root) come with the first reader. No hosted image states the capability on: the mark is held by the tests that run with the feature, which the exhaustion leg does not yet. The next absent switches of the catalogue are declarations-synced-event and the remote-declaration-watch capability (G3)."
+      ],
+      "publishable_decision_summary": "The capability pool-monitor (G6 of the switch catalogue), first step. A fixed pool counted its refusals in a field of its own, and nothing listed the pools or kept how full any had been: a refusal says a pool was too small, not by how much, nor how near a pool that never refused came. pool_gauge names one answer for every pool (capacity, held, most held, refused) and one mark, HighWater, which has no field without the feature, so a pool is the size it was and the slot record does not move. A mark that is not kept reads None, not zero. The peer id tables and the session slot table answer first. The listing of a node's pools and the document that serves it come with their first reader, so neither exists without one.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml declares WZ_CAP_POOL_MONITOR (core only, off); Kconfig.capabilities is regenerated and wz-session-core and wz-capi-core spell the feature. wz-session-core: pool_gauge.rs with PoolStat, PoolGauge, HighWater; FixedIdMap and SessionSlots keep the mark and answer as pools. docs/pool-monitor.md states the model, its cost and what is not yet a pool. Tests: three model tests, one id table test, and the session pool exhaustion test reads the slot table as a pool, with the mark off and on."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machines: the model and id table tests pass with the feature on (3 and 1) and off (2 and 1); clippy -D warnings passes for wz-session-core with default and all features; the session pool exhaustion test passes 5 of 5 with the mark off and 5 of 5 with it on (the mark lies between what is held and the capacity, and is one past it where a later table refused after the slot was taken). wz_config.py --check passes (36 capabilities, 3 manifests agree) and so does the prose identifier gate. Layer Q passes: the typed slot is 36848 and 36840 bytes, equal to the record, the stack rows are unchanged, and every footprint row reads the same as before this change."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed for pool-monitor: the reply stage tables, the reassembly slots, the pump and task cells and the listener lanes still keep their own counters and do not answer as pools; nothing lists a node's pools and nothing serves them. The listing trait and the document (the resource snapshot's admin-space route, keyed under the node's wz root) come with the first reader. No hosted image states the capability on: the mark is held by the tests that run with the feature, which the exhaustion leg does not yet. The next absent switches of the catalogue are declarations-synced-event and the remote-declaration-watch capability (G3)."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
