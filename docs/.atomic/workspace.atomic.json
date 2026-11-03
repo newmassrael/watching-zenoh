@@ -308558,6 +308558,34 @@
         "After codec Layer 3 catalog completes (R46-R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip) per docs/runtime-crate-*.md. Session FSM script-placeholder wiring (R29 carry) becomes viable once trait surface lands."
       ]
     },
+    "Round 4200": {
+      "decision_summary": "The stack bound's call contract named a call through a register by a line number, which moves whenever a line is added above it; a pin of the task poll had gone stale that way and cost four Zephyr images their bound. The fix is the structure and not another number. A rule now names its site by an anchor, a fragment of the source of the line the call is on, which follows the call when lines move and is checked against the source with no image (a new --contract mode, run by the C0 lane beside the gate's selftest). A position in the compiler's own library, which this repository does not hold, is a fact of one commit of it: such a rule says so (library) and the contract pins the commit (libraries.rustc), so a toolchain move is reported as one finding and not as a scatter of unclaimed sites. A position in a file of this repository is refused.",
+      "changes_bullets": [
+        "scripts/lib/stack_bound_gate.py: anchor and library rules, a source reader, --contract, --emit --sites, and the claimed sites of every rule kept in the result. deploy/stack_call_contracts.json: the 16 line pins of this repository become anchors (the four length calls of the capped buffer are one rule), the 10 of the library carry library and the commit, and the site pins of engine-host (5 to 4) and answer-reply (7 to 6) move. scripts/run-ci.sh: the C0 lane runs --contract."
+      ],
+      "verification_bullets": [
+        "The gate's selftest ends rc 0 with 42 controls, 16 of them new (an anchor follows a line 24 lower, a line without the fragment and a source the machine does not hold claim nothing, a library position of another commit is not claimed and its commit is named, the contract check refuses a position in a file of the repository, an unpinned library, a missing file, an absent anchor and a repeated id). --contract ends rc 0: 59 rules, 13 by anchor, 10 by a library position. The four Zephyr client images built on this workstation pass the gate with the new contract: bounds 3,472, 3,472, 3,472 and 4,816, unchanged. Two pins found stale by the sites listing moved the claims of two rules by one each in all four images: the engine's clock source (engine.rs, SceClock::Source) was claimed as a call of the host and the latest-slot read (slot_client.rs) as a reply; neither moved a bound."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The rules that name a function or a whole file are not touched; the whole-file ones are held by their site pins, which move when a call is added. The library pin has to move with rust-toolchain.toml in the same commit, and the gate says so when it does not. The feature-gate NEG lanes job still ends at 91 to 93 percent of its budget, and the wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd."
+      ],
+      "publishable_decision_summary": "The stack bound's call contract named a call through a register by a line number, which moves whenever a line is added above it; a pin of the task poll had gone stale that way and cost four Zephyr images their bound. The fix is the structure and not another number. A rule now names its site by an anchor, a fragment of the source of the line the call is on, which follows the call when lines move and is checked against the source with no image (a new --contract mode, run by the C0 lane beside the gate's selftest). A position in the compiler's own library, which this repository does not hold, is a fact of one commit of it: such a rule says so (library) and the contract pins the commit (libraries.rustc), so a toolchain move is reported as one finding and not as a scatter of unclaimed sites. A position in a file of this repository is refused.",
+      "publishable_changes_bullets": [
+        "scripts/lib/stack_bound_gate.py: anchor and library rules, a source reader, --contract, --emit --sites, and the claimed sites of every rule kept in the result. deploy/stack_call_contracts.json: the 16 line pins of this repository become anchors (the four length calls of the capped buffer are one rule), the 10 of the library carry library and the commit, and the site pins of engine-host (5 to 4) and answer-reply (7 to 6) move. scripts/run-ci.sh: the C0 lane runs --contract."
+      ],
+      "publishable_verification_bullets": [
+        "The gate's selftest ends rc 0 with 42 controls, 16 of them new (an anchor follows a line 24 lower, a line without the fragment and a source the machine does not hold claim nothing, a library position of another commit is not claimed and its commit is named, the contract check refuses a position in a file of the repository, an unpinned library, a missing file, an absent anchor and a repeated id). --contract ends rc 0: 59 rules, 13 by anchor, 10 by a library position. The four Zephyr client images built on this workstation pass the gate with the new contract: bounds 3,472, 3,472, 3,472 and 4,816, unchanged. Two pins found stale by the sites listing moved the claims of two rules by one each in all four images: the engine's clock source (engine.rs, SceClock::Source) was claimed as a call of the host and the latest-slot read (slot_client.rs) as a reply; neither moved a bound."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The rules that name a function or a whole file are not touched; the whole-file ones are held by their site pins, which move when a call is added. The library pin has to move with rust-toolchain.toml in the same commit, and the gate says so when it does not. The feature-gate NEG lanes job still ends at 91 to 93 percent of its budget, and the wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
