@@ -1099,8 +1099,13 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     itself, which `accept` answers with an error, is counted too) and `TlsListener::last_drop`
     names the channel's error of the latest drop, `None` for a stall. An arena that ran out was
     measured to be `OutOfMemory` (`wz-tls-mbedtls/tests/arena_exhaustion.rs`: 11 sessions held in
-    the tests' 256 KiB, the next dropped); a key store with no free slot returns PSA's
-    insufficient-memory code, which the channel maps to the same (read, not measured).
+    the tests' 256 KiB, the next dropped). A key store with no free slot is NOT `OutOfMemory`,
+    which this item had read it to be and is corrected here by measurement
+    (`tests/key_store_exhaustion.rs`, an arena of 64 MiB so the store runs out first): 255
+    sessions held, the 256th handshake dropped with the arena at 5.0 MB of 64 MiB, and the
+    channel's error is `Code(-0x6E00)`, Mbed TLS's generic handshake failure, which a refused
+    peer gives as well. So the count and the arena's peak say it was the store, not the code, and
+    the event log reports it as `OTHER` with that code; `NO_ROOM` is the arena's.
   - A C program reads them through the node's event log, not a new door. The host provider holds
     the typed listener (`TlsDial::listen_counted`) and, in a build with `event-ring`, writes one
     library event per drop: source `WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED` (0xFF01), level

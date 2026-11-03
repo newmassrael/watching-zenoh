@@ -113,8 +113,8 @@ z_result_t wz_ext_clock_report(wz_ext_clock_event_t event);
 #define WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED 0xFF01
 #define WZ_EXT_EVENT_TLS_DROP_STALLED 0 /* a peer that stalled past the accept
                                            budget; the code is 0 */
-#define WZ_EXT_EVENT_TLS_DROP_NO_ROOM 1 /* the arena or the key store had no
-                                           room; the code is the channel's */
+#define WZ_EXT_EVENT_TLS_DROP_NO_ROOM 1 /* the arena had no room; the code is
+                                           the channel's */
 #define WZ_EXT_EVENT_TLS_DROP_OTHER 2   /* any other failure, or a peer the
                                            policy refused; the code is the
                                            channel's, 0 where it has none */

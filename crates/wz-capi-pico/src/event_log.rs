@@ -43,7 +43,7 @@ pub const WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED: u16 = events::SOURCE_SUPERVIS
 pub const WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED: u16 = events::SOURCE_TLS_HANDSHAKE_DROPPED;
 /// The first integer of a dropped handshake: a peer that stalled past the accept budget.
 pub const WZ_EXT_EVENT_TLS_DROP_STALLED: u64 = events::TLS_DROP_STALLED;
-/// The first integer of a dropped handshake: the arena or the key store had no room.
+/// The first integer of a dropped handshake: the arena had no room.
 pub const WZ_EXT_EVENT_TLS_DROP_NO_ROOM: u64 = events::TLS_DROP_NO_ROOM;
 /// The first integer of a dropped handshake: any other failure, or a peer the policy refused.
 pub const WZ_EXT_EVENT_TLS_DROP_OTHER: u64 = events::TLS_DROP_OTHER;

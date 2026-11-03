@@ -30,7 +30,7 @@ pub const SOURCE_SUPERVISION_EXPIRED: u16 = library::SUPERVISION_EXPIRED;
 pub const SOURCE_TLS_HANDSHAKE_DROPPED: u16 = library::TLS_HANDSHAKE_DROPPED;
 /// A peer that stalled past the accept budget.
 pub const TLS_DROP_STALLED: u64 = 0;
-/// The arena or the key store had no room for the handshake.
+/// The arena had no room for the handshake.
 pub const TLS_DROP_NO_ROOM: u64 = 1;
 /// Any other failure of the handshake, or a peer the policy did not accept.
 pub const TLS_DROP_OTHER: u64 = 2;

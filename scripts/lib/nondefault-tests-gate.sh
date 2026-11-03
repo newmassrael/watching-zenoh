@@ -510,10 +510,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-tls-mbedtls|hook|host-lock,vendored|"
     # The same tests with the host's RSA beside the P-256 (`rsa`, step T4 of L6): a host's chain is
     # RSA, and the configuration that carries it adds signature algorithms to every handshake, so
-    # the channel against rustls over P-256 is run again with it on. MEASURED: 32 passed, the 31
+    # the channel against rustls over P-256 is run again with it on. MEASURED: 33 passed, the 32
     # of the row above (`tests/arena_exhaustion.rs` among them: a handshake the arena has no room
-    # for is counted and names the channel's out-of-memory) and `tests/rsa_key_forms.rs` (an RSA
-    # key in PKCS#1 and in PKCS#8 opens an
+    # for is counted and names the channel's out-of-memory; `tests/key_store_exhaustion.rs`: the
+    # 256th handshake finds the key store full and is counted as a handshake failure) and
+    # `tests/rsa_key_forms.rs` (an RSA key in PKCS#1 and in PKCS#8 opens an
     # identity of the same zid), which only this row compiles. The row above is the build the
     # kit's image is, which never sets `rsa`.
     "wz-tls-mbedtls|hook|host-lock,rsa,vendored|"

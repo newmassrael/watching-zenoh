@@ -36,11 +36,18 @@ static STARTED: Once = Once::new();
 
 /// The library, started once, held for the test that calls this; the arena's peak restarts.
 pub fn library() -> MutexGuard<'static, ()> {
+    library_sized(ARENA)
+}
+
+/// [`library`] on an arena of `bytes`, for a binary whose one test needs more room than the
+/// shared 256 KiB. Only the first call of a program starts the library, so a binary uses either
+/// this with one size or [`library`], not both.
+pub fn library_sized(bytes: usize) -> MutexGuard<'static, ()> {
     let guard = LIBRARY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     STARTED.call_once(|| {
-        let arena: &'static mut [u8] = vec![0u8; ARENA].leak();
+        let arena: &'static mut [u8] = vec![0u8; bytes].leak();
         start(arena).expect("the library starts");
         rustls::crypto::ring::default_provider()
             .install_default()
