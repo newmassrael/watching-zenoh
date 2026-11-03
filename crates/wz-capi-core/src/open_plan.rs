@@ -687,14 +687,14 @@ impl OpenPlan {
 
     /// Whether a client opened with this plan can run as a forwarding node
     /// ([`OpenArguments::run_node`] with [`NodeRole::Client`](crate::drive::NodeRole::Client)):
-    /// it accepts sessions and keeps a south apart (`gateway/south` names subregions), which makes
-    /// it the gateway of the nodes that find it, and it is told where its router is, so that it
-    /// scouts for no one. A client that fits no node is the registry of faces, which has no south
-    /// to keep apart.
+    /// it keeps a south apart (`gateway/south` names subregions) and is told where its router is,
+    /// so that it scouts for no one. It is the gateway of the nodes that find it when it accepts
+    /// sessions, and when it accepts none it dials the remotes it places in its south, as the peer
+    /// that keeps a south does ([`Self::peer_fits_node`]). A client that fits no node is the
+    /// registry of faces, which has no south to keep apart.
     #[cfg(feature = "router-node")]
     pub fn client_fits_node(&self) -> bool {
-        !self.listen.is_empty()
-            && !self.connect.is_empty()
+        !self.connect.is_empty()
             && self.groups.is_empty()
             && matches!(self.gateway_south, SouthPartition::Custom(_))
             && self.listen_phase.policy.exit_on_failure
@@ -1364,8 +1364,8 @@ mod tests {
         );
     }
 
-    /// A client is a node only when it is the gateway of a south it keeps apart: it accepts
-    /// sessions, is told its router, and its `gateway/south` names subregions. A client without
+    /// A client is a node only when it holds a south it keeps apart: it is told its router and
+    /// its `gateway/south` names subregions, whether or not it accepts sessions. A client without
     /// them is the registry of faces, as every client was before.
     #[cfg(feature = "router-node")]
     #[test]
@@ -1385,8 +1385,12 @@ mod tests {
             "a client with no south to keep apart has nothing to forward between"
         );
         assert!(
-            !client(&["tcp/127.0.0.1:7447"], &[], gateway).client_fits_node(),
-            "a client that accepts no session has no south"
+            client(&["tcp/127.0.0.1:7447"], &[], gateway).client_fits_node(),
+            "a client that accepts no session dials the remotes it places in its south"
+        );
+        assert!(
+            !client(&["tcp/127.0.0.1:7447"], &[], "{}").client_fits_node(),
+            "a client that keeps no south apart and accepts no session is the registry of faces"
         );
         assert!(
             !client(&[], &["tcp/127.0.0.1:0"], gateway).client_fits_node(),
@@ -1466,8 +1470,14 @@ mod tests {
             assert_eq!(
                 plan(WhatAmI::Client, &dial, &[], south)
                     .refuse_uncarried_south(WhatAmI::Client, true),
+                Ok(()),
+                "a client that keeps a south apart is a node though it accepts no session"
+            );
+            assert_eq!(
+                plan(WhatAmI::Client, &[], &bind, south)
+                    .refuse_uncarried_south(WhatAmI::Client, true),
                 Err(OpenRefusal::GatewayNotCarried),
-                "a client that accepts no session holds no south"
+                "a client that is told no router scouts for one, and no node carries that"
             );
         }
         #[cfg(not(feature = "router-node"))]

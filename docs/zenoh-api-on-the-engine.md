@@ -1099,7 +1099,7 @@ Each lands whole with its surface lines, tests and faults in one round.
       so its withdrawal reached no one. The client node runs on the tables of the peer node and
       announces itself as a client; the forwarder has no client hat of its own. A south kept
       apart is placed by a node alone, so an open that would keep one and fits no node (a
-      client with no listener or no router, the C ABI, which holds no node, a build without
+      client that is told no router, the C ABI, which holds no node, a build without
       `router-node`) is refused by the key
       (`OpenRefusal::GatewayNotCarried`, decided once in `OpenPlan::carries_south`) and not
       opened as the registry of faces, which has no south to partition. The 126 tests pass
@@ -1108,6 +1108,10 @@ Each lands whole with its surface lines, tests and faults in one round.
       peer that accepts no session, which dials the remotes it places in its south (a node
       between two listeners it dials into two subregions carries a put from one to the other;
       the same test with the open as the registry of faces fails, gossip off on all three).
+      The second is the client that accepts no session and is told its router: it dials the
+      router and a peer it places in its south, and a put from the peer reaches a subscriber on
+      the router through it (with the fit and the refusal both removed, the put does not cross).
+      A client that is told no router scouts for one, which no node carries, and is still refused.
     - **Open:** `routing` (the two above) and `open_time` (its tests are ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
       to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome

@@ -6249,21 +6249,17 @@ mod tests {
             .expect("a peer on a group of its own that names its region");
     }
 
-    /// A client that keeps its south apart and accepts no session fits no node, and the registry
-    /// of faces it would be opened as has no south to partition: the open is refused by the key,
-    /// and does not run as a client that holds a partition it never applies.
+    /// A client that keeps its south apart and is told no router fits no node (it scouts for the
+    /// router it dials, which no node carries), and the registry of faces it would be opened as
+    /// has no south to partition: the open is refused by the key, and does not run as a client
+    /// that holds a partition it never applies.
     #[test]
-    fn a_client_that_partitions_its_south_and_accepts_no_session_is_refused_by_the_key() {
-        let mut client = Config::from_json5(
+    fn a_client_that_partitions_its_south_and_is_told_no_router_is_refused_by_the_key() {
+        let client = Config::from_json5(
             r#"{ id: "a1b2cb", mode: "client",
-                 connect: { endpoints: ["tcp/127.0.0.1:1"] },
-                 scouting: { multicast: { enabled: false } },
                  gateway: { south: [{filters:[{modes:["peer"]}]}] } }"#,
         )
         .expect("a configuration zenoh reads");
-        client
-            .insert_json5("listen/endpoints", "[]")
-            .expect("a key zenoh reads");
         let refusal = match open(client).wait() {
             Ok(_) => panic!("a partition no node carries opened"),
             Err(refusal) => refusal.to_string(),
@@ -6313,6 +6309,89 @@ mod tests {
             }
             open(config).wait().expect("a gateway peer that dials")
         });
+        let (sender, received) = std::sync::mpsc::channel();
+        let sender = std::sync::Mutex::new(sender);
+        let _subscriber = taker
+            .declare_subscriber("demo/**")
+            .callback(move |sample| {
+                let _ = sender.lock().unwrap().send(sample.key_expr().to_string());
+            })
+            .wait()
+            .expect("declares");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let arrived = loop {
+            putter.put("demo/x", "v").wait().expect("puts");
+            match received.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(key) => break Some(key),
+                Err(_) if std::time::Instant::now() < deadline => {}
+                Err(_) => break None,
+            }
+        };
+        assert_eq!(
+            arrived.as_deref(),
+            Some("demo/x"),
+            "the put crossed the node"
+        );
+    }
+
+    /// A client that keeps its south apart and accepts no session is a node: it dials its router
+    /// and a peer it places in its south, and what the peer puts reaches the router's subscriber
+    /// through it. The registry of faces it would be opened as joins no two of its faces, so the
+    /// put would not arrive.
+    #[test]
+    fn a_client_that_partitions_its_south_and_accepts_no_session_is_a_node_that_dials() {
+        let endpoint_of = || format!("tcp/127.0.0.1:{}", unautoselected_port());
+        let router_at = endpoint_of();
+        let peer_at = endpoint_of();
+        let _router = with_the_node(|| {
+            let mut config = Config::from_json5(
+                r#"{ id: "a1b2ce", mode: "router",
+                     scouting: { multicast: { enabled: false } } }"#,
+            )
+            .expect("a configuration zenoh reads");
+            for (key, value) in [
+                ("listen/endpoints", format!(r#"["{router_at}"]"#)),
+                ("scouting/gossip/enabled", "false".to_owned()),
+            ] {
+                config.insert_json5(key, &value).expect("a key zenoh reads");
+            }
+            open(config).wait().expect("a router")
+        });
+        let putter = with_the_node(|| {
+            let mut config = peer("a1b2c1");
+            for (key, value) in [
+                ("listen/endpoints", format!(r#"["{peer_at}"]"#)),
+                // Without gossip the peer cannot learn of the router and dial it, so a put that
+                // arrives went through the client.
+                ("scouting/gossip/enabled", "false".to_owned()),
+            ] {
+                config.insert_json5(key, &value).expect("a key zenoh reads");
+            }
+            open(config).wait().expect("a peer")
+        });
+        let _client = with_the_node(|| {
+            let mut config = Config::from_json5(&format!(
+                r#"{{ id: "a1b2cc", mode: "client",
+                      connect: {{ endpoints: ["{router_at}", "{peer_at}"] }},
+                      scouting: {{ multicast: {{ enabled: false }} }},
+                      gateway: {{ south: [ {{ filters: [{{ modes: ["peer"] }}] }} ] }} }}"#
+            ))
+            .expect("a configuration zenoh reads");
+            config
+                .insert_json5("listen/endpoints", "[]")
+                .expect("a key zenoh reads");
+            open(config).wait().expect("a client that dials")
+        });
+        let taker = open(
+            Config::from_json5(&format!(
+                r#"{{ id: "a1b2c2", mode: "client",
+                      connect: {{ endpoints: ["{router_at}"] }},
+                      scouting: {{ multicast: {{ enabled: false }} }} }}"#
+            ))
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("a client of the router");
         let (sender, received) = std::sync::mpsc::channel();
         let sender = std::sync::Mutex::new(sender);
         let _subscriber = taker
