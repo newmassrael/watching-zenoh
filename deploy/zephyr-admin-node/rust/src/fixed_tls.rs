@@ -30,6 +30,42 @@ static IDENTITY: IdentitySlot = IdentitySlot::new();
 /// Zephyr's sockets as a stack that also opens `tls/` links, dialled or accepted.
 pub type Stack = IpStack<ZephyrUdpSocket, ZephyrTcpDial, TlsDial<ZephyrTcpDial>>;
 
+/// The bytes of the arena Mbed TLS allocates from (`CONFIG_MBEDTLS_HEAP_SIZE`), as the build states
+/// them: what the `tls arena: peak` line is a share of. Zero when the build does not say.
+pub const TLS_ARENA_BYTES: usize = match option_env!("WZ_TLS_ARENA_BYTES") {
+    Some(text) => decimal(text),
+    None => 0,
+};
+
+/// The number a decimal text spells; a text of anything else stops the build.
+const fn decimal(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    assert!(!bytes.is_empty(), "the arena size is empty");
+    let mut n = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        assert!(
+            bytes[i] >= b'0' && bytes[i] <= b'9',
+            "the arena size is not a decimal number"
+        );
+        n = n * 10 + (bytes[i] - b'0') as usize;
+        i += 1;
+    }
+    n
+}
+
+/// The arena's peak and size, when the peak has grown past `reported` (which then takes it): the
+/// node prints a line for it, and a lane reads the last.
+pub fn arena_peak_growth(reported: &mut usize) -> Option<(usize, usize)> {
+    let (peak, _blocks) = wz_tls_mbedtls::channel::arena_peak()?;
+    if peak > *reported {
+        *reported = peak;
+        Some((peak, TLS_ARENA_BYTES))
+    } else {
+        None
+    }
+}
+
 /// Start the channel on the arena Zephyr gave Mbed TLS and make the node's identity, a key whose
 /// certificate carries `subject`.
 pub fn identity(subject: &CStr) -> Result<&'static Identity, &'static CStr> {

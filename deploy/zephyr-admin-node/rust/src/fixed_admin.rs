@@ -68,7 +68,6 @@ use wz_session_mcu::run_arena::{run_bytes_needed, RunArena};
 use wz_session_mcu::slot_admin::AcceptingAdminNode;
 use wz_session_mcu::slot_dial::SessionFactory;
 use wz_session_mcu::slot_host::SessionHost;
-use wz_tls_mbedtls::channel::arena_peak;
 use wz_tls_mbedtls::stream::{AcceptBudget, TlsDial, TlsListener};
 
 use crate::fixed_tls::{self, Stack};
@@ -246,30 +245,6 @@ static OPEN_LIST: CommanderList<MAX_COMMANDERS> = commanders_of!("WZ_COMMANDERS_
 static CLOSE_LIST: CommanderList<MAX_COMMANDERS> = commanders_of!("WZ_COMMANDERS_CLOSE");
 static RESET_LIST: CommanderList<MAX_COMMANDERS> = commanders_of!("WZ_COMMANDERS_RESET");
 static STATUS_LIST: CommanderList<MAX_COMMANDERS> = commanders_of!("WZ_COMMANDERS_STATUS");
-
-/// The bytes of the arena Mbed TLS allocates from (`CONFIG_MBEDTLS_HEAP_SIZE`), as the build states
-/// them: what the `tls arena: peak` line is a share of. Zero when the build does not say.
-const TLS_ARENA_BYTES: usize = match option_env!("WZ_TLS_ARENA_BYTES") {
-    Some(text) => decimal(text),
-    None => 0,
-};
-
-/// The number a decimal text spells; a text of anything else stops the build.
-const fn decimal(text: &str) -> usize {
-    let bytes = text.as_bytes();
-    assert!(!bytes.is_empty(), "the arena size is empty");
-    let mut n = 0usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        assert!(
-            bytes[i] >= b'0' && bytes[i] <= b'9',
-            "the arena size is not a decimal number"
-        );
-        n = n * 10 + (bytes[i] - b'0') as usize;
-        i += 1;
-    }
-    n
-}
 
 /// The one peer the build knows where to find (`CONFIG_WZ_PEER_NODE_ZID` and `_LOCATOR`): declared to
 /// the node's directory at start as a permanent hint, so an `open` for that zid has a locator to dial
@@ -553,13 +528,8 @@ pub fn run() -> i32 {
                 ));
             }
             // The channel's arena, read the same way: a line when its peak grows.
-            if let Some((peak, _blocks)) = arena_peak() {
-                if peak > arena_reported {
-                    arena_reported = peak;
-                    log_args(format_args!(
-                        "tls arena: peak {peak} of {TLS_ARENA_BYTES} bytes"
-                    ));
-                }
+            if let Some((peak, size)) = fixed_tls::arena_peak_growth(&mut arena_reported) {
+                log_args(format_args!("tls arena: peak {peak} of {size} bytes"));
             }
         }
         let sessions = CONTROL.status.session_count();

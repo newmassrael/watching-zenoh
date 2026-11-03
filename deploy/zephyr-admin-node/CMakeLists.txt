@@ -40,6 +40,8 @@ set(backend_env WZ_BATCH_BYTES=${CONFIG_WZ_BATCH_BYTES})
 # that it adds to the caller's `backend_undefined`: the client that dials with it and the admin node
 # that accepts with it both name them.
 macro(wz_secure_channel)
+  # The arena Mbed TLS allocates from, which the node reports the peak of as a share of.
+  list(APPEND backend_env WZ_TLS_ARENA_BYTES=${CONFIG_MBEDTLS_HEAP_SIZE})
   set(tls_src ${CMAKE_CURRENT_SOURCE_DIR}/../../crates/wz-tls-mbedtls)
   target_sources(app PRIVATE ${tls_src}/csrc/wz_tls.c)
   target_include_directories(app PRIVATE ${tls_src}/csrc)
@@ -99,7 +101,6 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
       WZ_COMMANDERS_CLOSE=${CONFIG_WZ_COMMANDERS_CLOSE}
       WZ_COMMANDERS_RESET=${CONFIG_WZ_COMMANDERS_RESET}
       WZ_COMMANDERS_STATUS=${CONFIG_WZ_COMMANDERS_STATUS}
-      WZ_TLS_ARENA_BYTES=${CONFIG_MBEDTLS_HEAP_SIZE}
       WZ_PEER_NODE_ZID=${CONFIG_WZ_PEER_NODE_ZID}
       WZ_PEER_NODE_LOCATOR=${CONFIG_WZ_PEER_NODE_LOCATOR})
   endif()

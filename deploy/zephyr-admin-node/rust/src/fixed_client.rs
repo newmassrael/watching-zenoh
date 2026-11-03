@@ -277,6 +277,9 @@ const DOCUMENTS: [Document; DOCS] = [
 struct ZephyrPort {
     stack_watch: StackWatch,
     next_stack_check_ms: u64,
+    /// The channel's arena peak the last `tls arena` line said (the secure-channel client only).
+    #[cfg(feature = "tls")]
+    arena_reported: usize,
 }
 
 impl NodePort for ZephyrPort {
@@ -307,6 +310,17 @@ impl NodePort for ZephyrPort {
                 Str(" bytes"),
             ]);
         }
+        // The channel's arena, read the same way: a line when its peak grows.
+        #[cfg(feature = "tls")]
+        if let Some((peak, size)) = crate::fixed_tls::arena_peak_growth(&mut self.arena_reported) {
+            log_parts(&[
+                Str("tls arena: peak "),
+                U64(peak as u64),
+                Str(" of "),
+                U64(size as u64),
+                Str(" bytes"),
+            ]);
+        }
     }
 }
 
@@ -322,6 +336,8 @@ pub fn run() -> i32 {
     let mut port = ZephyrPort {
         stack_watch: StackWatch::new(),
         next_stack_check_ms: 0,
+        #[cfg(feature = "tls")]
+        arena_reported: 0,
     };
     match start(&mut port) {
         Ok(mut running) => running.drive(&mut port),

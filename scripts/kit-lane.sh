@@ -741,6 +741,10 @@ hold_the_run() {
     else
         ok "$key" "the console has no 'wz: FAIL' line"
     fi
+    # A secure-channel image reports its arena's peak, and the arena keeps a quarter free.
+    if [[ "$KIND" == verify ]]; then
+        hold_the_arena "$key" "$OUT/console.raw"
+    fi
     if python3 "$ROOT/scripts/lib/resource_budget_gate.py" --measure "$key" --log "$OUT/console.raw" "${results[@]}" \
         >"$OUT/budget.log" 2>&1; then
         ok "$key" "the run is inside its row ($(tail -n 1 "$OUT/budget.log" | sed 's/^ *//'))"
@@ -1118,10 +1122,15 @@ EOF
     else
         bad "$key" "the run is outside its row: $(sed 's/^ *//' "$OUT/budget.log" | head -n 3 | tr '\n' ' ')"
     fi
-    # The channel's arena over the whole run (a session accepted, one dialled, an endpoint dialled): the
-    # firmware's last `tls arena: peak N of M bytes` line leaves a quarter of M free, as the stack does.
-    local arena_line arena_peak_bytes arena_size
-    arena_line="$(grep -a 'tls arena: peak' "$OUT/console.run" | tail -n 1)"
+    # The channel's arena over the whole run (a session accepted, one dialled, an endpoint dialled).
+    hold_the_arena "$key" "$OUT/console.run"
+}
+
+# The channel's arena over a run: the firmware's last `tls arena: peak N of M bytes` line in the console
+# file $2 leaves a quarter of M free, as the stack does. An image that builds the secure channel reports it.
+hold_the_arena() {
+    local key="$1" console="$2" arena_line arena_peak_bytes arena_size
+    arena_line="$(grep -a 'tls arena: peak' "$console" | tail -n 1)"
     arena_peak_bytes="$(sed -n 's/.*tls arena: peak \([0-9]*\) of \([0-9]*\) bytes.*/\1/p' <<<"$arena_line")"
     arena_size="$(sed -n 's/.*tls arena: peak \([0-9]*\) of \([0-9]*\) bytes.*/\2/p' <<<"$arena_line")"
     if [[ -z "$arena_peak_bytes" || -z "$arena_size" || "$arena_size" -eq 0 ]]; then
