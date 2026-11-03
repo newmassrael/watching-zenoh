@@ -308260,6 +308260,42 @@
         "A test added later next to these three needs its own row, since the filters are full names. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd. The hosted run on this tip is read at the start of the next round."
       ]
     },
+    "Round 4193": {
+      "decision_summary": "A consumer claim, forwarded by a peer session: the analyzer offers \"filter on this field\" from a node of a row's field tree, and two things kept it from working. The nodes carry the walker's names while the selector reads a normalised view (an extension entry named by what it is, the chain not a level), so a consumer had to build that view again to name the qos rows. And a path through the Frame (Frame.sn, the transport qos) parsed, because the declared shape holds it, and kept no record, because a record's tree was its network message alone. So every field object now carries selector_path, or null for the two nodes no term can single out, and a record a Frame carried is judged inside that Frame, walked from the bytes the capture keeps of it; where it keeps none, a path that could stand in the Frame is undecided. Not path: the document already gives that key a decoded payload field.",
+      "changes_bullets": [
+        "wz-session-core: dissect_schema gains node_paths, the selector path of every node of a tree by one walk of the normalised view, and names the batch carrier (Frame, payload) once; to_json writes selector_path on every field object, a string or null.",
+        "wz-capture: field_path gains RecordTree (the tree and whether the Frame around the record was read, absent or unread) and FrameEnvelope (the Frame walked once per frame, its records apart); a path term that could stand in an unread Frame is undecided; the census planes and the row plane hand each record its tree through RecordAt.",
+        "wz-capture: the capture-order walk hands each fold the bytes it can read of a frame's transport message (CaptureOrder::held_message_bytes, the list's own unit bytes where the caller holds the packet), and the four whole-capture walks share fold_whole_capture.",
+        "wz-capture: doc_revision adds fields 56 (selector_path, the kind shapes with it); the header and the C consumer state it; tests hold that every node path is declared and reaches its node, that a row's node path names the same node in its record's tree, and that Frame.sn selects the frame's records."
+      ],
+      "verification_bullets": [
+        "On build machines: wz-capture with dissect 1644 pass, the three new selector tests among them (Frame.sn selects that frame's records and a sibling record stays apart; an unread Frame leaves only its own paths undecided; every node path of a row names the same node in its record's tree); wz-session-core dissect 115 pass, the two new node path tests among them (every handed-out path is declared and reaches its node over seeded noise, the rendered tree carries it); wz-analyze pass; clippy clean for wz-capture with and without dissect and for wz-session-core with dissect; lanes C1bo (the C consumer linked the release cdylib), C1bt and C1bn pass. The reason pin, citation, document revision consumer pin and guarded count gates pass."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told fields 56, the commit, and that selector_path is read off each node rather than built. Open: the capture the consumer measured is not on this machine, so the claim's own reproduction (Frame.sn == v keeping the packets of that sn) is the consumer's to confirm; a datagram row whose unit the list does not keep and whose container this call was not lent leaves Frame paths undecided."
+      ],
+      "publishable_decision_summary": "A consumer claim, forwarded by a peer session: the analyzer offers \"filter on this field\" from a node of a row's field tree, and two things kept it from working. The nodes carry the walker's names while the selector reads a normalised view (an extension entry named by what it is, the chain not a level), so a consumer had to build that view again to name the qos rows. And a path through the Frame (Frame.sn, the transport qos) parsed, because the declared shape holds it, and kept no record, because a record's tree was its network message alone. So every field object now carries selector_path, or null for the two nodes no term can single out, and a record a Frame carried is judged inside that Frame, walked from the bytes the capture keeps of it; where it keeps none, a path that could stand in the Frame is undecided. Not path: the document already gives that key a decoded payload field.",
+      "publishable_changes_bullets": [
+        "wz-session-core: dissect_schema gains node_paths, the selector path of every node of a tree by one walk of the normalised view, and names the batch carrier (Frame, payload) once; to_json writes selector_path on every field object, a string or null.",
+        "wz-capture: field_path gains RecordTree (the tree and whether the Frame around the record was read, absent or unread) and FrameEnvelope (the Frame walked once per frame, its records apart); a path term that could stand in an unread Frame is undecided; the census planes and the row plane hand each record its tree through RecordAt.",
+        "wz-capture: the capture-order walk hands each fold the bytes it can read of a frame's transport message (CaptureOrder::held_message_bytes, the list's own unit bytes where the caller holds the packet), and the four whole-capture walks share fold_whole_capture.",
+        "wz-capture: doc_revision adds fields 56 (selector_path, the kind shapes with it); the header and the C consumer state it; tests hold that every node path is declared and reaches its node, that a row's node path names the same node in its record's tree, and that Frame.sn selects the frame's records."
+      ],
+      "publishable_verification_bullets": [
+        "On build machines: wz-capture with dissect 1644 pass, the three new selector tests among them (Frame.sn selects that frame's records and a sibling record stays apart; an unread Frame leaves only its own paths undecided; every node path of a row names the same node in its record's tree); wz-session-core dissect 115 pass, the two new node path tests among them (every handed-out path is declared and reaches its node over seeded noise, the rendered tree carries it); wz-analyze pass; clippy clean for wz-capture with and without dissect and for wz-session-core with dissect; lanes C1bo (the C consumer linked the release cdylib), C1bt and C1bn pass. The reason pin, citation, document revision consumer pin and guarded count gates pass."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The consumer is told fields 56, the commit, and that selector_path is read off each node rather than built. Open: the capture the consumer measured is not on this machine, so the claim's own reproduction (Frame.sn == v keeping the packets of that sn) is the consumer's to confirm; a datagram row whose unit the list does not keep and whose container this call was not lent leaves Frame paths undecided."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
