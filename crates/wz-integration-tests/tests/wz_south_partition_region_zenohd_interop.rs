@@ -49,7 +49,8 @@
 //! region-hat forwarder: a wz `--peer` process started with `--gateway-south`
 //! announces its bound on the Open it sends, and zenohd's logged decision for it
 //! is the one the pin's rule gives a remote that announced that bound, against a
-//! control started without the flag.
+//! control started without the flag. A third leg gives the same peer its partition
+//! through the `gateway/south` key of a config file instead of the flag.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -707,7 +708,7 @@ const WZ_PEER_ZID: &str = "f1b2c3d4";
 /// (`zenoh/src/net/runtime/region.rs` @ `Router regions cannot be subregions of non-router regions (unsupported)`),
 /// so no peer announces a south bound to a router; what a peer node can put in
 /// its south is another peer, which is what a zenohd peer is.
-fn zenohd_places_a_wz_peer(south: Option<&str>) -> String {
+fn zenohd_places_a_wz_peer(south: Option<&str>, spelling: PartitionSpelling) -> String {
     let port = PortReservation::pick();
     let tcp = port.port();
     let config = zenohd_config_in_mode("peer", tcp, r#""auto""#);
@@ -732,10 +733,25 @@ fn zenohd_places_a_wz_peer(south: Option<&str>) -> String {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
 
+    // Held until the node is killed: the node reads the file when it starts.
+    let mut node_config = None;
     let mut command = Command::new(&demo);
     command.args(["--peer", "127.0.0.1:0", "--key", "demo/x"]);
     if let Some(south) = south {
-        command.args(["--gateway-south", south]);
+        match spelling {
+            PartitionSpelling::Flag => {
+                command.args(["--gateway-south", south]);
+            }
+            PartitionSpelling::ConfigKey => {
+                let mut file = tempfile::Builder::new()
+                    .suffix(".json5")
+                    .tempfile()
+                    .expect("wz node config file");
+                write!(file, "{{ gateway: {{ south: {south} }} }}").expect("write wz node config");
+                command.arg("--config").arg(file.path());
+                node_config = Some(file);
+            }
+        }
     }
     command
         .args(["--zid", WZ_PEER_ZID, "--connect", &dial])
@@ -761,9 +777,18 @@ fn zenohd_places_a_wz_peer(south: Option<&str>) -> String {
     };
     let _ = node.child_mut().kill();
     let _ = node.child_mut().wait();
+    drop(node_config);
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
     region
+}
+
+/// How a wz peer process is given its partition: the demo's flag, or the
+/// `gateway/south` key of the config file it is started on.
+#[derive(Clone, Copy)]
+enum PartitionSpelling {
+    Flag,
+    ConfigKey,
 }
 
 /// THE CLAIM: a wz peer started with a partition whose one open subregion puts
@@ -777,7 +802,7 @@ fn zenohd_places_a_wz_peer(south: Option<&str>) -> String {
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
 fn zenohd_places_a_wz_peer_that_calls_it_south_below_wz() {
-    let region = zenohd_places_a_wz_peer(Some(ONE_OPEN_SUBREGION));
+    let region = zenohd_places_a_wz_peer(Some(ONE_OPEN_SUBREGION), PartitionSpelling::Flag);
     assert_eq!(
         region,
         zenohd_should_decide_for(
@@ -797,7 +822,7 @@ fn zenohd_places_a_wz_peer_that_calls_it_south_below_wz() {
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
 fn zenohd_places_a_wz_peer_that_announces_nothing_by_its_own_rule() {
-    let region = zenohd_places_a_wz_peer(None);
+    let region = zenohd_places_a_wz_peer(None, PartitionSpelling::Flag);
     let announced_south = zenohd_should_decide_for(
         WhatAmI::Peer,
         WZ_PEER_ZID,
@@ -811,4 +836,27 @@ fn zenohd_places_a_wz_peer_that_announces_nothing_by_its_own_rule() {
         "the two readings of the pin's rule differ, or the claim above proves nothing"
     );
     assert_eq!(region, announced_nothing);
+}
+
+/// THE CLAIM, given the partition by the `gateway/south` key of a config file and
+/// no flag: the node reads the key, announces SOUTH on its Open, and zenohd places
+/// it as it does the flag's peer. This is the leg that reaches the key's reader and
+/// its expansion on a node the way an operator uses it.
+// wz-proves: none -- the Open's bound announcement of a peer node configured by the
+// key, read by zenohd; no atom's claim, the flag's leg above is its twin.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
+fn zenohd_places_a_wz_peer_that_the_south_key_calls_it_south_below_wz() {
+    let by_key = zenohd_places_a_wz_peer(Some(ONE_OPEN_SUBREGION), PartitionSpelling::ConfigKey);
+    assert_eq!(
+        by_key,
+        zenohd_should_decide_for(
+            WhatAmI::Peer,
+            WZ_PEER_ZID,
+            WhatAmI::Peer,
+            Some(Bound::South)
+        ),
+        "zenohd read the announcement of a peer configured by the key"
+    );
+    assert_eq!(by_key, "Ok((North, South))");
 }
