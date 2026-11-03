@@ -27,7 +27,7 @@ use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::put::z_put;
-use wz_capi_c::result::{Z_ENETWORK, Z_OK};
+use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 use wz_runtime_tokio_test_support::free_port;
@@ -209,6 +209,30 @@ fn a_client_with_nothing_to_dial_fails_its_open_listener_or_not() {
         close_session(a);
         close_session(b);
     }
+}
+
+/// A south kept apart by subregions is placed by a node, and this surface opens the registry of
+/// faces and holds none: the open is refused by the key, whatever the role, and a document that
+/// states the preset (or no `gateway` at all) opens as before.
+#[test]
+fn a_gateway_south_of_subregions_is_refused_and_the_preset_is_not() {
+    let subregions = r#"{ south: [ { filters: [ { modes: ["peer"] } ] } ] }"#;
+    for mode in ["peer", "router"] {
+        let mut entries = stated(mode, Some(free_port()), None);
+        entries.push(("gateway", subregions.to_owned()));
+        // SAFETY: a fresh config and session.
+        let (rc, session) = unsafe { open_with(&entries) };
+        assert_eq!(rc, Z_EINVAL, "a {mode} that partitions its south");
+        // SAFETY: a gravestone, which drops as a no-op.
+        unsafe { close_session(session) };
+    }
+    let mut preset = stated("peer", Some(free_port()), None);
+    preset.push(("gateway", r#"{ south: "auto" }"#.to_owned()));
+    // SAFETY: a fresh config and session.
+    let (rc, session) = unsafe { open_with(&preset) };
+    assert_eq!(rc, Z_OK, "the preset places a remote by its role alone");
+    // SAFETY: a live session this test opened.
+    unsafe { close_session(session) };
 }
 
 /// A group no other test or node on this host scouts on, so a session that scouts here meets

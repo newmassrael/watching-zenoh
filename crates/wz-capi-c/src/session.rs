@@ -78,7 +78,8 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::RoleNotInBuild
         | OpenRefusal::TimestampingNotInBuild
         | OpenRefusal::MulticastCompressionNotInBuild
-        | OpenRefusal::Namespace => Z_EINVAL,
+        | OpenRefusal::Namespace
+        | OpenRefusal::GatewayNotCarried => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial
@@ -149,7 +150,11 @@ fn plan_of(cfg: &ConfigState) -> Result<OpenPlan, OpenRefusal> {
     let role = dial_role(cfg.first(MODE_KEY));
     let stated = stated_endpoints(cfg);
     let document = cfg.with_default_mode(role.to_str()).render_nested().ok();
-    OpenPlan::resolve(role, stated, document.as_deref())
+    let plan = OpenPlan::resolve(role, stated, document.as_deref())?;
+    // This surface opens the registry of faces and holds no node: subregions of `gateway/south`
+    // have nothing here to place a remote by, and the open says so and does not run without them.
+    plan.refuse_uncarried_south(role, false)?;
+    Ok(plan)
 }
 
 /// What an open of `config` would ask of the operating system, as one JSON object with the keys of

@@ -224,6 +224,12 @@ pub enum OpenRefusal {
     /// A session told to prefix every key it publishes that opens and does not is worse than one
     /// that does not open: its keys leave unprefixed and nothing says so.
     Namespace,
+    /// The document keeps a south apart (`gateway/south` names subregions) and the open has no node
+    /// to carry that out: the engine places a remote in a region only where it runs as a node
+    /// ([`OpenPlan::refuse_uncarried_south`] says which opens do). Upstream gives every such node
+    /// its regions whatever links it holds; an open that accepted the key and ran as the registry
+    /// of faces would hold a south it never partitions, and nothing would say so.
+    GatewayNotCarried,
 }
 
 impl OpenRefusal {
@@ -246,6 +252,7 @@ impl OpenRefusal {
             Self::NothingToDial => "connect/endpoints, scouting/multicast/enabled",
             Self::GroupInConnect | Self::NoDialableEndpoint => "connect/endpoints",
             Self::Namespace => "namespace",
+            Self::GatewayNotCarried => "gateway/south",
         }
     }
 }
@@ -685,6 +692,49 @@ impl OpenPlan {
             && self.groups.is_empty()
             && matches!(self.gateway_south, SouthPartition::Custom(_))
             && self.listen_phase.policy.exit_on_failure
+    }
+
+    /// Whether the south this plan keeps apart is carried out when `role` is opened by a caller
+    /// that can run a node (`can_run_a_node`) or one that cannot.
+    ///
+    /// The preset places a remote by its role alone, which every open does. Subregions are a
+    /// partition only a node holds (`gateway/south`, [`Self::gateway_south`]): a router is always
+    /// one, a peer or a client is one where [`Self::peer_fits_node`] or [`Self::client_fits_node`]
+    /// say so, and a build without `router-node` has none. The one place that decides this, for
+    /// every surface that opens a plan.
+    pub fn carries_south(&self, role: WhatAmI, can_run_a_node: bool) -> bool {
+        if !matches!(self.gateway_south, SouthPartition::Custom(_)) {
+            return true;
+        }
+        #[cfg(feature = "router-node")]
+        {
+            can_run_a_node
+                && match role {
+                    WhatAmI::Router => true,
+                    WhatAmI::Peer => self.peer_fits_node(),
+                    WhatAmI::Client => self.client_fits_node(),
+                }
+        }
+        #[cfg(not(feature = "router-node"))]
+        {
+            let _ = (role, can_run_a_node);
+            false
+        }
+    }
+
+    /// Refuse a plan whose south is not carried out ([`Self::carries_south`]), by the key's name:
+    /// stating subregions that nothing places a remote by is not the default the key has, and the
+    /// open does not run as if it had not been stated.
+    pub fn refuse_uncarried_south(
+        &self,
+        role: WhatAmI,
+        can_run_a_node: bool,
+    ) -> Result<(), OpenRefusal> {
+        if self.carries_south(role, can_run_a_node) {
+            Ok(())
+        } else {
+            Err(OpenRefusal::GatewayNotCarried)
+        }
     }
 
     /// Read the document for the role `role` (see [`dial_role`]) and the endpoints the caller
@@ -1335,6 +1385,80 @@ mod tests {
         assert!(
             !client(&[], &["tcp/127.0.0.1:0"], gateway).client_fits_node(),
             "a client that is told no router has nothing north"
+        );
+    }
+
+    /// Subregions of `gateway/south` are placed by a node alone, so an open that holds none is
+    /// refused by the key and not run as the registry of faces: a router is a node whatever it
+    /// holds, a peer or a client where it fits one, a caller that runs no node never, and the
+    /// preset every open.
+    #[test]
+    fn a_south_apart_is_refused_where_no_node_carries_it() {
+        let south = r#"{ gateway: { south: [ { filters: [ { modes: ["peer"] } ] } ] } }"#;
+        let plan = |role: WhatAmI, connect: &[&str], listen: &[&str], document: &str| {
+            plan_of(role, connect, listen, document).expect("a document these roles open with")
+        };
+        let dial = ["tcp/127.0.0.1:7447"];
+        let bind = ["tcp/127.0.0.1:0"];
+        // The preset places a remote by its role alone, which every open does.
+        for role in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+            for node in [false, true] {
+                assert_eq!(
+                    plan(role, &dial, &bind, "{}").refuse_uncarried_south(role, node),
+                    Ok(()),
+                    "the preset needs no node ({role:?}, node: {node})"
+                );
+            }
+        }
+        // A caller that runs no node carries no partition, whatever the shape.
+        for role in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+            assert_eq!(
+                plan(role, &dial, &bind, south).refuse_uncarried_south(role, false),
+                Err(OpenRefusal::GatewayNotCarried),
+                "a surface with no node refuses the partition ({role:?})"
+            );
+        }
+        assert_eq!(OpenRefusal::GatewayNotCarried.key(), "gateway/south");
+        #[cfg(feature = "router-node")]
+        {
+            assert_eq!(
+                plan(WhatAmI::Router, &[], &[], south)
+                    .refuse_uncarried_south(WhatAmI::Router, true),
+                Ok(()),
+                "a router is a node whatever it holds"
+            );
+            assert_eq!(
+                plan(WhatAmI::Peer, &[], &bind, south).refuse_uncarried_south(WhatAmI::Peer, true),
+                Ok(()),
+                "a peer that listens and does not scout is a node"
+            );
+            // A peer binds its role's default unless its document names the key, so a peer that
+            // accepts no session says so.
+            let deaf = r#"{ listen: { endpoints: [] },
+                gateway: { south: [ { filters: [ { modes: ["peer"] } ] } ] } }"#;
+            assert_eq!(
+                plan(WhatAmI::Peer, &dial, &[], deaf).refuse_uncarried_south(WhatAmI::Peer, true),
+                Err(OpenRefusal::GatewayNotCarried),
+                "a peer that accepts no session is the registry of faces"
+            );
+            assert_eq!(
+                plan(WhatAmI::Client, &dial, &bind, south)
+                    .refuse_uncarried_south(WhatAmI::Client, true),
+                Ok(()),
+                "a client that listens and dials its router is a node"
+            );
+            assert_eq!(
+                plan(WhatAmI::Client, &dial, &[], south)
+                    .refuse_uncarried_south(WhatAmI::Client, true),
+                Err(OpenRefusal::GatewayNotCarried),
+                "a client that accepts no session holds no south"
+            );
+        }
+        #[cfg(not(feature = "router-node"))]
+        assert_eq!(
+            plan(WhatAmI::Router, &[], &[], south).refuse_uncarried_south(WhatAmI::Router, true),
+            Err(OpenRefusal::GatewayNotCarried),
+            "a build without router-node has no node to carry it"
         );
     }
 

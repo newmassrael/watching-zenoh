@@ -503,6 +503,10 @@ impl Engine {
         tokio_engine::refuse_repeated_ids(&document)?;
         let plan = OpenPlan::resolve(role, stated, Some(&document.to_string()))
             .map_err(tokio_engine::refusal_error)?;
+        // Subregions of `gateway/south` are placed by a node alone: a shape that fits none is
+        // refused by the key's name and not opened as the registry of faces, which has no south.
+        plan.refuse_uncarried_south(role, true)
+            .map_err(tokio_engine::refusal_error)?;
         // A router is the router data plane run as a node (`RouterEngine`), not the registry of
         // faces a peer or a client is: announcing the role over that registry would be the
         // silent fallback the other refusals of this function exist against.
@@ -6243,6 +6247,24 @@ mod tests {
         open(together)
             .wait()
             .expect("a peer on a group of its own that names its region");
+    }
+
+    /// A peer that keeps its south apart and accepts no session fits no node, and the registry of
+    /// faces it would be opened as has no south to partition: the open is refused by the key, and
+    /// does not run as a peer that holds a partition it never applies.
+    #[test]
+    fn a_peer_that_partitions_its_south_and_accepts_no_session_is_refused_by_the_key() {
+        let mut deaf = peer_with(
+            "gateway",
+            r#"{south:[{filters:[{negated:true,region_names:["main"]}]}]}"#,
+        );
+        deaf.insert_json5("listen/endpoints", "[]")
+            .expect("a key zenoh reads");
+        let refusal = match open(deaf).wait() {
+            Ok(_) => panic!("a partition no node carries opened"),
+            Err(refusal) => refusal.to_string(),
+        };
+        assert!(refusal.contains("gateway/south"), "{refusal}");
     }
 
     /// The first three nodes of upstream's second regions scenario: peers of one region on a
