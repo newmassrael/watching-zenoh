@@ -613,46 +613,41 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
         self.inner.clear();
     }
 
-    /// Drain the collection by value, partitioning each element by
-    /// `extract`: every element for which it returns `true` is moved
-    /// into the returned `BoundedVec` (in original order); the rest are
-    /// retained in `self`. `extract` receives `&mut T`, so it may mutate
-    /// an element before deciding (e.g. decrement a counter and extract
-    /// on reaching zero).
+    /// Take the next element for which `extract` is true out of the table, scanning from
+    /// `*at`: the element is removed from `self` and returned, and `*at` stays where it
+    /// was, since the element after it now stands there; `None` once the scan has passed
+    /// the last element. `extract` receives `&mut T`, so it may mutate an element before
+    /// deciding (e.g. decrement a counter and extract on reaching zero), and an element it
+    /// declines keeps what it did to it. Order is the table's.
     ///
-    /// This is the no-alloc *drain-partition-fire* seam the pending-table
-    /// registries share (the reply + liveliness-get `sweep_timed_out` /
-    /// `fire_final_for` bodies): the borrow checker forbids firing a
-    /// captured callback while a `&mut self.pending` iteration is live, so
-    /// the caller extracts the to-fire entries here and fires over the
-    /// returned vec *after* this call releases the borrow. Extract-then-
-    /// fire also means a panicking callback cannot leave a half-swept
-    /// entry behind -- every fired entry is already out of `self`.
+    /// This is the no-alloc *take-then-fire* seam the pending-table registries share (the
+    /// reply and liveliness-get `sweep_timed_out` / `fire_final_for` / `finish_all` bodies):
+    /// the borrow checker forbids firing a captured callback while a `&mut self.pending`
+    /// iteration is live, so the caller takes one entry out here, fires it, and asks for the
+    /// next. The entry is out of the table before its callback runs, so a panicking callback
+    /// cannot leave a half-swept entry behind.
     ///
-    /// In place: an extracted entry is removed from `self` and the rest stay where
-    /// they are, so the table keeps the storage it has. The earlier form took the
-    /// whole table out and rebuilt it, which gave the capacity back on every call
-    /// and made the next push allocate again (a heap table paid two allocations a
-    /// query for it; a fixed one moved its whole buffer twice). The returned vec is
-    /// empty, and holds no storage, when nothing is extracted. `self` and the
-    /// returned vec together hold what `self` held (retained + extracted <= N), so
-    /// neither push can exceed `N`.
-    pub fn drain_partition<F>(&mut self, mut extract: F) -> Self
+    /// ONE ENTRY AT A TIME, which is the point of the shape. The form this replaced
+    /// (`drain_partition`) returned every extracted entry as a table of its own, by value,
+    /// and the caller moved each of them out again to fire it: the frame of the function held
+    /// the table, the copy being built and the entry, a few times the size of the table. A
+    /// table of entries that each hold a sink and a keyexpr is kilobytes, and the frame sat on
+    /// the path of every event of a node that asks (3,696 bytes on the kit's asking client,
+    /// the largest frame of its stack chain). A scan that keeps one entry holds one.
+    ///
+    /// In place: the rest of the table stays where it is, so it keeps the storage it has (a
+    /// heap table is not rebuilt, and its next push does not allocate).
+    pub fn take_next_where<F>(&mut self, at: &mut usize, mut extract: F) -> Option<T>
     where
         F: FnMut(&mut T) -> bool,
     {
-        let mut extracted: Self = Self::default();
-        let mut at = 0;
-        while at < self.inner.as_slice().len() {
-            if extract(&mut self.inner.as_mut_slice()[at]) {
-                extracted
-                    .push(self.inner.remove(at))
-                    .expect("drain_partition fits: retained + extracted <= N");
-            } else {
-                at += 1;
+        while *at < self.inner.as_slice().len() {
+            if extract(&mut self.inner.as_mut_slice()[*at]) {
+                return Some(self.inner.remove(*at));
             }
+            *at += 1;
         }
-        extracted
+        None
     }
 }
 
@@ -948,75 +943,101 @@ mod tests {
         assert_eq!(v.as_ref(), &[0, 2]);
     }
 
+    /// Every element `extract` takes, in the order they are taken.
+    fn taken<const N: usize, P: Storage>(
+        v: &mut BoundedVec<u32, N, P>,
+        mut extract: impl FnMut(&mut u32) -> bool,
+    ) -> sce_forge_runtime::heapless::Vec<u32, 8> {
+        let mut at = 0;
+        let mut out = sce_forge_runtime::heapless::Vec::new();
+        while let Some(x) = v.take_next_where(&mut at, &mut extract) {
+            out.push(x).unwrap();
+        }
+        out
+    }
+
     #[test]
-    fn drain_partition_extracts_matches_and_retains_rest_in_order() {
+    fn take_next_where_extracts_matches_and_retains_rest_in_order() {
         let mut v: BoundedVec<u32, 4> = BoundedVec::new();
         for i in 0..4 {
             v.push(i).unwrap();
         }
-        // Extract evens; odds retained, both partitions order-preserving.
-        let extracted = v.drain_partition(|x| *x % 2 == 0);
-        assert_eq!(extracted.as_ref(), &[0, 2]);
+        // Take evens; odds retained, both in the table's order.
+        assert_eq!(taken(&mut v, |x| *x % 2 == 0), [0, 2]);
         assert_eq!(v.as_ref(), &[1, 3]);
     }
 
     #[test]
-    fn drain_partition_predicate_may_mutate_before_deciding() {
+    fn take_next_where_predicate_may_mutate_before_deciding() {
         let mut v: BoundedVec<u32, 4> = BoundedVec::new();
         for i in 1..=3 {
             v.push(i).unwrap();
         }
-        // Decrement each, extract those that reach zero (mirrors the
+        // Decrement each, take those that reach zero (mirrors the
         // reply registry's remaining_finals counter path).
-        let extracted = v.drain_partition(|x| {
+        let out = taken(&mut v, |x| {
             *x -= 1;
             *x == 0
         });
-        assert_eq!(extracted.len(), 1); // only the original `1` reaches 0
+        assert_eq!(out.len(), 1); // only the original `1` reaches 0
         assert_eq!(v.as_ref(), &[1, 2]); // 2->1, 3->2 retained, decremented
     }
 
     #[test]
-    fn drain_partition_empty_and_all_match() {
+    fn take_next_where_decides_each_element_once() {
+        // The counter path above runs the predicate once per element across the whole
+        // scan: an element declined is not asked again by the next call, and one taken
+        // is gone, so no element is decremented twice.
+        let mut v: BoundedVec<u32, 4> = BoundedVec::new();
+        for i in [1, 2, 1, 3] {
+            v.push(i).unwrap();
+        }
+        let mut asked = 0;
+        let out = taken(&mut v, |x| {
+            asked += 1;
+            *x -= 1;
+            *x == 0
+        });
+        assert_eq!(out, [0, 0]);
+        assert_eq!(asked, 4);
+        assert_eq!(v.as_ref(), &[1, 2]);
+    }
+
+    #[test]
+    fn take_next_where_empty_and_all_match() {
         let mut empty: BoundedVec<u32, 4> = BoundedVec::new();
-        assert!(empty.drain_partition(|_| true).is_empty());
+        assert!(taken(&mut empty, |_| true).is_empty());
         assert!(empty.is_empty());
 
         let mut all: BoundedVec<u32, 4> = BoundedVec::new();
         all.push(7).unwrap();
         all.push(8).unwrap();
-        let extracted = all.drain_partition(|_| true);
-        assert_eq!(extracted.len(), 2);
+        assert_eq!(taken(&mut all, |_| true), [7, 8]);
         assert!(all.is_empty());
     }
 
     #[test]
-    fn drain_partition_takes_adjacent_matches_without_skipping() {
+    fn take_next_where_takes_adjacent_matches_without_skipping() {
         let mut v: BoundedVec<u32, 6> = BoundedVec::new();
         for x in [2, 4, 6, 1, 8, 3] {
             v.push(x).unwrap();
         }
-        let extracted = v.drain_partition(|x| *x % 2 == 0);
-        assert_eq!(extracted.as_ref(), &[2, 4, 6, 8]);
+        assert_eq!(taken(&mut v, |x| *x % 2 == 0), [2, 4, 6, 8]);
         assert_eq!(v.as_ref(), &[1, 3]);
     }
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn drain_partition_leaves_a_heap_table_its_storage() {
+    fn take_next_where_leaves_a_heap_table_its_storage() {
         let mut v: BoundedVec<u32, 4, Heap> = BoundedVec::default();
         for i in 0..4 {
             v.push(i).unwrap();
         }
         let room = v.inner.capacity();
         assert!(room >= 4);
-        let extracted = v.drain_partition(|_| true);
-        assert_eq!(extracted.len(), 4);
+        assert_eq!(taken(&mut v, |_| true), [0, 1, 2, 3]);
         assert!(v.is_empty());
         assert_eq!(v.inner.capacity(), room);
-        let none = v.drain_partition(|_| true);
-        assert!(none.is_empty());
-        assert_eq!(none.inner.capacity(), 0);
     }
 
     #[test]
@@ -1088,9 +1109,8 @@ mod tests {
         }
     }
 
-    /// Order, removal, and the take-and-rebuild partition behave the same on
-    /// every policy: only the refusal differs, and the partition never reaches it
-    /// (retained + extracted == taken <= N).
+    /// Order, removal, and the take-out scan behave the same on every policy: only the
+    /// refusal differs, and the scan never reaches it (it pushes nothing).
     fn removal_and_partition_keep_order<P: Storage>() {
         let mut v: BoundedVec<u32, 6, P> = BoundedVec::default();
         for i in 0..6 {
@@ -1100,8 +1120,13 @@ mod tests {
         v.retain(|&x| x != 1);
         assert_eq!(v.as_ref(), &[0, 2, 3, 4]);
 
-        let evens = v.drain_partition(|x| *x % 2 == 0);
-        assert_eq!(evens.as_ref(), &[0, 2, 4]);
+        let mut at = 0;
+        let mut evens: sce_forge_runtime::heapless::Vec<u32, 8> =
+            sce_forge_runtime::heapless::Vec::new();
+        while let Some(x) = v.take_next_where(&mut at, |x| *x % 2 == 0) {
+            evens.push(x).unwrap();
+        }
+        assert_eq!(evens.as_slice(), &[0, 2, 4]);
         assert_eq!(v.as_ref(), &[3]);
 
         v.clear();

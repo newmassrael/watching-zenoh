@@ -10,10 +10,12 @@
 //! `send_request_query` refuses it with `FeatureDisabled`.
 //! [`RequestWriter`](crate::lent_request::RequestWriter) takes the description of the
 //! query ([`GetParts`](crate::lent_request::GetParts)) with every field borrowed and writes the
-//! `Request` the owned path writes, byte for byte, in the same way
-//! [`crate::lent_response::ResponseWriter`] writes a reply: the text and the parameters
-//! are read where they lie and the few numbers it has to make go in the codec's own
-//! fixed-capacity lists.
+//! `Request` the owned path writes, byte for byte: the text and the parameters are read
+//! where they lie, and the message is described in the codec's PARTS form (references and
+//! a slice of at most three extension entries) that the codec's own wire writer reads. The
+//! lent form (`wz_codecs::lent::Request`) is not built: it holds the lists of the
+//! deployment inline at their capacity, and a `get` that states no extension would carry
+//! that capacity on the stack (a frame of 3,328 bytes at the SCE pin 9619440966).
 //!
 //! What it carries is what a `get` of a node that stores nothing asks for: a literal
 //! keyexpr, the selector parameters, the consolidation, the target, the timeout and the
@@ -27,13 +29,16 @@
 //! A description the wire cannot carry (an empty keyexpr) is REFUSED with a
 //! [`RequestRefusal`](crate::lent_request::RequestRefusal) and not repaired.
 
-use sce_forge_runtime::codec::{Bounded, CodecError, SceSink};
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
-use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
-use wz_codecs::lent::{Query, Request, RequestVariant};
+use sce_forge_runtime::codec::{Bounded, Bytes, CodecError, SceSink};
+use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
+use wz_codecs::ext_zint::ExtZintParts;
+use wz_codecs::query::QueryParts;
+use wz_codecs::request::{RequestParts, RequestPartsBody, RequestWire};
+use wz_codecs::wireexpr::{WireexprParts, WireexprPartsBody};
+use wz_codecs::wireexpr_local::WireexprLocalParts;
 
-use crate::lent_control::{local, qos_entry, with_z};
+use crate::declare_ext_qos::QOS_EXT_HEADER;
+use crate::ext_header::EXT_FLAG_Z;
 use crate::query_mode::{ConsolidationMode, QueryTarget, TARGET_EXT_ID};
 use crate::request_routing_context::TIMEOUT_EXT_ID;
 use crate::sample::QosLevel;
@@ -43,12 +48,16 @@ use crate::sample::QosLevel;
 /// encode time, and `Z` is added when the envelope carries extensions.
 const REQUEST_HEADER: u8 = 0x1C | 0x20;
 
-/// The Query body's header: `_Z_MID_Z_QUERY`, with the `C` (consolidation) and `P`
-/// (parameters) flags added below.
+/// The Query body's header: `_Z_MID_Z_QUERY`. The `C` (consolidation), `P` (parameters) and
+/// `Z` (extensions) flags are the codec's to set: it derives them from what the value holds.
 const QUERY_HEADER: u8 = 0x03;
-const FLAG_QUERY_C: u8 = 0x20;
-#[cfg(feature = "query-selector-parameters")]
-const FLAG_QUERY_P: u8 = 0x40;
+
+/// The entries the envelope's extension chain holds at most: the QoS, the target and the
+/// timeout.
+const CHAIN_ENTRIES: usize = 3;
+
+/// The body of an entry no extension fills: a slot of the chain that is never written.
+static UNUSED_ENTRY_BODY: ExtZintParts = ExtZintParts { value: 0 };
 
 /// The extension entry headers of the Request: `ENC_ZINT | id`, and for the target
 /// the mandatory bit as well.
@@ -105,87 +114,101 @@ impl<'a> RequestWriter<'a> {
     {
         let parts = &self.parts;
 
-        // The Query body: the consolidation byte and the parameters behind the flags
-        // that announce them.
-        let mut query_header = QUERY_HEADER;
-        let consolidation = parts.consolidation.map(|mode| {
-            query_header |= FLAG_QUERY_C;
-            mode.wire_byte()
-        });
-        // The parameters ride only in a build that carries them, as the owned
-        // builder's `QueryMetadata` path does (`query-selector-parameters`).
+        // The message is described in the codec's PARTS form: every field a reference, a
+        // slice or a few words, and the codec's own wire writer reads it (`RequestWire`).
+        // The lent form of the same codecs holds their lists inline at the capacity the
+        // deployment gives them, which a `Query` with no extension and an envelope of three
+        // entries would carry on the stack all the same (a frame of 3,328 bytes).
+
+        // The Query body: the codec derives the `C`, `P` and `Z` flags and the parameters'
+        // length from what the value holds. The parameters ride only in a build that
+        // carries them, as the owned builder's `QueryMetadata` path does
+        // (`query-selector-parameters`).
         #[cfg(feature = "query-selector-parameters")]
-        let parameters = (!parts.parameters.is_empty()).then(|| {
-            query_header |= FLAG_QUERY_P;
-            parts.parameters
-        });
+        let parameters: Option<Bytes<'_, { usize::MAX }>> = if parts.parameters.is_empty() {
+            None
+        } else {
+            Some(crate::codec_owned::sent(parts.parameters)?)
+        };
         #[cfg(not(feature = "query-selector-parameters"))]
-        let parameters: Option<&[u8]> = None;
-        let query = Query {
-            header: query_header,
-            consolidation,
-            parameters_len: parameters.map(|bytes| bytes.len() as u64),
-            parameters: parameters.map(crate::codec_owned::sent).transpose()?,
+        let parameters: Option<Bytes<'_, { usize::MAX }>> = None;
+        let query = QueryParts {
+            header: QUERY_HEADER,
+            consolidation: parts.consolidation.map(|mode| mode.wire_byte()),
+            parameters,
             extensions: None,
         };
 
         // The envelope's extensions, in the order the owned builder writes them: the
-        // QoS unless it is the default, then the target, then the timeout.
-        let mut chain: HeaplessVec<ExtEntry<'_>, 8> = HeaplessVec::new();
+        // QoS unless it is the default, then the target, then the timeout. The entry of
+        // the QoS is `ENC_ZINT | 0x01`, the one every control message carries and the
+        // owned builder writes.
+        let qos = ExtZintParts {
+            value: u64::from(parts.qos.raw),
+        };
+        let target = ExtZintParts {
+            value: parts
+                .target
+                .map_or(0, |target| u64::from(target.wire_byte())),
+        };
+        let timeout = ExtZintParts {
+            value: parts.timeout_ms,
+        };
+        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); CHAIN_ENTRIES];
+        let mut count = 0;
         if parts.qos != QosLevel::DEFAULT {
-            // Three entries in a list of eight. The entry is `ENC_ZINT | 0x01`, the
-            // one every control message carries and the owned builder writes.
-            let _ = chain.push(qos_entry(parts.qos));
+            chain[count] = zint_entry(QOS_EXT_HEADER, &qos);
+            count += 1;
         }
-        if let Some(target) = parts.target {
-            let _ = chain.push(zint_entry(
-                ENC_ZINT | FLAG_EXT_M | TARGET_EXT_ID,
-                u64::from(target.wire_byte()),
-            ));
+        if parts.target.is_some() {
+            chain[count] = zint_entry(ENC_ZINT | FLAG_EXT_M | TARGET_EXT_ID, &target);
+            count += 1;
         }
         if parts.timeout_ms != 0 {
-            let _ = chain.push(zint_entry(ENC_ZINT | TIMEOUT_EXT_ID, parts.timeout_ms));
+            chain[count] = zint_entry(ENC_ZINT | TIMEOUT_EXT_ID, &timeout);
+            count += 1;
         }
-        link_chain(&mut chain);
-        let header = if chain.is_empty() {
-            REQUEST_HEADER
-        } else {
-            with_z(REQUEST_HEADER)
-        };
+        let chain = &mut chain[..count];
+        link_chain(chain);
 
-        Request {
-            header,
+        let suffix = WireexprLocalParts {
+            id: 0,
+            suffix: Some(crate::codec_owned::sent_suffix(parts.keyexpr)?),
+        };
+        let keyexpr = WireexprParts {
+            body: WireexprPartsBody::WireexprLocal(&suffix),
+        };
+        let request = RequestParts {
+            header: REQUEST_HEADER,
             rid: parts.rid,
-            keyexpr: local(0, Some(parts.keyexpr))?,
-            // A chain of no entry is none: the bounds of a chain hold one entry or more, and
-            // the list's capacity is the bound.
-            extensions: Bounded::new(chain),
-            body: RequestVariant::CodecZenohQuery(query),
-        }
-        .encode(sink)
-        .map_err(CodecError::from)
+            keyexpr: &keyexpr,
+            // A chain of no entry is none: the bounds of a chain hold one entry or more.
+            extensions: Bounded::new(&*chain),
+            body: RequestPartsBody::CodecZenohQuery(&query),
+        };
+        RequestWire::encode_source(&request, sink).map_err(CodecError::from)
     }
 }
 
 /// An integer-valued extension entry.
-fn zint_entry<'a>(header: u8, value: u64) -> ExtEntry<'a> {
-    ExtEntry {
+const fn zint_entry<'a>(header: u8, body: &'a ExtZintParts) -> ExtEntryParts<'a> {
+    ExtEntryParts {
         header,
-        body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value }),
+        body: ExtEntryPartsBody::CodecZenohExtZint(body),
     }
 }
 
 /// Set the chain-continuation `Z` bit on every entry but the last, which ends the
 /// chain.
-fn link_chain(chain: &mut HeaplessVec<ExtEntry<'_>, 8>) {
+fn link_chain(chain: &mut [ExtEntryParts<'_>]) {
     let Some(last) = chain.len().checked_sub(1) else {
         return;
     };
     for (index, entry) in chain.iter_mut().enumerate() {
         entry.header = if index == last {
-            entry.header & !crate::ext_header::EXT_FLAG_Z
+            entry.header & !EXT_FLAG_Z
         } else {
-            entry.header | crate::ext_header::EXT_FLAG_Z
+            entry.header | EXT_FLAG_Z
         };
     }
 }

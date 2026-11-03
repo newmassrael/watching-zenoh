@@ -370,16 +370,18 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     }
 
     pub fn sweep_timed_out(&mut self, now_ms: u64) -> usize {
-        // R311ig — no-alloc drain-partition via the shared
-        // `BoundedVec::drain_partition` seam (mirror of
-        // ReplyRegistry::sweep_timed_out): extract the expired entries, then
-        // fire after the borrow releases so a panicking `on_final` cannot
-        // leave half-swept entries behind.
-        let fired = self
-            .pending
-            .drain_partition(|entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms));
-        let swept = fired.len();
-        for mut entry in fired {
+        // R311ig — no-alloc take-then-fire via the shared
+        // `BoundedVec::take_next_where` seam (mirror of
+        // ReplyRegistry::sweep_timed_out): take one expired entry out, then
+        // fire it after the borrow releases so a panicking `on_final` cannot
+        // leave a half-swept entry behind.
+        let mut swept = 0;
+        let mut at = 0;
+        while let Some(mut entry) = self.pending.take_next_where(
+            &mut at,
+            |entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms),
+        ) {
+            swept += 1;
             let id = entry.interest_id;
             // F3/R311ka — a timed-out get is as terminated as a
             // DeclFinal'd one: stage it for the reconnect-cache prune
@@ -416,13 +418,15 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// (a `BoundedVec` partition) though only a single entry can match a
     /// fresh-allocated id.
     fn fire_final_for(&mut self, interest_id: u64) -> bool {
-        // R311ig — no-alloc drain-partition via the shared
-        // `BoundedVec::drain_partition` seam (see `sweep_timed_out`).
-        let fired = self
+        // R311ig — no-alloc take-then-fire via the shared
+        // `BoundedVec::take_next_where` seam (see `sweep_timed_out`).
+        let mut any = false;
+        let mut at = 0;
+        while let Some(mut entry) = self
             .pending
-            .drain_partition(|entry| entry.interest_id == interest_id);
-        let any = !fired.is_empty();
-        for mut entry in fired {
+            .take_next_where(&mut at, |entry| entry.interest_id == interest_id)
+        {
+            any = true;
             let id = entry.interest_id;
             // F3/R311ka — stage the terminated id for the reconnect-cache
             // prune drain. This drain is the cache entry's ONLY prune (a

@@ -1507,11 +1507,12 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// face (`zenoh/src/net/routing/dispatcher/face.rs` @ `finalize_pending_queries(&self.tables, &mut state);`),
     /// and the replies the get already had stand.
     pub fn finish_all(&mut self) -> usize {
-        let fired = self.pending.drain_partition(|_| true);
-        let ended = fired.len();
-        for mut entry in fired {
+        let mut ended = 0;
+        let mut at = 0;
+        while let Some(mut entry) = self.pending.take_next_where(&mut at, |_| true) {
             let rid = entry.rid;
             entry.sink.on_final(rid);
+            ended += 1;
         }
         ended
     }
@@ -1556,22 +1557,25 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// hand-picked `now_ms` value without needing to advance a real
     /// clock or mock TimeSource.
     pub fn sweep_timed_out(&mut self, now_ms: u64) -> usize {
-        // Same drain-then-fire pattern as fire_final_for: the
+        // Same take-then-fire pattern as fire_final_for: the
         // borrow-checker forbids calling the captured on_final while a
-        // &mut self.pending iteration is active, so we partition first
-        // and fire after the partition releases the borrow. This also
-        // ensures a panicking on_final does NOT leave half-swept entries
-        // in the registry — every fired entry has already been removed
+        // &mut self.pending iteration is active, so we take one expired
+        // entry out and fire it after the take releases the borrow. This also
+        // ensures a panicking on_final does NOT leave a half-swept entry
+        // in the registry — the entry has already been removed
         // from self.pending by the time its callback runs.
-        // R311ig — no-alloc drain-partition via the shared
-        // `BoundedVec::drain_partition` seam: extract the expired entries
-        // (removed from self.pending), then fire after the borrow releases
-        // so a panicking on_final cannot leave a half-swept entry behind.
-        let fired = self
-            .pending
-            .drain_partition(|entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms));
-        let swept = fired.len();
-        for mut entry in fired {
+        // R311ig — no-alloc take-then-fire via the shared
+        // `BoundedVec::take_next_where` seam: one expired entry at a time
+        // (removed from self.pending), then fire it, so a panicking on_final
+        // cannot leave a half-swept entry behind and the frame holds one
+        // entry and not the table of them.
+        let mut swept = 0;
+        let mut at = 0;
+        while let Some(mut entry) = self.pending.take_next_where(
+            &mut at,
+            |entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms),
+        ) {
+            swept += 1;
             let rid = entry.rid;
             // R311y323 — `on_timeout`, NOT a bare `on_final`: an expired query
             // synthesizes `Err("Timeout")` before its final, so a caller can tell
@@ -1702,26 +1706,28 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// (pen_qry->_remaining_finals > 0) { pen_qry->_remaining_finals--;
     /// } bool do_finalize = (pen_qry->_remaining_finals == 0);`.
     fn fire_final_for(&mut self, rid: u64) {
-        // Partition: take ownership of every matching entry that
-        // reaches zero, leave the rest (decremented but non-zero, or
+        // Take ownership of each matching entry that reaches zero, one
+        // at a time, and leave the rest (decremented but non-zero, or
         // non-matching) in place. Vec::retain would force us to mutate
         // the callback in-place which the borrow checker rejects (we
         // need to call `(on_final)(rid)` which requires `&mut Pending`);
-        // we instead drain the matches into a stash and fire after the
-        // retain-pass releases the &mut self.pending borrow.
-        // R311ig — no-alloc drain-partition via the shared
-        // `BoundedVec::drain_partition` seam (see `sweep_timed_out`); the
+        // we instead take an entry out and fire it after the take
+        // releases the &mut self.pending borrow.
+        // R311ig — no-alloc take-then-fire via the shared
+        // `BoundedVec::take_next_where` seam (see `sweep_timed_out`); the
         // extract predicate mutates the entry (decrement remaining_finals)
         // and extracts only when it reaches zero. Order-preserving (matters
         // for the documented duplicate-rid registration-order final firing).
-        let fired = self.pending.drain_partition(|entry| {
+        // One entry in the frame and not the table of them: this is the
+        // function the final of every get passes through.
+        let mut at = 0;
+        while let Some(mut entry) = self.pending.take_next_where(&mut at, |entry| {
             if entry.rid == rid && entry.remaining_finals > 0 {
                 entry.remaining_finals -= 1;
                 return entry.remaining_finals == 0;
             }
             false
-        });
-        for mut entry in fired {
+        }) {
             entry.sink.on_final(rid);
         }
     }
