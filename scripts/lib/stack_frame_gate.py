@@ -147,8 +147,15 @@ IMAGES = (
         # code moves and not a bound on a run: the qemu run of the same image reads a stack peak
         # of 8,968 of 32,768 bytes. Before the group session was spawned from a seed
         # (`MulticastSeed`) the worst frame of the image was `TwoSessions::spawn` at 16,208 and
-        # the chain 17,820; the figure here is what is left of them.
-        peak=4012,
+        # the chain 17,820; the figure here is what is left of them. 2,360 bytes over 8 frames at the
+        # SCE pin 9619440966 (4,012 before it), read by Layer Q on one build host on main's
+        # d7dc86a826 and on a tree that adds only a zero-sized field, with the same chain: the
+        # frames are `wz_task` 632, `TwoSessions::spawn` 744, the session's send 792 and three
+        # small ones beneath it; `push_body` and `try_as_borrowed` (1,804 bytes together) are no
+        # longer on it. The chain moved with the pins since ed2f5d7453 (main's own code did not
+        # change it), and the share of each pin, and whether the two functions were inlined or
+        # shrank, are not separated.
+        peak=2360,
     ),
     # The Zephyr node on the fixed-memory profile: its main thread's stack is the overlay's
     # `CONFIG_MAIN_STACK_SIZE`, and the image is built by west into a directory Layer Qzb

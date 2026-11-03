@@ -1094,8 +1094,19 @@ declare -A BASELINE_MC_TEXT=(
     # read in place (`c7afd33520`, `0a522369e2`) and the SCE pin moves of the day are what the head
     # has over `81e87c37f5`, and the share of each is not separated. data is 4 and bss 270112 on
     # both. Old: 71148/71228.
-    ["thumbv7m-none-eabi"]=72296
-    ["thumbv7em-none-eabihf"]=72436
+    #
+    # 2026-11-03 -- thumbv7m 72296 -> 77848, thumbv7em-hf 72436 -> 77720 (+5552 / +5284), read by
+    # Layer Q on one build host (rustc 1.97.0 / gcc 13.2.1) at main's d7dc86a826 (SCE pin
+    # 9619440966) and, to the byte, on a tree that adds only zero-sized fields, so the growth is
+    # not that tree's. The qemu-demo image moved by +36 to +64 over the same pins, so the growth
+    # is in what only this image links, and the pins since 5a1145e4d0 (gated fields grouped,
+    # flags as arms, bounds at wire width, values at a profile) are what moved between the
+    # readings. Which symbols grew, and the share of each pin, are not separated, and the reading
+    # is a build host's, not the hosted one that grades; a hosted reading that differs moves this
+    # again. data is 4 and bss 270120 on both. Old:
+    # 72296/72436.
+    ["thumbv7m-none-eabi"]=77848
+    ["thumbv7em-none-eabihf"]=77720
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
