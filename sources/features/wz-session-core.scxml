@@ -44,6 +44,7 @@
   <sce:feature name="codec-response-final"/>
   <sce:feature name="codec-scout"/>
   <sce:feature name="connect-endpoints"/>
+  <sce:feature name="declarations-synced-event" requires="alloc"/>
   <sce:feature name="declare-final" requires="codec-declare"/>
   <sce:feature name="declare-interest" requires="codec-declare"/>
   <sce:feature name="declare-keyexpr" requires="alloc codec-declare"/>
@@ -69,6 +70,7 @@
   <sce:feature name="liveliness-token" requires="codec-declare declare-final rx-control"/>
   <sce:feature name="multicast-declarations" requires="alloc codec-declare codec-push session-multicast"/>
   <sce:feature name="multicast-ingress-gate" requires="alloc session-multicast"/>
+  <sce:feature name="pool-monitor"/>
   <sce:feature name="pubsub-attachment" requires="attachment-bytes"/>
   <sce:feature name="pubsub-congestion-control" requires="pubsub-qos"/>
   <sce:feature name="pubsub-delete" requires="codec-push"/>

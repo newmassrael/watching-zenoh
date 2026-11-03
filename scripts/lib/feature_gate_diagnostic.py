@@ -279,6 +279,9 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "query-reply",
             # `query-target` joined with that move: it gates the BODY of
             # `QueryOptions::with_target` and of `effective_target`, never an item.
+            # `pool-monitor` gates `pool_gauge::HighWater`'s private mark and the
+            # bodies of its public methods, which exist in every build.
+            "pool-monitor",
             "query-target",
             "reply-source-info",
             "session-reconnect",
@@ -352,6 +355,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # the declaration as false. The round that falsified it did not
             # come back for it; this one does.
             "config-mutate-runtime",
+            # `declarations-synced-event` gates the observer's firing of the
+            # final declarations and a listener's private registration with it;
+            # the listener's event type exists in every build.
+            "declarations-synced-event",
             "ext-pubsub-sample-miss-detection",
             "multicast-declarations",
             "reply-source-info",
