@@ -368,7 +368,10 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2424,
+        # 2,648 bytes over 10 frames at the SCE pin 9619440966 (2,424 before it): the pin regenerated
+        # the codecs, and the receive path's frames grew by 224. The same figure for the heap and the
+        # batching clients.
+        peak=2648,
     ),
     # The fixed client with its storage block taken from the kernel heap at start
     # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
@@ -382,7 +385,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2424,
+        peak=2648,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -434,7 +437,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2424,
+        peak=2648,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -499,7 +502,11 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2972,
+        # 6,876 bytes over 11 frames at the SCE pin 9619440966 (2,972 before it): the dispatch of the
+        # getter's events (`EventsOf<GetterEvents>`) is a frame of 3,696 bytes, which the pin's codecs
+        # made (it was not among the largest frames before), under `dispatch_copied`, with the
+        # application layer's dispatch of 520 beneath it. The cause of the frame was not found.
+        peak=6876,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
@@ -550,8 +557,8 @@ IMAGES = (
         # followed. 9,588 with the other limits the node does not use stated as well (keyexpr bytes
         # 128, locator length 32, static connects 2, queryables 2, subscriptions 2, no inbound
         # interests and no remote declarations, 4 peer key aliases, 2 pending replies and finals): the
-        # same 26 frames, the largest the node's `start` at 3,968.
-        peak=9588,
+        # same 26 frames, the largest the node's `start` at 3,968. 9,628 at the SCE pin 9619440966.
+        peak=9628,
     ),
 )
 

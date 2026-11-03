@@ -140,7 +140,7 @@
     },
     {
       "id": "entropy-draw",
-      "where": {"file": "session_actions.rs", "line": 6184},
+      "where": {"file": "session_actions.rs", "line": 6228},
       "callees": "EntropySource>::try_next_u64$",
       "why": "the draw of the session's initial value"
     },

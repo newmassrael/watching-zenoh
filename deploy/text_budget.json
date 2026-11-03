@@ -3,11 +3,11 @@
   "schema": 1,
   "images": {
     "zephyr-client-fixed": {
-      "text_bytes": 143420,
+      "text_bytes": 149548,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 27516,
+        "wz_session_core": 30672,
         "c:net_": 20590,
         "wz_session_mcu": 11526,
         "c:z_": 10028,
@@ -22,7 +22,7 @@
         "wz_runtime_coop": 3560,
         "c:other": 2975,
         "c:sys_": 2360,
-        "wz_codecs": 2330,
+        "wz_codecs": 5424,
         "c:cyhal": 1862,
         "core": 1446,
         "c:zvfs": 1384,
@@ -47,11 +47,11 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-client-heap": {
-      "text_bytes": 143484,
+      "text_bytes": 149604,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 27428,
+        "wz_session_core": 30662,
         "c:net_": 20590,
         "wz_session_mcu": 11648,
         "c:z_": 10028,
@@ -66,7 +66,7 @@
         "wz_runtime_coop": 3560,
         "c:other": 2975,
         "c:sys_": 2360,
-        "wz_codecs": 2330,
+        "wz_codecs": 5424,
         "c:cyhal": 1862,
         "core": 1446,
         "c:zvfs": 1384,
@@ -91,11 +91,11 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-client-fixed-batching": {
-      "text_bytes": 145108,
+      "text_bytes": 151284,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 28954,
+        "wz_session_core": 32132,
         "c:net_": 20590,
         "wz_session_mcu": 11642,
         "c:z_": 10028,
@@ -110,7 +110,7 @@
         "wz_runtime_coop": 3566,
         "c:other": 2975,
         "c:sys_": 2360,
-        "wz_codecs": 2330,
+        "wz_codecs": 5424,
         "c:cyhal": 1862,
         "core": 1446,
         "c:zvfs": 1384,
@@ -135,17 +135,17 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-client-fixed-get": {
-      "text_bytes": 161600,
+      "text_bytes": 174112,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 32624,
+        "wz_session_core": 36960,
         "c:net_": 20590,
-        "wz_session_mcu": 14328,
+        "wz_session_mcu": 15880,
         "c:z_": 10028,
         "(smaller owners)": 8960,
         "sce_rust_runtime": 6948,
-        "wz_codecs": 6012,
+        "wz_codecs": 11732,
         "c:__": 5908,
         "core": 5814,
         "(no symbol)": 5729,
@@ -166,7 +166,7 @@
         "compiler_builtins": 864,
         "wz_eth_mac_cyt4bf": 850,
         "c:context": 838,
-        "sce_forge_runtime": 808,
+        "sce_forge_runtime": 1864,
         "c:register": 758,
         "c:zeth": 728,
         "c:gpio": 722,
@@ -180,11 +180,11 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-admin-fixed-tls": {
-      "text_bytes": 324892,
+      "text_bytes": 338088,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 58940,
+        "wz_session_core": 64588,
         "c:mbedtls": 54856,
         "c:net_": 25114,
         "wz_session_mcu": 23698,
@@ -194,7 +194,7 @@
         "(no symbol)": 10073,
         "c:psa": 9286,
         "c:wz_": 9202,
-        "wz_codecs": 7670,
+        "wz_codecs": 13506,
         "sce_rust_runtime": 7208,
         "core": 6762,
         "wz_runtime_coop": 6672,
@@ -222,7 +222,7 @@
         "c:context": 1016,
         "compiler_builtins": 864,
         "wz_eth_mac_cyt4bf": 850,
-        "sce_forge_runtime": 770,
+        "sce_forge_runtime": 1904,
         "c:register": 758,
         "c:zeth": 728,
         "c:gpio": 722,
