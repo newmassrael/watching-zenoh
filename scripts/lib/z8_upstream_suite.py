@@ -230,6 +230,38 @@ def stock() -> bool:
     return bool(os.environ.get("Z8_STOCK"))
 
 
+#: The one line of upstream's `regions` entry that picks the locator a scenario dials.
+LOCATORS_ANCHOR = "ztimeout!($session.info().locators())"
+#: The same expression with the link-local addresses (169.254.0.0/16) left out of the list.
+LOCATORS_WITHOUT_LINK_LOCAL = (
+    'ztimeout!($session.info().locators()).into_iter()'
+    '.filter(|l| !l.as_str().contains("/169.254.")).collect::<Vec<_>>()'
+)
+
+
+def skip_link_local() -> bool:
+    """`Z8_SKIP_LINK_LOCAL`: the `regions` scenarios dial a locator that can be reached.
+
+    Upstream's `loc!` dials the first IPv4 locator of `info().locators()`, and both upstream's
+    enumeration and this tree's list every address of every adapter, as the platform reports them. A
+    Windows host with a disconnected adapter reports that adapter's 169.254.x.y address first, which
+    nothing answers, so a scenario fails on connect on the real library as on this tree (the control
+    is `Z8_STOCK`). The option removes those addresses from the list the test reads, in the generated
+    copy only; the engine's list is untouched. It is off by default: the files are otherwise
+    byte for byte upstream's."""
+    return bool(os.environ.get("Z8_SKIP_LINK_LOCAL"))
+
+
+def without_link_local(text: str) -> str:
+    """`text` (the entry of the `regions` tests) with `loc!` reading the locators minus link-local."""
+    if text.count(LOCATORS_ANCHOR) != 1:
+        raise SystemExit(
+            f"z8: Z8_SKIP_LINK_LOCAL found {text.count(LOCATORS_ANCHOR)} places that read the locators "
+            "where the harness expects one; the pinned tests changed"
+        )
+    return text.replace(LOCATORS_ANCHOR, LOCATORS_WITHOUT_LINK_LOCAL)
+
+
 def manifest(deps: dict[str, str], member: dict[str, list[str]], out: pathlib.Path) -> str:
     """The generated package's manifest."""
     top = (
@@ -330,6 +362,9 @@ def generate(src: pathlib.Path, out: pathlib.Path) -> list[str]:
         shutil.rmtree(out)
     out.mkdir(parents=True)
     shutil.copytree(src / "zenoh" / "tests", out / "tests")
+    if skip_link_local():
+        entry = out / "tests" / "regions" / "main.rs"
+        entry.write_bytes(without_link_local(entry.read_bytes().decode("utf-8")).encode("utf-8"))
     helper = out / "zenoh-test"
     shutil.copytree(src / "commons" / "zenoh-test", helper)
     (helper / "Cargo.toml").write_text(
@@ -579,6 +614,16 @@ def selftest() -> int:
     assert 'edition = "2021"' in inherited and 'version = "0.0.0"' in inherited, inherited
     assert 'tokio = { version = "*", features = ["rt"] }' in inherited, inherited
     assert 'zenoh-core = { version = "*" }' in inherited, inherited
+    read = "    ($session:expr) => {\r\n        " + LOCATORS_ANCHOR + "\r\n            .into_iter()\r\n"
+    skipped = without_link_local(read)
+    # A locator is `tcp/169.254.1.2:7447`: one slash after the protocol, not two.
+    assert '"/169.254."' in skipped and '"//169.254."' not in skipped and skipped.count(".into_iter()") == 2 and "\r\n" in skipped, skipped
+    for broken in ("", read + read):
+        try:
+            without_link_local(broken)
+        except SystemExit:
+            continue
+        raise AssertionError("an unexpected number of readers must be refused")
     print("z8-upstream-suite selftest: OK")
     return 0
 
