@@ -457,7 +457,11 @@ CASES: tuple[Case, ...] = (
     # 2,946,000, which the 2026-11-02 move of the coop cases had not reached; moved to that reading
     # plus 3,500, to the hundred. The growth is the day's, as the coop cases' was (the SCE pin
     # moves of 11-02, which regenerate the codecs this image links); it is not separated further.
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_949_700,
+    # 2026-11-03, later -- 2,949,477 on a build host (hkl002) with the order fence on the lanes, the
+    # scouting ask socket of its own and the peers' commits of the day, against 2,945,401 on that
+    # host at the hosted reading's head; the hosted run reads about 780 above that host, so the
+    # hosted reading is about 2,950,300 and the budget is that and 3,500, to the hundred.
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_953_800,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
