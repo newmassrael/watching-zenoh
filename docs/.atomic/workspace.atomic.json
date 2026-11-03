@@ -307456,6 +307456,38 @@
         "deploy/text_budget.json and the footprint rows were not measured locally; the hosted run judges them."
       ]
     },
+    "Round 4168": {
+      "decision_summary": "The upstream suite, run against the patched graph on the Windows host, differed from Linux in two places that were the family's. A node that had no interface to name scouted from the group socket, whose port every responder on the host holds, and Windows delivers a unicast Hello to the first socket bound to a port, so the asker never heard its answer (qos, queryable): it now asks from one unpinned socket of its own, as upstream does. A listener on the IPv6 wildcard refused IPv4 on Windows for about two seconds while the node told its peers IPv4 addresses, so a peer's open, which waits for the dials its gossip made, ran out scouting/delay (routing, liveliness): the listener is dual stack, as everywhere else by default. Z8_STOCK runs the same files over upstream's own crates as the control. The pico-peer text budget follows the growth.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/scouting_fanout.rs: bind_scout_sockets binds one unpinned ask socket on an ephemeral port when it is offered no address; an_empty_offer_binds_one_unpinned_ask_socket_of_its_own replaces an_empty_offer_binds_nothing.",
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: bind_listener clears IPV6_V6ONLY on a Windows IPv6 wildcard listener (accept_ipv4_on_v6_wildcard, a ws2_32 setsockopt declared in place, no new dependency).",
+        "scripts/lib/z8_upstream_suite.py: Z8_STOCK builds the package over the registry's crates with no patch table. scripts/lib/capability_cost_gate.py: pico-peer budget 2,949,700 to 2,953,800."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio lib with all features: 2236 pass; clippy with all features and all targets is clean; the scouting fan-out tests pass. Windows host, 25 of 31 files pass after the two changes (qos 2 of 2, queryable 3 of 3, routing 8 of 8, liveliness 46 of 46); four are empty because upstream gates the file to unix (acl, interceptors, low_pass, qos_overwrite); session 4 of 5 and shm 8 of 10 fail on the multicast tests that open udp/224.0.0.1:0, which Windows refuses with 10065, and upstream's own library fails the same three with the same error. regions is not gradable there: the host has a disconnected Ethernet adapter whose 169.254 address leads the locator list, and upstream's library fails the first scenario tried with the same connect error. The pico-peer text read 2,949,477 on a build host."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: regions on a Windows host with no adapter that is down; the hosted verdict of this round and the hosted reading of the pico-peer text (its budget follows an estimate); the budgets of the other pico cases, which the lane fence and the scouting socket also reach and were not measured."
+      ],
+      "publishable_decision_summary": "The upstream suite, run against the patched graph on the Windows host, differed from Linux in two places that were the family's. A node that had no interface to name scouted from the group socket, whose port every responder on the host holds, and Windows delivers a unicast Hello to the first socket bound to a port, so the asker never heard its answer (qos, queryable): it now asks from one unpinned socket of its own, as upstream does. A listener on the IPv6 wildcard refused IPv4 on Windows for about two seconds while the node told its peers IPv4 addresses, so a peer's open, which waits for the dials its gossip made, ran out scouting/delay (routing, liveliness): the listener is dual stack, as everywhere else by default. Z8_STOCK runs the same files over upstream's own crates as the control. The pico-peer text budget follows the growth.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/scouting_fanout.rs: bind_scout_sockets binds one unpinned ask socket on an ephemeral port when it is offered no address; an_empty_offer_binds_one_unpinned_ask_socket_of_its_own replaces an_empty_offer_binds_nothing.",
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: bind_listener clears IPV6_V6ONLY on a Windows IPv6 wildcard listener (accept_ipv4_on_v6_wildcard, a ws2_32 setsockopt declared in place, no new dependency).",
+        "scripts/lib/z8_upstream_suite.py: Z8_STOCK builds the package over the registry's crates with no patch table. scripts/lib/capability_cost_gate.py: pico-peer budget 2,949,700 to 2,953,800."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio lib with all features: 2236 pass; clippy with all features and all targets is clean; the scouting fan-out tests pass. Windows host, 25 of 31 files pass after the two changes (qos 2 of 2, queryable 3 of 3, routing 8 of 8, liveliness 46 of 46); four are empty because upstream gates the file to unix (acl, interceptors, low_pass, qos_overwrite); session 4 of 5 and shm 8 of 10 fail on the multicast tests that open udp/224.0.0.1:0, which Windows refuses with 10065, and upstream's own library fails the same three with the same error. regions is not gradable there: the host has a disconnected Ethernet adapter whose 169.254 address leads the locator list, and upstream's library fails the first scenario tried with the same connect error. The pico-peer text read 2,949,477 on a build host."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: regions on a Windows host with no adapter that is down; the hosted verdict of this round and the hosted reading of the pico-peer text (its budget follows an estimate); the budgets of the other pico cases, which the lane fence and the scouting socket also reach and were not measured."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
