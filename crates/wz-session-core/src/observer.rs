@@ -354,6 +354,12 @@ pub struct ApplicationLayerObserver {
         any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     pending_queryable_replies: alloc::vec::Vec<crate::query::QueryableInterestReply>,
+    /// The observers told, once, that the peer ended its initial declarations
+    /// (`declarations-synced-event`). Not fired by [`Self::dispatch_event`]: the session that
+    /// drives this observer fires it where it sees the fact turn true, because the flag it turns
+    /// on lives on the subscriber plane and the observers listen on all three.
+    #[cfg(feature = "declarations-synced-event")]
+    pub declarations_final: crate::decl_sink::SyncedSinks,
 }
 
 impl Default for ApplicationLayerObserver {
@@ -430,6 +436,8 @@ impl ApplicationLayerObserver {
                 any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             pending_queryable_replies: alloc::vec::Vec::new(),
+            #[cfg(feature = "declarations-synced-event")]
+            declarations_final: crate::decl_sink::SyncedSinks::new(),
         }
     }
 

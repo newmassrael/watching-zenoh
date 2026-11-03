@@ -206,6 +206,10 @@ declare-queryable = ["codec-declare", "wz-session-core/declare-queryable"]
 declare-subscriber = ["codec-declare", "wz-session-core/declare-subscriber"]
 declare-token = ["codec-declare", "wz-session-core/declare-token"]
 declare-undeclare = ["codec-declare", "wz-session-core/declare-undeclare"]
+# A declaration listener is told, once, when the peer's initial declarations are final
+# (`docs/declarations-synced-event.md`). The fact is read from the subscriber plane, which tracks
+# the peer's `DeclareFinal` of the initial interest, so that plane is part of it.
+declarations-synced-event = ["declare-subscriber", "wz-session-core/declarations-synced-event"]
 # `query-get` implies `query-reply` (the get-side ReplyRegistry tracks
 # pending entries) + `codec-request` (R311j — the wire-emit path
 # `send_request_query` builds on Request/Query types gated by

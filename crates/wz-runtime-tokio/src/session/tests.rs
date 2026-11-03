@@ -15667,6 +15667,123 @@ fn the_inbound_dispatch_ends_the_wait_for_an_interests_final() {
     assert!(session.declarations_synced(), "the final was dispatched");
 }
 
+/// `declarations-synced-event`: the `DeclareFinal` of the initial interest ends the peer's first
+/// burst of declarations, and each listener, of whichever plane, is told once, in the dispatch that
+/// carries it. Another interest's final, and a peer repeating its own, tell nobody; a listener that
+/// was undeclared is told nothing; a new establishment is told again.
+#[cfg(all(
+    feature = "declarations-synced-event",
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "liveliness-token"
+))]
+#[test]
+fn each_listener_is_told_once_when_the_peers_initial_declarations_are_final() {
+    use std::sync::{Arc, Mutex};
+    let (session, _driver) = build_session();
+    let log = || Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
+    let (subscribers, queryables, tokens) = (log(), log(), log());
+    let (s, q, t) = (subscribers.clone(), queryables.clone(), tokens.clone());
+    let subscriber_listener = session
+        .declare_remote_subscriber_listener(move |e| s.lock().unwrap().push(e))
+        .unwrap();
+    let queryable_listener = session
+        .declare_remote_queryable_listener(move |e| q.lock().unwrap().push(e))
+        .unwrap();
+    let token_listener = session
+        .declare_remote_token_listener(move |e| t.lock().unwrap().push(e))
+        .unwrap();
+    let told = |log: &Arc<Mutex<Vec<DeclEvent>>>| log.lock().unwrap().clone();
+
+    // The final of some other interest is some other plane's answer.
+    assert!(!session.peer_declarations_final());
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&peer_final_for(
+        5,
+    )));
+    assert!(!session.peer_declarations_final());
+    for plane in [&subscribers, &queryables, &tokens] {
+        assert!(
+            told(plane).is_empty(),
+            "a final of another interest tells nobody"
+        );
+    }
+
+    // The initial interest's final tells each listener once, whichever plane it listens on.
+    let initial = peer_final_for(wz_session_core::extbound::INITIAL_INTEREST_ID);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&initial));
+    assert!(session.peer_declarations_final());
+    for plane in [&subscribers, &queryables, &tokens] {
+        assert_eq!(told(plane), [DeclEvent::Synced]);
+    }
+
+    // A peer that says it again has said nothing new.
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&initial));
+    for plane in [&subscribers, &queryables, &tokens] {
+        assert_eq!(told(plane), [DeclEvent::Synced], "told once, not twice");
+    }
+
+    // A listener undeclared before the next establishment is not told of it; the others are.
+    assert!(queryable_listener.undeclare());
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .flush_declarations_on_link_loss();
+    assert!(!session.peer_declarations_final(), "the link was lost");
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&initial));
+    assert_eq!(told(&subscribers), [DeclEvent::Synced, DeclEvent::Synced]);
+    assert_eq!(told(&tokens), [DeclEvent::Synced, DeclEvent::Synced]);
+    assert_eq!(
+        told(&queryables),
+        [DeclEvent::Synced],
+        "undeclared, so told no more"
+    );
+
+    // Undeclaring removes the observer, not only silences it.
+    assert!(subscriber_listener.undeclare());
+    assert!(token_listener.undeclare());
+    assert!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .declarations_final
+            .is_empty(),
+        "no observer is left behind"
+    );
+}
+
+/// A listener declared after the peer finished is not told: it was not given what came before, so
+/// the event would claim a completeness it does not have. It reads the fact instead.
+#[cfg(all(
+    feature = "declarations-synced-event",
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest",
+    feature = "declare-subscriber"
+))]
+#[test]
+fn a_listener_declared_after_the_peer_finished_reads_the_fact_and_is_not_told() {
+    use std::sync::{Arc, Mutex};
+    let (session, _driver) = build_session();
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&peer_final_for(
+        wz_session_core::extbound::INITIAL_INTEREST_ID,
+    )));
+    let seen = Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
+    let writer = seen.clone();
+    let _listener = session
+        .declare_remote_subscriber_listener(move |e| writer.lock().unwrap().push(e))
+        .unwrap();
+    assert!(session.peer_declarations_final(), "the fact is readable");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "and nothing was staged for it"
+    );
+}
+
 /// Stable is synced and unchanged for one interval: a session with nothing owed is stable, and one
 /// whose answer never comes is not, within the time given.
 #[cfg(all(

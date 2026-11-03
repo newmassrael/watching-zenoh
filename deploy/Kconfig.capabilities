@@ -153,6 +153,13 @@ config WZ_CAP_POOL_MONITOR
 	  Record how full each of the node's fixed pools has been and list every pool's occupancy and refusals.
 	  Exported by: .
 
+config WZ_CAP_DECLARATIONS_SYNCED_EVENT
+	bool "declarations-synced-event"
+	default n
+	help
+	  Tell a declaration listener when the peer has sent everything it held, so what follows is live.
+	  Exported by: .
+
 config WZ_CAP_GROUP
 	bool "group"
 	default y

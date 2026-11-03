@@ -962,6 +962,20 @@ abis = ["core"]
 implies = []
 help = "Record how full each of the node's fixed pools has been and list every pool's occupancy and refusals."
 
+# The peer's initial declarations are final (docs/declarations-synced-event.md): a declaration
+# listener is told, once, that the declarations it has been given are everything the peer held
+# when the session was established and the ones after are live. wz's own, with no counterpart in
+# an upstream library, so off in every original.
+[[capability]]
+id = "declarations-synced-event"
+kconfig = "WZ_CAP_DECLARATIONS_SYNCED_EVENT"
+os_needs = []
+upstream_off = []
+default = "off"
+abis = ["core"]
+implies = []
+help = "Tell a declaration listener when the peer has sent everything it held, so what follows is live."
+
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"

@@ -378,6 +378,10 @@ resource-snapshot = ["unstable-api", "wz-session-core/resource-snapshot", "wz-ru
 # The high-water mark of the node's fixed pools (`deploy/wz-config.toml`, off by default, no door
 # of an ABI: the pools are read from the model). The pools and the mark are in `wz-session-core`.
 pool-monitor = ["wz-session-core/pool-monitor"]
+# A declaration listener is told when the peer's initial declarations are final
+# (`deploy/wz-config.toml`, off by default, no door of an ABI). The sinks are in `wz-session-core`
+# and the session that raises the event is the runtime's.
+declarations-synced-event = ["wz-session-core/declarations-synced-event", "wz-runtime-tokio/declarations-synced-event"]
 local-subscriber = []
 local-queryable = []
 

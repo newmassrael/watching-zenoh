@@ -715,6 +715,11 @@ resource-snapshot = []
 # this says; the feature adds the mark, which a build without it does not store.
 pool-monitor = []
 
+# declarations-synced-event (docs/declarations-synced-event.md) — the observer holds the sinks that
+# are told, once, that the peer's initial declarations are final. Heap closures, so it needs the
+# heap; the host session raises the event where it dispatches the peer's declarations.
+declarations-synced-event = ["alloc"]
+
 # session-close-ingress — a rail message can close a RUNNING session. The
 # ingress (a keyexpr matcher) and the session FSM engine live in two different
 # ownership domains and never meet: the matcher runs under the observer lock on

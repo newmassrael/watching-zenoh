@@ -335,6 +335,63 @@ impl UndeclSink for BoxedUndeclSink {
     }
 }
 
+/// The observers told that the peer ended its initial declarations (`declarations-synced-event`,
+/// `docs/declarations-synced-event.md`): the `DeclareFinal` of the initial interest has arrived,
+/// so the declarations observed so far are all the peer held when this session was established
+/// and the ones after are live.
+///
+/// It is not a [`DeclSink`] or an [`UndeclSink`]: those say what one entity did, and this says a
+/// fact of the peer as a whole, which holds for subscribers, queryables and tokens alike (one
+/// wire message ends the burst of all three). Observers are id-keyed like the pair's, so a
+/// listener handle removes its own on undeclare. Heap closures only: a node with no heap holds
+/// no listener to tell.
+#[cfg(feature = "declarations-synced-event")]
+#[derive(Default)]
+pub struct SyncedSinks {
+    next_id: u64,
+    sinks: alloc::vec::Vec<(u64, Box<dyn FnMut() + Send + 'static>)>,
+}
+
+#[cfg(feature = "declarations-synced-event")]
+impl SyncedSinks {
+    /// No observer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install an observer; the id removes it again.
+    pub fn install(&mut self, sink: impl FnMut() + Send + 'static) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.sinks.push((id, Box::new(sink)));
+        id
+    }
+
+    /// Remove the observer `id`. `false` when there is none, as when it was removed already.
+    pub fn uninstall(&mut self, id: u64) -> bool {
+        let before = self.sinks.len();
+        self.sinks.retain(|(held, _)| *held != id);
+        self.sinks.len() != before
+    }
+
+    /// Tell every observer, in the order they were installed.
+    pub fn fire(&mut self) {
+        for (_, sink) in &mut self.sinks {
+            sink();
+        }
+    }
+
+    /// How many observers are installed.
+    pub fn len(&self) -> usize {
+        self.sinks.len()
+    }
+
+    /// Whether none is installed.
+    pub fn is_empty(&self) -> bool {
+        self.sinks.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,5 +594,33 @@ mod tests {
         sink.on_undeclared(20);
 
         assert_eq!(*seen.lock().unwrap(), std::vec![10, 20]);
+    }
+
+    #[cfg(feature = "declarations-synced-event")]
+    #[test]
+    fn synced_sinks_tell_each_observer_in_install_order_and_forget_a_removed_one() {
+        use std::sync::{Arc, Mutex};
+        use std::vec::Vec;
+
+        let told: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut sinks = SyncedSinks::new();
+        assert!(sinks.is_empty());
+        let (a, b) = (Arc::clone(&told), Arc::clone(&told));
+        let first = sinks.install(move || a.lock().unwrap().push("first"));
+        let second = sinks.install(move || b.lock().unwrap().push("second"));
+        assert_ne!(first, second, "each observer has an id of its own");
+
+        sinks.fire();
+        assert_eq!(*told.lock().unwrap(), ["first", "second"]);
+
+        assert!(sinks.uninstall(first), "removed once");
+        assert!(!sinks.uninstall(first), "and not twice");
+        sinks.fire();
+        assert_eq!(
+            *told.lock().unwrap(),
+            ["first", "second", "second"],
+            "the removed observer is told no more, the other still is"
+        );
+        assert_eq!(sinks.len(), 1);
     }
 }

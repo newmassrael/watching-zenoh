@@ -4571,7 +4571,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 obs.replies.set_shm_handoff_shared(shared.clone());
                 obs.queryables.set_shm_handoff_shared(shared);
             }
+            // `declarations-synced-event` — the peer's `DeclareFinal` of the initial interest
+            // turns the subscriber plane's flag on; read before and after, the dispatch that
+            // turns it on is the one that tells the listeners, and one that finds it on already
+            // (a peer repeating its final) tells nobody. A new establishment clears the flag with
+            // the tables, so the next one is told again.
+            #[cfg(feature = "declarations-synced-event")]
+            let was_final = obs.remote_subscribers.peer().initial_declarations_final();
             obs.dispatch_event(event);
+            #[cfg(feature = "declarations-synced-event")]
+            if !was_final && obs.remote_subscribers.peer().initial_declarations_final() {
+                obs.declarations_final.fire();
+            }
             // R2690 (§5.23) — refresh the admin introspection cache from the
             // tables this dispatch has just moved. AFTER `dispatch_event`, not
             // before: an inbound `DeclSubscriber` must be answerable by the very
@@ -4630,6 +4641,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             }
         });
         self.drain_deferred_fires();
+    }
+
+    /// Whether the peer has ended its initial declarations: it sent the `DeclareFinal` of the
+    /// initial interest, so what the declaration listeners have been given is everything it held
+    /// when this session was established. The other half of [`DeclEvent::Synced`]: that event
+    /// reaches the listeners declared before the peer finished, and this answers for one declared
+    /// after. `false` before the peer's final, and again once the link is lost.
+    ///
+    /// Not [`Self::declarations_synced`], which is about this node's declarations reaching the
+    /// peer; this is about the peer's reaching this node.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn peer_declarations_final(&self) -> bool {
+        R::with_mutex_mut(&self.observer, |obs| {
+            obs.remote_subscribers.peer().initial_declarations_final()
+        })
     }
 
     /// Whether this session's declarations are in step with its peer right now

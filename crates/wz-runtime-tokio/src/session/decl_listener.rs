@@ -40,6 +40,7 @@ use super::*;
 /// surface the listener was registered through, exactly as the inline
 /// seam carries it by registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeclEvent {
     /// Peer declared an entity: the peer-assigned declaration id + the
     /// resolved keyexpr literal it was declared on.
@@ -55,6 +56,17 @@ pub enum DeclEvent {
         /// Peer-assigned declaration id of the prior declaration.
         id: u64,
     },
+    /// The peer ended its initial declarations (`declarations-synced-event`,
+    /// `docs/declarations-synced-event.md`): it sent the `DeclareFinal` of the initial interest,
+    /// so every `Declared` before this event is what the peer held when the session was
+    /// established, and every one after is live. One wire message ends the burst of subscribers,
+    /// queryables and tokens alike, so a listener of any of the three is told, once for each time
+    /// the session is established.
+    ///
+    /// Never delivered in a build without the capability. A listener declared after the peer
+    /// finished is not told, as it was not given the declarations that came before: it reads
+    /// [`Session::peer_declarations_final`].
+    Synced,
 }
 
 /// R311lc — the type-erased user callback a decl listener's deferred
@@ -111,6 +123,9 @@ pub struct DeclListener<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioT
     pub(super) decl_id: u64,
     /// R311lb registry-local id of the installed undeclaration observer.
     pub(super) undecl_id: u64,
+    /// The id of the observer told that the peer's initial declarations are final
+    /// (`declarations-synced-event`), or `None` in a build without it.
+    pub(super) synced_id: Option<u64>,
     pub(super) scope: DeclListenerScope,
     /// The deferred-fire cell holding the user callback (the registry
     /// sinks only stage; the drive loop's drain fires through this cell
@@ -139,13 +154,21 @@ impl<R: SessionRuntime, T: TimeSource> DeclListener<R, T> {
         // under a subset where all three registry variants are cfg-off
         // the zero-arm match below reads none of these fields and the
         // deny-warnings build would reject them.
-        let _ = (&self.session, self.decl_id, self.undecl_id);
+        let _ = (&self.session, self.decl_id, self.undecl_id, self.synced_id);
         #[cfg(any(
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "liveliness-token"
         ))]
         self.cell.kill();
+        // The observer of the peer's sync goes with the other two, so a listener that was
+        // undeclared is told nothing and leaves nothing behind.
+        #[cfg(feature = "declarations-synced-event")]
+        if let Some(synced_id) = self.synced_id {
+            R::with_mutex_mut(self.session.observer(), |obs| {
+                obs.declarations_final.uninstall(synced_id)
+            });
+        }
         // Each arm rides its variant's gate (see [`DeclListenerScope`]).
         match self.scope {
             #[cfg(feature = "declare-subscriber")]
@@ -254,6 +277,36 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         (cell, decl_sink, undecl_sink)
     }
 
+    /// Install, under the observer lock the caller holds, the observer that stages
+    /// [`DeclEvent::Synced`] onto `cell` when the peer's initial declarations are final
+    /// (`declarations-synced-event`), and return its id; `None` in a build without it. Staged, as
+    /// the other two are, so the callback runs after the lock drops.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token"
+    ))]
+    fn tell_when_synced(
+        &self,
+        obs: &mut ApplicationLayerObserver,
+        cell: &DeclListenerCell<R>,
+    ) -> Option<u64> {
+        #[cfg(feature = "declarations-synced-event")]
+        {
+            let queue = self.fires.clone();
+            let cell = cell.clone();
+            Some(obs.declarations_final.install(move || {
+                let cell = cell.clone();
+                cell.stage(&queue, move |cb| cb(DeclEvent::Synced));
+            }))
+        }
+        #[cfg(not(feature = "declarations-synced-event"))]
+        {
+            let _ = (obs, cell);
+            None
+        }
+    }
+
     /// R311lc — observe peer SUBSCRIBER declaration activity: `callback`
     /// fires with [`DeclEvent::Declared`] on every inbound
     /// `Declare(DeclSubscriber)` whose keyexpr resolves, and with
@@ -283,7 +336,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(feature = "declare-subscriber")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
-            let (decl_id, undecl_id) = R::with_mutex_mut(&self.observer, |obs| {
+            let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
                 let d = obs
                     .remote_subscribers
                     .on_subscriber_declared_sink(decl_sink)
@@ -292,12 +345,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     .remote_subscribers
                     .on_subscriber_undeclared_sink(undecl_sink)
                     .expect("observer install on the alloc backing never exceeds capacity");
-                (d, u)
+                (d, u, self.tell_when_synced(obs, &cell))
             });
             Ok(DeclListener {
                 session: self.clone(),
                 decl_id,
                 undecl_id,
+                synced_id,
                 scope: DeclListenerScope::RemoteSubscribers,
                 cell,
             })
@@ -321,7 +375,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(feature = "declare-queryable")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
-            let (decl_id, undecl_id) = R::with_mutex_mut(&self.observer, |obs| {
+            let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
                 let d = obs
                     .remote_queryables
                     .on_queryable_declared_sink(decl_sink)
@@ -330,12 +384,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     .remote_queryables
                     .on_queryable_undeclared_sink(undecl_sink)
                     .expect("observer install on the alloc backing never exceeds capacity");
-                (d, u)
+                (d, u, self.tell_when_synced(obs, &cell))
             });
             Ok(DeclListener {
                 session: self.clone(),
                 decl_id,
                 undecl_id,
+                synced_id,
                 scope: DeclListenerScope::RemoteQueryables,
                 cell,
             })
@@ -361,7 +416,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(feature = "liveliness-token")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
-            let (decl_id, undecl_id) = R::with_mutex_mut(&self.observer, |obs| {
+            let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
                 let d = obs
                     .liveliness
                     .on_token_declared_sink(decl_sink)
@@ -370,12 +425,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     .liveliness
                     .on_token_undeclared_sink(undecl_sink)
                     .expect("observer install on the alloc backing never exceeds capacity");
-                (d, u)
+                (d, u, self.tell_when_synced(obs, &cell))
             });
             Ok(DeclListener {
                 session: self.clone(),
                 decl_id,
                 undecl_id,
+                synced_id,
                 scope: DeclListenerScope::LivelinessTokens,
                 cell,
             })
