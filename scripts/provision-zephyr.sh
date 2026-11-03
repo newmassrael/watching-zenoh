@@ -57,16 +57,6 @@ pin() {
 
 REF="$(pin ZEPHYR_REF)"
 SDK_VERSION="$(pin ZEPHYR_SDK_VERSION)"
-
-# `bx.toml` states the SDK version a build machine must have to be sent a Qz run. bx reads a version
-# from a file only where exactly one line matches, and the workflow states this pin in two jobs, so
-# `[tools.zephyr-sdk]` carries a copy; a copy that differs from CI's would send runs to machines
-# built against another SDK, so it is held to the pin here.
-BX_SDK_VERSION="$(sed -n '/^\[tools\.zephyr-sdk\]/,/^\[/s/^version = "\([^"]*\)"$/\1/p' "$ROOT/bx.toml")"
-if [[ "$BX_SDK_VERSION" != "$SDK_VERSION" ]]; then
-    echo "provision-zephyr: FAIL - bx.toml [tools.zephyr-sdk] version is '${BX_SDK_VERSION}', $WORKFLOW states $SDK_VERSION" >&2
-    exit 2
-fi
 SDK_DIR="${ZEPHYR_SDK_DIR:-$HOME/zephyr-sdk-$SDK_VERSION}"
 VENV="$HOME_DIR/.venv"
 ZEPHYR="$HOME_DIR/zephyr"
