@@ -308384,6 +308384,34 @@
         "A hosted reading of Layers B, C1cs, C1bzr, C1cn, C1z and 0 at this round's head."
       ]
     },
+    "Round 4196": {
+      "decision_summary": "The hosted census job (non-default feature compile + census, shard 0 of 2) refused the tree after the open-with-a-node change: wz-capi-c has 12 tests only a feature build reaches, the legs run 11, and one is claimed by nothing. It is the roles-file test that opens a config keeping its south apart as the node that places a remote by it; it sits under cfg(feature = \"router-node\") and no row named that feature for the crate. One row claims it, filtered on the integration target so a router-node test added to that file later is claimed without touching the row.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: one wz-capi-c row, feature router-node, filter the session_roles target, placed after the clock-source row, with a comment quoting the hosted refusal."
+      ],
+      "verification_bullets": [
+        "The leg's own command on the build machine, cargo test -p wz-capi-c --features router-node --test session_roles: 7 passed, 0 failed, 0 filtered out, and the test the hosted census named is one of the seven. The full census was not re-run for this row; the earlier full census on the build machine, taken before the open-with-a-node change, had wz-capi-c at 11 tests only a feature build reaches, all run by a leg."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The same hosted run is also red on the C0 discard-site gate, three rustdoc links in the C1bzr shards, the capic-default size budget, the Zephyr stack bound and the NEG lanes' time alarm; each is read against the current main tip and repaid as its own round if it still stands. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd."
+      ],
+      "publishable_decision_summary": "The hosted census job (non-default feature compile + census, shard 0 of 2) refused the tree after the open-with-a-node change: wz-capi-c has 12 tests only a feature build reaches, the legs run 11, and one is claimed by nothing. It is the roles-file test that opens a config keeping its south apart as the node that places a remote by it; it sits under cfg(feature = \"router-node\") and no row named that feature for the crate. One row claims it, filtered on the integration target so a router-node test added to that file later is claimed without touching the row.",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: one wz-capi-c row, feature router-node, filter the session_roles target, placed after the clock-source row, with a comment quoting the hosted refusal."
+      ],
+      "publishable_verification_bullets": [
+        "The leg's own command on the build machine, cargo test -p wz-capi-c --features router-node --test session_roles: 7 passed, 0 failed, 0 filtered out, and the test the hosted census named is one of the seven. The full census was not re-run for this row; the earlier full census on the build machine, taken before the open-with-a-node change, had wz-capi-c at 11 tests only a feature build reaches, all run by a leg."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The same hosted run is also red on the C0 discard-site gate, three rustdoc links in the C1bzr shards, the capic-default size budget, the Zephyr stack bound and the NEG lanes' time alarm; each is read against the current main tip and repaid as its own round if it still stands. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
