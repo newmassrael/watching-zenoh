@@ -1420,3 +1420,57 @@ chance at most 10%, which needs 29 groups a side. After the report the
 validation files may join the development corpus and the model may change, and
 the next freeze needs a validation corpus of its own.
 
+### 6.13 The validation corpus, read once (2026-11-03)
+
+`captures/validation/` holds 58 captures taken after the freeze, each a group of
+its own: 29 zenoh groups and 29 null ones. The zenoh groups are workloads,
+links and implementations the development corpus lacks, all at the pinned
+release 1.10.2: queries and the querier, liveliness, fragmented samples over
+TCP and UDP, two priorities and express, user-password authentication, a
+multicast transport, the lowlatency transport over TCP and UDP (D12),
+WebSocket (D15), peers with no router, two linked routers, IPv6, compression
+with queries, the advanced publisher, thirty one-put sessions, express round
+trips, multicast scouting, TLS, QUIC, the admin space, zenoh-c and zenoh-pico.
+The null groups are 29 protocols the development corpus does not hold, each
+its real server and client: beanstalkd, consul, FTP, git, gRPC, iperf3 over TCP
+and UDP, IRC, LDAP, mail (SMTP, IMAP, POP3), MySQL (MariaDB), memcached, Modbus,
+MongoDB, NATS, NSQ, AMQP (RabbitMQ), RADIUS, rsync, SIP, SMB, SNMP, STUN,
+syslog over UDP and TCP, telnet, TFTP, a WebSocket of another protocol, ZMTP
+(ZeroMQ) and ZooKeeper. How each was taken is `scripts/capture-validation.sh`.
+
+The corpus was read once, by `the_validation_corpus_read_against_the_frozen_model`
+on the reader whose model digest is the registered `0xace0388900a8cc99`. Its
+report is `captures/validation/report.txt`, which the test now holds the
+reader to. What it says, in the three parts section 6.12 registered:
+
+1. **The errors.** No zenoh group has a flow that reads `no`, and no null group
+   has a flow that reads `yes`. Nothing refutes the frozen model.
+2. **The model's validity.** No null group's `yes` sum reaches even `+1` bit
+   (0 of 29 at every level, exact 95% interval up to 0.1194). Three zenoh
+   groups' `no` sums dip below `-1` bit (3 of 29, interval 0.0219 to 0.2735,
+   under the level of one half) and none below `-2` bits. The shares fall as
+   the levels do; at the interim level of section 6.4, no group failing in 29
+   bounds the chance a group fails at `1 - 0.05^(1/29) = 0.098` (one-sided
+   95%), under the 10% registered.
+3. **The operating characteristics.** A zenoh flow that reads `yes` does so on
+   its sixth observation over TCP and its ninth over UDP and WebSocket (where
+   no length chain stands beside the handshake), at the 95th percentile as at
+   the mean.
+   A null flow that reads `no` does so on its first or second observation: a
+   foreign front.
+
+What the reading does not show, stated rather than dropped:
+
+- Flows that stay `undecided`. TLS and QUIC zenoh flows carry nothing the
+  reader sees, as intended. Six flows of the scouting workload, fifteen of
+  zenoh-c's query sessions and one of its publication sessions end before a
+  word. Thirteen null groups reach no word either (iperf3 over TCP, LDAP,
+  MySQL, Modbus, MongoDB, RADIUS, SMB, STUN, telnet, TFTP, the other
+  WebSocket, ZeroMQ and ZooKeeper): their fronts are IDs of the wire or they
+  are too short, and their `yes` sums stay under one bit.
+- The judgement is at the interim level only: 29 groups a side cannot reach the
+  first target (59) or the final one (299).
+
+With the report written, the validation files may join the development corpus;
+until a new freeze, they are held as they were read.
+
