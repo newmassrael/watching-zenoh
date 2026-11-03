@@ -307108,6 +307108,36 @@
         "Replaces the carry of round 4150. The flow zenoh test, in order: the freezing entry (D5, D9), now that the derived checks are in; then the validation corpus, read once (new captures of queries, liveliness, other implementations, a lowlatency link for D12 and a WebSocket link for D15). A compressed link's uncompressed batch (header 0x00) is not a point the ws scan resumes at; stated in doc 6.11. The consumer and the RTT session are told fields 54 and table 10."
       ]
     },
+    "Round 4157": {
+      "decision_summary": "The kit run of the admin image of decision D14 exercises the write of the connect endpoints. The limits of the previous entry cut the subscriptions the node holds to two, and the one thing they serve that no kit step had run was the config subscriber: the write of connect/endpoints. The run now starts a third peer on the cable, listening for tls/ with the node's certificate as the root it pins and a key of its own, has the router write that locator as the node's endpoint through the REST plugin (HTTP 200), and requires three things: the node dials it (no zid is hinted for it, so this is the endpoint dial and not the open by zid), the node's status/connect reports the written endpoint live, and its admin root lists the session of the third peer. The peer opened by zid goes first because the node holds two sessions at most (the router's and one it dials). The step held on its first run and again on the repeat, with the leaner limits, the stack of 12,800 bytes and the reading of 7,744 unchanged.",
+      "changes_bullets": [
+        "scripts/kit-lane.sh: the third peer and the write of the connect endpoints in the admin run, ENDPOINT_PORT. docs/session-lifecycle-intent.md: the step."
+      ],
+      "verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: two runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls with the step, the second inside the image's row (stack 7,744) with every step held and no wz: FAIL line; the first held every step and failed only the row because the rows on the lab host were one edit behind. kit-lane.sh --selftest passes. The hosted run has not been read; the hosted runs of the last pushes were cancelled by newer ones."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the limits the overlay still leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's); a hosted reading of Layer Qzk, which no completed hosted run has given since the contract order changed."
+      ],
+      "publishable_decision_summary": "The kit run of the admin image of decision D14 exercises the write of the connect endpoints. The limits of the previous entry cut the subscriptions the node holds to two, and the one thing they serve that no kit step had run was the config subscriber: the write of connect/endpoints. The run now starts a third peer on the cable, listening for tls/ with the node's certificate as the root it pins and a key of its own, has the router write that locator as the node's endpoint through the REST plugin (HTTP 200), and requires three things: the node dials it (no zid is hinted for it, so this is the endpoint dial and not the open by zid), the node's status/connect reports the written endpoint live, and its admin root lists the session of the third peer. The peer opened by zid goes first because the node holds two sessions at most (the router's and one it dials). The step held on its first run and again on the repeat, with the leaner limits, the stack of 12,800 bytes and the reading of 7,744 unchanged.",
+      "publishable_changes_bullets": [
+        "scripts/kit-lane.sh: the third peer and the write of the connect endpoints in the admin run, ENDPOINT_PORT. docs/session-lifecycle-intent.md: the step."
+      ],
+      "publishable_verification_bullets": [
+        "On the T2G kit with zenohd 1.10.2: two runs of scripts/kit-lane.sh run zephyr-admin-fixed-tls with the step, the second inside the image's row (stack 7,744) with every step held and no wz: FAIL line; the first held every step and failed only the row because the rows on the lab host were one edit behind. kit-lane.sh --selftest passes. The hosted run has not been read; the hosted runs of the last pushes were cancelled by newer ones."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the limits the overlay still leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's); a hosted reading of Layer Qzk, which no completed hosted run has given since the contract order changed."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
