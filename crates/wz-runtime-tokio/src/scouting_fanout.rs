@@ -146,6 +146,34 @@ pub async fn bind_scout_sockets(
             Err(error) => refused.push((*local, error)),
         }
     }
+    if locals.is_empty() {
+        // Upstream's floor: a host with no interface to name (Windows answers none, and so does a
+        // host with no multicast interface up) scouts from ONE socket bound to the family
+        // wildcard on an ephemeral port, its egress left to the kernel
+        // (`zenoh/src/net/runtime/orchestrator.rs` @ `vec![Ipv6Addr::UNSPECIFIED.into()]`, then
+        // `Runtime::bind_ucast_port(iface, multicast_ttl)`). The group socket must not be the one
+        // that asks: its port is the group's, shared with every responder on the host, and where
+        // a unicast datagram to a port several sockets hold goes to ONE of them (Windows: the
+        // first bound) the Hello would come back to a responder and not to the asker.
+        let cfg = McastSocketConfig {
+            iface: None,
+            ttl,
+            extra_joins: &[],
+            bind: None,
+            dscp: None,
+            loopback: Default::default(),
+        };
+        match UdpDriver::bind_multicast_tx(group, port, cfg).await {
+            Ok(driver) => bound.push(driver),
+            Err(error) => refused.push((
+                match group {
+                    IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                },
+                error,
+            )),
+        }
+    }
     (bound, refused)
 }
 
@@ -161,9 +189,9 @@ pub struct FanOutShape {
     /// Addresses that were offered and could not be bound.
     pub refused: Vec<(IpAddr, io::Error)>,
     /// The group socket is asking because nothing else could — the pre-R2611
-    /// behaviour, kept as a floor so a host whose enumeration fails still
-    /// scouts. NAMED because a fallback nobody can see is the shape this tree
-    /// keeps paying for.
+    /// behaviour, kept as the last floor so a host that cannot bind even
+    /// [`bind_scout_sockets`]'s one unpinned ask socket still scouts. NAMED
+    /// because a fallback nobody can see is the shape this tree keeps paying for.
     pub fell_back_to_group: bool,
 }
 
@@ -541,16 +569,37 @@ mod tests {
         );
     }
 
-    /// R2611 — an empty offer is not a fan-out, and the shape must not read as
-    /// one.
+    /// An empty offer binds upstream's floor: ONE unpinned ask socket on an ephemeral port, and
+    /// not the group's port.
     ///
-    /// The anti-vacuity arm: `asked_on` is the number a caller would quote, so
-    /// a zero-interface host must report the fallback rather than a fan-out of
-    /// one that happens to be the same socket.
+    /// The group socket asked here before, and on a host that enumerates no interface (Windows,
+    /// or one with none up) its Scout left from the group port, which every responder on the
+    /// host holds too: a unicast Hello to a port several sockets hold goes to one of them
+    /// (Windows: the first bound, measured with two plain sockets), so the asker never heard the
+    /// answer to its own question. The socket asked with must have a port of its own, and the
+    /// shape must say that nothing fell back to the group socket.
     #[tokio::test]
-    async fn an_empty_offer_binds_nothing() {
+    async fn an_empty_offer_binds_one_unpinned_ask_socket_of_its_own() {
         let (ask, refused) = bind_scout_sockets(GROUP, 7446, &[], None).await;
-        assert!(ask.is_empty(), "nothing offered, nothing bound");
-        assert!(refused.is_empty(), "and nothing to refuse");
+        assert!(refused.is_empty(), "the floor binds: {refused:?}");
+        assert_eq!(ask.len(), 1, "one socket asks");
+        let local = ask[0].local_addr().expect("the ask socket's own address");
+        assert_ne!(local.port(), 7446, "an ephemeral port, not the group's");
+        // The readback is the pin's, which a build with `locator-iface` compiles.
+        #[cfg(feature = "locator-iface")]
+        assert_eq!(
+            ask[0]
+                .multicast_egress_v4()
+                .expect("read back the default egress"),
+            Ipv4Addr::UNSPECIFIED,
+            "nothing is pinned: the kernel chooses the egress"
+        );
+
+        let (_, shape) = ScoutFanOut::over(stand_in_group_socket().await, ask, refused);
+        assert_eq!(shape.asked_on, 1);
+        assert!(
+            !shape.fell_back_to_group,
+            "the group socket only receives while an ask socket exists"
+        );
     }
 }
