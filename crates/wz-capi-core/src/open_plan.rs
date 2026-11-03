@@ -661,9 +661,10 @@ impl OpenPlan {
     /// of the node that it does not carry (a multicast group, a listener that is bound after the
     /// open). A peer that scouts and keeps its south apart (`gateway/south` names subregions) is a
     /// node too: it is the gateway of the nodes that find it, and the node carries the scouting
-    /// that dials what it finds ([`OpenArguments::run_node`]). A peer that scouts and keeps no
-    /// south apart fits no node, and is the registry of faces the other roles are, which does not
-    /// forward between its faces.
+    /// that dials what it finds ([`OpenArguments::run_node`]). So is one that accepts no session
+    /// and keeps its south apart, which dials the remotes it places in it. A peer that scouts and
+    /// keeps no south apart fits no node, and is the registry of faces the other roles are, which
+    /// does not forward between its faces.
     #[cfg(feature = "router-node")]
     pub fn peer_fits_node(&self) -> bool {
         #[cfg(feature = "scout")]
@@ -671,9 +672,14 @@ impl OpenPlan {
         #[cfg(not(feature = "scout"))]
         let scouts = false;
         let a_gateway = matches!(self.gateway_south, SouthPartition::Custom(_));
+        // A peer that keeps a south apart is a node whether or not it accepts a session: the
+        // remotes it dials are placed by the partition as the ones that dial it are, so it has a
+        // south to keep apart on the links it opens itself. A peer that keeps none is a node
+        // only as the node others route through, which is one that accepts sessions.
+        //
         // A listener that cannot be bound is a failed open here; one that is bound later, when
         // `listen/exit_on_failure` is off, is the registry's to serve.
-        !self.listen.is_empty()
+        (!self.listen.is_empty() || a_gateway)
             && self.groups.is_empty()
             && (!scouts || a_gateway)
             && self.listen_phase.policy.exit_on_failure
@@ -1438,8 +1444,18 @@ mod tests {
                 gateway: { south: [ { filters: [ { modes: ["peer"] } ] } ] } }"#;
             assert_eq!(
                 plan(WhatAmI::Peer, &dial, &[], deaf).refuse_uncarried_south(WhatAmI::Peer, true),
-                Err(OpenRefusal::GatewayNotCarried),
-                "a peer that accepts no session is the registry of faces"
+                Ok(()),
+                "a peer that keeps a south apart is a node though it accepts no session"
+            );
+            assert!(
+                !plan(
+                    WhatAmI::Peer,
+                    &dial,
+                    &[],
+                    r#"{ listen: { endpoints: [] } }"#
+                )
+                .peer_fits_node(),
+                "a peer that keeps no south apart and accepts no session is the registry of faces"
             );
             assert_eq!(
                 plan(WhatAmI::Client, &dial, &bind, south)
