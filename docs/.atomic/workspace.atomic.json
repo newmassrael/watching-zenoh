@@ -308232,6 +308232,34 @@
         "The reply stage's two tables, the reassembly slots and the listener's lanes still do not answer as pools, and the host lists three. The task table's mark is noted by a scan of its cells at each spawn, which costs a pass over the table only in a build with pool-monitor. The footprint and stack figures of the images are not re-read for this round. Nothing carries the document off a node yet, and no firmware turns the mark on."
       ]
     },
+    "Round 4192": {
+      "decision_summary": "The full nondefault-tests census, run on the shared build machine once its disk had room, refused the tree for a third crate: wz-runtime-tokio carries 1898 tests only a feature build reaches, the legs ran 1893 and the SKIPS excused 2, leaving three claimed by nothing. The three are the declarations-synced-event tests of the tokio session; each sits under a cfg(all(..)) that no row spelled. Three rows claim them, each with the union of the three cfg lists so that every one compiles, and each filtered on the full test name because session::tests:: would run every unit test of the session.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: three wz-runtime-tokio rows after the storage_manager_service row, with a comment quoting the refusal and saying why the filters are full names."
+      ],
+      "verification_bullets": [
+        "The three tests run with that feature list on the build machine: 3 passed, 0 failed, 642 filtered out. The full census on the build machine then ended with exit 0 and no FAIL line: wz-runtime-tokio 1898 only-with-features, 1896 run by a leg, 2 skipped by name; wz-session-core 2175 of 2175 run by a leg; wz-capi-pico 32, 28 run by a leg and 4 skipped by name; 26 crates carry 5183 such tests. This is the first complete census of the tree that was seen to pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "A test added later next to these three needs its own row, since the filters are full names. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd. The hosted run on this tip is read at the start of the next round."
+      ],
+      "publishable_decision_summary": "The full nondefault-tests census, run on the shared build machine once its disk had room, refused the tree for a third crate: wz-runtime-tokio carries 1898 tests only a feature build reaches, the legs ran 1893 and the SKIPS excused 2, leaving three claimed by nothing. The three are the declarations-synced-event tests of the tokio session; each sits under a cfg(all(..)) that no row spelled. Three rows claim them, each with the union of the three cfg lists so that every one compiles, and each filtered on the full test name because session::tests:: would run every unit test of the session.",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: three wz-runtime-tokio rows after the storage_manager_service row, with a comment quoting the refusal and saying why the filters are full names."
+      ],
+      "publishable_verification_bullets": [
+        "The three tests run with that feature list on the build machine: 3 passed, 0 failed, 642 filtered out. The full census on the build machine then ended with exit 0 and no FAIL line: wz-runtime-tokio 1898 only-with-features, 1896 run by a leg, 2 skipped by name; wz-session-core 2175 of 2175 run by a leg; wz-capi-pico 32, 28 run by a leg and 4 skipped by name; 26 crates carry 5183 such tests. This is the first complete census of the tree that was seen to pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A test added later next to these three needs its own row, since the filters are full names. The wz-native peer-publisher test pin still waits for a lane that drives wz_zenoh against zenohd. The hosted run on this tip is read at the start of the next round."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
