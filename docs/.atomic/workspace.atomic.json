@@ -307138,6 +307138,36 @@
         "Open: the admin image's stack bound with the calls through a register followed (15 on its chain are not followed); a hint for more than one peer and more than one commander key per verb on the kit; the limits the overlay still leaves at their defaults (liveliness subscriptions 8, local tokens 8, declaration observers 8, pending declares 32, multicast replies 8, the delivery lane's); a hosted reading of Layer Qzk, which no completed hosted run has given since the contract order changed."
       ]
     },
+    "Round 4158": {
+      "decision_summary": "The freezing entry of D5 (doc 6.12). Model 6 is frozen before any validation file exists: the rule (D1, D3, D4, D8: e-processes, 95% region, rounding toward the rejected side, +-20 bits, latch), zenoh of wire 0x09 with alteration bounds 2^-24 and 2^-10 (D10, D11), the checks and where they are weighed (D12 to D15), the generated parameters (22 zenoh groups, 18 null files, SN prior Beta(89/10000, 19911/10000)) and the groups of 6.3. A test holds all of it as digest 0xace0388900a8cc99 in every build, so a changed model fails until a new entry registers it. The validation corpus (queries, liveliness, fragments, priorities, auth, multicast, another implementation, lowlatency, WebSocket, new null protocols) sits apart, is weighed into nothing, and is read once: errors per group, crossing shares at 1 to 10 bits with exact intervals, units to a word; judged at the interim level (10%, 29 groups a side).",
+      "changes_bullets": [
+        "wz-capture zenoh_evidence: the_model_is_the_one_frozen_before_the_validation_corpus, an FNV-1a digest over the model number, the thresholds, the cookie and alteration bounds, the fixed-point constants, every check's strength and bases, and the parameters, pinned at 0xace0388900a8cc99. docs/flow-zenoh-verdict.md: section 6.12, the registration of the frozen model and of how the validation corpus is read."
+      ],
+      "verification_bullets": [
+        "On a build machine: the freeze test passes in the lz4, plain and no-default-features builds of wz-capture (one test run in each), all three computing digest 0xace0388900a8cc99; clippy clean for wz-capture with lz4 and with no default features. The model it freezes is the one round 4156 landed and verified (wz-capture 1649 and 1637, capi 227, C1bo, C1bt). Static gates 125 of 125, citation form gate passes. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Replaces the carry of round 4156. The flow zenoh test's one remaining step is the validation corpus: capture the groups doc 6.12 lists, apart from captures/corpus/, each file naming its group, then read it once and write the report doc 6.12 specifies before any of it is weighed. Capturing needs no release tag beyond those held; a 0.x capture only if the owner asks for another version's samples. A compressed link's uncompressed batch is not a point the ws scan resumes at (doc 6.11)."
+      ],
+      "publishable_decision_summary": "The freezing entry of D5 (doc 6.12). Model 6 is frozen before any validation file exists: the rule (D1, D3, D4, D8: e-processes, 95% region, rounding toward the rejected side, +-20 bits, latch), zenoh of wire 0x09 with alteration bounds 2^-24 and 2^-10 (D10, D11), the checks and where they are weighed (D12 to D15), the generated parameters (22 zenoh groups, 18 null files, SN prior Beta(89/10000, 19911/10000)) and the groups of 6.3. A test holds all of it as digest 0xace0388900a8cc99 in every build, so a changed model fails until a new entry registers it. The validation corpus (queries, liveliness, fragments, priorities, auth, multicast, another implementation, lowlatency, WebSocket, new null protocols) sits apart, is weighed into nothing, and is read once: errors per group, crossing shares at 1 to 10 bits with exact intervals, units to a word; judged at the interim level (10%, 29 groups a side).",
+      "publishable_changes_bullets": [
+        "wz-capture zenoh_evidence: the_model_is_the_one_frozen_before_the_validation_corpus, an FNV-1a digest over the model number, the thresholds, the cookie and alteration bounds, the fixed-point constants, every check's strength and bases, and the parameters, pinned at 0xace0388900a8cc99. docs/flow-zenoh-verdict.md: section 6.12, the registration of the frozen model and of how the validation corpus is read."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine: the freeze test passes in the lz4, plain and no-default-features builds of wz-capture (one test run in each), all three computing digest 0xace0388900a8cc99; clippy clean for wz-capture with lz4 and with no default features. The model it freezes is the one round 4156 landed and verified (wz-capture 1649 and 1637, capi 227, C1bo, C1bt). Static gates 125 of 125, citation form gate passes. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Replaces the carry of round 4156. The flow zenoh test's one remaining step is the validation corpus: capture the groups doc 6.12 lists, apart from captures/corpus/, each file naming its group, then read it once and write the report doc 6.12 specifies before any of it is weighed. Capturing needs no release tag beyond those held; a 0.x capture only if the owner asks for another version's samples. A compressed link's uncompressed batch is not a point the ws scan resumes at (doc 6.11)."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
