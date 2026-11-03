@@ -307168,6 +307168,34 @@
         "Replaces the carry of round 4156. The flow zenoh test's one remaining step is the validation corpus: capture the groups doc 6.12 lists, apart from captures/corpus/, each file naming its group, then read it once and write the report doc 6.12 specifies before any of it is weighed. Capturing needs no release tag beyond those held; a 0.x capture only if the owner asks for another version's samples. A compressed link's uncompressed batch is not a point the ws scan resumes at (doc 6.11)."
       ]
     },
+    "Round 4159": {
+      "decision_summary": "The coverage assertion of the writer-queue race test counted the senders' own flushes over a fixed 25 rounds and demanded more than 100. A loaded hosted runner that leaves the five threads few cores won the flush role 90 times, so the test failed on the machine, not on the code. The test now runs at least 25 rounds and continues, up to 400, until more than 100 flushes were reached, then asserts; every round still checks the stream order.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: test senders_that_write_their_own_messages_and_the_writer_keep_the_stream_in_order loops until the coverage count is met or 400 rounds, and reports the rounds in its message."
+      ],
+      "verification_bullets": [
+        "On a build host: the test passes (1 ran, 1 passed); rustfmt of the file is clean. Not run: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the hosted verdict of this round. The run that failed was head 1268297c95 (the heaviest feature-gate leg)."
+      ],
+      "publishable_decision_summary": "The coverage assertion of the writer-queue race test counted the senders' own flushes over a fixed 25 rounds and demanded more than 100. A loaded hosted runner that leaves the five threads few cores won the flush role 90 times, so the test failed on the machine, not on the code. The test now runs at least 25 rounds and continues, up to 400, until more than 100 flushes were reached, then asserts; every round still checks the stream order.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: test senders_that_write_their_own_messages_and_the_writer_keep_the_stream_in_order loops until the coverage count is met or 400 rounds, and reports the rounds in its message."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the test passes (1 ran, 1 passed); rustfmt of the file is clean. Not run: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the hosted verdict of this round. The run that failed was head 1268297c95 (the heaviest feature-gate leg)."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
