@@ -5,14 +5,14 @@
 //! hosts N LIVE [`StorageService`]s over a volume registry, driven by
 //! [`StorageConfig`]s.
 //!
-//! The kernel [`wz_session_core::storage_manager::StorageManager`] (R311y57) is
+//! The kernel [`wz_storage::storage_manager::StorageManager`] (R311y57) is
 //! the SYNC, runtime-agnostic registry: it resolves a config's `volume_id` to a
 //! [`Volume`], creates a backend, and
 //! holds the bare [`StorageBackend`] by name. It has no Session — it cannot
 //! capture Put/Delete samples or answer queries. [`RuntimeStorageManager`] here
 //! is its LIVE counterpart: per [`StorageConfig`] it resolves+creates the
 //! backend via a shared
-//! [`VolumeRegistry`](wz_session_core::storage_manager::VolumeRegistry::create_backend),
+//! [`VolumeRegistry`](wz_storage::storage_manager::VolumeRegistry::create_backend),
 //! then declares a live [`StorageService`] on a [`Session`] (a capture
 //! subscriber + a queryable, with the config's `strip_prefix` / `complete`
 //! applied) and holds it by name. Dropping the manager undeclares every hosted
@@ -77,15 +77,15 @@
 //! registry the kernel `StorageManager` composes — for volume registration,
 //! `volume_id` resolution, and the resolve+create step
 //! ([`register_volume`](RuntimeStorageManager::register_volume) +
-//! [`VolumeRegistry::create_backend`](wz_session_core::storage_manager::VolumeRegistry::create_backend)),
+//! [`VolumeRegistry::create_backend`](wz_storage::storage_manager::VolumeRegistry::create_backend)),
 //! so the registry and its
-//! [`VolumeNotFound`](wz_session_core::storage_manager::VolumeRegistryError::VolumeNotFound)
+//! [`VolumeNotFound`](wz_storage::storage_manager::VolumeRegistryError::VolumeNotFound)
 //! /
-//! [`VolumeCreate`](wz_session_core::storage_manager::VolumeRegistryError::VolumeCreate)
+//! [`VolumeCreate`](wz_storage::storage_manager::VolumeRegistryError::VolumeCreate)
 //! errors are a single source of truth shared by both managers (no duplicated
 //! registry). There is no embedded kernel `StorageManager` and so no dead
 //! `storages` map: the kernel manager's hold-the-backend
-//! [`add_storage`](wz_session_core::storage_manager::StorageManager::add_storage)
+//! [`add_storage`](wz_storage::storage_manager::StorageManager::add_storage)
 //! is the no_std / MCU sync hosting path; here the LIVE services hold their
 //! backends instead.
 
@@ -95,8 +95,8 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::storage_backend::StorageBackend;
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_manager::{VolumeRegistry, VolumeRegistryError};
 use wz_session_core::storage_volume::Volume;
+use wz_storage::storage_manager::{VolumeRegistry, VolumeRegistryError};
 
 use crate::session::{Session, Unicast};
 use crate::session_glue::SessionLinkActions;
@@ -297,7 +297,7 @@ pub fn build_volume(
 pub enum RuntimeStorageManagerError {
     /// A storage with this name is already hosted (names are unique per
     /// manager) — the live-service counterpart of the kernel manager's
-    /// [`DuplicateStorage`](wz_session_core::storage_manager::StorageManagerError::DuplicateStorage).
+    /// [`DuplicateStorage`](wz_storage::storage_manager::StorageManagerError::DuplicateStorage).
     DuplicateStorage(String),
     /// The shared [`VolumeRegistry`] could not resolve the volume or create the
     /// backend (the propagated

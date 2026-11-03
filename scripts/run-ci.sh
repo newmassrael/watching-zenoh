@@ -9648,10 +9648,10 @@ layer_c1y_cargo_test_routing_peer() {
 #      now runs `-p wz-session-core --features storage-backend --lib storage` to
 #      cover them — the §5.24 Volume/Capability/MemoryVolume (storage_volume) AND
 #      the previously-uncovered storage_backend/storage_state kernel tests.
-#      R311y57 — a SECOND wz-session-core line runs `--features
-#      storage-mgr-multi-storage-host --lib storage` (the storage_manager module is
-#      gated on that feature, NOT storage-backend, so the line above does not
-#      compile it) + clippy + a `wz` facade build, covering the cfg-ACTIVE manager.
+#      R311y57 — a SECOND line covers the cfg-ACTIVE manager (+ clippy + a `wz`
+#      facade build). The manager is the wz-storage crate's since the server-layer
+#      split (step 2), so that line is `-p wz-storage --lib`; it ran as a core
+#      `--features storage-mgr-multi-storage-host --lib storage` line before.
 #      R311y58 — likewise a `--features storage-mgr-strip-prefix --lib
 #      storage_strip_prefix` line (+ clippy + facade) covers the cfg-ACTIVE
 #      strip_prefix/restore key transforms (gated on their own feature). R311y59 —
@@ -9677,8 +9677,7 @@ layer_c1y_cargo_test_routing_peer() {
 #      `clippy --features storage-mgr-multi-storage-host` line proves the
 #      cfg(not(strip)) arm + the module compile standalone (the feature now
 #      also pulls the runtime storage-backend driver). The kernel
-#      create_backend rides the storage-mgr-multi-storage-host `--lib storage`
-#      line above;
+#      create_backend rides the wz-storage `--lib` line above;
 #      R311wt slice 2 — a `--features storage-mgr-wildcard-updates --lib storage`
 #      line (+ clippy + facade build) covers the write-path wildcard override
 #      engine (the `storage_state::tests::wildcard` mod: materialize + the
@@ -9757,8 +9756,10 @@ layer_c1z_cargo_test_storage_driver() {
     # storage leg.
     _runci_guarded_test "C1z storage" 45 \
         cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 53 \
-        cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet || return 1
+    # The storage manager's eight are the wz-storage crate's since the server-layer split
+    # (step 2): the core leg that turned on its feature read the 45 above and these 8 (53).
+    _runci_guarded_test "C1z storage manager" 8 \
+        cargo test -p wz-storage --lib --quiet || return 1
     # R2696 — 5 -> 8: the volume lifecycle's manager half reaches this leg too,
     # because none of the three (cascade, refusal, `build_volume`'s backend
     # resolution) is gated on an adminspace feature. It moves by THREE where the
@@ -9900,7 +9901,7 @@ layer_c1z_cargo_test_storage_driver() {
     _runci_guarded_test "C1z storage" 13 \
         cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet || return 1
     (cd crates \
-        && cargo clippy -p wz-session-core --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-storage --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-multi-storage-host --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \

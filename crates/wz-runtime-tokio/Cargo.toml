@@ -627,13 +627,13 @@ storage-aligner = [
     "query-consolidation",
     "query-timeout",
 ]
-# R311y57 — storage-mgr-multi-storage-host (§5.24): forward the wz-session-core
-# kernel StorageManager atom. R311y62 — also pulls the runtime `storage-backend`
-# driver: the runtime-side RuntimeStorageManager (storage_manager_service) hosts
-# N live StorageServices over the kernel manager's volume registry, so it needs
-# the StorageService driver (previously this was kernel-only).
+# R311y57 — storage-mgr-multi-storage-host (§5.24): the kernel StorageManager and its
+# volume registry, now the wz-storage crate's (`wz_storage::storage_manager`). R311y62 — also
+# pulls the runtime `storage-backend` driver: the runtime-side RuntimeStorageManager
+# (storage_manager_service) hosts N live StorageServices over the kernel manager's
+# volume registry, so it needs the StorageService driver.
 storage-mgr-multi-storage-host = [
-    "wz-session-core/storage-mgr-multi-storage-host",
+    "dep:wz-storage",
     "storage-backend",
 ]
 # R311y58 — forward the wz-session-core strip_prefix/restore key-transform logic.
@@ -2068,6 +2068,9 @@ wz-access-control = { path = "../wz-access-control", optional = true }
 # The §5.16 usrpwd auth method (`UsrPwdMethod`), the server layer's half of authentication.
 # Optional — pulled only by `access-extauth-usrpwd`.
 wz-auth = { path = "../wz-auth", optional = true }
+# The §5.24 storage manager's volume registry (`VolumeRegistry`), the server layer's storage plane.
+# Optional — pulled only by `storage-mgr-multi-storage-host`.
+wz-storage = { path = "../wz-storage", optional = true }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec
 # emit/include of every codec-* is governed strictly by the matching
 # `codec-*` forward above. Without disabling defaults the codec

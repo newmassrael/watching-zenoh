@@ -4379,6 +4379,7 @@ dependencies = [
  "wz-session-core-test-support",
  "wz-session-wire-fixtures",
  "wz-statechart-bridge",
+ "wz-storage",
  "wz-switchboard-schema",
  "wz-tls-pem",
  "wz-volume-abi",
@@ -4499,6 +4500,13 @@ name = "wz-statechart-bridge"
 version = "0.1.0"
 dependencies = [
  "sce-rust-runtime",
+ "wz-session-core",
+]
+
+[[package]]
+name = "wz-storage"
+version = "0.1.0"
+dependencies = [
  "wz-session-core",
 ]
 

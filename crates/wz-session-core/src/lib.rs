@@ -1718,15 +1718,9 @@ pub mod storage_config;
 #[cfg(feature = "adminspace-config-hotreload")]
 pub mod storage_plugin_config;
 
-/// R311y57 — the §5.24 `storage-mgr-multi-storage-host` atom: the
-/// [`storage_manager::StorageManager`] that hosts N named storages over a registry
-/// of named [`storage_volume::Volume`]s, creating each backend from its
-/// [`storage_config::StorageConfig`] via the volume (the wz mirror of zenoh's
-/// plugin-storage-manager `spawn_storage`). The first cfg-ACTIVE storage-manager
-/// atom (the data-model + volume keystones are FOUNDATIONAL); composes
-/// `storage-backend`.
-#[cfg(feature = "storage-mgr-multi-storage-host")]
-pub mod storage_manager;
+// The storage manager that hosts N named storages over a registry of these volumes
+// is the server layer's, in the wz-storage crate (`storage-mgr-multi-storage-host`
+// downstream); it composes the three modules above.
 
 // R311y58 — the §5.24 `storage-mgr-strip-prefix` atom: the
 // `storage_strip_prefix::strip_prefix` / `storage_strip_prefix::restore_prefix`

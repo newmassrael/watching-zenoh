@@ -2234,13 +2234,13 @@ pub use wz_session_core::storage_volume;
 // R311y62 — the storage MANAGER DRIVER (§5.24): the AP tokio binding that
 // hosts N live `storage_service::StorageService`s over a volume registry.
 // A `storage_manager_service::RuntimeStorageManager` reuses the kernel
-// `wz_session_core::storage_manager::StorageManager` for volume
+// volume registry of `wz_storage::storage_manager` for volume
 // registration + backend creation, then declares one live StorageService per
 // `wz_session_core::storage_config::StorageConfig` and holds
 // it by name — the live-service counterpart of the sync kernel manager (which
 // holds bare backends). Dropping the manager undeclares every hosted storage
 // (each StorageService's RAII Drop). Gated on `storage-mgr-multi-storage-host`
-// (which forwards the kernel manager + pulls `storage-backend` for the
+// (which pulls wz-storage for the kernel manager and `storage-backend` for the
 // service).
 #[cfg(feature = "storage-mgr-multi-storage-host")]
 pub mod storage_manager_service;

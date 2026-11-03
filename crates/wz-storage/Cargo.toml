@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-storage — the §5.11 / §5.24 storage plane, the server layer's storages: the wz mirror of
+# zenoh's `zenoh-plugin-storage-manager`. Its first module is the storage manager (`storage_manager`),
+# which hosts N named storages over a registry of named volumes. The backend, volume and config
+# types it composes are still the core's (`storage-backend`) and join this crate in later steps of
+# the server-layer split. The dependency points one way, and `scripts/lib/layer_direction_gate.py`
+# holds it: this crate is built on the core and the core never names it.
+#
+# no_std with alloc, as the core's storage modules are.
+[package]
+name = "wz-storage"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The storage plane of a wz node: storages hosted on the session, the zenoh storage manager's counterpart."
+
+[lib]
+name = "wz_storage"
+path = "src/lib.rs"
+
+[dependencies]
+# `StorageBackend`, `Volume` and `StorageConfig`, which the manager composes.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["storage-backend"] }
+
+[lints]
+workspace = true

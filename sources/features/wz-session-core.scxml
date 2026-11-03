@@ -120,7 +120,6 @@
   <sce:feature name="storage-backend" requires="alloc"/>
   <sce:feature name="storage-history" requires="storage-backend"/>
   <sce:feature name="storage-mgr-garbage-collection" requires="storage-mgr-wildcard-updates"/>
-  <sce:feature name="storage-mgr-multi-storage-host" requires="storage-backend"/>
   <sce:feature name="storage-mgr-strip-prefix" requires="alloc keyexpr-prefix"/>
   <sce:feature name="storage-mgr-wildcard-updates" requires="keyexpr-wildcard-double keyexpr-wildcard-single storage-backend"/>
   <sce:feature name="storage-profile"/>

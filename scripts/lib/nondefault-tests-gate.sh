@@ -624,7 +624,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         storage-backend,\
         storage-history,\
         storage-mgr-garbage-collection,\
-        storage-mgr-multi-storage-host,\
         storage-mgr-strip-prefix,\
         storage-mgr-wildcard-updates,\
         storage-replication,\
