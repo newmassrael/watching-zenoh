@@ -307602,6 +307602,36 @@
         "Owed for remote-declaration-watch: the unicast host session only. A multicast session has many peers and no single identity, the router face names its peer by its own means, and no C ABI door carries declaration events at all; one is a separate step with its own capability row and will carry this identity. An event staged while the link is already lost reads None, and the tests do not drive a reconnect to a second real peer, only a second named one. No hosted image states the capability on; the on value is held by tests that run with the feature, which no lane does yet. The G3 rows are now both landed on the host. Next absent switches: pool-monitor needs its reader and more pools; targeted-query and the G2 rows are P9."
       ]
     },
+    "Round 4173": {
+      "decision_summary": "The SDK version of the Zephyr tool was written in bx.toml, with a check in provision-zephyr.sh holding it to CI's pin, because bx refused a version_pattern that matched the two jobs of the workflow stating it. bx now takes the value when every matching line gives the same one and refuses when they differ, and that build is installed on this machine and the fleet. [tools.zephyr-sdk] reads ZEPHYR_SDK_VERSION from .github/workflows/ci.yml again, and the copy and its check in the script are gone, so the pin has one place.",
+      "changes_bullets": [
+        "bx.toml: [tools.zephyr-sdk] uses version_file and version_pattern on ci.yml; its comment says so.",
+        "scripts/provision-zephyr.sh: the bx.toml version check is removed."
+      ],
+      "verification_bullets": [
+        "bx-fleet decl validate bx.toml: valid; bx --explain-declaration reads version 1.0.1 for zephyr-sdk with needed_by Qz. A Qz command to a machine without Zephyr is still refused before anything is sent. provision-zephyr.sh --dry-run passes; shellcheck clean. Not run: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: a full run-ci.sh with no --layer is not caught by needed_by and is placed with --host; the owner is asked for a per-command requirement. bx keeping the toolchain (install, prefix_link) is not decided."
+      ],
+      "publishable_decision_summary": "The SDK version of the Zephyr tool was written in bx.toml, with a check in provision-zephyr.sh holding it to CI's pin, because bx refused a version_pattern that matched the two jobs of the workflow stating it. bx now takes the value when every matching line gives the same one and refuses when they differ, and that build is installed on this machine and the fleet. [tools.zephyr-sdk] reads ZEPHYR_SDK_VERSION from .github/workflows/ci.yml again, and the copy and its check in the script are gone, so the pin has one place.",
+      "publishable_changes_bullets": [
+        "bx.toml: [tools.zephyr-sdk] uses version_file and version_pattern on ci.yml; its comment says so.",
+        "scripts/provision-zephyr.sh: the bx.toml version check is removed."
+      ],
+      "publishable_verification_bullets": [
+        "bx-fleet decl validate bx.toml: valid; bx --explain-declaration reads version 1.0.1 for zephyr-sdk with needed_by Qz. A Qz command to a machine without Zephyr is still refused before anything is sent. provision-zephyr.sh --dry-run passes; shellcheck clean. Not run: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: a full run-ci.sh with no --layer is not caught by needed_by and is placed with --host; the owner is asked for a per-command requirement. bx keeping the toolchain (install, prefix_link) is not decided."
+      ]
+    },
     "Round 42": {
       "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
       "changes_bullets": [
