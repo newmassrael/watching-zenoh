@@ -384,6 +384,15 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     }
 }
 
+/// The runtime's task table as a pool (`pool-monitor`, `docs/pool-monitor.md`): see
+/// [`crate::executor::ExecutorState`].
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, D: ?Sized> wz_session_core::pool_gauge::PoolGauge for CoopRuntime<C, D> {
+    fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
+        wz_session_core::pool_gauge::PoolGauge::pool_stat(&self.inner.executor, name)
+    }
+}
+
 /// The runtime of an image: its task table, its timer table and the runtime built
 /// over them, in ONE `static` the image declares. Under `session-slot` this is how
 /// a [`CoopRuntime`] comes to be: nothing is allocated, the image says how many

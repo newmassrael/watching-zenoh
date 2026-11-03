@@ -113,8 +113,7 @@ where
 }
 
 /// The host lists the tables its sessions live in (`pool-monitor`, `docs/pool-monitor.md`): the
-/// session slots, then the pump cells, in that order. The task table is the runtime's and is not
-/// listed yet.
+/// session slots, then the pump cells, then the cells of the runtime's task table, in that order.
 impl<C, T, E, const S: usize, const P: usize> wz_session_core::pool_gauge::PoolList
     for SessionHost<C, T, E, S, P>
 where
@@ -126,6 +125,7 @@ where
         use wz_session_core::pool_gauge::PoolGauge;
         visit(self.sessions.pool_stat("session-slots"));
         visit(self.pumps.pool_stat("pump-cells"));
+        visit(self.local.runtime().pool_stat("task-cells"));
     }
 }
 

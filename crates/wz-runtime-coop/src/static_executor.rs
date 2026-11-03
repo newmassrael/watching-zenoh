@@ -183,6 +183,7 @@ impl<const TASKS: usize, const BYTES: usize> TaskTable<TASKS, BYTES> {
         ExecutorState {
             cells: &self.cells,
             refused: Mutex::new(Cell::new(Refusals::default())),
+            high: Mutex::new(Cell::new(wz_session_core::pool_gauge::HighWater::new())),
         }
     }
 }
@@ -234,6 +235,9 @@ pub struct Refusals {
 pub struct ExecutorState {
     cells: &'static [TaskCell],
     refused: Mutex<Cell<Refusals>>,
+    /// The most cells the table has held at once: zero-sized unless the build keeps the mark
+    /// (`pool-monitor`), so the state is the size it was.
+    high: Mutex<Cell<wz_session_core::pool_gauge::HighWater>>,
 }
 
 /// `value` rounded up to a multiple of `align`.
@@ -336,6 +340,17 @@ impl ExecutorState {
                 why: SpawnRefusal::NoTaskCell,
             });
         };
+        // The cell is taken: the mark is what the table holds now, if that is the most so far.
+        #[cfg(feature = "pool-monitor")]
+        {
+            let held = self.live_task_count();
+            crate::cs::with(|cs| {
+                let high = self.high.borrow(cs);
+                let mut mark = high.get();
+                mark.note(held);
+                high.set(mark);
+            });
+        }
         // SAFETY: the cell is `Spawning`, which only this call holds, and its bytes
         // are `cap` long and `CELL_ALIGN`-aligned, which the check above compared
         // against `F`'s size and alignment.
@@ -471,6 +486,22 @@ impl ExecutorState {
         self.cells.iter().any(|cell| {
             cell.with_meta(|meta| meta.state == State::Live) && cell.wake.load(Ordering::Acquire)
         })
+    }
+}
+
+/// The task table says its state as a pool (`pool-monitor`, `docs/pool-monitor.md`): its cells,
+/// those that hold a task or a result nobody has read, the most that held one at once where the
+/// build keeps the mark, and the spawns refused for want of a free cell. A task too large for a
+/// cell is not a want of room, so it is not counted here (`Refusals::too_large`).
+impl wz_session_core::pool_gauge::PoolGauge for ExecutorState {
+    fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
+        wz_session_core::pool_gauge::PoolStat {
+            name,
+            capacity: u32::try_from(self.capacity()).unwrap_or(u32::MAX),
+            in_use: u32::try_from(self.live_task_count()).unwrap_or(u32::MAX),
+            high_water: crate::cs::with(|cs| self.high.borrow(cs).get().get()),
+            refused: u64::from(self.refusals().no_task_cell),
+        }
     }
 }
 

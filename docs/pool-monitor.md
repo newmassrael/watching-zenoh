@@ -48,13 +48,18 @@ that keeps the mark.
 | id-keyed tables a peer writes | `id_map::FixedIdMap` | rows, refusals |
 | session slots | `session_slot::SessionSlots` | taken slots, refusals |
 | pump cells | `session_drive::PumpSlots` (`wz-runtime-coop`) | taken cells, refusals |
+| task cells | `static_executor::ExecutorState` (`wz-runtime-coop`), as `CoopRuntime` | cells holding a task or an unread result, spawns refused for want of a cell |
+
+The task table counts a spawn refused because the task is too large for a cell apart
+(`Refusals::too_large`): that is not a want of room, and a larger table would not cure it, so
+the pool's `refused` is the spawns that found no free cell and no more.
 
 ## Listing the pools
 
 An owner of pools implements `PoolList::visit_pools(&self, visit)`: it calls `visit` once per
 pool, in a fixed order, so a build with no heap lists its pools as one with a heap does, and
 nothing is collected. The MCU session host (`wz-session-mcu`'s `SessionHost`) is the first owner:
-it lists `session-slots`, then `pump-cells`.
+it lists `session-slots`, then `pump-cells`, then `task-cells`.
 
 `write_pool_document(&owner, &mut writer)` writes what an owner lists as a document, in JSON
 without whitespace and without an allocator:
@@ -69,8 +74,8 @@ the document. A reader that does not know `version` reads none of it.
 
 ## Not yet
 
-The reply stage's two tables, the reassembly slots, the task table and the listener's lanes keep
-their own counters and do not yet answer as pools. Nothing serves the document: a node's program
+The reply stage's two tables, the reassembly slots and the listener's lanes keep their own
+counters and do not yet answer as pools. Nothing serves the document: a node's program
 calls `write_pool_document` on the host it holds and sends the text where it wants, and the
 admin-space route and a `wz_ext_*` door are for the first consumer that asks for one. No firmware
 image of the repository turns the mark on or prints the document yet.

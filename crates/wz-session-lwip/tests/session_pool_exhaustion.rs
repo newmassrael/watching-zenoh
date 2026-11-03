@@ -472,11 +472,37 @@ fn fill_then_refuse<
     wz_session_core::pool_gauge::PoolList::visit_pools(&rig.acceptor, &mut |pool| {
         listed.push(pool)
     });
-    let (slots, cells) = (
+    let (slots, cells, tasks) = (
         wz_session_core::pool_gauge::PoolGauge::pool_stat(rig.sessions, "session-slots"),
         wz_session_core::pool_gauge::PoolGauge::pool_stat(rig.pumps, "pump-cells"),
+        wz_session_core::pool_gauge::PoolGauge::pool_stat(&rig.runtime, "task-cells"),
     );
-    assert_eq!(listed, [slots, cells], "{why:?}: the host's pools");
+    assert_eq!(listed, [slots, cells, tasks], "{why:?}: the host's pools");
+    // The task table is shared with whatever else the rig runs, so it holds at least the
+    // sessions' tasks; what it refused for want of a cell is what the runtime counted, and its
+    // mark lies between what it holds now and its capacity.
+    assert_eq!(
+        tasks.refused,
+        u64::from(task),
+        "{why:?}: the task cells' refusals"
+    );
+    assert!(
+        tasks.in_use as usize >= fill && tasks.in_use <= tasks.capacity,
+        "{why:?}: the task cells held {} of {}",
+        tasks.in_use,
+        tasks.capacity
+    );
+    assert_eq!(
+        tasks.high_water.is_some(),
+        cfg!(feature = "pool-monitor"),
+        "{why:?}: the task cells' mark is kept exactly when the build asks"
+    );
+    if let Some(mark) = tasks.high_water {
+        assert!(
+            (tasks.in_use..=tasks.capacity).contains(&mark),
+            "{why:?}: the task cells' mark {mark}"
+        );
+    }
     assert_eq!(
         cells.refused,
         u64::from(pump),
@@ -505,7 +531,11 @@ fn fill_then_refuse<
                 "{{\"name\":\"pump-cells\",\"capacity\":{},\"in_use\":{},",
                 cells.capacity, cells.in_use
             ))
-            && document.contains(&format!("\"refused\":{pump}}}]}}")),
+            && document.contains(&format!(
+                "{{\"name\":\"task-cells\",\"capacity\":{},",
+                tasks.capacity
+            ))
+            && document.ends_with(&format!("\"refused\":{task}}}]}}")),
         "{why:?}: the document {document}"
     );
 
