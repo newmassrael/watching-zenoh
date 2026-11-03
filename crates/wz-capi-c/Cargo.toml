@@ -513,9 +513,11 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", fea
 # itself, and two rows there use one; the stand-in stays for the rows that need a node whose zid
 # and locator are the test's to choose.) Dev-only; both are already in the graph.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["scouting-responder"] }
-# `listener_auth` dials a listener with a usrpwd initiator (`UsrPwdMethod`, `AuthDispatch`),
-# which the runtime does not re-export. Dev-only; the crate is already in the graph.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["access-extauth-usrpwd"] }
+# `listener_auth` dials a listener with a usrpwd initiator (`UsrPwdMethod` from `wz-auth`,
+# `AuthDispatch` from the core), which the runtime does not re-export. Dev-only; both crates are
+# already in the graph.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["session-extauth"] }
+wz-auth = { path = "../wz-auth" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 # R2300 (open-debt item 631) — for `config_verdict_zenohd_interop`, which has to
 # hand a real zenohd a config FILE: zenoh dispatches its parser on the file

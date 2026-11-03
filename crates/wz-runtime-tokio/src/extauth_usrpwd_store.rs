@@ -7,8 +7,8 @@
 //!
 //! # Why it lives here and not in the session kernel
 //!
-//! `wz-session-core` is `no_std`-shaped. It owns the SEAM
-//! ([`CredentialSource`](wz_session_core::extauth_usrpwd::CredentialSource))
+//! `wz-auth`, like the session core it is built on, is `no_std`-shaped. It owns the SEAM
+//! ([`CredentialSource`](wz_auth::usrpwd::CredentialSource))
 //! and the pure dictionary PARSER; this crate owns the
 //! machinery that needs `std` — a lock and a filesystem. That split is what lets
 //! the parse be tested without a filesystem and keeps file I/O out of a kernel
@@ -36,9 +36,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use wz_session_core::extauth_usrpwd::{
-    parse_dictionary, CredentialSource, CredentialTable, DictionaryError,
-};
+use wz_auth::usrpwd::{parse_dictionary, CredentialSource, CredentialTable, DictionaryError};
 
 /// Why a dictionary file could not be loaded.
 #[derive(Debug)]
@@ -63,7 +61,7 @@ impl std::error::Error for LoadError {}
 /// A shared, mutable `(user, password)` table.
 ///
 /// Cloning shares the table rather than copying it — that is the entire point:
-/// every session's [`UsrPwdMethod`](wz_session_core::extauth_usrpwd::UsrPwdMethod)
+/// every session's [`UsrPwdMethod`](wz_auth::usrpwd::UsrPwdMethod)
 /// holds a clone, so a later [`add_user`](Self::add_user) is visible to the next
 /// handshake without anyone re-installing a dispatch.
 #[derive(Clone)]

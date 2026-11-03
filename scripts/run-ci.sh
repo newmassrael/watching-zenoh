@@ -9526,8 +9526,13 @@ layer_c1y_cargo_test_routing_peer() {
     # dispatch's per-method draw and its carried-methods-only restore, and
     # 5 -> 6 is the e2e that decodes the carried challenge off the InitAck.
     # READ off the count-guard gate on R2779's range, which printed 18 / 9 / 6.
-    _runci_guarded_test "C1y extauth" 19 \
-        cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
+    # The usrpwd method moved to the `wz-auth` crate, above the core: its 15 tests left the core's
+    # `extauth` filter (19 -> 4, the `extauth` module's own) and are the `wz-auth` leg, 15.
+    # READ off `--list` of both, which printed 4 and 15.
+    _runci_guarded_test "C1y extauth" 4 \
+        cargo test -p wz-session-core --features session-extauth --lib extauth --quiet || return 1
+    _runci_guarded_test "C1y usrpwd" 15 \
+        cargo test -p wz-auth --lib --quiet || return 1
     # R2631 — 6 -> 7: `an_identity_is_an_acl_username_only_when_it_is_utf8`, the
     # witness for `AuthIdentity::acl_username`, the one bytes-to-name step the
     # ACL's new username axis reads through. READ off the command, which printed 7.
@@ -9540,7 +9545,7 @@ layer_c1y_cargo_test_routing_peer() {
     # witnessed (decision D9: a proof over a link nothing protects is not a lifecycle
     # credential), so the count is back. READ off the command, which printed 9.
     _runci_guarded_test "C1y auth_dispatch" 9 \
-        cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet || return 1
+        cargo test -p wz-session-core --features session-extauth --lib auth_dispatch --quiet || return 1
     _runci_guarded_test "C1y usrpwd e2e" 6 \
         cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
         --test usrpwd_handshake_e2e --quiet || return 1
@@ -9599,7 +9604,7 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-runtime-tokio --lib --no-default-features --features access-downsampling,zenoh-config --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --lib --no-default-features --features access-quota,zenoh-config --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat,zenoh-config --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
+        && cargo clippy -p wz-auth --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extauth --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-pubkey --quiet -- -D warnings)
@@ -15505,23 +15510,26 @@ layer_c1bn_passive_dissection_features() {
     # a register of, found by diffing this lane's `--list` against the union's
     # rather than by reading either. Named tests rather than a count, because
     # a count cannot say WHICH one went missing.
+    # The usrpwd method is the `wz-auth` crate's, above the core, so the test that holds this
+    # walker to that method's own body is wz-auth's (`tests/dissect_usrpwd.rs`) and runs below.
     listing="$(cd crates && cargo test -p wz-session-core \
-        --features dissect,access-extauth-usrpwd,transport-multilink dissect:: -- --list 2>&1)" \
+        --features dissect,session-extauth,transport-multilink dissect:: -- --list 2>&1)" \
         || { echo "$listing"; return 1; }
     for name in \
-        dissect::tests::the_auth_walker_agrees_with_this_trees_own_mux \
-        dissect::tests::the_usrpwd_body_walker_agrees_with_this_trees_own_method
+        dissect::tests::the_auth_walker_agrees_with_this_trees_own_mux
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bn FAIL: $name is absent from the auth-union dissect build"
             echo "$listing"; return 1; }
     done
     out="$(cd crates && cargo test -p wz-session-core \
-        --features dissect,access-extauth-usrpwd,transport-multilink dissect:: --quiet 2>&1)" \
+        --features dissect,session-extauth,transport-multilink dissect:: --quiet 2>&1)" \
         || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: the auth-union dissect filter matched no test"
         echo "$out"; return 1; }
+    _runci_guarded_test "C1bn usrpwd body against its own method" 1 \
+        cargo test -p wz-auth --test dissect_usrpwd --quiet || return 1
 
     # R2052 (open-debt item 377) — the MULTICAST UNION arm, and it exists for
     # the same reason the auth one above does. The gate it carries holds

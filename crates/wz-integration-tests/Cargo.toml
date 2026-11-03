@@ -138,6 +138,9 @@ wz-capi-pico = { path = "../wz-capi-pico" }
 # crates already depend on it. No prose in this tree records a decision to keep
 # it out; the omission is one.
 wz-capi-dissect = { path = "../wz-capi-dissect" }
+# The usrpwd method the zenohd interop legs dial with (`UsrPwdMethod::initiator`), which the
+# runtime does not re-export.
+wz-auth = { path = "../wz-auth" }
 # W3 no-alloc bounded mirror migration — tests build owned-mirror
 # heapless fields via the `codec_bound::bounded_{bytes,string}` helpers
 # (the same idiom production code uses at decode boundaries).

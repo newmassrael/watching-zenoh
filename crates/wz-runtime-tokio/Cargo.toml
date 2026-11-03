@@ -1718,7 +1718,8 @@ session-extauth = ["wz-session-core/session-extauth"]
 # LOCAL session-extauth must be on too, so the AP-layer wiring gated on it
 # (nonce_from_os_entropy, OpenError::AuthRejected, the drive-loop reject arm)
 # compiles; forwarding only to wz-session-core left those configured out.
-access-extauth-usrpwd = ["session-extauth", "wz-session-core/access-extauth-usrpwd"]
+# The method itself is the `wz-auth` crate's, above the core.
+access-extauth-usrpwd = ["session-extauth", "dep:wz-auth"]
 # R4b pubkey — the §5.16 RSA challenge-response auth method (PubKeyMethod). Unlike
 # usrpwd (which lives in the no_std session kernel), pubkey lives HERE because
 # `rsa` needs std; it gates the local `extauth_pubkey` module + pulls `rsa` /
@@ -2064,6 +2065,9 @@ wz-routing-graph = { path = "../wz-routing-graph", optional = true }
 # NetworkMessage live here in the runtime crate and consume this engine, the
 # same access_control.rs/authorization.rs split zenoh keeps.
 wz-access-control = { path = "../wz-access-control", optional = true }
+# The §5.16 usrpwd auth method (`UsrPwdMethod`), the server layer's half of authentication.
+# Optional — pulled only by `access-extauth-usrpwd`.
+wz-auth = { path = "../wz-auth", optional = true }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec
 # emit/include of every codec-* is governed strictly by the matching
 # `codec-*` forward above. Without disabling defaults the codec

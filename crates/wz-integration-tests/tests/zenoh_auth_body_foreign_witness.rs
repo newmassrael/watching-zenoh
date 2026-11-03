@@ -229,7 +229,7 @@ fn assert_one_id_three_encodings(bodies: &[Body], acceptor: Direction, initiator
 /// `key = state.nonce.to_le_bytes()` and `data = password`
 /// (`.../establishment/ext/auth/usrpwd.rs:325-327` on the initiator,
 /// `:420-423` on the acceptor, which recomputes and compares). Written from
-/// that algorithm and not from `wz_session_core::extauth_usrpwd`'s private
+/// that algorithm and not from `wz_auth::usrpwd`'s private
 /// twin on purpose: a digest borrowed from the tree under test could agree
 /// with it while both disagreed with the wire.
 fn usrpwd_hmac(nonce: u64, password: &[u8]) -> Vec<u8> {

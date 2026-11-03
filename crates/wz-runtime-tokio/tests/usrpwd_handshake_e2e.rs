@@ -6,7 +6,7 @@
 //! Drives a REAL initiator<->responder unicast handshake over the actual
 //! `encode_init`/`encode_open` + `parse_inbound` + `dispatch_link_event` path,
 //! pumping each side's emitted wire bytes into the other through
-//! `poll_and_dispatch_one`. Unlike the `extauth_usrpwd` / `auth_dispatch` kernel
+//! `poll_and_dispatch_one`. Unlike the `wz_auth::usrpwd` / `auth_dispatch` kernel
 //! unit tests (which exercise the four-stage exchange through the dispatch in
 //! isolation), this test proves the LIVE WIRING the R3b round added:
 //!
@@ -30,6 +30,7 @@
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use wz_auth::usrpwd::UsrPwdMethod;
 use wz_runtime_tokio::extauth_usrpwd_store::UsrPwdStore;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
@@ -49,7 +50,6 @@ use wz_runtime_tokio_test_support::{
 };
 use wz_session_core::auth_dispatch::{AuthDispatch, AuthIdentity};
 use wz_session_core::extauth::decode_auth_ext;
-use wz_session_core::extauth_usrpwd::UsrPwdMethod;
 use wz_session_core::locator::parse_any_locator;
 
 const USER: &[u8] = b"alice";

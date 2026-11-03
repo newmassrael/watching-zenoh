@@ -13,15 +13,15 @@
 //! - OpenAck = `Unit`         — accepted
 //!
 //! zenoh's `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>` (commons/zenoh-crypto/
-//! src/hmac.rs:19) — SHA3-256, NOT the SHA-2 the cookie [`crate::signing_key`]
-//! uses — so usrpwd pulls the `sha3` crate (under this feature). The OpenSyn
+//! src/hmac.rs:19) — SHA3-256, NOT the SHA-2 the session cookie (`wz_session_core::signing_key`)
+//! uses — so usrpwd pulls the `sha3` crate. The OpenSyn
 //! `{user, hmac}` body is zenoh `Zenoh080`'s two-`ZBuf` encoding (a VLE length
 //! then the bytes, twice), the read twin of [`SceCursor::read_vle_u64`].
 //!
 //! # Scope
 //!
 //! This is the method KERNEL: the credential logic + the wire codec + the HMAC,
-//! unit-tested through [`AuthDispatch`](crate::auth_dispatch::AuthDispatch). The challenge nonce is INJECTED at
+//! unit-tested through [`AuthDispatch`](wz_session_core::auth_dispatch::AuthDispatch). The challenge nonce is INJECTED at
 //! construction (the no_std core carries no RNG — `getrandom` has no bare-metal
 //! backend; the live handshake wiring supplies a per-handshake random nonce).
 //! Wiring `AuthDispatch` into the live Init/Open exchange + a wz<->zenohd
@@ -34,8 +34,8 @@ use hmac::{Hmac, Mac};
 use sce_forge_runtime::codec::SceCursor;
 use sha3::Sha3_256;
 
-use crate::auth_dispatch::{id, AuthError, AuthIdentity, AuthMethod, AuthSubExt};
-use crate::vle::{read_zbuf, write_zbuf};
+use wz_session_core::auth_dispatch::{id, AuthError, AuthIdentity, AuthMethod, AuthSubExt};
+use wz_session_core::vle::{read_zbuf, write_zbuf};
 
 /// A fixed dummy password the unknown-user reject path HMACs over so its cost
 /// matches a known user's verify (the timing-oracle close in
@@ -67,7 +67,7 @@ fn hmac_sha3_256_verify(key: &[u8], msg: &[u8], tag: &[u8]) -> bool {
 }
 
 /// Encode the OpenSyn body `{user, hmac}` — two zenoh `ZBuf`s, via the
-/// [`crate::vle`] `write_zbuf` SSOT (shared with the pubkey method's body codec).
+/// [`wz_session_core::vle`] `write_zbuf` SSOT (shared with the pubkey method's body codec).
 fn encode_open_syn(user: &[u8], hmac: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(user.len() + hmac.len() + 4);
     write_zbuf(&mut out, user);
@@ -451,9 +451,9 @@ impl AuthMethod for UsrPwdMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth_dispatch::AuthDispatch;
     use alloc::boxed::Box;
-    use wz_codecs::ext_entry::ExtEntryOwned;
+    use wz_session_core::auth_dispatch::AuthDispatch;
+    use wz_session_core::transport_profile::ExtEntryOwned;
 
     fn into_exts(ext: Option<ExtEntryOwned>) -> Vec<ExtEntryOwned> {
         ext.into_iter().collect()
@@ -770,7 +770,7 @@ mod tests {
         // — both lengths < 0x80, so single-byte VLE. This pins the exact wire,
         // the unit-level down payment on the wz<->zenohd interop e2e. (Values
         // are < 2^63, so the LEB128-vs-9-byte-cap divergence — tracked in
-        // crate::vle — does not arise here.)
+        // wz_session_core::vle — does not arise here.)
         let body = encode_open_syn(b"alice", &[0xAB; 32]);
         let mut expected = alloc::vec![0x05, b'a', b'l', b'i', b'c', b'e', 0x20];
         expected.extend_from_slice(&[0xAB; 32]);

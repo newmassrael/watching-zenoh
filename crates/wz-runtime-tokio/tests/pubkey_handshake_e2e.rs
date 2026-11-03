@@ -163,9 +163,9 @@ impl<M: wz_session_core::auth_dispatch::AuthMethod> wz_session_core::auth_dispat
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usrpwd_and_pubkey_challenge_the_initiator_with_different_values() {
     use std::sync::{Arc, Mutex};
+    use wz_auth::usrpwd::UsrPwdMethod;
     use wz_runtime_tokio::rsa::Pkcs1v15Encrypt;
     use wz_session_core::auth_dispatch::AuthSubExt;
-    use wz_session_core::extauth_usrpwd::UsrPwdMethod;
     use wz_session_core::vle::read_zbuf;
 
     const USER: &[u8] = b"alice";

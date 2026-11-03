@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use tempfile::NamedTempFile;
 
+use wz_auth::usrpwd::UsrPwdMethod;
 use wz_integration_tests::common::{
     wait_for_tcp_accept_alive, zenohd_binary, ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
@@ -47,7 +48,6 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::auth_dispatch::AuthDispatch;
-use wz_session_core::extauth_usrpwd::UsrPwdMethod;
 use wz_session_core::locator::parse_any_locator;
 
 /// The handshake-open iteration cap (matches the storage A10 interop).

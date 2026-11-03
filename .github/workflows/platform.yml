@@ -45,6 +45,7 @@ on:
       - "scripts/lib/rust-toolchain-pinned.sh"
       - "crates/wz-runtime-tokio/**"
       - "crates/wz-session-core/**"
+      - "crates/wz-auth/**"
       - "crates/wz-integration-tests/**"
       - "crates/wz-capi-core/**"
       - "crates/wz-capi-port/**"

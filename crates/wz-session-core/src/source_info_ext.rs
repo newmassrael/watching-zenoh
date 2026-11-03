@@ -99,7 +99,7 @@ pub fn encode_source_info_ext_entry<S: for<'x> ExtEntryFrom<'x>>(
 
 // `encode_vle_u64_into` moved to the `crate::vle` SSOT (imported above) so the
 // VLE-u64 writer has one home alongside its reader; this module and
-// `response_build` + `extauth_usrpwd` all share it.
+// `response_build` + the usrpwd method in `wz-auth` all share it.
 
 // R311fs — encode_source_info_ext_body wire-layout test, relocated
 // from wz-runtime-tokio::session_glue to its SSOT home (R311ek moved

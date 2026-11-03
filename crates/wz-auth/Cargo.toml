@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-auth — the §5.16 auth methods a node plugs into the session's handshake: the server layer's
+# half of authentication. The handshake's own half, the Z_EXT_AUTH sub-extension and its
+# per-method demux (`auth_dispatch`, `extauth`), stays in wz-session-core, where the drive loop
+# reads it on every frame; a method here implements its `AuthMethod` and is handed to
+# `AuthDispatch::new` by whoever builds the session. The dependency points one way, and
+# `scripts/lib/layer_direction_gate.py` holds it: this crate is built on the core and the core
+# never names it.
+#
+# no_std with alloc, as the core is: a node with no operating system authenticates too.
+[package]
+name = "wz-auth"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Auth methods for the wz session handshake, the zenoh transport's auth extension methods."
+
+[lib]
+name = "wz_auth"
+path = "src/lib.rs"
+
+[dependencies]
+# The dispatch a method plugs into (`AuthMethod`, `AuthSubExt`, the method ids) and the zenoh
+# `ZBuf` record codec (`vle::{read_zbuf, write_zbuf}`) the usrpwd body is written in.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["session-extauth"] }
+sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
+# zenoh's `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>`
+# (`commons/zenoh-crypto/src/hmac.rs` @ `let mut hmac = Hmac::<Sha3_256>::new_from_slice(key)?;`),
+# so usrpwd interop with zenohd requires SHA3, not the SHA-2 of the session cookie. Both no_std.
+hmac = { version = "0.12", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+# `tests/dissect_usrpwd.rs`: the core's dissector reads the OpenSyn the core's own encoder writes
+# around this crate's usrpwd body, so the test turns on both.
+wz-session-core = { path = "../wz-session-core", features = ["dissect", "codec-open-body"] }
+wz-codecs = { path = "../wz-codecs" }
+
+[lints]
+workspace = true

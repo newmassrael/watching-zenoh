@@ -223,7 +223,7 @@ auth_usrpwd = ["access-extauth-usrpwd"]
 access-extauth-usrpwd = [
     "wz-runtime-tokio/routing-accept",
     "wz-runtime-tokio/access-extauth-usrpwd",
-    "wz-session-core/access-extauth-usrpwd",
+    "dep:wz-auth",
 ]
 # The policy a node's config states for the traffic of its sessions: `access_control`,
 # `low_pass_filter`, `downsampling` and the QoS overwrite of `qos/network`, compiled from the
@@ -500,6 +500,9 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # build `String`s; it adds nothing to any dependent, since `wz-runtime-tokio`, which every build
 # of this crate links, already turns it on.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The usrpwd auth method a node's config asks for (`NodeAuth`). Optional — pulled only by
+# `access-extauth-usrpwd`.
+wz-auth = { path = "../wz-auth", optional = true }
 # The vocabulary a C ABI and its engine both name (the subscriber and matching factories, the ids,
 # a key's wire form, the write filter's plane and answer), which `faces` re-exports: this crate is
 # one engine of that port, and a C ABI over another engine names the same types without it.

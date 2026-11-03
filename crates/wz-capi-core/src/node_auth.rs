@@ -45,6 +45,8 @@
 #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
 use std::sync::Arc;
 
+#[cfg(feature = "access-extauth-usrpwd")]
+use wz_auth::usrpwd::UsrPwdMethod;
 #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
 use wz_runtime_tokio::accept_loop::{AuthRole, SessionAuth};
 #[cfg(feature = "access-extauth-pubkey")]
@@ -61,8 +63,6 @@ use wz_runtime_tokio::rsa::RsaPrivateKey;
 use wz_runtime_tokio::zenoh_config::SecretText;
 #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
 use wz_session_core::auth_dispatch::{AuthDispatch, AuthMethod};
-#[cfg(feature = "access-extauth-usrpwd")]
-use wz_session_core::extauth_usrpwd::UsrPwdMethod;
 
 /// Why a node's authentication could not be built from its config.
 #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]

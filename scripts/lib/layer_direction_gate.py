@@ -80,7 +80,6 @@ IN_CORE = frozenset(
         "admin_connect",
         "admin_reply",
         "adminspace",
-        "extauth_usrpwd",
         "storage_aligner",
         "storage_backend",
         "storage_config",

@@ -520,7 +520,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-tls-mbedtls|hook|host-lock,rsa,vendored|"
     "wz-runtime-core|hook|alloc|"
     "wz-session-core|hook|\
-        access-extauth-usrpwd,\
         adminspace-config-hotreload,\
         adminspace-core,\
         adminspace-introspection-handlers,\

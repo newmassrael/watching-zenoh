@@ -3568,11 +3568,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-auth"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "sce-forge-runtime",
+ "sha3",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-capi-core"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "tokio",
+ "wz-auth",
  "wz-capi-port",
  "wz-codecs",
  "wz-routing-graph",
@@ -3714,6 +3725,7 @@ dependencies = [
  "webpki-roots",
  "windows-sys 0.61.2",
  "wz-access-control",
+ "wz-auth",
  "wz-codecs",
  "wz-ext-pubsub",
  "wz-host-net",
@@ -3739,7 +3751,6 @@ dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
  "sha2",
- "sha3",
  "wz-codecs",
  "wz-runtime-core",
  "zeroize",

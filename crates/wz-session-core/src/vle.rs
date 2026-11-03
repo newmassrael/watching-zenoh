@@ -4,7 +4,7 @@
 //! Borrowed-slice / `Vec<u8>` adapter over the `sce_forge_runtime` VLE
 //! (base-128 varint) codec — for the cases where a VLE field is embedded in an
 //! already-buffered `ExtZbuf` body (`source_info_ext`, `declare_ext_keyexpr`,
-//! the `extauth_usrpwd` OpenSyn body) rather than read from / written to a live
+//! the usrpwd method's OpenSyn body in `wz-auth`) rather than read from / written to a live
 //! `SceCursor` / `SceSink`.
 //!
 //! Both helpers DELEGATE to the `sce_forge_runtime` codec — the ONE VLE SSOT
@@ -29,7 +29,7 @@ pub(crate) fn read_vle_u64(bytes: &[u8]) -> Option<(u64, usize)> {
 /// Append `v` to `out` as a VLE — the write twin of [`read_vle_u64`]. Delegates
 /// to the `sce_forge_runtime` sink codec (the VLE SSOT): a `u64` caps at 9 bytes
 /// per canonical zenoh/pico. Consumed by `source_info_ext`, `response_build`,
-/// and the `extauth_usrpwd` OpenSyn body. Heap profile only: it grows a `Vec`.
+/// and the usrpwd method's OpenSyn body in `wz-auth`. Heap profile only: it grows a `Vec`.
 #[cfg(feature = "alloc")]
 pub(crate) fn encode_vle_u64_into(out: &mut alloc::vec::Vec<u8>, v: u64) {
     use sce_forge_runtime::codec::{SceSink, VecSink};

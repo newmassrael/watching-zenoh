@@ -758,10 +758,8 @@ secure-channel = []
 # MCU profile. R1 lands the codec; the method-agnostic dispatch (OpenFsm /
 # AcceptFsm mirror) + the usrpwd / pubkey methods are follow-on atoms.
 session-extauth = ["alloc"]
-# access-extauth-usrpwd — the §5.16 usrpwd auth method (R311wx). Gates the
-# `extauth_usrpwd` module (the UsrPwdMethod + HMAC-SHA3-256 + OpenSyn codec);
-# implies session-extauth (the dispatch kernel it plugs into) and pulls `sha3`.
-access-extauth-usrpwd = ["session-extauth", "dep:sha3"]
+# The §5.16 auth methods that plug into the dispatch are not here: `access-extauth-usrpwd` is the
+# `wz-auth` crate's, built on this one (`scripts/lib/layer_direction_gate.py`).
 # transport-multilink — the Z_EXT_MULTILINK (0x4) establishment extension
 # (catalog §5.1 transport, zenoh `establishment/ext/multilink.rs`). Gates the
 # `extmultilink` module: the UN-wrapped 0x4 envelope + the single-method
@@ -1409,15 +1407,10 @@ log = "0.4"
 # `alloc` feature supplies the `Zeroizing<Vec<u8>>` key wrapper.
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-# R3 (R311wx) — SHA3-256 for the §5.16 usrpwd auth method. zenoh's
-# `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>` (commons/zenoh-crypto/src/
-# hmac.rs:19), so usrpwd interop with zenohd requires SHA3 (the cookie path's
-# sha2 is a different hash). Optional; default-features = false keeps it no_std.
-# R311y816 made `codec-open-body` a second consumer, for the `Shake128` zenoh's
-# `compute_sn` derives an Open body's `initial_sn` with. R2776 moved that one to
-# `keccak` below, so usrpwd is this crate's only runtime consumer again; the
-# XOF survives here as the TEST oracle (the `sha3` dev-dependency).
-sha3 = { version = "0.10", default-features = false, optional = true }
+# `sha3` is not a runtime dependency of this crate: its one consumer, the usrpwd method's
+# HMAC-SHA3-256, is the `wz-auth` crate's. R2776 moved the SHAKE128 of an Open body's
+# `initial_sn` to `keccak` below, so the XOF survives here only as the TEST oracle (the `sha3`
+# dev-dependency).
 # R2776 — the Keccak-f[1600] permutation `sha3` itself calls, for the SHAKE128
 # sponge `src/initial_sn.rs` spells over it (see the note on `codec-open-body`).
 # The MCU unicast acceptor reaches that path, so no_std is load-bearing.

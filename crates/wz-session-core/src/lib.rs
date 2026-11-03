@@ -1584,12 +1584,9 @@ pub mod auth_dispatch;
 #[cfg(feature = "transport-multilink")]
 pub mod extmultilink;
 
-// The usrpwd auth method — the wz mirror of zenoh `establishment/ext/auth/
-// usrpwd.rs`. A username/password challenge-response `auth_dispatch::AuthMethod`
-// (HMAC-SHA3-256 over an InitAck nonce). Gated on `access-extauth-usrpwd` (the
-// first concrete §5.16 auth method; pulls `sha3`).
-#[cfg(feature = "access-extauth-usrpwd")]
-pub mod extauth_usrpwd;
+// The auth methods that plug into `auth_dispatch` (usrpwd, the wz mirror of zenoh's user and
+// password method) are the server layer's, in the `wz-auth` crate, which is built on this one;
+// nothing here names it (`scripts/lib/layer_direction_gate.py`).
 
 // R311dv — Response-builder cluster (`build_response_{reply,err}_*`
 // + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value

@@ -14,7 +14,6 @@
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:sce="http://sce.dev/ext"
        version="1.0" sce:kind="feature-model" name="wz-session-core">
-  <sce:feature name="access-extauth-usrpwd" requires="session-extauth"/>
   <sce:feature name="adminspace-config-hotreload" requires="adminspace-core storage-backend"/>
   <sce:feature name="adminspace-core" requires="adminspace-fixed alloc"/>
   <sce:feature name="adminspace-fixed" requires="keyexpr-wildcard-double keyexpr-wildcard-single pubsub-encoding storage-profile"/>

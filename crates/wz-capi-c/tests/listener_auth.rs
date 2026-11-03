@@ -29,6 +29,7 @@ use std::ffi::CString;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
+use wz_auth::usrpwd::UsrPwdMethod;
 use wz_capi_c::abi::{z_moved_config_t, z_moved_session_t, z_owned_config_t, z_owned_session_t};
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::result::{Z_EINVAL, Z_OK};
@@ -40,7 +41,6 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, free_port};
 use wz_session_core::auth_dispatch::AuthDispatch;
-use wz_session_core::extauth_usrpwd::UsrPwdMethod;
 use wz_session_core::locator::parse_any_locator;
 
 const USER: &str = "alice";

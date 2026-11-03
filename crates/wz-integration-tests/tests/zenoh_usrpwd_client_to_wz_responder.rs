@@ -54,6 +54,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 
+use wz_auth::usrpwd::UsrPwdMethod;
 use wz_integration_tests::common::{zenoh_core_example_binary, ChildGuard};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
@@ -61,7 +62,6 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::auth_dispatch::{AuthDispatch, AuthError, AuthIdentity};
-use wz_session_core::extauth_usrpwd::UsrPwdMethod;
 
 const ITER_CAP: usize = 4096;
 const USER: &str = "alice";

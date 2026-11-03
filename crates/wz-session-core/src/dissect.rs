@@ -1006,7 +1006,7 @@ fn walk_ext_entry_head(
 /// | `shm` (Init) | `crate::extshm::encode_shm_init_syn_body` / `..._ack_body` |
 ///
 /// | `auth` (Init / Open) | `crate::auth_dispatch::AuthDispatch::mux`, via [`walk_auth_body`] |
-/// | `usrpwd` (Auth) | `crate::extauth_usrpwd`'s `encode_open_syn` |
+/// | `usrpwd` (Auth) | `wz-auth`'s usrpwd `encode_open_syn` |
 /// | `pubkey` (Auth) | `wz-runtime-tokio`'s `extauth_pubkey` `encode_init_syn` / `..._ack` / `..._open_syn` |
 /// | `multi_link` (Init) | the same, `.transmute()`d onto `0x4` by `crate::extmultilink` |
 /// | `multi_link_syn` (Open) | the `Open` half of that transmute |
@@ -1704,12 +1704,11 @@ fn zbuf_record_count(body: &[u8]) -> Option<usize> {
 
 /// The usrpwd method's OpenSyn body — `{user, hmac}`, two zenoh `ZBufs`.
 ///
-/// Written by `crate::extauth_usrpwd`'s `encode_open_syn` and read back by its
-/// `decode_open_syn`, both over the [`crate::vle::write_zbuf`] /
-/// [`crate::vle::read_zbuf`] SSOT (code spans, not links: the method sits
-/// behind `access-extauth-usrpwd`, which `dissect` does not select, so a link
-/// would be unresolved in the builds a reader runs — the rule R311y893 wrote
-/// beside `crate::ext_name`'s constants and Layer C1bz counts).
+/// Written by the usrpwd method's `encode_open_syn` and read back by its
+/// `decode_open_syn` (the `wz-auth` crate, built on this one), both over the
+/// [`crate::vle::write_zbuf`] / [`crate::vle::read_zbuf`] SSOT. The test that
+/// holds this walker to that producer is `wz-auth`'s, since this crate cannot
+/// name the method (`scripts/lib/layer_direction_gate.py`).
 ///
 /// # Why this is the protocol's shape and not the method's secret
 ///
@@ -10011,40 +10010,9 @@ mod tests {
         assert_eq!(raw(walked, "hmac"), alloc::vec![0x01, 0x02, 0x03, 0x04]);
     }
 
-    /// The same body, produced by THIS TREE'S OWN usrpwd method rather than
-    /// laid out by hand — the rule every other walker in
-    /// [`walk_ext_zbuf_body`] is held to, and the one the "METHOD's own
-    /// format" reason claimed could not be met here.
-    ///
-    /// `open_recv_init_ack` then `open_open_syn` is the exact pair the live
-    /// initiator runs, so a divergence between the encoder and this reading
-    /// reds here rather than on a capture.
-    #[cfg(feature = "access-extauth-usrpwd")]
-    #[test]
-    fn the_usrpwd_body_walker_agrees_with_this_trees_own_method() {
-        use crate::auth_dispatch::{AuthMethod, AuthSubExt};
-        let mut method =
-            crate::extauth_usrpwd::UsrPwdMethod::initiator(b"bob".to_vec(), b"hunter2".to_vec());
-        method
-            .open_recv_init_ack(Some(AuthSubExt::Z64(0x0102_0304_0506_0708)))
-            .expect("the InitAck nonce");
-        let Some(AuthSubExt::Zbuf(body)) = method.open_open_syn().expect("the OpenSyn") else {
-            panic!("usrpwd's OpenSyn is a ZBuf");
-        };
-        let auth = auth_of(&init_with_auth_sub(0x02, &body));
-        let walked = sub_ext_body(&auth, "usrpwd");
-        assert_eq!(
-            raw(walked, "user"),
-            b"bob".to_vec(),
-            "the producer's own user must reach the reader",
-        );
-        assert_eq!(
-            raw(walked, "hmac").len(),
-            32,
-            "HMAC-SHA3-256 is 32 bytes, and the walker must have found the \
-             SECOND record rather than the tail of the first",
-        );
-    }
+    // The same body produced by this tree's own usrpwd method, rather than laid
+    // out by hand, is walked by `wz-auth`'s `tests/dissect_usrpwd.rs`: the
+    // method is that crate's and this one never names it.
 
     /// The pubkey / multilink body's COUNT is which stage of the mutual
     /// challenge-response this is, and the three counts are three namings.
