@@ -83,10 +83,13 @@ const ACCEPTS: usize = 1;
 const BACKLOG: u8 = 2;
 /// The runtime's task table: a pump task per session, with room beside them.
 const TASKS: usize = SESSIONS + 1;
-/// Bytes of one task cell: the pump's handle and the application layer's state. The layer is about
-/// 4.9 KB (its requesters are 4.8 KB of them) and an `async fn` holds a by-value argument twice, so
-/// the cell is sized for two of them and the handle; the number the lwIP admin node holds.
-const TASK_BYTES: usize = 12288;
+/// Bytes of one task cell: the pump's handle and the application layer's state. The layer was about
+/// 4.9 KB while its requesters (the registries of pending queries) were 4.8 KB of them, and an `async
+/// fn` holds a by-value argument twice, so the cell was 12,288; with the limits this node does not use
+/// stated as zero (`overlays/qemu_admin_fixed_tls.conf`) the pump's future is under 1,024 bytes (a cell
+/// of 1,024 ran the whole witness on the kit, and a cell the future does not fit is refused at spawn,
+/// which the witness would show), and the cell is twice that.
+const TASK_BYTES: usize = 2048;
 /// Timers the runtime holds: the handshake and lease deadlines of the sessions.
 const TIMERS: usize = 4;
 /// Extra bytes a link's receive buffer holds beyond one batch.

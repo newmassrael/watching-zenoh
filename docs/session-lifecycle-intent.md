@@ -1453,6 +1453,10 @@ router writes its locator as the image's endpoint (HTTP 200), the image dials it
 with no zid hinted for it, reports the endpoint live in `status/connect`, and
 its admin root lists the session; the peer opened by zid goes first, since the
 image holds two sessions at most. Held on two runs with the limits above. The
+task cells were sized for an application layer that carried 4.8 KB of pending-query
+registries (12,288 bytes each, three of them); with the limits stated the pump's
+future is under 1,024 bytes (a cell of 1,024 ran the whole witness on the kit),
+the cells are 2,048 bytes, and the `.bss` is 267,671 bytes. The
 image has a
 stack-chain row, a text row (324,728 bytes) and a
 resource row whose `latency_source` is `none`, a kind of row the resource gate
