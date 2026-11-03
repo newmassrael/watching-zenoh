@@ -180,7 +180,7 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-admin-fixed-tls": {
-      "text_bytes": 324712,
+      "text_bytes": 324892,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {

@@ -1456,7 +1456,11 @@ image holds two sessions at most. Held on two runs with the limits above. The
 task cells were sized for an application layer that carried 4.8 KB of pending-query
 registries (12,288 bytes each, three of them); with the limits stated the pump's
 future is under 1,024 bytes (a cell of 1,024 ran the whole witness on the kit),
-the cells are 2,048 bytes, and the `.bss` is 267,671 bytes. The
+the cells are 2,048 bytes, and the `.bss` is 267,671 bytes. The channel's arena,
+which the node now reports (`tls arena: peak N of M bytes`) and the kit lane holds
+to a quarter free, peaks at 45,304 of 98,304 bytes over a run that accepts a
+router, opens a peer by its zid and dials a written endpoint; it is 65,536 bytes
+now (31 percent free) and the `.bss` 234,903. The
 image has a
 stack-chain row, a text row (324,728 bytes) and a
 resource row whose `latency_source` is `none`, a kind of row the resource gate

@@ -1118,6 +1118,19 @@ EOF
     else
         bad "$key" "the run is outside its row: $(sed 's/^ *//' "$OUT/budget.log" | head -n 3 | tr '\n' ' ')"
     fi
+    # The channel's arena over the whole run (a session accepted, one dialled, an endpoint dialled): the
+    # firmware's last `tls arena: peak N of M bytes` line leaves a quarter of M free, as the stack does.
+    local arena_line arena_peak_bytes arena_size
+    arena_line="$(grep -a 'tls arena: peak' "$OUT/console.run" | tail -n 1)"
+    arena_peak_bytes="$(sed -n 's/.*tls arena: peak \([0-9]*\) of \([0-9]*\) bytes.*/\1/p' <<<"$arena_line")"
+    arena_size="$(sed -n 's/.*tls arena: peak \([0-9]*\) of \([0-9]*\) bytes.*/\2/p' <<<"$arena_line")"
+    if [[ -z "$arena_peak_bytes" || -z "$arena_size" || "$arena_size" -eq 0 ]]; then
+        bad "$key" "the console has no 'tls arena: peak N of M bytes' line: the firmware did not say what the channel's arena held"
+    elif (( arena_peak_bytes * 4 > arena_size * 3 )); then
+        bad "$key" "the channel's arena peaked at $arena_peak_bytes of $arena_size bytes: less than a quarter free"
+    else
+        ok "$key" "the channel's arena peaked at $arena_peak_bytes of $arena_size bytes, a quarter or more free"
+    fi
 }
 
 # ── compare ─────────────────────────────────────────────────────────────────────────────────────
