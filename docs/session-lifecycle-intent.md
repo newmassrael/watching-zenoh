@@ -1448,7 +1448,12 @@ aliases, 2 pending replies and finals): the chain is 9,588 bytes, the reading
 7,744 (three of three runs, every step held), the `.bss` 298,391 bytes (385,207
 before them) and the stack 12,800 bytes, a quarter free over the chain and 39
 percent over the reading. The write of the connect endpoints (the config
-subscriber) was not exercised on the kit with these limits. The image has a
+subscriber) is a step of the kit run too: a third peer listens on the cable, the
+router writes its locator as the image's endpoint (HTTP 200), the image dials it
+with no zid hinted for it, reports the endpoint live in `status/connect`, and
+its admin root lists the session; the peer opened by zid goes first, since the
+image holds two sessions at most. Held on two runs with the limits above. The
+image has a
 stack-chain row, a text row (324,728 bytes) and a
 resource row whose `latency_source` is `none`, a kind of row the resource gate
 learned for an image that makes no claim about a round trip; the kit run is held

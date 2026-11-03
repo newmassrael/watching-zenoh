@@ -179,6 +179,8 @@ TLS_PORT=7448
 # locator the admin image is built to hint for that peer.
 PEER_HOST=192.168.100.1
 PEER_PORT=7449
+# The port of a third peer an admin image's run WRITES as a connect endpoint (no zid is hinted for it).
+ENDPOINT_PORT=7450
 
 load_lab() {
     if [[ ! -r "$LAB_ENV" ]]; then
@@ -994,7 +996,8 @@ EOF
     setsid "$KIT_ZENOHD" --config "$OUT/peer/router.json5" -l "tls/$PEER_HOST:$PEER_PORT" \
         --no-multicast-scouting --plugin-search-dir "$(dirname "$KIT_ZENOHD")" \
         >"$OUT/peer/router.log" 2>&1 </dev/null &
-    PIDS+=("$!")
+    local peer_pid=$!
+    PIDS+=("$peer_pid")
     sleep 3
     local open_body
     open_body="$(curl -s -m 10 "$base/open/$peer_id" 2>/dev/null || true)"
@@ -1017,6 +1020,54 @@ EOF
         ok "$key" "the admin root of the image lists both sessions: the router that dialled it and the peer it opened by zid ($OUT/root.json)"
     else
         bad "$key" "the admin root does not list both sessions (router $held_router, peer $held_peer): '${root_body:0:200}' ($OUT/root.json)"
+    fi
+
+    # The write of the connect endpoints, which the config subscriber serves: a third peer listens on the
+    # cable, the router writes its locator as the image's endpoint, and the image dials it (no zid is hinted
+    # for it) and reports the endpoint live; the admin root then lists its session. The image holds two
+    # sessions at most (the router's and one it dials), so the peer it opened by zid goes first.
+    kill "$peer_pid" 2>/dev/null
+    wait "$peer_pid" 2>/dev/null
+    sleep 5
+    if ! make_router_identity "$OUT/endpoint-peer"; then
+        bad "$key" "the endpoint peer's identity could not be made ($OUT/endpoint-peer/router-id.log)"
+        return 1
+    fi
+    local endpoint_id="$ROUTER_ID"
+    cat >"$OUT/endpoint-peer/router.json5" <<EOF
+{ id: "$endpoint_id", mode: "router",
+  transport: { link: { tls: {
+    listen_certificate: "$OUT/endpoint-peer/router.pem", listen_private_key: "$OUT/endpoint-peer/router.key",
+    root_ca_certificate: "$OUT/device.pem", enable_mtls: true } } } }
+EOF
+    setsid "$KIT_ZENOHD" --config "$OUT/endpoint-peer/router.json5" -l "tls/$PEER_HOST:$ENDPOINT_PORT" \
+        --no-multicast-scouting --plugin-search-dir "$(dirname "$KIT_ZENOHD")" \
+        >"$OUT/endpoint-peer/router.log" 2>&1 </dev/null &
+    PIDS+=("$!")
+    sleep 3
+    local put_code
+    put_code="$(curl -s -m 10 -o "$OUT/put.body" -w '%{http_code}' -X PUT -H 'content-type: application/json' \
+        -d "[\"tls/$PEER_HOST:$ENDPOINT_PORT\"]" \
+        "http://127.0.0.1:$REST_PORT/@/$node_id/peer/config/connect/endpoints" 2>/dev/null || true)"
+    local held_endpoint=0 connect_body=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        root_body="$(curl -s -m 10 "http://127.0.0.1:$REST_PORT/@/$node_id/peer" 2>/dev/null || true)"
+        grep -aqE "\"peer\"[^a-f0-9]+$endpoint_id" <<<"$root_body" && held_endpoint=1
+        [[ "$held_endpoint" -eq 1 ]] && break
+        sleep 5
+    done
+    printf '%s\n' "$root_body" >"$OUT/root-endpoint.json"
+    connect_body="$(curl -s -m 10 "http://127.0.0.1:$REST_PORT/@/$node_id/peer/status/connect" 2>/dev/null || true)"
+    printf '%s\n' "$connect_body" >"$OUT/status-connect.json"
+    if [[ "$held_endpoint" -eq 1 ]]; then
+        ok "$key" "the write of the connect endpoints (HTTP $put_code) made the image dial the third peer: its admin root lists the session ($OUT/root-endpoint.json)"
+    else
+        bad "$key" "the write of the connect endpoints (HTTP $put_code) did not make the image dial the third peer: '${root_body:0:200}' ($OUT/root-endpoint.json, $OUT/endpoint-peer/router.log)"
+    fi
+    if grep -aqE "\"state\"[^a-z]+live" <<<"$connect_body"; then
+        ok "$key" "the image reports the written endpoint live ($OUT/status-connect.json)"
+    else
+        bad "$key" "the image does not report the written endpoint live: '${connect_body:0:200}' ($OUT/status-connect.json)"
     fi
 
     # The control: the same image, asked through a router whose key is NOT the listed commander. The verb
