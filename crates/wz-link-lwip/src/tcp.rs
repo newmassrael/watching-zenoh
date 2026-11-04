@@ -381,6 +381,17 @@ impl<const RX: usize> LwipTcpSocket<RX> {
         self.inner.held
     }
 
+    /// The local port of the connection: the one the stack picked at the connect. Zero once the
+    /// control block is gone (the connection failed or was shut down).
+    pub fn local_port(&self) -> u16 {
+        let pcb = self.inner.pcb;
+        if pcb.is_null() {
+            return 0;
+        }
+        // SAFETY: `pcb` is the live control block of this connection.
+        unsafe { lwip_sys::wz_lwip_tcp_local_port(pcb) }
+    }
+
     /// Queue every part, in order, for sending, or none of them.
     ///
     /// # Errors

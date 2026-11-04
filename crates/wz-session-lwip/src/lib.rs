@@ -86,6 +86,10 @@ pub mod links;
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_drive;
 pub mod session_drive;
+// The cooperative engine's TCP stream over lwIP (`tcp`): the `StreamSocket` and `StreamDial` the
+// stream link of `wz-runtime-coop` runs over, polling lwIP where the contract blocks.
+#[cfg(feature = "tcp")]
+pub mod stream;
 // Fixed-memory step S6 (exhaustion cases R1 and R2) -- the node of the `session-slot`
 // profile: a listener that holds up to N accepted sessions on one socket and claims
 // what each needs before it is answered, and the host that opens a session, dialled

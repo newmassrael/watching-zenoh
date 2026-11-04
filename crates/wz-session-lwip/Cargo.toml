@@ -163,6 +163,11 @@ declare-subscriber = ["wz-session-core/declare-subscriber"]
 # per-session slot's step (S5), not this selector's.
 static-link-storage = ["wz-link-lwip/static-link-storage"]
 
+# The cooperative engine's TCP stream over lwIP (`stream::LwipTcpStream`, `stream::LwipTcpDial`): the
+# `StreamSocket` and `StreamDial` that the stream link of `wz-runtime-coop` runs over. Builds lwIP with
+# its TCP sources (`wz-link-lwip/tcp`); off by default, and an image without it links the UDP-only stack.
+tcp = ["wz-link-lwip/tcp"]
+
 # R311kx — keepalive TX emitter on the MCU session loop. Forwards to the
 # wz-session-core transport-keepalive capability (the shared
 # check_keepalive_deadline / keepalive_wake_deadline pair + the

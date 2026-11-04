@@ -29,7 +29,10 @@
 /* The `tcp` feature (`shim.c`): the send buffer left on a pcb and the port's receive window. */
 unsigned int wz_lwip_tcp_sndbuf(const struct tcp_pcb *pcb);
 unsigned int wz_lwip_tcp_window(void);
+unsigned short wz_lwip_tcp_local_port(const struct tcp_pcb *pcb);
 #endif
+/* The port's millisecond clock, the one lwIP's timers run on. */
+unsigned int wz_lwip_now_ms(void);
 
 /* R2390 — the netif carrier seam, defined in `shim.c` beside the lwIP sources.
  * Declared here so bindgen emits it; both halves are C macros in lwIP, so

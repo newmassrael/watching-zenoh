@@ -685,6 +685,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "session-slot",
                 "session-unicast-accept",
                 "static-link-storage",
+                # `tcp` joins, for the same reason as `static-link-storage`: the cooperative
+                # engine's TCP stream (`pub mod stream`) is chosen by an MCU final binary, and
+                # the facade forwards it no more than it does the storage selector.
+                "tcp",
                 "transport-multicast",
             }
         ),
@@ -1087,6 +1091,7 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
             "session-slot",
             "session-unicast-accept",
             "static-link-storage",
+            "tcp",
             "transport-multicast",
         }
     ),

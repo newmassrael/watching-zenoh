@@ -674,6 +674,13 @@ impl LwipLink {
         unsafe { sys_check_timeouts() };
     }
 
+    /// The port's millisecond clock, the one lwIP's own timers run on (`sys_now`). It wraps at
+    /// `u32::MAX`: compare two readings with `wrapping_sub`.
+    pub fn now_ms(&self) -> u32 {
+        // SAFETY: reads the port's clock; no state.
+        unsafe { lwip_sys::wz_lwip_now_ms() }
+    }
+
     /// Join the IPv4 multicast `group` (network-byte-order u32, e.g.
     /// [`rx_sockets::SCOUT_MULTICAST_GROUP`]) on every IGMP-capable
     /// netif. After this, a [`LwipUdpSocket`] bound to the matching port

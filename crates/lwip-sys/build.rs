@@ -311,6 +311,8 @@ fn main() {
         .allowlist_function("tcp_abort")
         .allowlist_function("wz_lwip_tcp_sndbuf")
         .allowlist_function("wz_lwip_tcp_window")
+        .allowlist_function("wz_lwip_tcp_local_port")
+        .allowlist_function("wz_lwip_now_ms")
         .allowlist_type("tcp_pcb")
         .allowlist_type("tcp_pcb_listen")
         .allowlist_type("tcp_state")

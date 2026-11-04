@@ -41,7 +41,20 @@ unsigned int wz_lwip_tcp_sndbuf(const struct tcp_pcb *pcb) {
 unsigned int wz_lwip_tcp_window(void) {
     return (unsigned int)TCP_WND;
 }
+
+/* The local port of a connection: the one the stack picked for a connect, or the one bound. */
+unsigned short wz_lwip_tcp_local_port(const struct tcp_pcb *pcb) {
+    return (unsigned short)pcb->local_port;
+}
 #endif
+
+#include "lwip/sys.h"
+
+/* The port's millisecond clock (`sys_now`), which lwIP's own timers run on, as a call Rust can make
+ * without binding a symbol the host port and a deploy each define. */
+unsigned int wz_lwip_now_ms(void) {
+    return (unsigned int)sys_now();
+}
 
 /* Non-zero when ANY interface has its carrier up.
  *
