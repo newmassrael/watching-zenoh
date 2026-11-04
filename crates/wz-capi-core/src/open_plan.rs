@@ -718,6 +718,18 @@ impl OpenPlan {
         }
     }
 
+    /// The node `role` is opened as by a surface that opens every router as one: a router is the
+    /// router data plane whatever it holds (a router that forwards nothing is not what
+    /// `mode: "router"` asks for), and a peer or a client is one where it keeps a south apart
+    /// ([`Self::node_for_south`]).
+    #[cfg(feature = "router-node")]
+    pub fn node_role(&self, role: WhatAmI) -> Option<crate::drive::NodeRole> {
+        match role {
+            WhatAmI::Router => Some(crate::drive::NodeRole::Router),
+            WhatAmI::Peer | WhatAmI::Client => self.node_for_south(role),
+        }
+    }
+
     /// Whether the south this plan keeps apart is carried out when `role` is opened by a caller
     /// that can run a node (`can_run_a_node`) or one that cannot.
     ///

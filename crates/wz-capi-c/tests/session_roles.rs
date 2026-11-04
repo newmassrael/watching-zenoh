@@ -255,6 +255,35 @@ fn a_peer_or_router_with_no_endpoint_opens_alone_and_hears_itself() {
     }
 }
 
+/// A router opened through the C ABI in a build with `router-node` forwards: of two clients that
+/// dial it and cannot reach each other, what one puts reaches the subscriber of the other. The
+/// registry of faces joins no two of the faces it holds, so a router that was one would deliver
+/// nothing.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_router_opened_through_the_c_abi_forwards_between_its_clients() {
+    let port_router = free_port();
+    // SAFETY: fresh configs and sessions.
+    let (rc, router) = unsafe { open_with(&stated("router", Some(port_router), None)) };
+    assert_eq!(rc, Z_OK, "the router opens");
+    let (rc, subscriber_client) = unsafe { open_with(&stated("client", None, Some(port_router))) };
+    assert_eq!(rc, Z_OK, "a client dials the router");
+    let (rc, putter_client) = unsafe { open_with(&stated("client", None, Some(port_router))) };
+    assert_eq!(rc, Z_OK, "another client dials the router");
+    // SAFETY: the sessions are live; the context is freed after them.
+    unsafe {
+        let (hits, ctx) = count_samples(&subscriber_client);
+        assert!(
+            put_until_it_arrives(&putter_client, &hits),
+            "what one client put never reached the other through the router"
+        );
+        close_session(putter_client);
+        close_session(subscriber_client);
+        close_session(router);
+        drop(Box::from_raw(ctx));
+    }
+}
+
 /// A client fails its open when it has nothing to dial, whether or not it states a listener:
 /// zenoh's `start_client` bails once scouting is off and no peer is stated.
 #[test]

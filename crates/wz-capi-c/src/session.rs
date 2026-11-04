@@ -320,10 +320,12 @@ pub(crate) unsafe fn open_session(
         not(feature = "zenoh-c-no-unstable-api")
     ))]
     let shm_keys = plan.shm;
-    // A plan that keeps its south apart is opened as the node that places a remote by it. The
-    // registry of faces is the open of every other plan, as before.
+    // A router is opened as the router data plane, and a peer or a client that keeps its south
+    // apart as the node that places a remote by it. The registry of faces, which forwards between
+    // none of the faces it holds, is the open of every other plan, and of every plan in a build
+    // without `router-node`.
     #[cfg(feature = "router-node")]
-    let node = plan.node_for_south(plan.role);
+    let node = plan.node_role(plan.role);
     #[allow(unused_mut)]
     let mut arguments = plan.into_arguments(abi_choices(shm_clients));
     // R3065 -- a session opened over a client storage advertises the protocols of THAT

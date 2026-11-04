@@ -1125,7 +1125,11 @@ Each lands whole with its surface lines, tests and faults in one round.
       its descriptor to a face that negotiated shared memory; the value of a get goes out as
       bytes; and a get is ended by its cancellation token, which ends the one query the
       node's face holds for it), then what is left (the shared-memory provider, the advanced
-      pair, the group).
+      pair, the group). In a build with `router-node` a router opened through the C ABI is the
+      router data plane whatever it holds (`OpenPlan::node_role`), as the Rust API's is, and
+      forwards between the clients that dial it; a peer or a client is a node there only where
+      it keeps a south apart, and a build without `router-node` opens the registry of faces,
+      which forwards nothing, for every role.
     - **Open:** `routing` (the two above) and `open_time` (its tests are ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
       to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome
