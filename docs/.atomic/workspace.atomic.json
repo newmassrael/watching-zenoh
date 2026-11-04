@@ -308642,6 +308642,34 @@
         "The feature-gate NEG lanes job still ends at 91 to 93 percent of its 2,700 s budget on the hosted runs, which trips the margin step with every lane green; the remedy that job's own notes prescribe is to peel its heaviest lanes into a job of their own. Still unmeasured from the TLS rounds: pico's handling of certificate dates, the 4 MiB TLS arena against a count of sessions, a Zephyr kit image rebuild with the secure link, and a PKCS#8 RSA key refused by Identity::from_pem."
       ]
     },
+    "Round 4203": {
+      "decision_summary": "The fourth pool of a node's listing is the listener's lanes, and the listing gains the means to hold more than one owner. The lanes are not the session host's: the listener is declared apart and the host never holds it, so a host's listing could not say them. The listener answers as a pool (lanes, those that belong to a session, the most that did at once where the build keeps a mark, and the InitSyns dropped for want of a lane alone, since an InitSyn that another table refused after the lane was taken is that table's) and lists itself as listener-lanes. PoolList is implemented for a reference to an owner and for a pair of owners, so a node writes one document for (&host, &listener) without a collection and without an allocator.",
+      "changes_bullets": [
+        "wz-session-core pool_gauge.rs: PoolList for &T and for a pair (A, B), with a test of the order and of the document written for a pair. wz-session-lwip listener.rs: SessionListener holds a HighWater (zero-sized without pool-monitor) noted when a lane is reserved, implements PoolGauge (refusals are the InitSyns dropped for want of a lane) and PoolList (listener-lanes). The pool exhaustion test checks the lanes against the listener's own readings, the lanes' refusals against the lane case, their mark between what is held and the capacity, and the list of (&host, &listener) as the host's three pools and then the lanes. docs/pool-monitor.md names the lanes and the pair."
+      ],
+      "verification_bullets": [
+        "On a build host: the pool_gauge tests of wz-session-core pass without pool-monitor (5) and with it (6), session_pool_exhaustion of wz-session-lwip passes with and without pool-monitor (5 of 5 each), and clippy with warnings denied is clean for wz-session-core and wz-session-lwip with the mark on. No feature or CONFIG name was added. Layer Q is not re-run: the change adds a zero-sized field to the listener and impls that the images do not instantiate, and the last Layer Q passed on the tree before it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow"
+      ],
+      "carry_forward_bullets": [
+        "The reply stage's two tables and the reassembly slots still do not answer as pools; they live inside a session's state, so listing them means a path from the host to each session. The listener's mark is noted at each reserve, including a lane that another table's refusal gives back at once, so the mark can be one past the sessions that exist. Nothing carries the document off a node yet, and no firmware turns the mark on."
+      ],
+      "publishable_decision_summary": "The fourth pool of a node's listing is the listener's lanes, and the listing gains the means to hold more than one owner. The lanes are not the session host's: the listener is declared apart and the host never holds it, so a host's listing could not say them. The listener answers as a pool (lanes, those that belong to a session, the most that did at once where the build keeps a mark, and the InitSyns dropped for want of a lane alone, since an InitSyn that another table refused after the lane was taken is that table's) and lists itself as listener-lanes. PoolList is implemented for a reference to an owner and for a pair of owners, so a node writes one document for (&host, &listener) without a collection and without an allocator.",
+      "publishable_changes_bullets": [
+        "wz-session-core pool_gauge.rs: PoolList for &T and for a pair (A, B), with a test of the order and of the document written for a pair. wz-session-lwip listener.rs: SessionListener holds a HighWater (zero-sized without pool-monitor) noted when a lane is reserved, implements PoolGauge (refusals are the InitSyns dropped for want of a lane) and PoolList (listener-lanes). The pool exhaustion test checks the lanes against the listener's own readings, the lanes' refusals against the lane case, their mark between what is held and the capacity, and the list of (&host, &listener) as the host's three pools and then the lanes. docs/pool-monitor.md names the lanes and the pair."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the pool_gauge tests of wz-session-core pass without pool-monitor (5) and with it (6), session_pool_exhaustion of wz-session-lwip passes with and without pool-monitor (5 of 5 each), and clippy with warnings denied is clean for wz-session-core and wz-session-lwip with the mark on. No feature or CONFIG name was added. Layer Q is not re-run: the change adds a zero-sized field to the listener and impls that the images do not instantiate, and the last Layer Q passed on the tree before it."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The reply stage's two tables and the reassembly slots still do not answer as pools; they live inside a session's state, so listing them means a path from the host to each session. The listener's mark is noted at each reserve, including a lane that another table's refusal gives back at once, so the mark can be one past the sessions that exist. Nothing carries the document off a node yet, and no firmware turns the mark on."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
