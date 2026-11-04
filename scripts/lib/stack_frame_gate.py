@@ -554,7 +554,12 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7432,
+        # 4,688 bytes over 25 frames at the tree of 2026-11-05 (7,432 when the row was set, on
+        # 2026-10-24): the lane did not run this gate on the image, a verify image, so the figure stood
+        # while the frames under it fell (the final of a get taking one entry, the dispatch and the
+        # codecs' frames). It is the chain through the node's loop, the connect manager and the dial;
+        # the handshake beneath the dial is the stack bound's, which follows the calls through a register.
+        peak=4688,
     ),
     # The fixed-memory ADMIN node over Zephyr's sockets and the secure channel on the T2G kit
     # (`overlays/t2g_admin_fixed_tls.conf`, decision D14 of docs/session-lifecycle-intent.md): it listens,

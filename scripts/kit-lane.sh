@@ -453,8 +453,6 @@ PY
     ok "$key" "$(arm-none-eabi-size "$elf" | awk 'NR==2 {printf "text %s, data %s, bss %s", $1, $2, $3}'); padded image sha256 ${sha:0:16}"
     if [[ "$KIND" == measure ]]; then
         ok "$key" "a measure image: its stack is one of the figures it reports, not the stack gate's"
-    elif [[ "$KIND" == verify ]]; then
-        ok "$key" "a verify image: no stack gate row yet, its first runs on the kit set it"
     elif is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
         ok "$key" "a compare build: not the stack gate's, a compare run reports what it reads of it"
     elif python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
@@ -466,7 +464,7 @@ PY
     # that commit one; it is the figure the quarter of free stack applies to, and the kit's reading lies under it.
     local bound_rows
     bound_rows="$(python3 "$ROOT/scripts/lib/stack_bound_gate.py" --list)"
-    if [[ "$KIND" == measure || "$KIND" == verify ]] || is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
+    if [[ "$KIND" == measure ]] || is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
         :
     elif [[ $'\n'"$bound_rows"$'\n' == *$'\n'"$key"$'\n'* ]]; then
         if python3 "$ROOT/scripts/lib/stack_bound_gate.py" --check "$key" --elf "$elf" >"$out/stack-bound.log" 2>&1; then
