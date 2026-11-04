@@ -131,13 +131,17 @@ enum SubscriberHolder {
     #[cfg(feature = "router-node")]
     Node {
         forwarder: Arc<wz_runtime_tokio::router_forward::RouterForwarder>,
+        /// Held for [`z_subscriber_id`], its one reader, and so only where that door is.
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
         zid: [u8; 16],
         id: u64,
     },
 }
 
 impl SubscriberHolder {
-    /// The identity of the session the subscription is declared on.
+    /// The identity of the session the subscription is declared on: the entity id
+    /// [`z_subscriber_id`] reports, which a build without the unstable API does not have.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     fn zid(&self) -> [u8; 16] {
         match self {
             Self::Registry { shared, .. } => shared.zid(),
@@ -177,12 +181,17 @@ fn node_subscriber_state_handle(
     id: u64,
     keyexpr: String,
 ) -> Handle {
-    let mut zid = [0u8; 16];
-    let wire = node.zid();
-    zid[..wire.len().min(16)].copy_from_slice(&wire[..wire.len().min(16)]);
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    let zid = {
+        let mut zid = [0u8; 16];
+        let wire = node.zid();
+        zid[..wire.len().min(16)].copy_from_slice(&wire[..wire.len().min(16)]);
+        zid
+    };
     state_handle(
         SubscriberHolder::Node {
             forwarder: node.shared_forwarder(),
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
             zid,
             id,
         },
