@@ -150,6 +150,10 @@ name = "redial_zenohd_interop"
 required-features = ["peer"]
 
 [[test]]
+name = "router_node_zenohd_interop"
+required-features = ["router-node"]
+
+[[test]]
 name = "scouting_autoconnect"
 required-features = ["peer", "scout"]
 

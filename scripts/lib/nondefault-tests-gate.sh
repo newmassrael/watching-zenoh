@@ -1461,6 +1461,14 @@ the cooperative engine's test, run by lane C1co tls engine-coop; this table's bu
 the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
     "wz-capi-pico|a_client_that_never_speaks_is_dropped_as_a_stall_and_the_event_log_is_told|\
 the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
+    # The C ABI's node beside a REAL zenohd (`tests/router_node_zenohd_interop.rs`, needs
+    # `router-node`): `#[ignore]` because it spawns `target/zenohd/zenohd`, which only Layer Z
+    # provisions, so a leg of this table, which never passes `--ignored`, would run none of them.
+    # Layer Z runs both with `--ignored`, 2 passed guarded.
+    "wz-capi-c|a_router_node_and_a_zenohd_forward_between_the_clients_of_each|\
+a test that spawns a real zenohd, run by Layer Z with --ignored (2 passed guarded); this table never passes --ignored"
+    "wz-capi-c|a_peer_node_that_keeps_a_south_relays_between_its_client_and_zenohd|\
+a test that spawns a real zenohd, run by Layer Z with --ignored (2 passed guarded); this table never passes --ignored"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then

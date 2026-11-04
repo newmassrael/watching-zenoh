@@ -20674,6 +20674,18 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
         --test redial_zenohd_interop -- --ignored --quiet --test-threads=1 \
         || return 1
+    # The C ABI as a NODE (`router-node`) beside a real zenohd: a router opened by `z_open` and a
+    # peer that keeps a `gateway/south` forward between a wz client and zenohd, each way. 2 legs,
+    # each with its own control (no link between the node and zenohd: a put must not cross) and
+    # each failing, MEASURED, with the node taken out (the router opened as the registry of faces,
+    # the peer's partition replaced by the preset): both on "a put of the client of the wz node
+    # never reached the client of zenohd". 2 passed against zenohd 1.10.2 (build machine hkl002).
+    # Built with `router-node`, which the lane above does not turn on. In this crate for the
+    # reason the legs above give.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+        --features router-node --test router_node_zenohd_interop -- --ignored --quiet \
+        --test-threads=1 \
+        || return 1
     # A C session whose config names a usrpwd dictionary authenticates a REAL zenohd's
     # credential. `listener_auth` (a default lane) proves the config reaches the session with a
     # peer wz wrote itself; this is the other direction, a peer wz did not write computing its own
