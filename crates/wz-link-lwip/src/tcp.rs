@@ -27,6 +27,7 @@
 //! in a stream, which cannot be taken back; the connection is aborted and the call says
 //! [`TcpError::Write`].
 
+use core::cell::{Cell, UnsafeCell};
 use core::ffi::c_void;
 use core::marker::PhantomPinned;
 use core::pin::Pin;
@@ -36,9 +37,11 @@ use core::ptr;
 use alloc::boxed::Box;
 
 use lwip_sys::{
-    err_enum_t_ERR_MEM, err_enum_t_ERR_OK, err_t, ip_addr_t, pbuf, pbuf_copy_partial, pbuf_free,
-    tcp_abort, tcp_arg, tcp_close, tcp_connect, tcp_err, tcp_new, tcp_output, tcp_pcb, tcp_recv,
-    tcp_recved, tcp_write, wz_lwip_tcp_sndbuf, wz_lwip_tcp_window,
+    err_enum_t_ERR_MEM, err_enum_t_ERR_OK, err_enum_t_ERR_VAL, err_t, ip_addr_t, pbuf,
+    pbuf_copy_partial, pbuf_free, tcp_abort, tcp_accept, tcp_arg, tcp_bind, tcp_close, tcp_connect,
+    tcp_err, tcp_listen_with_backlog, tcp_new, tcp_output, tcp_pcb, tcp_recv, tcp_recved,
+    tcp_write, wz_lwip_tcp_remote_ip, wz_lwip_tcp_remote_port, wz_lwip_tcp_sndbuf,
+    wz_lwip_tcp_window,
 };
 
 use crate::LwipLink;
@@ -74,6 +77,10 @@ pub enum TcpError {
     /// A write that was started could not be finished and the connection was aborted, so no half
     /// of a frame is left in the stream. The lwIP error that stopped it.
     Write(i8),
+    /// The listener is already listening: it listens once.
+    AlreadyListening,
+    /// Binding or listening on the port failed with this lwIP error (the port is taken).
+    ListenFailed(i8),
 }
 
 /// Where a connection is.
@@ -276,19 +283,61 @@ impl<const RX: usize> LwipTcpSocket<RX> {
     #[cfg(not(feature = "static-link-storage"))]
     pub fn connect(link: &LwipLink, addr: [u8; 4], port: u16) -> Result<Self, TcpError> {
         Self::check_window()?;
+        Self::attach(link, Self::boxed_inner(), addr, port)
+    }
+
+    /// A connection's state on the heap, pinned, written in place.
+    #[cfg(not(feature = "static-link-storage"))]
+    fn boxed_inner() -> Pin<InnerBox<RX>> {
         let layout = core::alloc::Layout::new::<TcpInner<RX>>();
         // SAFETY: the layout is not zero-sized; `init_in_place` writes every field but the
         // receive buffer (read only after it is written), and an allocation from the global
         // allocator with this layout is what `Box::from_raw` takes back.
-        let inner = unsafe {
+        unsafe {
             let at = alloc::alloc::alloc(layout).cast::<TcpInner<RX>>();
             if at.is_null() {
                 alloc::alloc::handle_alloc_error(layout);
             }
             TcpInner::init_in_place(at);
             Box::into_pin(Box::from_raw(at))
-        };
-        Self::attach(link, inner, addr, port)
+        }
+    }
+
+    /// The connection lwIP made for an arrived `SYN`, in the state it is in when it is handed over
+    /// (`Open`): the control block is registered with the pinned state as every callback's
+    /// argument. Called from the accept callback, before lwIP goes on to the segment's data, so
+    /// nothing the peer sent with its handshake is missed.
+    fn adopt(mut inner: Pin<InnerBox<RX>>, pcb: *mut tcp_pcb) -> Self {
+        // SAFETY: the state is pinned; only plain fields are written, and the callbacks that may
+        // write it are registered after its address is taken.
+        let state = unsafe { Pin::get_unchecked_mut(inner.as_mut()) };
+        state.pcb = pcb;
+        state.state = TcpState::Open;
+        let arg = (state as *mut TcpInner<RX>).cast::<c_void>();
+        // SAFETY: `pcb` is the live block of an accepted connection and `arg` outlives the
+        // registration (the drop clears it first).
+        unsafe {
+            tcp_arg(pcb, arg);
+            tcp_recv(pcb, Some(recv_thunk::<RX>));
+            tcp_err(pcb, Some(err_thunk::<RX>));
+        }
+        Self { inner }
+    }
+
+    /// The other end of the connection: its address and port. Zeros once the control block is
+    /// gone.
+    pub fn peer(&self) -> ([u8; 4], u16) {
+        let pcb = self.inner.pcb;
+        if pcb.is_null() {
+            return ([0; 4], 0);
+        }
+        // SAFETY: `pcb` is the live control block of this connection.
+        unsafe {
+            (
+                wz_lwip_tcp_remote_ip(pcb).to_le_bytes(),
+                wz_lwip_tcp_remote_port(pcb),
+            )
+        }
     }
 
     /// `static-link-storage`: [`connect`](Self::connect) over a cell of `pool`.
@@ -516,6 +565,196 @@ impl<const RX: usize> Drop for LwipTcpSocket<RX> {
     }
 }
 
+/// The accept side: a port the node listens on and the connections that arrive on it, each handed
+/// out as an [`LwipTcpSocket`].
+///
+/// Declared by the image as a `static`, as the datagram listener of `wz-session-lwip` is:
+///
+/// ```text
+/// static LISTENER: LwipTcpListener<4096, 2> = LwipTcpListener::new();
+/// LISTENER.listen(7447)?;
+/// // once per executor pass, after polling lwIP:
+/// while let Some(connection) = LISTENER.accept() { /* hand it to a session */ }
+/// ```
+///
+/// `Q` is how many connections may wait to be taken. A connection that arrives with no room for it
+/// (the queue is full, or on `static-link-storage` every cell of the pool is taken) is refused: lwIP
+/// abandons it (its dialler reads a reset when it first sends), nothing is allocated instead, and
+/// the refusal is counted ([`refused`](Self::refused)).
+pub struct LwipTcpListener<const RX: usize, const Q: usize, const S: usize = 0> {
+    /// Null until it listens.
+    pcb: Cell<*mut tcp_pcb>,
+    ready: UnsafeCell<heapless::Deque<LwipTcpSocket<RX>, Q>>,
+    refused: Cell<u32>,
+    /// `static-link-storage`: the cells an accepted connection is made in.
+    #[cfg(feature = "static-link-storage")]
+    pool: Cell<Option<&'static TcpSocketPool<RX, S>>>,
+}
+
+// SAFETY: the profile's rule, as for every socket of this crate. The listener is touched by the one
+// cooperative thread that drives lwIP, and by lwIP's accept callback, which runs on that thread
+// inside a poll; the two never run at once. `Sync` is what a `static` needs of it.
+unsafe impl<const RX: usize, const Q: usize, const S: usize> Sync for LwipTcpListener<RX, Q, S> {}
+
+impl<const RX: usize, const Q: usize, const S: usize> Default for LwipTcpListener<RX, Q, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const RX: usize, const Q: usize, const S: usize> LwipTcpListener<RX, Q, S> {
+    /// A listener that listens on nothing yet, for a `static`.
+    pub const fn new() -> Self {
+        Self {
+            pcb: Cell::new(ptr::null_mut()),
+            ready: UnsafeCell::new(heapless::Deque::new()),
+            refused: Cell::new(0),
+            #[cfg(feature = "static-link-storage")]
+            pool: Cell::new(None),
+        }
+    }
+
+    /// Listen on `port` (0: the stack picks one, read back with
+    /// [`local_port`](Self::local_port)), making each connection on the heap.
+    ///
+    /// # Errors
+    ///
+    /// [`TcpError::RxBelowWindow`], [`TcpError::AlreadyListening`], [`TcpError::PcbExhausted`] and
+    /// [`TcpError::ListenFailed`].
+    #[cfg(not(feature = "static-link-storage"))]
+    pub fn listen(&'static self, port: u16) -> Result<(), TcpError> {
+        self.start(port)
+    }
+
+    /// `static-link-storage`: [`listen`](Self::listen) with each connection made in a cell of
+    /// `pool`.
+    ///
+    /// # Errors
+    ///
+    /// As `listen`.
+    #[cfg(feature = "static-link-storage")]
+    pub fn listen_in(
+        &'static self,
+        port: u16,
+        pool: &'static TcpSocketPool<RX, S>,
+    ) -> Result<(), TcpError> {
+        self.pool.set(Some(pool));
+        self.start(port)
+    }
+
+    fn start(&'static self, port: u16) -> Result<(), TcpError> {
+        LwipTcpSocket::<RX>::check_window()?;
+        if !self.pcb.get().is_null() {
+            return Err(TcpError::AlreadyListening);
+        }
+        // SAFETY: `tcp_new` is a no-argument allocator of a control block.
+        let pcb = unsafe { tcp_new() };
+        if pcb.is_null() {
+            return Err(TcpError::PcbExhausted);
+        }
+        // SAFETY: `pcb` is valid; a null address is "any".
+        let bound = unsafe { tcp_bind(pcb, ptr::null(), port) };
+        if bound as core::ffi::c_int != err_enum_t_ERR_OK as core::ffi::c_int {
+            // SAFETY: the block was just made and bound to nothing.
+            unsafe { tcp_close(pcb) };
+            return Err(TcpError::ListenFailed(bound));
+        }
+        let backlog = u8::try_from(Q).unwrap_or(u8::MAX);
+        // SAFETY: on success `tcp_listen_with_backlog` frees `pcb` and returns the listening
+        // block; on failure (null) `pcb` is still ours.
+        let listening = unsafe { tcp_listen_with_backlog(pcb, backlog) };
+        if listening.is_null() {
+            // SAFETY: as above.
+            unsafe { tcp_close(pcb) };
+            return Err(TcpError::ListenFailed(err_enum_t_ERR_MEM as i8));
+        }
+        let arg = (self as *const Self).cast_mut().cast::<c_void>();
+        // SAFETY: `self` is a `static`, so `arg` outlives every callback.
+        unsafe {
+            tcp_arg(listening, arg);
+            tcp_accept(listening, Some(accept_thunk::<RX, Q, S>));
+        }
+        self.pcb.set(listening);
+        Ok(())
+    }
+
+    /// The port the listener is bound to; zero until it listens.
+    pub fn local_port(&self) -> u16 {
+        let pcb = self.pcb.get();
+        if pcb.is_null() {
+            return 0;
+        }
+        // SAFETY: `pcb` is the live listening block; its local port sits where a connection's does.
+        unsafe { lwip_sys::wz_lwip_tcp_local_port(pcb) }
+    }
+
+    /// The connection waiting to be taken, oldest first, or `None`. Poll lwIP first: a connection
+    /// arrives as its handshake is processed.
+    pub fn accept(&self) -> Option<LwipTcpSocket<RX>> {
+        // SAFETY: single-threaded by the profile's rule (see `Sync`); no reference to the queue
+        // outlives this call.
+        unsafe { (*self.ready.get()).pop_front() }
+    }
+
+    /// How many connections wait to be taken.
+    pub fn waiting(&self) -> usize {
+        // SAFETY: as `accept`.
+        unsafe { (*self.ready.get()).len() }
+    }
+
+    /// How many connections were refused for want of room, since it listened.
+    pub fn refused(&self) -> u32 {
+        self.refused.get()
+    }
+
+    /// A connection's state for an arrival: a heap box, or a cell of the pool.
+    fn make_inner(&self) -> Option<Pin<InnerBox<RX>>> {
+        #[cfg(not(feature = "static-link-storage"))]
+        {
+            Some(LwipTcpSocket::<RX>::boxed_inner())
+        }
+        #[cfg(feature = "static-link-storage")]
+        {
+            let pool = self.pool.get()?;
+            // SAFETY: `init_in_place` writes every field the state is read through.
+            let slot = unsafe { pool.0.claim_in_place(|at| TcpInner::init_in_place(at)) }?;
+            // SAFETY: a slot's value stays in its cell of a `static` until the slot drops.
+            Some(unsafe { Pin::new_unchecked(slot) })
+        }
+    }
+}
+
+unsafe extern "C" fn accept_thunk<const RX: usize, const Q: usize, const S: usize>(
+    arg: *mut c_void,
+    new: *mut tcp_pcb,
+    err: err_t,
+) -> err_t {
+    // SAFETY: `arg` is the `&'static LwipTcpListener` handed to `tcp_arg`.
+    let listener = unsafe { &*arg.cast::<LwipTcpListener<RX, Q, S>>() };
+    if new.is_null() || err as core::ffi::c_int != err_enum_t_ERR_OK as core::ffi::c_int {
+        return err_enum_t_ERR_VAL as err_t;
+    }
+    // SAFETY: single-threaded by the profile's rule; the borrow ends in this call.
+    let ready = unsafe { &mut *listener.ready.get() };
+    if ready.is_full() {
+        listener
+            .refused
+            .set(listener.refused.get().saturating_add(1));
+        // lwIP abandons the connection (the peer reads a reset); nothing was made for it.
+        return err_enum_t_ERR_MEM as err_t;
+    }
+    let Some(inner) = listener.make_inner() else {
+        listener
+            .refused
+            .set(listener.refused.get().saturating_add(1));
+        return err_enum_t_ERR_MEM as err_t;
+    };
+    let socket = LwipTcpSocket::adopt(inner, new);
+    // Cannot fail: the queue was checked not full.
+    let _ = ready.push_back(socket);
+    err_enum_t_ERR_OK as err_t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +814,7 @@ mod tests {
         link.check_timeouts();
     }
 
+    #[track_caller]
     fn until(link: &LwipLink, mut done: impl FnMut() -> bool) {
         for _ in 0..4_000 {
             pump(link);
@@ -710,5 +950,68 @@ mod tests {
             pump(&link);
         }
         assert_eq!(socket.readable(), 0);
+    }
+
+    static LISTENER: LwipTcpListener<RX, 2> = LwipTcpListener::new();
+    static NARROW: LwipTcpListener<RX, 1> = LwipTcpListener::new();
+
+    /// A connection that arrives is handed out as a socket that reads and writes like a dialled
+    /// one, with the dialler's address as its peer; and the listener's second `listen` is refused.
+    #[test]
+    fn a_listener_hands_out_the_connection_that_arrived() {
+        let (_gate, link) = lwip_test_link();
+        LISTENER.listen(47_410).unwrap();
+        assert_eq!(LISTENER.local_port(), 47_410);
+        assert_eq!(LISTENER.listen(47_411), Err(TcpError::AlreadyListening));
+        assert!(LISTENER.accept().is_none(), "nothing has arrived");
+
+        let mut client = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_410).unwrap();
+        until(&link, || LISTENER.waiting() == 1);
+        let mut accepted = LISTENER.accept().expect("the connection that arrived");
+        assert!(LISTENER.accept().is_none());
+        assert_eq!(accepted.state(), TcpState::Open);
+        until(&link, || client.state() == TcpState::Open);
+        assert_eq!(accepted.peer(), ([127, 0, 0, 1], client.local_port()));
+
+        client.send_parts(&[b"ping"]).unwrap();
+        until(&link, || accepted.readable() == 4);
+        let mut got = [0u8; 8];
+        assert_eq!(accepted.try_read(&mut got), Ok(Some(4)));
+        assert_eq!(&got[..4], b"ping");
+        accepted.send_parts(&[b"po", b"ng"]).unwrap();
+        until(&link, || client.readable() == 4);
+        assert_eq!(client.try_read(&mut got), Ok(Some(4)));
+        assert_eq!(&got[..4], b"pong");
+        assert_eq!(LISTENER.refused(), 0);
+    }
+
+    /// A connection that arrives when the queue is full is refused and counted: its dialler reads
+    /// the reset, and the one that was waiting is still there.
+    #[test]
+    fn a_full_queue_refuses_the_next_connection_and_counts_it() {
+        let (_gate, link) = lwip_test_link();
+        NARROW.listen(47_420).unwrap();
+        let first = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_420).unwrap();
+        until(&link, || NARROW.waiting() == 1);
+        let mut second = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_420).unwrap();
+        until(&link, || NARROW.refused() == 1);
+        // How soon the dialler learns of the refusal is lwIP's: it abandons a connection the accept
+        // callback refuses, and the dialler reads the reset at once or when it first sends. So it
+        // sends once if it finds itself established, and the property is that it ends failed.
+        let mut sent = false;
+        until(&link, || {
+            if second.state() == TcpState::Open && !sent {
+                sent = true;
+                let _ = second.send_parts(&[b"x"]);
+            }
+            matches!(second.state(), TcpState::Failed(_))
+        });
+        assert_eq!(NARROW.refused(), 1);
+        assert_eq!(NARROW.waiting(), 1, "the first connection still waits");
+        assert!(matches!(
+            second.try_read(&mut [0; 4]),
+            Err(TcpError::Failed(_))
+        ));
+        drop(first);
     }
 }

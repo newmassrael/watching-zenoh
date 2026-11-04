@@ -30,6 +30,8 @@
 unsigned int wz_lwip_tcp_sndbuf(const struct tcp_pcb *pcb);
 unsigned int wz_lwip_tcp_window(void);
 unsigned short wz_lwip_tcp_local_port(const struct tcp_pcb *pcb);
+unsigned int wz_lwip_tcp_remote_ip(const struct tcp_pcb *pcb);
+unsigned short wz_lwip_tcp_remote_port(const struct tcp_pcb *pcb);
 #endif
 /* The port's millisecond clock, the one lwIP's timers run on. */
 unsigned int wz_lwip_now_ms(void);

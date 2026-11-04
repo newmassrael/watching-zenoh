@@ -46,6 +46,16 @@ unsigned int wz_lwip_tcp_window(void) {
 unsigned short wz_lwip_tcp_local_port(const struct tcp_pcb *pcb) {
     return (unsigned short)pcb->local_port;
 }
+
+/* The other end of a connection: its address as lwIP stores it (the octets in memory order), and
+ * its port. */
+unsigned int wz_lwip_tcp_remote_ip(const struct tcp_pcb *pcb) {
+    return (unsigned int)ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip));
+}
+
+unsigned short wz_lwip_tcp_remote_port(const struct tcp_pcb *pcb) {
+    return (unsigned short)pcb->remote_port;
+}
 #endif
 
 #include "lwip/sys.h"
