@@ -78,14 +78,29 @@ const _: () = {
 /// SSOT.
 ///
 /// `Drop` RETRACTS — see the module note.
-struct TokenState {
-    shared: Arc<SharedSession>,
-    id: TokenId,
+enum TokenState {
+    /// A token of the registry of faces.
+    Registry {
+        shared: Arc<SharedSession>,
+        id: TokenId,
+    },
+    /// A token of a node, which the node's own face counts and its data plane tells the others
+    /// of. It holds the node counted, so that it can be retracted after the session handle has
+    /// been let go of.
+    #[cfg(feature = "router-node")]
+    Node {
+        node: Arc<wz_capi_core::drive::RouterState>,
+        id: u64,
+    },
 }
 
 impl Drop for TokenState {
     fn drop(&mut self) {
-        self.shared.undeclare_liveliness_token(self.id);
+        match self {
+            Self::Registry { shared, id } => shared.undeclare_liveliness_token(*id),
+            #[cfg(feature = "router-node")]
+            Self::Node { node, id } => node.undeclare_token(*id),
+        }
     }
 }
 
@@ -183,10 +198,10 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         unsafe { *token = z_owned_liveliness_token_t::null_value() };
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { crate::session::session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { crate::session::not_a_registry(session) };
+            return Z_ENULL;
         };
         let ke = ke.to_owned();
         // The same outbound canonicity gate the data plane applies, hoisted so the
@@ -194,10 +209,31 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_EINVAL;
         }
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            crate::session::SessionHandle::Registry(state) => state,
+            // A node counts the token on its own face and tells the faces that asked.
+            #[cfg(feature = "router-node")]
+            crate::session::SessionHandle::Node(node) => {
+                let boxed = Box::new(TokenState::Node {
+                    id: node.declare_token(&ke),
+                    node: Arc::clone(node),
+                });
+                // SAFETY: the caller's contract; the slot was gravestoned above.
+                unsafe {
+                    *token = z_owned_liveliness_token_t::from_handle(Box::into_raw(boxed) as Handle)
+                };
+                return Z_OK;
+            }
+        };
         let Some(id) = state.shared.declare_liveliness_token(ke) else {
             return Z_EUNAVAILABLE;
         };
-        let boxed = Box::new(TokenState {
+        let boxed = Box::new(TokenState::Registry {
             shared: state.shared.clone(),
             id,
         });
@@ -336,10 +372,10 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         *owned = z_owned_closure_sample_t::null_value();
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { crate::session::session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { crate::session::not_a_registry(session) };
+            return Z_ENULL;
         };
         let ke = ke.to_owned();
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
@@ -351,6 +387,32 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         } else {
             // SAFETY: the caller's contract.
             unsafe { (*options).history }
+        };
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            crate::session::SessionHandle::Registry(state) => state,
+            // A node's own face is told the tokens of the other faces; the subscription is
+            // hosted there and withdrawn there.
+            #[cfg(feature = "router-node")]
+            crate::session::SessionHandle::Node(node) => {
+                let declared = ke.clone();
+                let id = node.liveliness().subscribe(
+                    &ke,
+                    history,
+                    Box::new(make_liveliness_callback(Arc::new(cclosure))),
+                );
+                // SAFETY: the caller's contract; the slot was gravestoned above.
+                unsafe {
+                    *subscriber = z_owned_subscriber_t::from_handle(
+                        crate::sub::node_liveliness_state_handle(node, id, declared),
+                    )
+                };
+                return Z_OK;
+            }
         };
         // `LivelinessSubscriberOptions` is `#[non_exhaustive]`, so it is built
         // from its default and narrowed — the shape that survives a new field.
@@ -500,15 +562,27 @@ pub unsafe extern "C" fn z_liveliness_get(
         let token = unsafe { liveliness_get_token(options) };
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { crate::session::session_handle(session) }, unsafe {
             crate::keyexpr::keyexpr_str(key_expr)
         }) else {
-            return unsafe { crate::session::not_a_registry(session) };
+            return crate::result::Z_ENULL;
         };
         let ke = ke.to_owned();
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return crate::result::Z_EINVAL;
         }
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            crate::session::SessionHandle::Registry(state) => state,
+            #[cfg(feature = "router-node")]
+            crate::session::SessionHandle::Node(node) => {
+                return liveliness_get_on_node(node, &ke, closure, token);
+            }
+        };
         // A NULL options pointer is upstream's "defaults", not an error.
         let timeout_ms = if options.is_null() {
             0
@@ -590,4 +664,40 @@ pub unsafe extern "C" fn z_liveliness_get(
         drop(registration);
         crate::result::Z_OK
     })
+}
+
+/// A liveliness get as the session of a node: the node's own face knows the tokens alive, its own
+/// among them, and answers the snapshot itself with one reply for each key that meets `keyexpr`.
+/// The snapshot is complete when this returns, and the C closure's `drop(context)` runs as the
+/// last reference to it is let go.
+///
+/// A token that cancels a get stops the faces of a registry the get was fanned over, and a node
+/// has none, so a get that brings one is refused by name and not run uncancellable.
+#[cfg(all(feature = "router-node", feature = "liveliness-get"))]
+fn liveliness_get_on_node(
+    node: &wz_capi_core::drive::RouterState,
+    keyexpr: &str,
+    closure: Arc<crate::get::CReplyClosure>,
+    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
+) -> ZResult {
+    if token.is_some() {
+        return Z_EUNAVAILABLE;
+    }
+    let gate = crate::get::ReplyGate {
+        query_keyexpr: keyexpr.to_owned(),
+        anyke: false,
+    };
+    for alive in node.liveliness().alive(keyexpr) {
+        let reply = wz_runtime_tokio::reply_sink::BorrowedReply {
+            rid: 0,
+            keyexpr: &alive,
+            kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
+            payload: &[],
+            err_encoding: None,
+            attachment: None,
+            put_encoding: None,
+        };
+        crate::get::fire_reply(&closure, &gate, &reply);
+    }
+    Z_OK
 }

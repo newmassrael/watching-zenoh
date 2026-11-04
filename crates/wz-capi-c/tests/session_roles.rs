@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "router-node")]
 use wz_capi_c::abi::{
     z_loaned_querier_t, z_loaned_query_t, z_loaned_reply_t, z_moved_closure_query_t,
-    z_moved_closure_reply_t, z_owned_closure_query_t, z_owned_closure_reply_t, z_owned_publisher_t,
-    z_owned_querier_t, z_owned_queryable_t,
+    z_moved_closure_reply_t, z_owned_closure_query_t, z_owned_closure_reply_t,
+    z_owned_liveliness_token_t, z_owned_publisher_t, z_owned_querier_t, z_owned_queryable_t,
 };
 use wz_capi_c::abi::{
     z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_sample_t, z_moved_config_t,
@@ -36,6 +36,11 @@ use wz_capi_c::get::{z_closure_reply, z_get};
 #[cfg(feature = "router-node")]
 use wz_capi_c::keyexpr::z_keyexpr_equals;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
+#[cfg(feature = "router-node")]
+use wz_capi_c::liveliness::{
+    z_liveliness_declare_subscriber, z_liveliness_declare_token, z_liveliness_get,
+    z_liveliness_subscriber_options_t, z_liveliness_undeclare_token,
+};
 #[cfg(feature = "router-node")]
 use wz_capi_c::matching::{
     z_matching_status_t, z_publisher_get_matching_status, z_querier_get_matching_status,
@@ -64,6 +69,8 @@ use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
 #[cfg(feature = "router-node")]
 use wz_capi_c::session::z_session_is_closed;
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
+#[cfg(feature = "router-node")]
+use wz_capi_c::sub::z_undeclare_subscriber;
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 #[cfg(feature = "router-node")]
 use wz_capi_c::timestamp::{z_timestamp_new, z_timestamp_t};
@@ -595,6 +602,138 @@ unsafe fn querier_get_until_replied(querier: *const z_loaned_querier_t) -> bool 
         std::thread::sleep(Duration::from_millis(100));
     }
     replies.load(Ordering::SeqCst) > 0
+}
+
+/// Ask the liveliness of [`KEYEXPR`] from `asker` until a token has been counted (up to ten
+/// seconds), and say whether one was.
+#[cfg(feature = "router-node")]
+unsafe fn liveliness_get_until_replied(asker: &z_owned_session_t) -> bool {
+    let replies = Arc::new(AtomicUsize::new(0));
+    // Leaked rather than freed under a get that may still be under way.
+    let ctx = Box::into_raw(Box::new(CountCtx {
+        hits: replies.clone(),
+    }));
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while replies.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+        z_closure_reply(&mut closure, Some(on_reply_hit), None, ctx.cast());
+        assert_eq!(
+            z_liveliness_get(
+                z_session_loan(asker),
+                z_view_keyexpr_loan(&view),
+                (&mut closure as *mut z_owned_closure_reply_t).cast::<z_moved_closure_reply_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    replies.load(Ordering::SeqCst) > 0
+}
+
+/// Declare a liveliness token on [`KEYEXPR`].
+#[cfg(feature = "router-node")]
+unsafe fn declare_token(session: &z_owned_session_t) -> z_owned_liveliness_token_t {
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+    let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+    assert_eq!(
+        z_liveliness_declare_token(
+            z_session_loan(session),
+            &mut token,
+            z_view_keyexpr_loan(&view),
+            std::ptr::null(),
+        ),
+        Z_OK,
+        "a token is declared"
+    );
+    token
+}
+
+/// A node opened through the C ABI takes part in liveliness: its liveliness get finds the token
+/// of a registry peer, its liveliness subscriber hears that token (with history), and the peer's
+/// liveliness get finds the token of the node.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_node_opened_through_the_c_abi_takes_part_in_liveliness() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the contexts are freed after them.
+    unsafe {
+        let mut peer_token = declare_token(&peer);
+        assert!(
+            liveliness_get_until_replied(&node),
+            "the node's liveliness get never found the token of the peer"
+        );
+        // A subscriber that asks for the history is told the token that is already alive.
+        let heard = Arc::new(AtomicUsize::new(0));
+        let heard_ctx = Box::into_raw(Box::new(CountCtx {
+            hits: heard.clone(),
+        }));
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample), None, heard_ctx.cast());
+        let ke = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+        let mut options = z_liveliness_subscriber_options_t { history: true };
+        let mut subscriber: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_liveliness_declare_subscriber(
+                z_session_loan(&node),
+                &mut subscriber,
+                z_view_keyexpr_loan(&view),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                &mut options,
+            ),
+            Z_OK,
+            "a liveliness subscriber is declared on the node"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while heard.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            heard.load(Ordering::SeqCst) > 0,
+            "the node's liveliness subscriber never heard the token of the peer"
+        );
+        let mut node_token = declare_token(&node);
+        assert!(
+            liveliness_get_until_replied(&peer),
+            "the peer's liveliness get never found the token of the node"
+        );
+        assert_eq!(
+            z_liveliness_undeclare_token(
+                (&mut node_token as *mut z_owned_liveliness_token_t).cast()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_liveliness_undeclare_token(
+                (&mut peer_token as *mut z_owned_liveliness_token_t).cast()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_subscriber((&mut subscriber as *mut z_owned_subscriber_t).cast()),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
+        drop(Box::from_raw(heard_ctx));
+    }
 }
 
 /// A querier declared on a node asks as the node does: the queryable of a registry peer that dials

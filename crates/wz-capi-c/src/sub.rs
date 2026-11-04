@@ -136,6 +136,14 @@ enum SubscriberHolder {
         zid: [u8; 16],
         id: u64,
     },
+    /// A liveliness subscription of a node: the node's own face is told the tokens of the other
+    /// faces, and the subscription is withdrawn there. It holds the node counted, as the above
+    /// holds the data plane.
+    #[cfg(feature = "router-node")]
+    NodeLiveliness {
+        node: Arc<wz_capi_core::drive::RouterState>,
+        id: u64,
+    },
 }
 
 impl SubscriberHolder {
@@ -147,6 +155,8 @@ impl SubscriberHolder {
             Self::Registry { shared, .. } => shared.zid(),
             #[cfg(feature = "router-node")]
             Self::Node { zid, .. } => *zid,
+            #[cfg(feature = "router-node")]
+            Self::NodeLiveliness { node, .. } => crate::zid::z_id_t::from_wire(node.zid()).id,
         }
     }
 }
@@ -218,8 +228,28 @@ impl Drop for SubscriberState {
             SubscriberHolder::Node { forwarder, id, .. } => {
                 forwarder.unhost_subscriber(*id);
             }
+            #[cfg(feature = "router-node")]
+            SubscriberHolder::NodeLiveliness { node, id } => node.liveliness().unsubscribe(*id),
         }
     }
+}
+
+/// [`subscriber_state_handle`] for a liveliness subscription of a node, which the liveliness
+/// plane hands back as the same `z_owned_subscriber_t` so that one `z_undeclare_subscriber`
+/// retracts both kinds.
+#[cfg(feature = "router-node")]
+pub(crate) fn node_liveliness_state_handle(
+    node: &Arc<wz_capi_core::drive::RouterState>,
+    id: u64,
+    keyexpr: String,
+) -> Handle {
+    state_handle(
+        SubscriberHolder::NodeLiveliness {
+            node: Arc::clone(node),
+            id,
+        },
+        keyexpr,
+    )
 }
 
 /// Options for `z_declare_subscriber` (`zenoh_commons.h:464-470`).
