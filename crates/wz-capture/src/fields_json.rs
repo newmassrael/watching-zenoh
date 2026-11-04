@@ -1540,9 +1540,9 @@ pub(crate) struct CaptureTables {
     /// The keyexpr bindings, each stamped with the packet it went past at, so a
     /// row resolves at its own packet.
     spaces: crate::agg::KeyexprSpaces,
-    /// Per list, by its place in `Dissection::message_lists_with_origin`, where
-    /// each request of the list was produced, for the rows of the finals that
-    /// close them.
+    /// Per list, by its place in `Dissection::message_lists_with_origin`, which
+    /// of its requests it still holds, for the rows of the finals that close
+    /// them.
     requests: alloc::collections::BTreeMap<usize, RequestIndex>,
 }
 
@@ -1557,10 +1557,6 @@ impl CaptureTables {
         row: &wz_session_core::passive_messages::Row<'_>,
     ) {
         self.spaces.absorb_in_order(grouping, list, packet, row);
-        self.requests
-            .entry(list)
-            .or_default()
-            .note(row, row.produced());
     }
 
     /// Take every message of the capture, in capture order.
@@ -1578,7 +1574,7 @@ fn list_requests(
     list: Option<usize>,
     first_held: u64,
 ) -> Option<&RequestIndex> {
-    let requests = requests.get_mut(&list?)?;
+    let requests = requests.entry(list?).or_default();
     requests.forget_before(first_held);
     Some(requests)
 }
@@ -2397,7 +2393,15 @@ fn push_stream_flow(
         };
         let row_start = w.len();
         let mut declined = false;
-        let at = message_at(frame);
+        let space = crate::anchor_space_of(frame);
+        // The anchor under the key its space names, as a datagram row writes
+        // it. A message a stream flow anchors at a PACKET (a WebSocket unit)
+        // has a packet index where a stream message has a byte, and the byte
+        // inside its unit added to that index named no place at all.
+        let (anchor_key, at) = match space {
+            crate::AnchorSpace::StreamBytes => ("message_at", message_at(frame)),
+            crate::AnchorSpace::PacketIndex => ("packet", frame.stream_offset),
+        };
         let _ = write!(
             w,
             // R311y919 — the word comes from `AnchorSpace` now, so this row and
@@ -2407,9 +2411,9 @@ fn push_stream_flow(
             // message-list enumeration used to carry, and the serial line is
             // what it cost: two places deciding one fact, with nothing joining
             // either to the caller that chose the coordinate.
-            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"message_at\":{at},",
+            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"{anchor_key}\":{at},",
             dir_name(frame.direction),
-            crate::anchor_space_of(frame).name()
+            space.name()
         );
         push_coordinates(
             tags.list_id,
@@ -2418,7 +2422,7 @@ fn push_stream_flow(
             seq,
             w,
         );
-        push_selected(tags.selection, frame, w);
+        push_selected(tags.selection, &row, w);
         match flow.message_bytes(&row) {
             Err(why) => {
                 declined = true;
@@ -2434,7 +2438,7 @@ fn push_stream_flow(
                     declarations,
                     carried: Some(&frame.carried),
                     e2e,
-                    closes: RowCloses::of(&tags, tags.requests, frame),
+                    closes: RowCloses::of(&tags, tags.requests, &row),
                 },
                 w,
             ),
@@ -2602,7 +2606,7 @@ fn push_datagram_flow(
                         if let Some(message) = datagram_message(frame, &datagram) {
                             judge_unwritten_row(RowWalk {
                                 bytes: message,
-                                space: MidSpace::Transport,
+                                space: MidSpace::of_frame(frame),
                                 direction: frame.direction,
                                 framed: &message_name(frame),
                                 spaces,
@@ -2663,18 +2667,22 @@ fn push_datagram_flow(
             crate::anchor_space_of(frame).name()
         );
         push_coordinates(tags.list_id, index as u64, frame.batch_index as u64, seq, w);
-        push_selected(tags.selection, frame, w);
+        push_selected(tags.selection, &row, w);
         push_walk(
             RowWalk {
                 bytes: message,
-                space: MidSpace::Transport,
+                // The space the session read the unit in, as the stream
+                // producer takes it: a lowlatency datagram IS its network
+                // message, and read in the transport space its MID names no
+                // transport message (`0x1e` is a `Declare`, not an unknown).
+                space: MidSpace::of_frame(frame),
                 direction: frame.direction,
                 framed: &message_name(frame),
                 spaces,
                 declarations,
                 carried: Some(&frame.carried),
                 e2e,
-                closes: RowCloses::of(&tags, tags.requests, frame),
+                closes: RowCloses::of(&tags, tags.requests, &row),
             },
             w,
         );
@@ -5284,78 +5292,45 @@ impl<'a> RowClosings<'a> {
     }
 }
 
-/// Where each `Request` of ONE list stood, as the produced index of its message,
-/// so the row of a `ResponseFinal` can name the sequence number of the request it
-/// closed.
+/// Where the `Request`s of ONE list stood, as the produced index of their
+/// messages, so the row of a `ResponseFinal` can name the sequence number of the
+/// request it closed.
 ///
 /// A request and the final that closes it are always in the SAME list (the
-/// exchange plane pairs them by list, direction and rid), and the request comes
-/// first, so a walk that visits a list's messages in list order has the request's
-/// index before any final that names it. A walk that continues keeps this between
-/// calls, because the request may be a message the continuing walk does not visit
-/// again.
+/// exchange plane pairs them by list, direction and rid). The plane names a
+/// request by its row's key, which IS the row's produced-index
+/// ([`crate::payload::RowKey`]), so nothing is kept per request: what is kept,
+/// between the calls of a walk that continues, is where the list's held rows
+/// begin, below which a request has no row left to name.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RequestIndex {
+    /// The produced-index of the oldest row the list still holds, as the last
+    /// [`Self::forget_before`] was told it.
     #[cfg(feature = "network-codecs")]
-    produced: alloc::collections::BTreeMap<(usize, usize), u64>,
-    /// The produced-index below which the last [`Self::forget_before`] already
-    /// forgot every request.
-    #[cfg(feature = "network-codecs")]
-    forgotten_before: u64,
+    first_held: u64,
 }
 
 impl RequestIndex {
-    /// Note a row of the list, at produced index `produced`. Only a row that
-    /// batches a `Request` is kept, found in the records the exchange plane folds.
-    #[cfg(feature = "network-codecs")]
-    fn note(&mut self, frame: &PassiveFrame, produced: u64) {
-        let batches_a_request = crate::exchange::batch_of(frame).is_some_and(|batch| {
-            batch.records().any(|(message, _)| {
-                matches!(
-                    message,
-                    wz_session_core::network_message::NetworkMessage::Request(_)
-                )
-            })
-        });
-        if batches_a_request {
-            self.produced
-                .insert(crate::payload::RowKey::position_of(frame), produced);
-        }
-    }
-
-    /// Without the record plane no final names a request, so nothing is kept.
-    #[cfg(not(feature = "network-codecs"))]
-    fn note(&mut self, _: &PassiveFrame, _: u64) {}
-
     /// Forget the requests whose messages are older than `first_held`, the
     /// produced-index of the oldest message the list still holds.
     ///
     /// A request a trim took has no row for a final to name the sequence number
-    /// of (`request_seq` reads `null` for it), so the entry answers nothing, and an
-    /// index that kept every request a live handle ever saw would grow with the
-    /// handle's life. Costs a pass over what is kept, and is skipped when nothing
-    /// is.
+    /// of (`request_seq` reads `null` for it). The front only moves forward.
     #[cfg(feature = "network-codecs")]
     fn forget_before(&mut self, first_held: u64) {
-        // The front only moves forward, so a call that finds it where the last
-        // call left it has nothing to forget and does not pass over the index.
-        if first_held <= self.forgotten_before {
-            return;
-        }
-        self.forgotten_before = first_held;
-        if !self.produced.is_empty() {
-            self.produced.retain(|_, produced| *produced >= first_held);
-        }
+        self.first_held = self.first_held.max(first_held);
     }
 
     /// Without the record plane nothing is kept, so nothing is forgotten.
     #[cfg(not(feature = "network-codecs"))]
     fn forget_before(&mut self, _: u64) {}
 
-    /// Where the request that stood at `request` in its list was produced.
+    /// Where the request that stood at `request` in its list was produced,
+    /// while the list still holds it.
     #[cfg(feature = "network-codecs")]
     fn produced_of(&self, request: &crate::payload::RowKey) -> Option<u64> {
-        self.produced.get(&request.position_in_list()).copied()
+        let produced = request.produced();
+        (produced >= self.first_held).then_some(produced)
     }
 }
 
@@ -5411,7 +5386,7 @@ impl<'a> RowCloses<'a> {
     fn of(
         tags: &RowTags<'a>,
         requests: Option<&'a RequestIndex>,
-        frame: &PassiveFrame,
+        frame: &crate::messages::Row<'_>,
     ) -> Option<Self> {
         let RowClosings { table, list } = tags.closings?;
         Some(Self {
@@ -5518,7 +5493,11 @@ struct RowCloses<'a>(core::marker::PhantomData<&'a ()>);
 
 #[cfg(not(feature = "network-codecs"))]
 impl<'a> RowCloses<'a> {
-    fn of(_: &RowTags<'a>, _: Option<&'a RequestIndex>, _: &PassiveFrame) -> Option<Self> {
+    fn of(
+        _: &RowTags<'a>,
+        _: Option<&'a RequestIndex>,
+        _: &crate::messages::Row<'_>,
+    ) -> Option<Self> {
         None
     }
 
@@ -5865,7 +5844,11 @@ fn push_coordinates(
 /// reader mistake a gap in the capture for a measured exclusion, which is the
 /// failure this axis was asked for in the first place.
 #[cfg(feature = "network-codecs")]
-fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out: &mut String) {
+fn push_selected(
+    selection: Option<RowSelection<'_>>,
+    frame: &crate::messages::Row<'_>,
+    out: &mut String,
+) {
     let Some(RowSelection { list, judged }) = selection else {
         return;
     };
@@ -6011,7 +5994,7 @@ impl RowJudgement {
 pub(crate) fn row_verdict_of(
     judged: &RowJudgement,
     list: usize,
-    frame: &PassiveFrame,
+    frame: &crate::messages::Row<'_>,
 ) -> RowVerdict {
     use crate::filter::Truth;
     let key = crate::payload::RowKey::of(list, frame);
@@ -6099,7 +6082,12 @@ impl RowVerdict {
 /// verdict to report and says nothing rather than saying "unjudged" about
 /// every row — which would be this document claiming a walk it never made.
 #[cfg(not(feature = "network-codecs"))]
-fn push_selected(_selection: Option<RowSelection<'_>>, _frame: &PassiveFrame, _out: &mut String) {}
+fn push_selected(
+    _selection: Option<RowSelection<'_>>,
+    _frame: &crate::messages::Row<'_>,
+    _out: &mut String,
+) {
+}
 
 fn message_name(frame: &PassiveFrame) -> String {
     if let Ok(wz_session_core::inbound::InboundFrame::Network { payload }) = &frame.frame {
@@ -9882,7 +9870,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 81] = [
+        let live: [(&str, &str, Vec<&'static str>); 82] = [
             // On what grounds a session parameter's value is known.
             (rev::FIELDS, "basis", BasisWord::names()),
             // The session's per-frame verdicts, each held to the
@@ -10042,6 +10030,13 @@ mod tests {
                 rev::SELECTOR_BIND,
                 "refusal",
                 crate::filter::bind_refusal_words(),
+            ),
+            // The node sentence's refusal words, walked from the enum the
+            // emitter writes them through.
+            (
+                rev::SELECTOR_TERM,
+                "refusal",
+                crate::selector_term::term_refusal_words(),
             ),
             // A path's kind on the field list: the dissection's own kind words,
             // walked by `FieldValue::kind_words`, which a test holds to every
@@ -10934,6 +10929,29 @@ mod tests {
             crate::filter::bind_json("node ==", Some(names)),
             crate::filter::bind_json("node == cam", Some("[]")),
         ];
+        // The node sentence, over a success and one node per word of its
+        // `refusal`, for the binder's reason.
+        let sn = r#"{"selector_path":"Frame.sn","kind":"uint","value":9}"#;
+        let term_verdicts: Vec<String> = alloc::vec![
+            crate::selector_term::term_json(sn, crate::selector_term::Verb::Add, "kind == put"),
+            crate::selector_term::term_json("[]", crate::selector_term::Verb::Filter, ""),
+            crate::selector_term::term_json(sn, crate::selector_term::Verb::Add, "kind =="),
+            crate::selector_term::term_json(
+                r#"{"selector_path":"Scout.zid","kind":"zid","value":"a1"}"#,
+                crate::selector_term::Verb::Filter,
+                "",
+            ),
+            crate::selector_term::term_json(
+                r#"{"selector_path":null,"kind":"nested","fields":[]}"#,
+                crate::selector_term::Verb::Filter,
+                "",
+            ),
+            crate::selector_term::term_json(
+                r#"{"selector_path":"Frame.nosuch","kind":"uint","value":1}"#,
+                crate::selector_term::Verb::Filter,
+                "",
+            ),
+        ];
         // The two verdicts on a typed text, over one text per FAULT so every
         // `reason` word is rendered, and (for the declaration verdict) a success
         // with a line of each kind so every `kind` word is.
@@ -11026,7 +11044,7 @@ mod tests {
         let describe_docs = crate::proto_describe_tests::documents_for_the_carries_gate();
         let since_docs = crate::selection_json::tests::since_documents_for_the_gates();
         let field_list = crate::filter::selector_fields_json();
-        let docs: [(&str, Vec<&String>); 16] = [
+        let docs: [(&str, Vec<&String>); 17] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -11034,6 +11052,7 @@ mod tests {
             ),
             (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
             (rev::SELECTOR_BIND, bind_verdicts.iter().collect()),
+            (rev::SELECTOR_TERM, term_verdicts.iter().collect()),
             (rev::SELECTOR_FIELDS, alloc::vec![&field_list]),
             (rev::SELECTION, verdict_docs.iter().collect()),
             (rev::SELECTION_SINCE, since_docs.iter().collect()),

@@ -418,6 +418,16 @@ ONLY_CAPI = {
         "same nearest names reach `--select` through the one parser.",
         (11,),
     ),
+    # (ABI 52) -- filed in the round that added the symbol.
+    "the selector a field document's node offers": (
+        "wz_dissect_selector_term",
+        "DELIBERATE. It answers a person pointing at a node of a rendered tree "
+        "and asking to filter by it, add it, or exclude it: the gesture of a UI "
+        "that shows the field document. A person at the command line reads a "
+        "tree as text and types the selector, and the field list and the "
+        "nearest names of a refusal reach `--select` through the one parser.",
+        (11,),
+    ),
     "diagnosing a declaration text without a capture": (
         "wz_dissect_declarations_diagnose",
         "DELIBERATE, on exactly the argument the row above makes, arriving for the "

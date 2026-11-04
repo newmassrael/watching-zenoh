@@ -26,11 +26,16 @@
 //!   QoS entry's two-bit body encoding, and `query_body.encoding` the encoding
 //!   the query's value was written in. Without the level the two are one path
 //!   with two kinds. An entry with no name is already `ext`, and its header
-//!   fields stay where they are.
+//!   fields stay where they are;
+//! * a body whose encoding its carrier does not fix (an entry with no name,
+//!   an `Oam`) is walked as `value` whatever it holds, an integer or bytes.
+//!   Under one name that is one path with two kinds, which no comparison can
+//!   be written against, so in this view it is named by the encoding the wire
+//!   chose, as the protocol names the two bodies: `z64` and `zbuf`.
 //!
 //! The rules are applied HERE, once, by
 //! [`children`](crate::dissect_schema::children) and
-//! [`name_of`](crate::dissect_schema::name_of), for the
+//! [`name_in`](crate::dissect_schema::name_in), for the
 //! two readers that need them to agree: the selector, which matches a path
 //! against a record's tree, and the declared shape below, which says which
 //! paths exist. A path the declaration lists and the matcher cannot reach, or
@@ -52,18 +57,49 @@ use alloc::vec::Vec;
 
 use crate::dissect::{Field, FieldValue};
 
-/// The name a node answers to in the normalised view.
+/// The name a node answers to in the normalised view, standing under `parent`
+/// (`None` for a root).
 ///
-/// An `ext` entry answers to its `ext_name` when its carrier declares one;
-/// every other node to its own name.
-pub fn name_of(field: &Field) -> &str {
+/// An `ext` entry answers to its `ext_name` when its carrier declares one; a
+/// `value` under a carrier that does not fix its encoding answers to that
+/// encoding ([`Z64`], [`ZBUF`]); every other node to its own name.
+pub fn name_in<'t>(parent: Option<&'t Field>, field: &'t Field) -> &'t str {
     if field.name == "ext" {
         if let Some(label) = ext_label(field) {
             return label;
         }
     }
+    if field.name == "value" && parent.is_some_and(fixes_no_encoding) {
+        match field.value {
+            FieldValue::Uint(_) => return Z64,
+            FieldValue::Bytes(_) => return ZBUF,
+            _ => {}
+        }
+    }
     &field.name
 }
+
+/// A body an integer encoding wrote, under a carrier that fixes no encoding.
+pub const Z64: &str = "z64";
+/// A body a bytes encoding wrote, under a carrier that fixes no encoding.
+pub const ZBUF: &str = "zbuf";
+
+/// Whether `carrier` reads its body in whichever encoding the wire chose: an
+/// extension entry whose carrier declares no name for its id, a named entry
+/// the protocol writes in several encodings ([`SEVERAL_ENCODINGS`]), and an
+/// `Oam`.
+fn fixes_no_encoding(carrier: &Field) -> bool {
+    carrier.name == "Oam"
+        || (carrier.name == "ext"
+            && ext_label(carrier).map_or(true, |name| SEVERAL_ENCODINGS.contains(&name)))
+}
+
+/// The named extension entries whose body the protocol writes in more than one
+/// encoding: `usrpwd` is a unit on an `InitSyn`, an integer nonce on an
+/// `InitAck` and the user and HMAC bytes on an `OpenSyn`, all under one id.
+/// Their shape is [`ANY_VALUE`]; `every_declared_path_has_one_kind` holds the
+/// list to the shape.
+const SEVERAL_ENCODINGS: &[&str] = &["usrpwd"];
 
 /// The `ext_name` label directly under an `ext` entry, if it has one.
 fn ext_label(entry: &Field) -> Option<&str> {
@@ -85,6 +121,95 @@ pub const EXT_HEADER_LEVEL: &str = "ext";
 pub const BATCH_CARRIER: &str = "Frame";
 /// See [`BATCH_CARRIER`].
 pub const BATCH_LEVEL: &str = "payload";
+/// The node under [`BATCH_LEVEL`] that holds a batch's bytes past where its
+/// walk stopped: a byte range, not a message.
+pub const BATCH_REMAINDER: &str = "unparsed";
+/// The transport message whose bodies are pieces of a batch, joined across
+/// several of them: a record joined out of them stands beside the one that
+/// completed it, not inside it.
+pub const PIECE_CARRIER: &str = "Fragment";
+
+// ── Names once published ─────────────────────────────────────────────────
+//
+// A path is a NAME a consumer keeps: in a saved selector, in a column it
+// filters on, in the `selector_path` of a document it stored. So the declared
+// shape is not free to forget one. Three rules, each held by a test:
+//
+// * every fact the shape has published (a path, the kind it is read at, and
+//   each word of a closed label) is in `published_selector_paths.txt`, and that
+//   file only grows: a fact is appended in the commit that declares it;
+// * every published fact still holds of the shape, under the path's CURRENT
+//   name: the path is declared at the same kind, and a label still carries the
+//   word. A field whose kind changes is a new field and takes a new name, so a
+//   saved `p == 3` never becomes a comparison of another kind;
+// * a path that is no longer declared under its name was RENAMED, and the
+//   rename is declared in [`RENAMED`]. The selector reads a former name as the
+//   field it names now, so a saved selector keeps selecting what it selected,
+//   and a former name is never declared again for another field.
+
+/// One rename of a declared node, and with it of every path under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Renamed {
+    /// The node's full path before, from its message root.
+    pub from: &'static str,
+    /// The node's full path after.
+    pub to: &'static str,
+    /// The field document revision whose shape first carried `to`.
+    pub since_fields_revision: u32,
+}
+
+/// Every rename since the shape's paths were first published, oldest first.
+pub const RENAMED: &[Renamed] = &[];
+
+/// `path` with `from` replaced by `to` when it is that node or a path under it.
+/// A network message's node is the same node in the record a `Frame` carries,
+/// so a rename of `Push.x` renames `Frame.payload.Push.x` with it.
+fn rename_one(path: &str, from: &str, to: &str) -> Option<String> {
+    let under = |path: &str| {
+        let rest = path.strip_prefix(from)?;
+        (rest.is_empty() || rest.starts_with('.')).then(|| alloc::format!("{to}{rest}"))
+    };
+    if let Some(renamed) = under(path) {
+        return Some(renamed);
+    }
+    let record = path
+        .strip_prefix(BATCH_CARRIER)?
+        .strip_prefix('.')?
+        .strip_prefix(BATCH_LEVEL)?
+        .strip_prefix('.')?;
+    under(record).map(|r| alloc::format!("{BATCH_CARRIER}.{BATCH_LEVEL}.{r}"))
+}
+
+/// The name `path` has now under `renames` (oldest first): itself when no
+/// rename reaches it.
+pub fn current_name_under(path: &str, renames: &[Renamed]) -> String {
+    let mut name = String::from(path);
+    for r in renames {
+        if let Some(next) = rename_one(&name, r.from, r.to) {
+            name = next;
+        }
+    }
+    name
+}
+
+/// Every former name of `path` under `renames` (oldest first), most recent
+/// first: the names a selector written before each rename used for it.
+pub fn former_names_under(path: &str, renames: &[Renamed]) -> Vec<String> {
+    let mut names: Vec<String> = alloc::vec![String::from(path)];
+    for r in renames.iter().rev() {
+        let earlier: Vec<String> = names
+            .iter()
+            .filter_map(|n| rename_one(n, r.to, r.from))
+            .collect();
+        for e in earlier {
+            if !names.contains(&e) {
+                names.push(e);
+            }
+        }
+    }
+    names.remove(0);
+    names
+}
 
 /// One child in the normalised view.
 #[derive(Clone, Copy)]
@@ -247,8 +372,18 @@ fn walk<'t>(
     trail: &mut Vec<&'t str>,
     visit: &mut dyn FnMut(&[&'t str], &'t Field, &'static str),
 ) {
+    walk_under(None, node, trail, visit);
+}
+
+/// [`walk`] of `node`, a child of `parent` in the tree (`None` for a root).
+fn walk_under<'t>(
+    parent: Option<&'t Field>,
+    node: Child<'t>,
+    trail: &mut Vec<&'t str>,
+    visit: &mut dyn FnMut(&[&'t str], &'t Field, &'static str),
+) {
     let (name, field, kind) = match node {
-        Child::Node(f) => (name_of(f), f, f.value.kind_word()),
+        Child::Node(f) => (name_in(parent, f), f, f.value.kind_word()),
         // The level is not a node of the tree, and its occurrence is the entry
         // it belongs to: a group, as the level is.
         Child::HeaderLevel(entry) => (EXT_HEADER_LEVEL, entry, "nested"),
@@ -260,8 +395,11 @@ fn walk<'t>(
         Child::Node(f) => children(f, &mut |c| kids.push(c)),
         Child::HeaderLevel(entry) => header_fields(entry, &mut |h| kids.push(Child::Node(h))),
     }
+    // The node a kid is named under is the one the view visits it from: a
+    // message or entry, never the `extensions` container a kid is lifted out
+    // of, which is not a carrier of a body.
     for kid in kids {
-        walk(kid, trail, visit);
+        walk_under(Some(field), kid, trail, visit);
     }
     trail.pop();
 }
@@ -273,7 +411,7 @@ fn walk<'t>(
 /// `None` for every other kind.
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaNode {
-    /// The normalised name ([`name_of`]).
+    /// The normalised name ([`name_in`]).
     pub name: &'static str,
     /// The kind word of the node's value.
     pub kind: &'static str,
@@ -430,14 +568,11 @@ const EXT_LEVEL: &[SchemaNode] = &[group(
     EXT_HEADER_LEVEL,
     &[EXT_HEAD, &[label("ext_name", ext_name_words)]],
 )];
+/// The body of a carrier that fixes no encoding, named by the encoding the
+/// wire chose ([`name_in`]).
+const ANY_VALUE: &[SchemaNode] = &[leaf(Z64, U), leaf("value_len", U), leaf(ZBUF, BY)];
 /// An entry whose carrier declares no name for its id: any encoding.
-const UNNAMED: &[SchemaNode] = &[group(
-    "ext",
-    &[
-        EXT_HEAD,
-        &[leaf("value", U), leaf("value_len", U), leaf("value", BY)],
-    ],
-)];
+const UNNAMED: &[SchemaNode] = &[group("ext", &[EXT_HEAD, ANY_VALUE])];
 const Z64_VALUE: &[SchemaNode] = &[leaf("value", U)];
 const ZBUF_VALUE: &[SchemaNode] = &[leaf("value_len", U), leaf("value", BY)];
 
@@ -575,7 +710,7 @@ const W_USRPWD: &[SchemaNode] = &[
 /// The `auth` extension's body: a chain of its own, keyed by method.
 const W_AUTH: &[SchemaNode] = &[
     group("pubkey", &[EXT_LEVEL, ZBUF_VALUE, W_PUBKEY]),
-    group("usrpwd", &[EXT_LEVEL, Z64_VALUE, ZBUF_VALUE, W_USRPWD]),
+    group("usrpwd", &[EXT_LEVEL, ANY_VALUE, W_USRPWD]),
     UNNAMED[0],
 ];
 
@@ -632,14 +767,7 @@ const EXTS_QUERY: &[SchemaNode] = &[
         &[EXT_LEVEL, ZBUF_VALUE, W_QUERY_BODY, W_QUERY_SLICED],
     ),
     group("attachment", &[EXT_LEVEL, ZBUF_VALUE, W_QUERY_SLICED]),
-    group(
-        "ext",
-        &[
-            EXT_HEAD,
-            &[leaf("value", U), leaf("value_len", U), leaf("value", BY)],
-            W_QUERY_SLICED,
-        ],
-    ),
+    group("ext", &[EXT_HEAD, ANY_VALUE, W_QUERY_SLICED]),
 ];
 const EXTS_ERR: &[SchemaNode] = &[X_SOURCE_INFO, marker("shm"), UNNAMED[0]];
 const EXTS_INIT: &[SchemaNode] = &[
@@ -890,7 +1018,7 @@ pub const NETWORK_ROOTS: &[SchemaNode] = &[
                 leaf("id", U),
             ],
             EXTS_NET_OAM,
-            &[leaf("value", U), leaf("value_len", U), leaf("value", BY)],
+            ANY_VALUE,
             LINKSTATE,
         ],
     ),
@@ -913,9 +1041,9 @@ const TRANSPORT_ROOTS: &[SchemaNode] = &[
             &[
                 leaf("encoding", B),
                 leaf("id", U),
-                leaf("value", U),
+                leaf(Z64, U),
                 leaf("value_len", U),
-                leaf("value", BY),
+                leaf(ZBUF, BY),
                 leaf("body", BY),
             ],
             EXTS_T_OAM,
@@ -975,7 +1103,7 @@ const TRANSPORT_ROOTS: &[SchemaNode] = &[
             EXTS_FRAME,
             &[group(
                 BATCH_LEVEL,
-                &[NETWORK_ROOTS, &[leaf("unparsed", BY)]],
+                &[NETWORK_ROOTS, &[leaf(BATCH_REMAINDER, BY)]],
             )],
         ],
     ),
@@ -1033,6 +1161,12 @@ const SCOUTING_ROOTS: &[SchemaNode] = &[
 /// tree), the transport messages (a framing unit's) and the scouting ones.
 const ROOT_FAMILIES: &[&[SchemaNode]] = &[NETWORK_ROOTS, TRANSPORT_ROOTS, SCOUTING_ROOTS];
 
+/// Whether `name` is the root of a scouting message: a tree no session row
+/// holds, read off the scouting group's datagrams.
+pub fn is_scouting_root(name: &str) -> bool {
+    SCOUTING_ROOTS.iter().any(|root| root.name == name)
+}
+
 /// Every message root of the declared shape, network ones first.
 pub fn roots() -> impl Iterator<Item = &'static SchemaNode> {
     ROOT_FAMILIES.iter().flat_map(|family| family.iter())
@@ -1044,39 +1178,10 @@ mod tests {
     use crate::dissect::{
         dissect_batch, dissect_scouting_message, dissect_transport_message, Span,
     };
-    use alloc::collections::BTreeSet;
+    use alloc::collections::{BTreeMap, BTreeSet};
     use alloc::string::ToString;
 
-    /// A reproducible byte source: xorshift64, seeded.
-    struct Bytes(u64);
-
-    impl Bytes {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-
-        /// A byte that is SMALL most of the time, so a length or a count read
-        /// out of it fits the buffer and the walk goes on past it, and any
-        /// byte the rest of the time, so every flag and id is reached.
-        fn byte(&mut self) -> u8 {
-            let r = self.next();
-            if r % 3 == 0 {
-                (r >> 8) as u8
-            } else {
-                ((r >> 8) % 6) as u8
-            }
-        }
-
-        fn message(&mut self, first: u8) -> Vec<u8> {
-            let len = 1 + (self.next() % 48) as usize;
-            let mut out = alloc::vec![first];
-            out.extend((0..len).map(|_| self.byte()));
-            out
-        }
-    }
+    use crate::wire_noise::{WireNoise, NETWORK_MIDS, SCOUTING_MIDS, TRANSPORT_MIDS};
 
     /// Every declared path with each kind it is declared at.
     fn declared_kinds() -> BTreeSet<(String, &'static str)> {
@@ -1089,25 +1194,56 @@ mod tests {
     /// Every root the three readers produce over `rounds` messages per id,
     /// built from the seeded source with each id's header bits all reached.
     fn walked_roots(rounds: usize) -> Vec<Field> {
-        let mut source = Bytes(0x9E37_79B9_7F4A_7C15);
+        let mut source = WireNoise::default();
         let mut roots = Vec::new();
         for _ in 0..rounds {
-            let flags = (source.next() as u8) & 0xE0;
-            for mid in 0u8..=0x07 {
+            let flags = source.flags();
+            for mid in TRANSPORT_MIDS {
                 if let Ok(root) = dissect_transport_message(&source.message(mid | flags), 0) {
                     roots.push(root);
                 }
             }
-            for mid in [0x01u8, 0x02] {
+            for mid in SCOUTING_MIDS {
                 if let Ok(Some(root)) = dissect_scouting_message(&source.message(mid | flags), 0) {
                     roots.push(root);
                 }
             }
-            for mid in 0x19u8..=0x1F {
+            for mid in NETWORK_MIDS {
                 roots.extend(dissect_batch(&source.message(mid | flags), 0).records);
             }
         }
         roots
+    }
+
+    /// ONE PATH, ONE KIND. A path declared at two kinds is a field no
+    /// comparison can be written against: the selector refuses every term over
+    /// it as ambiguous, and a longer path cannot tell the two apart because
+    /// there is none. So a body the wire writes in several encodings is named
+    /// by the encoding ([`name_in`]), and every carrier whose shape is
+    /// [`ANY_VALUE`] is one [`fixes_no_encoding`] reads that way.
+    #[test]
+    fn every_declared_path_has_one_kind() {
+        let mut kinds: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
+        for d in declared_paths() {
+            kinds.entry(d.dotted()).or_default().insert(d.kind);
+        }
+        let twice: Vec<(&String, &BTreeSet<&'static str>)> =
+            kinds.iter().filter(|(_, k)| k.len() > 1).collect();
+        assert!(
+            twice.is_empty(),
+            "paths declared at more than one kind: {twice:?}"
+        );
+        // And the named entries read by encoding are exactly those declared
+        // with the any-encoding body.
+        for name in SEVERAL_ENCODINGS {
+            assert!(
+                declared_paths()
+                    .iter()
+                    .any(|d| d.segments.ends_with(&[*name, Z64])
+                        || d.segments.ends_with(&[*name, ZBUF])),
+                "`{name}` is read by encoding and declares no `{Z64}` or `{ZBUF}`"
+            );
+        }
     }
 
     /// THE DECLARED SHAPE HOLDS EVERY PATH THE WALKERS PRODUCE, at the kind
@@ -1205,6 +1341,159 @@ mod tests {
             "no collapsed body was walked: {unnamed:?}"
         );
         assert!(named > 100_000, "{named}");
+    }
+
+    /// The published registry, one fact a line.
+    const PUBLISHED: &str = include_str!("published_selector_paths.txt");
+
+    fn published() -> Vec<&'static str> {
+        PUBLISHED
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect()
+    }
+
+    /// A path as the FIELD it names: a record's path with the `Frame` that
+    /// carried it taken off, so `Frame.payload.Push.x` and `Push.x` are one
+    /// fact, as they are one field.
+    fn field_of(path: &str) -> &str {
+        path.strip_prefix(BATCH_CARRIER)
+            .and_then(|p| p.strip_prefix('.'))
+            .and_then(|p| p.strip_prefix(BATCH_LEVEL))
+            .and_then(|p| p.strip_prefix('.'))
+            .unwrap_or(path)
+    }
+
+    /// Every fact the declared shape publishes now: each field at its kind,
+    /// and each word of a closed label.
+    fn facts_now() -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for d in declared_paths() {
+            let dotted = d.dotted();
+            let path = field_of(&dotted);
+            out.insert(alloc::format!("{path}\t{}", d.kind));
+            for word in d.words.map(|w| w()).unwrap_or_default() {
+                out.insert(alloc::format!("{path}\t{}\t{word}", d.kind));
+            }
+        }
+        out
+    }
+
+    /// A PATH ONCE PUBLISHED IS NEVER TAKEN BACK. Every fact of the registry
+    /// holds of the shape under the path's current name, every fact of the
+    /// shape is in the registry, each once, and every rename names a published
+    /// node that is no longer declared and a node that is.
+    #[test]
+    fn every_published_fact_still_holds() {
+        let now = facts_now();
+        let published = published();
+        let broken: Vec<&str> = published
+            .iter()
+            .copied()
+            .filter(|line| {
+                let (path, rest) = line.split_once('\t').unwrap_or((line, ""));
+                let current = current_name_under(path, RENAMED);
+                !now.contains(&alloc::format!("{}\t{rest}", field_of(&current)))
+            })
+            .collect();
+        assert!(
+            broken.is_empty(),
+            "{} published facts no longer hold. A path that moved is declared in \
+             RENAMED; a field whose kind changed takes a new name; a label keeps \
+             every word it published:\n{}",
+            broken.len(),
+            broken.join("\n")
+        );
+        let registry: BTreeSet<&str> = published.iter().copied().collect();
+        assert_eq!(registry.len(), published.len(), "a fact is published once");
+        let missing: Vec<&String> = now
+            .iter()
+            .filter(|f| !registry.contains(f.as_str()))
+            .collect();
+        for fact in &missing {
+            std::println!("PUBLISH\t{fact}");
+        }
+        assert!(
+            missing.is_empty(),
+            "{} facts are declared and not published: `python3 \
+             scripts/lib/publish_selector_paths.py --append <this test's output>` \
+             appends the lines printed after `PUBLISH\\t`",
+            missing.len()
+        );
+        let declared: BTreeSet<String> =
+            declared_paths().iter().map(DeclaredPath::dotted).collect();
+        for r in RENAMED {
+            assert!(
+                registry
+                    .iter()
+                    .any(|l| l.split('\t').next() == Some(field_of(r.from))),
+                "{} is renamed and was never published",
+                r.from
+            );
+            assert!(
+                declared.contains(r.to),
+                "{} is renamed to an undeclared {}",
+                r.from,
+                r.to
+            );
+            assert!(
+                !declared
+                    .iter()
+                    .any(|d| rename_one(d, r.from, r.from).is_some()),
+                "{} was renamed away and is declared again: a former name names one \
+                 field for good",
+                r.from
+            );
+        }
+    }
+
+    /// A rename reaches every path under the node, and the record a `Frame`
+    /// carries; former names run back through a chain of renames.
+    #[test]
+    fn a_rename_reaches_every_path_under_it_and_runs_back_through_a_chain() {
+        let chain = [
+            Renamed {
+                from: "Push.put.old",
+                to: "Push.put.middle",
+                since_fields_revision: 60,
+            },
+            Renamed {
+                from: "Push.put.middle",
+                to: "Push.put.payload",
+                since_fields_revision: 61,
+            },
+        ];
+        assert_eq!(
+            current_name_under("Push.put.old", &chain),
+            "Push.put.payload"
+        );
+        assert_eq!(
+            current_name_under("Push.put.old.x", &chain),
+            "Push.put.payload.x"
+        );
+        assert_eq!(
+            current_name_under("Frame.payload.Push.put.old", &chain),
+            "Frame.payload.Push.put.payload"
+        );
+        assert_eq!(
+            current_name_under("Push.put.older", &chain),
+            "Push.put.older"
+        );
+        assert_eq!(
+            former_names_under("Push.put.payload", &chain),
+            alloc::vec![
+                String::from("Push.put.middle"),
+                String::from("Push.put.old")
+            ]
+        );
+        assert_eq!(
+            former_names_under("Frame.payload.Push.put.payload", &chain),
+            alloc::vec![
+                String::from("Frame.payload.Push.put.middle"),
+                String::from("Frame.payload.Push.put.old")
+            ]
+        );
+        assert!(former_names_under("Push.put.encoding", &chain).is_empty());
     }
 
     /// The rendered field object carries the path, and `null` where there is none.

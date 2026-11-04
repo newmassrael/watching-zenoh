@@ -1202,6 +1202,7 @@ dependencies = [
  "wz-capi-c",
  "wz-capi-dissect",
  "wz-capi-replay",
+ "wz-capture",
 ]
 
 [[package]]

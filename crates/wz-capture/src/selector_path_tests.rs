@@ -270,6 +270,65 @@ fn an_unsettled_path_is_refused_with_its_candidates() {
         .reads_tree());
 }
 
+/// A FORMER NAME READS AS THE FIELD IT NAMES NOW, spelled as a selector written
+/// today spells it: the shortest tail of the current name that names exactly
+/// the renamed fields, the record under a `Frame` included. A former name that
+/// names no field is still unknown.
+#[test]
+fn a_former_name_reads_as_the_field_it_names_now() {
+    use wz_session_core::dissect_schema::Renamed;
+    let renames = [Renamed {
+        from: "Push.put.old_payload",
+        to: "Push.put.payload",
+        since_fields_revision: 60,
+    }];
+    crate::field_path::with_shape(|shape| a_former_name_reads_under(shape.paths(), &renames));
+}
+
+fn a_former_name_reads_under(
+    declared: &[crate::field_path::Declared],
+    renames: &[wz_session_core::dissect_schema::Renamed],
+) {
+    use crate::field_path::{formerly_under, PathRefusal};
+    let (spelled, images) =
+        formerly_under(&["old_payload"], declared, renames).expect("a former name");
+    let mut named: alloc::vec::Vec<alloc::string::String> =
+        images.iter().map(|d| d.segments.join(".")).collect();
+    named.sort();
+    assert_eq!(
+        named,
+        ["Frame.payload.Push.put.payload", "Push.put.payload"],
+        "the record alone and under a Frame"
+    );
+    assert_eq!(spelled, ["Push", "put", "payload"]);
+    // Any tail of the former name reads the same.
+    assert!(formerly_under(&["put", "old_payload"], declared, renames).is_ok());
+    assert_eq!(
+        formerly_under(&["never_named"], declared, renames).map(|(s, _)| s),
+        Err(PathRefusal::Unknown)
+    );
+}
+
+/// The first rename moves the field list's revision to one that pins the keys
+/// of a `renamed` entry, which its header promises.
+#[test]
+fn a_rename_is_published_by_a_field_list_revision_that_pins_its_keys() {
+    let renamed = !wz_session_core::dissect_schema::RENAMED.is_empty();
+    let keys = crate::doc_revision::newest(crate::doc_revision::SELECTOR_FIELDS)
+        .expect("a shape")
+        .keys;
+    assert!(keys.contains(&"renamed"), "{keys:?}");
+    for key in ["from", "to", "since"] {
+        assert_eq!(
+            keys.contains(&key),
+            renamed,
+            "`{key}` is pinned exactly when a rename has been published: {keys:?}"
+        );
+    }
+    let doc = crate::filter::selector_fields_json();
+    assert!(doc.contains("\"renamed\":["), "{doc}");
+}
+
 /// END TO END: the payload plane hands each record the tree of its own bytes,
 /// so a path selects exactly the record that carries it.
 #[cfg(feature = "network-codecs")]

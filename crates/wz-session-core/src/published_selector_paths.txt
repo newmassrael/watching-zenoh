@@ -1,0 +1,3553 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# EVERY FACT THE DECLARED SHAPE HAS PUBLISHED, one a line, and the file only
+# grows. A path a selector names is a name a consumer keeps (in a saved
+# selector, in the `selector_path` of a document it stored), so a fact once
+# here is never taken back:
+#
+#   <path>\t<kind>            the path is declared, read at that kind
+#   <path>\t<kind>\t<word>    the label at that path carries that word
+#
+# A path is the FIELD's: a record's field stands at `<message>...` alone and at
+# `Frame.payload.<message>...` under the Frame that carried it, and is one fact,
+# written from the message.
+#
+# `dissect_schema::tests::every_published_fact_still_holds` holds the shape to
+# every line, under the path's CURRENT name (`dissect_schema::RENAMED`), and
+# lists the facts the shape declares that are not here yet, to be appended in
+# the commit that declares them by `scripts/lib/publish_selector_paths.py
+# --append`. A line is never edited or removed (`--check <ref>` refuses a line
+# a ref published and this file lost): a field that moves is renamed, and a
+# field whose kind changes takes a new name.
+#
+# First written at field document revision 56, the first to carry
+# `selector_path` on every node. A body whose encoding its carrier does not
+# fix (`value` of an unnamed extension entry or an `Oam`) is published under
+# the encoding's name, `z64` or `zbuf`: under one name it was a path of two
+# kinds, which every selector naming it was refused for, so no selector ever
+# read it by that name.
+Close	nested
+Close.ext	nested
+Close.ext.encoding	bits
+Close.ext.ext_id	bits
+Close.ext.header	uint
+Close.ext.m	flag
+Close.ext.value_len	uint
+Close.ext.z	flag
+Close.ext.z64	uint
+Close.ext.zbuf	bytes
+Close.header	uint
+Close.mid	bits
+Close.reason	uint
+Close.s	flag
+Close.z	flag
+Declare	nested
+Declare.decl_final	nested
+Declare.decl_final.header	uint
+Declare.decl_final.mid	bits
+Declare.decl_final.z	flag
+Declare.decl_kexpr	nested
+Declare.decl_kexpr.header	uint
+Declare.decl_kexpr.id	uint
+Declare.decl_kexpr.keyexpr	nested
+Declare.decl_kexpr.keyexpr.id	uint
+Declare.decl_kexpr.keyexpr.mapping	bits
+Declare.decl_kexpr.keyexpr.suffix	text
+Declare.decl_kexpr.keyexpr.suffix_len	uint
+Declare.decl_kexpr.m	flag
+Declare.decl_kexpr.mid	bits
+Declare.decl_kexpr.n	flag
+Declare.decl_kexpr.z	flag
+Declare.decl_queryable	nested
+Declare.decl_queryable.ext	nested
+Declare.decl_queryable.ext.encoding	bits
+Declare.decl_queryable.ext.ext_id	bits
+Declare.decl_queryable.ext.header	uint
+Declare.decl_queryable.ext.m	flag
+Declare.decl_queryable.ext.value_len	uint
+Declare.decl_queryable.ext.z	flag
+Declare.decl_queryable.ext.z64	uint
+Declare.decl_queryable.ext.zbuf	bytes
+Declare.decl_queryable.header	uint
+Declare.decl_queryable.id	uint
+Declare.decl_queryable.keyexpr	nested
+Declare.decl_queryable.keyexpr.id	uint
+Declare.decl_queryable.keyexpr.mapping	bits
+Declare.decl_queryable.keyexpr.suffix	text
+Declare.decl_queryable.keyexpr.suffix_len	uint
+Declare.decl_queryable.m	flag
+Declare.decl_queryable.mid	bits
+Declare.decl_queryable.n	flag
+Declare.decl_queryable.queryable_info	nested
+Declare.decl_queryable.queryable_info.complete	flag
+Declare.decl_queryable.queryable_info.distance	bits
+Declare.decl_queryable.queryable_info.ext	nested
+Declare.decl_queryable.queryable_info.ext.encoding	bits
+Declare.decl_queryable.queryable_info.ext.ext_id	bits
+Declare.decl_queryable.queryable_info.ext.ext_name	label
+Declare.decl_queryable.queryable_info.ext.ext_name	label	attachment
+Declare.decl_queryable.queryable_info.ext.ext_name	label	auth
+Declare.decl_queryable.queryable_info.ext.ext_name	label	budget
+Declare.decl_queryable.queryable_info.ext.ext_name	label	compression
+Declare.decl_queryable.queryable_info.ext.ext_name	label	drop
+Declare.decl_queryable.queryable_info.ext.ext_name	label	first
+Declare.decl_queryable.queryable_info.ext.ext_name	label	low_latency
+Declare.decl_queryable.queryable_info.ext.ext_name	label	multi_link
+Declare.decl_queryable.queryable_info.ext.ext_name	label	multi_link_ack
+Declare.decl_queryable.queryable_info.ext.ext_name	label	multi_link_syn
+Declare.decl_queryable.queryable_info.ext.ext_name	label	node_id
+Declare.decl_queryable.queryable_info.ext.ext_name	label	patch
+Declare.decl_queryable.queryable_info.ext.ext_name	label	pubkey
+Declare.decl_queryable.queryable_info.ext.ext_name	label	qos
+Declare.decl_queryable.queryable_info.ext.ext_name	label	qos_link
+Declare.decl_queryable.queryable_info.ext.ext_name	label	query_body
+Declare.decl_queryable.queryable_info.ext.ext_name	label	queryable_info
+Declare.decl_queryable.queryable_info.ext.ext_name	label	responder_id
+Declare.decl_queryable.queryable_info.ext.ext_name	label	shm
+Declare.decl_queryable.queryable_info.ext.ext_name	label	source_info
+Declare.decl_queryable.queryable_info.ext.ext_name	label	target
+Declare.decl_queryable.queryable_info.ext.ext_name	label	timeout
+Declare.decl_queryable.queryable_info.ext.ext_name	label	timestamp
+Declare.decl_queryable.queryable_info.ext.ext_name	label	usrpwd
+Declare.decl_queryable.queryable_info.ext.ext_name	label	wire_expr
+Declare.decl_queryable.queryable_info.ext.header	uint
+Declare.decl_queryable.queryable_info.ext.m	flag
+Declare.decl_queryable.queryable_info.ext.z	flag
+Declare.decl_queryable.queryable_info.undefined_bits	bits
+Declare.decl_queryable.queryable_info.value	uint
+Declare.decl_queryable.z	flag
+Declare.decl_subscriber	nested
+Declare.decl_subscriber.header	uint
+Declare.decl_subscriber.id	uint
+Declare.decl_subscriber.keyexpr	nested
+Declare.decl_subscriber.keyexpr.id	uint
+Declare.decl_subscriber.keyexpr.mapping	bits
+Declare.decl_subscriber.keyexpr.suffix	text
+Declare.decl_subscriber.keyexpr.suffix_len	uint
+Declare.decl_subscriber.m	flag
+Declare.decl_subscriber.mid	bits
+Declare.decl_subscriber.n	flag
+Declare.decl_subscriber.z	flag
+Declare.decl_token	nested
+Declare.decl_token.header	uint
+Declare.decl_token.id	uint
+Declare.decl_token.keyexpr	nested
+Declare.decl_token.keyexpr.id	uint
+Declare.decl_token.keyexpr.mapping	bits
+Declare.decl_token.keyexpr.suffix	text
+Declare.decl_token.keyexpr.suffix_len	uint
+Declare.decl_token.m	flag
+Declare.decl_token.mid	bits
+Declare.decl_token.n	flag
+Declare.decl_token.z	flag
+Declare.ext	nested
+Declare.ext.encoding	bits
+Declare.ext.ext_id	bits
+Declare.ext.header	uint
+Declare.ext.m	flag
+Declare.ext.value_len	uint
+Declare.ext.z	flag
+Declare.ext.z64	uint
+Declare.ext.zbuf	bytes
+Declare.header	uint
+Declare.i	flag
+Declare.interest_id	uint
+Declare.mid	bits
+Declare.node_id	nested
+Declare.node_id.absent_to_receiver	flag
+Declare.node_id.ext	nested
+Declare.node_id.ext.encoding	bits
+Declare.node_id.ext.ext_id	bits
+Declare.node_id.ext.ext_name	label
+Declare.node_id.ext.ext_name	label	attachment
+Declare.node_id.ext.ext_name	label	auth
+Declare.node_id.ext.ext_name	label	budget
+Declare.node_id.ext.ext_name	label	compression
+Declare.node_id.ext.ext_name	label	drop
+Declare.node_id.ext.ext_name	label	first
+Declare.node_id.ext.ext_name	label	low_latency
+Declare.node_id.ext.ext_name	label	multi_link
+Declare.node_id.ext.ext_name	label	multi_link_ack
+Declare.node_id.ext.ext_name	label	multi_link_syn
+Declare.node_id.ext.ext_name	label	node_id
+Declare.node_id.ext.ext_name	label	patch
+Declare.node_id.ext.ext_name	label	pubkey
+Declare.node_id.ext.ext_name	label	qos
+Declare.node_id.ext.ext_name	label	qos_link
+Declare.node_id.ext.ext_name	label	query_body
+Declare.node_id.ext.ext_name	label	queryable_info
+Declare.node_id.ext.ext_name	label	responder_id
+Declare.node_id.ext.ext_name	label	shm
+Declare.node_id.ext.ext_name	label	source_info
+Declare.node_id.ext.ext_name	label	target
+Declare.node_id.ext.ext_name	label	timeout
+Declare.node_id.ext.ext_name	label	timestamp
+Declare.node_id.ext.ext_name	label	usrpwd
+Declare.node_id.ext.ext_name	label	wire_expr
+Declare.node_id.ext.header	uint
+Declare.node_id.ext.m	flag
+Declare.node_id.ext.z	flag
+Declare.node_id.read_as	bits
+Declare.node_id.undefined_bits	bits
+Declare.node_id.value	uint
+Declare.qos	nested
+Declare.qos.congestion	label
+Declare.qos.congestion	label	Block
+Declare.qos.congestion	label	BlockFirst
+Declare.qos.congestion	label	Drop
+Declare.qos.express	flag
+Declare.qos.ext	nested
+Declare.qos.ext.encoding	bits
+Declare.qos.ext.ext_id	bits
+Declare.qos.ext.ext_name	label
+Declare.qos.ext.ext_name	label	attachment
+Declare.qos.ext.ext_name	label	auth
+Declare.qos.ext.ext_name	label	budget
+Declare.qos.ext.ext_name	label	compression
+Declare.qos.ext.ext_name	label	drop
+Declare.qos.ext.ext_name	label	first
+Declare.qos.ext.ext_name	label	low_latency
+Declare.qos.ext.ext_name	label	multi_link
+Declare.qos.ext.ext_name	label	multi_link_ack
+Declare.qos.ext.ext_name	label	multi_link_syn
+Declare.qos.ext.ext_name	label	node_id
+Declare.qos.ext.ext_name	label	patch
+Declare.qos.ext.ext_name	label	pubkey
+Declare.qos.ext.ext_name	label	qos
+Declare.qos.ext.ext_name	label	qos_link
+Declare.qos.ext.ext_name	label	query_body
+Declare.qos.ext.ext_name	label	queryable_info
+Declare.qos.ext.ext_name	label	responder_id
+Declare.qos.ext.ext_name	label	shm
+Declare.qos.ext.ext_name	label	source_info
+Declare.qos.ext.ext_name	label	target
+Declare.qos.ext.ext_name	label	timeout
+Declare.qos.ext.ext_name	label	timestamp
+Declare.qos.ext.ext_name	label	usrpwd
+Declare.qos.ext.ext_name	label	wire_expr
+Declare.qos.ext.header	uint
+Declare.qos.ext.m	flag
+Declare.qos.ext.z	flag
+Declare.qos.priority	label
+Declare.qos.priority	label	Background
+Declare.qos.priority	label	Control
+Declare.qos.priority	label	Data
+Declare.qos.priority	label	DataHigh
+Declare.qos.priority	label	DataLow
+Declare.qos.priority	label	InteractiveHigh
+Declare.qos.priority	label	InteractiveLow
+Declare.qos.priority	label	RealTime
+Declare.qos.undefined_bits	bits
+Declare.qos.value	uint
+Declare.timestamp	nested
+Declare.timestamp.ext	nested
+Declare.timestamp.ext.encoding	bits
+Declare.timestamp.ext.ext_id	bits
+Declare.timestamp.ext.ext_name	label
+Declare.timestamp.ext.ext_name	label	attachment
+Declare.timestamp.ext.ext_name	label	auth
+Declare.timestamp.ext.ext_name	label	budget
+Declare.timestamp.ext.ext_name	label	compression
+Declare.timestamp.ext.ext_name	label	drop
+Declare.timestamp.ext.ext_name	label	first
+Declare.timestamp.ext.ext_name	label	low_latency
+Declare.timestamp.ext.ext_name	label	multi_link
+Declare.timestamp.ext.ext_name	label	multi_link_ack
+Declare.timestamp.ext.ext_name	label	multi_link_syn
+Declare.timestamp.ext.ext_name	label	node_id
+Declare.timestamp.ext.ext_name	label	patch
+Declare.timestamp.ext.ext_name	label	pubkey
+Declare.timestamp.ext.ext_name	label	qos
+Declare.timestamp.ext.ext_name	label	qos_link
+Declare.timestamp.ext.ext_name	label	query_body
+Declare.timestamp.ext.ext_name	label	queryable_info
+Declare.timestamp.ext.ext_name	label	responder_id
+Declare.timestamp.ext.ext_name	label	shm
+Declare.timestamp.ext.ext_name	label	source_info
+Declare.timestamp.ext.ext_name	label	target
+Declare.timestamp.ext.ext_name	label	timeout
+Declare.timestamp.ext.ext_name	label	timestamp
+Declare.timestamp.ext.ext_name	label	usrpwd
+Declare.timestamp.ext.ext_name	label	wire_expr
+Declare.timestamp.ext.header	uint
+Declare.timestamp.ext.m	flag
+Declare.timestamp.ext.z	flag
+Declare.timestamp.time	uint
+Declare.timestamp.value	bytes
+Declare.timestamp.value_len	uint
+Declare.timestamp.zid	zid
+Declare.timestamp.zid_len	uint
+Declare.undecl_kexpr	nested
+Declare.undecl_kexpr.header	uint
+Declare.undecl_kexpr.id	uint
+Declare.undecl_kexpr.mid	bits
+Declare.undecl_kexpr.z	flag
+Declare.undecl_queryable	nested
+Declare.undecl_queryable.ext	nested
+Declare.undecl_queryable.ext.encoding	bits
+Declare.undecl_queryable.ext.ext_id	bits
+Declare.undecl_queryable.ext.header	uint
+Declare.undecl_queryable.ext.m	flag
+Declare.undecl_queryable.ext.value_len	uint
+Declare.undecl_queryable.ext.z	flag
+Declare.undecl_queryable.ext.z64	uint
+Declare.undecl_queryable.ext.zbuf	bytes
+Declare.undecl_queryable.header	uint
+Declare.undecl_queryable.id	uint
+Declare.undecl_queryable.mid	bits
+Declare.undecl_queryable.wire_expr	nested
+Declare.undecl_queryable.wire_expr.ext	nested
+Declare.undecl_queryable.wire_expr.ext.encoding	bits
+Declare.undecl_queryable.wire_expr.ext.ext_id	bits
+Declare.undecl_queryable.wire_expr.ext.ext_name	label
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	attachment
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	auth
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	budget
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	compression
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	drop
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	first
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	low_latency
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	multi_link
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	multi_link_ack
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	multi_link_syn
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	node_id
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	patch
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	pubkey
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	qos
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	qos_link
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	query_body
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	queryable_info
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	responder_id
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	shm
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	source_info
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	target
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	timeout
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	timestamp
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	usrpwd
+Declare.undecl_queryable.wire_expr.ext.ext_name	label	wire_expr
+Declare.undecl_queryable.wire_expr.ext.header	uint
+Declare.undecl_queryable.wire_expr.ext.m	flag
+Declare.undecl_queryable.wire_expr.ext.z	flag
+Declare.undecl_queryable.wire_expr.hdr	uint
+Declare.undecl_queryable.wire_expr.id	uint
+Declare.undecl_queryable.wire_expr.mapping	bits
+Declare.undecl_queryable.wire_expr.n	flag
+Declare.undecl_queryable.wire_expr.suffix	text
+Declare.undecl_queryable.wire_expr.value	bytes
+Declare.undecl_queryable.wire_expr.value_len	uint
+Declare.undecl_queryable.z	flag
+Declare.undecl_subscriber	nested
+Declare.undecl_subscriber.ext	nested
+Declare.undecl_subscriber.ext.encoding	bits
+Declare.undecl_subscriber.ext.ext_id	bits
+Declare.undecl_subscriber.ext.header	uint
+Declare.undecl_subscriber.ext.m	flag
+Declare.undecl_subscriber.ext.value_len	uint
+Declare.undecl_subscriber.ext.z	flag
+Declare.undecl_subscriber.ext.z64	uint
+Declare.undecl_subscriber.ext.zbuf	bytes
+Declare.undecl_subscriber.header	uint
+Declare.undecl_subscriber.id	uint
+Declare.undecl_subscriber.mid	bits
+Declare.undecl_subscriber.wire_expr	nested
+Declare.undecl_subscriber.wire_expr.ext	nested
+Declare.undecl_subscriber.wire_expr.ext.encoding	bits
+Declare.undecl_subscriber.wire_expr.ext.ext_id	bits
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	attachment
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	auth
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	budget
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	compression
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	drop
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	first
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	low_latency
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	multi_link
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	multi_link_ack
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	multi_link_syn
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	node_id
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	patch
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	pubkey
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	qos
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	qos_link
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	query_body
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	queryable_info
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	responder_id
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	shm
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	source_info
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	target
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	timeout
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	timestamp
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	usrpwd
+Declare.undecl_subscriber.wire_expr.ext.ext_name	label	wire_expr
+Declare.undecl_subscriber.wire_expr.ext.header	uint
+Declare.undecl_subscriber.wire_expr.ext.m	flag
+Declare.undecl_subscriber.wire_expr.ext.z	flag
+Declare.undecl_subscriber.wire_expr.hdr	uint
+Declare.undecl_subscriber.wire_expr.id	uint
+Declare.undecl_subscriber.wire_expr.mapping	bits
+Declare.undecl_subscriber.wire_expr.n	flag
+Declare.undecl_subscriber.wire_expr.suffix	text
+Declare.undecl_subscriber.wire_expr.value	bytes
+Declare.undecl_subscriber.wire_expr.value_len	uint
+Declare.undecl_subscriber.z	flag
+Declare.undecl_token	nested
+Declare.undecl_token.ext	nested
+Declare.undecl_token.ext.encoding	bits
+Declare.undecl_token.ext.ext_id	bits
+Declare.undecl_token.ext.header	uint
+Declare.undecl_token.ext.m	flag
+Declare.undecl_token.ext.value_len	uint
+Declare.undecl_token.ext.z	flag
+Declare.undecl_token.ext.z64	uint
+Declare.undecl_token.ext.zbuf	bytes
+Declare.undecl_token.header	uint
+Declare.undecl_token.id	uint
+Declare.undecl_token.mid	bits
+Declare.undecl_token.wire_expr	nested
+Declare.undecl_token.wire_expr.ext	nested
+Declare.undecl_token.wire_expr.ext.encoding	bits
+Declare.undecl_token.wire_expr.ext.ext_id	bits
+Declare.undecl_token.wire_expr.ext.ext_name	label
+Declare.undecl_token.wire_expr.ext.ext_name	label	attachment
+Declare.undecl_token.wire_expr.ext.ext_name	label	auth
+Declare.undecl_token.wire_expr.ext.ext_name	label	budget
+Declare.undecl_token.wire_expr.ext.ext_name	label	compression
+Declare.undecl_token.wire_expr.ext.ext_name	label	drop
+Declare.undecl_token.wire_expr.ext.ext_name	label	first
+Declare.undecl_token.wire_expr.ext.ext_name	label	low_latency
+Declare.undecl_token.wire_expr.ext.ext_name	label	multi_link
+Declare.undecl_token.wire_expr.ext.ext_name	label	multi_link_ack
+Declare.undecl_token.wire_expr.ext.ext_name	label	multi_link_syn
+Declare.undecl_token.wire_expr.ext.ext_name	label	node_id
+Declare.undecl_token.wire_expr.ext.ext_name	label	patch
+Declare.undecl_token.wire_expr.ext.ext_name	label	pubkey
+Declare.undecl_token.wire_expr.ext.ext_name	label	qos
+Declare.undecl_token.wire_expr.ext.ext_name	label	qos_link
+Declare.undecl_token.wire_expr.ext.ext_name	label	query_body
+Declare.undecl_token.wire_expr.ext.ext_name	label	queryable_info
+Declare.undecl_token.wire_expr.ext.ext_name	label	responder_id
+Declare.undecl_token.wire_expr.ext.ext_name	label	shm
+Declare.undecl_token.wire_expr.ext.ext_name	label	source_info
+Declare.undecl_token.wire_expr.ext.ext_name	label	target
+Declare.undecl_token.wire_expr.ext.ext_name	label	timeout
+Declare.undecl_token.wire_expr.ext.ext_name	label	timestamp
+Declare.undecl_token.wire_expr.ext.ext_name	label	usrpwd
+Declare.undecl_token.wire_expr.ext.ext_name	label	wire_expr
+Declare.undecl_token.wire_expr.ext.header	uint
+Declare.undecl_token.wire_expr.ext.m	flag
+Declare.undecl_token.wire_expr.ext.z	flag
+Declare.undecl_token.wire_expr.hdr	uint
+Declare.undecl_token.wire_expr.id	uint
+Declare.undecl_token.wire_expr.mapping	bits
+Declare.undecl_token.wire_expr.n	flag
+Declare.undecl_token.wire_expr.suffix	text
+Declare.undecl_token.wire_expr.value	bytes
+Declare.undecl_token.wire_expr.value_len	uint
+Declare.undecl_token.z	flag
+Declare.z	flag
+Fragment	nested
+Fragment.drop	nested
+Fragment.drop.ext	nested
+Fragment.drop.ext.encoding	bits
+Fragment.drop.ext.ext_id	bits
+Fragment.drop.ext.ext_name	label
+Fragment.drop.ext.ext_name	label	attachment
+Fragment.drop.ext.ext_name	label	auth
+Fragment.drop.ext.ext_name	label	budget
+Fragment.drop.ext.ext_name	label	compression
+Fragment.drop.ext.ext_name	label	drop
+Fragment.drop.ext.ext_name	label	first
+Fragment.drop.ext.ext_name	label	low_latency
+Fragment.drop.ext.ext_name	label	multi_link
+Fragment.drop.ext.ext_name	label	multi_link_ack
+Fragment.drop.ext.ext_name	label	multi_link_syn
+Fragment.drop.ext.ext_name	label	node_id
+Fragment.drop.ext.ext_name	label	patch
+Fragment.drop.ext.ext_name	label	pubkey
+Fragment.drop.ext.ext_name	label	qos
+Fragment.drop.ext.ext_name	label	qos_link
+Fragment.drop.ext.ext_name	label	query_body
+Fragment.drop.ext.ext_name	label	queryable_info
+Fragment.drop.ext.ext_name	label	responder_id
+Fragment.drop.ext.ext_name	label	shm
+Fragment.drop.ext.ext_name	label	source_info
+Fragment.drop.ext.ext_name	label	target
+Fragment.drop.ext.ext_name	label	timeout
+Fragment.drop.ext.ext_name	label	timestamp
+Fragment.drop.ext.ext_name	label	usrpwd
+Fragment.drop.ext.ext_name	label	wire_expr
+Fragment.drop.ext.header	uint
+Fragment.drop.ext.m	flag
+Fragment.drop.ext.z	flag
+Fragment.ext	nested
+Fragment.ext.encoding	bits
+Fragment.ext.ext_id	bits
+Fragment.ext.header	uint
+Fragment.ext.m	flag
+Fragment.ext.value_len	uint
+Fragment.ext.z	flag
+Fragment.ext.z64	uint
+Fragment.ext.zbuf	bytes
+Fragment.first	nested
+Fragment.first.ext	nested
+Fragment.first.ext.encoding	bits
+Fragment.first.ext.ext_id	bits
+Fragment.first.ext.ext_name	label
+Fragment.first.ext.ext_name	label	attachment
+Fragment.first.ext.ext_name	label	auth
+Fragment.first.ext.ext_name	label	budget
+Fragment.first.ext.ext_name	label	compression
+Fragment.first.ext.ext_name	label	drop
+Fragment.first.ext.ext_name	label	first
+Fragment.first.ext.ext_name	label	low_latency
+Fragment.first.ext.ext_name	label	multi_link
+Fragment.first.ext.ext_name	label	multi_link_ack
+Fragment.first.ext.ext_name	label	multi_link_syn
+Fragment.first.ext.ext_name	label	node_id
+Fragment.first.ext.ext_name	label	patch
+Fragment.first.ext.ext_name	label	pubkey
+Fragment.first.ext.ext_name	label	qos
+Fragment.first.ext.ext_name	label	qos_link
+Fragment.first.ext.ext_name	label	query_body
+Fragment.first.ext.ext_name	label	queryable_info
+Fragment.first.ext.ext_name	label	responder_id
+Fragment.first.ext.ext_name	label	shm
+Fragment.first.ext.ext_name	label	source_info
+Fragment.first.ext.ext_name	label	target
+Fragment.first.ext.ext_name	label	timeout
+Fragment.first.ext.ext_name	label	timestamp
+Fragment.first.ext.ext_name	label	usrpwd
+Fragment.first.ext.ext_name	label	wire_expr
+Fragment.first.ext.header	uint
+Fragment.first.ext.m	flag
+Fragment.first.ext.z	flag
+Fragment.header	uint
+Fragment.m	flag
+Fragment.mid	bits
+Fragment.payload	bytes
+Fragment.qos	nested
+Fragment.qos.ext	nested
+Fragment.qos.ext.encoding	bits
+Fragment.qos.ext.ext_id	bits
+Fragment.qos.ext.ext_name	label
+Fragment.qos.ext.ext_name	label	attachment
+Fragment.qos.ext.ext_name	label	auth
+Fragment.qos.ext.ext_name	label	budget
+Fragment.qos.ext.ext_name	label	compression
+Fragment.qos.ext.ext_name	label	drop
+Fragment.qos.ext.ext_name	label	first
+Fragment.qos.ext.ext_name	label	low_latency
+Fragment.qos.ext.ext_name	label	multi_link
+Fragment.qos.ext.ext_name	label	multi_link_ack
+Fragment.qos.ext.ext_name	label	multi_link_syn
+Fragment.qos.ext.ext_name	label	node_id
+Fragment.qos.ext.ext_name	label	patch
+Fragment.qos.ext.ext_name	label	pubkey
+Fragment.qos.ext.ext_name	label	qos
+Fragment.qos.ext.ext_name	label	qos_link
+Fragment.qos.ext.ext_name	label	query_body
+Fragment.qos.ext.ext_name	label	queryable_info
+Fragment.qos.ext.ext_name	label	responder_id
+Fragment.qos.ext.ext_name	label	shm
+Fragment.qos.ext.ext_name	label	source_info
+Fragment.qos.ext.ext_name	label	target
+Fragment.qos.ext.ext_name	label	timeout
+Fragment.qos.ext.ext_name	label	timestamp
+Fragment.qos.ext.ext_name	label	usrpwd
+Fragment.qos.ext.ext_name	label	wire_expr
+Fragment.qos.ext.header	uint
+Fragment.qos.ext.m	flag
+Fragment.qos.ext.z	flag
+Fragment.qos.priority	label
+Fragment.qos.priority	label	Background
+Fragment.qos.priority	label	Control
+Fragment.qos.priority	label	Data
+Fragment.qos.priority	label	DataHigh
+Fragment.qos.priority	label	DataLow
+Fragment.qos.priority	label	InteractiveHigh
+Fragment.qos.priority	label	InteractiveLow
+Fragment.qos.priority	label	RealTime
+Fragment.qos.undefined_bits	bits
+Fragment.qos.value	uint
+Fragment.r	flag
+Fragment.sn	uint
+Fragment.z	flag
+Frame	nested
+Frame.ext	nested
+Frame.ext.encoding	bits
+Frame.ext.ext_id	bits
+Frame.ext.header	uint
+Frame.ext.m	flag
+Frame.ext.value_len	uint
+Frame.ext.z	flag
+Frame.ext.z64	uint
+Frame.ext.zbuf	bytes
+Frame.header	uint
+Frame.mid	bits
+Frame.payload	nested
+Frame.qos	nested
+Frame.qos.ext	nested
+Frame.qos.ext.encoding	bits
+Frame.qos.ext.ext_id	bits
+Frame.qos.ext.ext_name	label
+Frame.qos.ext.ext_name	label	attachment
+Frame.qos.ext.ext_name	label	auth
+Frame.qos.ext.ext_name	label	budget
+Frame.qos.ext.ext_name	label	compression
+Frame.qos.ext.ext_name	label	drop
+Frame.qos.ext.ext_name	label	first
+Frame.qos.ext.ext_name	label	low_latency
+Frame.qos.ext.ext_name	label	multi_link
+Frame.qos.ext.ext_name	label	multi_link_ack
+Frame.qos.ext.ext_name	label	multi_link_syn
+Frame.qos.ext.ext_name	label	node_id
+Frame.qos.ext.ext_name	label	patch
+Frame.qos.ext.ext_name	label	pubkey
+Frame.qos.ext.ext_name	label	qos
+Frame.qos.ext.ext_name	label	qos_link
+Frame.qos.ext.ext_name	label	query_body
+Frame.qos.ext.ext_name	label	queryable_info
+Frame.qos.ext.ext_name	label	responder_id
+Frame.qos.ext.ext_name	label	shm
+Frame.qos.ext.ext_name	label	source_info
+Frame.qos.ext.ext_name	label	target
+Frame.qos.ext.ext_name	label	timeout
+Frame.qos.ext.ext_name	label	timestamp
+Frame.qos.ext.ext_name	label	usrpwd
+Frame.qos.ext.ext_name	label	wire_expr
+Frame.qos.ext.header	uint
+Frame.qos.ext.m	flag
+Frame.qos.ext.z	flag
+Frame.qos.priority	label
+Frame.qos.priority	label	Background
+Frame.qos.priority	label	Control
+Frame.qos.priority	label	Data
+Frame.qos.priority	label	DataHigh
+Frame.qos.priority	label	DataLow
+Frame.qos.priority	label	InteractiveHigh
+Frame.qos.priority	label	InteractiveLow
+Frame.qos.priority	label	RealTime
+Frame.qos.undefined_bits	bits
+Frame.qos.value	uint
+Frame.r	flag
+Frame.sn	uint
+Frame.z	flag
+Hello	nested
+Hello.cbyte	uint
+Hello.header	uint
+Hello.l	flag
+Hello.locator_entry	nested
+Hello.locator_entry.locator	text
+Hello.locator_entry.locator_len	uint
+Hello.mid	bits
+Hello.num_locators	uint
+Hello.version	uint
+Hello.whatami	bits
+Hello.zid	zid
+Hello.zid_len_m1	bits
+Init	nested
+Init.a	flag
+Init.auth	nested
+Init.auth.ext	nested
+Init.auth.ext.encoding	bits
+Init.auth.ext.ext_id	bits
+Init.auth.ext.ext_name	label
+Init.auth.ext.ext_name	label	attachment
+Init.auth.ext.ext_name	label	auth
+Init.auth.ext.ext_name	label	budget
+Init.auth.ext.ext_name	label	compression
+Init.auth.ext.ext_name	label	drop
+Init.auth.ext.ext_name	label	first
+Init.auth.ext.ext_name	label	low_latency
+Init.auth.ext.ext_name	label	multi_link
+Init.auth.ext.ext_name	label	multi_link_ack
+Init.auth.ext.ext_name	label	multi_link_syn
+Init.auth.ext.ext_name	label	node_id
+Init.auth.ext.ext_name	label	patch
+Init.auth.ext.ext_name	label	pubkey
+Init.auth.ext.ext_name	label	qos
+Init.auth.ext.ext_name	label	qos_link
+Init.auth.ext.ext_name	label	query_body
+Init.auth.ext.ext_name	label	queryable_info
+Init.auth.ext.ext_name	label	responder_id
+Init.auth.ext.ext_name	label	shm
+Init.auth.ext.ext_name	label	source_info
+Init.auth.ext.ext_name	label	target
+Init.auth.ext.ext_name	label	timeout
+Init.auth.ext.ext_name	label	timestamp
+Init.auth.ext.ext_name	label	usrpwd
+Init.auth.ext.ext_name	label	wire_expr
+Init.auth.ext.header	uint
+Init.auth.ext.m	flag
+Init.auth.ext.value_len	uint
+Init.auth.ext.z	flag
+Init.auth.ext.z64	uint
+Init.auth.ext.zbuf	bytes
+Init.auth.pubkey	nested
+Init.auth.pubkey.challenge	bytes
+Init.auth.pubkey.challenge_len	uint
+Init.auth.pubkey.ext	nested
+Init.auth.pubkey.ext.encoding	bits
+Init.auth.pubkey.ext.ext_id	bits
+Init.auth.pubkey.ext.ext_name	label
+Init.auth.pubkey.ext.ext_name	label	attachment
+Init.auth.pubkey.ext.ext_name	label	auth
+Init.auth.pubkey.ext.ext_name	label	budget
+Init.auth.pubkey.ext.ext_name	label	compression
+Init.auth.pubkey.ext.ext_name	label	drop
+Init.auth.pubkey.ext.ext_name	label	first
+Init.auth.pubkey.ext.ext_name	label	low_latency
+Init.auth.pubkey.ext.ext_name	label	multi_link
+Init.auth.pubkey.ext.ext_name	label	multi_link_ack
+Init.auth.pubkey.ext.ext_name	label	multi_link_syn
+Init.auth.pubkey.ext.ext_name	label	node_id
+Init.auth.pubkey.ext.ext_name	label	patch
+Init.auth.pubkey.ext.ext_name	label	pubkey
+Init.auth.pubkey.ext.ext_name	label	qos
+Init.auth.pubkey.ext.ext_name	label	qos_link
+Init.auth.pubkey.ext.ext_name	label	query_body
+Init.auth.pubkey.ext.ext_name	label	queryable_info
+Init.auth.pubkey.ext.ext_name	label	responder_id
+Init.auth.pubkey.ext.ext_name	label	shm
+Init.auth.pubkey.ext.ext_name	label	source_info
+Init.auth.pubkey.ext.ext_name	label	target
+Init.auth.pubkey.ext.ext_name	label	timeout
+Init.auth.pubkey.ext.ext_name	label	timestamp
+Init.auth.pubkey.ext.ext_name	label	usrpwd
+Init.auth.pubkey.ext.ext_name	label	wire_expr
+Init.auth.pubkey.ext.header	uint
+Init.auth.pubkey.ext.m	flag
+Init.auth.pubkey.ext.z	flag
+Init.auth.pubkey.pubkey_e	bytes
+Init.auth.pubkey.pubkey_e_len	uint
+Init.auth.pubkey.pubkey_n	bytes
+Init.auth.pubkey.pubkey_n_len	uint
+Init.auth.pubkey.value	bytes
+Init.auth.pubkey.value_len	uint
+Init.auth.usrpwd	nested
+Init.auth.usrpwd.ext	nested
+Init.auth.usrpwd.ext.encoding	bits
+Init.auth.usrpwd.ext.ext_id	bits
+Init.auth.usrpwd.ext.ext_name	label
+Init.auth.usrpwd.ext.ext_name	label	attachment
+Init.auth.usrpwd.ext.ext_name	label	auth
+Init.auth.usrpwd.ext.ext_name	label	budget
+Init.auth.usrpwd.ext.ext_name	label	compression
+Init.auth.usrpwd.ext.ext_name	label	drop
+Init.auth.usrpwd.ext.ext_name	label	first
+Init.auth.usrpwd.ext.ext_name	label	low_latency
+Init.auth.usrpwd.ext.ext_name	label	multi_link
+Init.auth.usrpwd.ext.ext_name	label	multi_link_ack
+Init.auth.usrpwd.ext.ext_name	label	multi_link_syn
+Init.auth.usrpwd.ext.ext_name	label	node_id
+Init.auth.usrpwd.ext.ext_name	label	patch
+Init.auth.usrpwd.ext.ext_name	label	pubkey
+Init.auth.usrpwd.ext.ext_name	label	qos
+Init.auth.usrpwd.ext.ext_name	label	qos_link
+Init.auth.usrpwd.ext.ext_name	label	query_body
+Init.auth.usrpwd.ext.ext_name	label	queryable_info
+Init.auth.usrpwd.ext.ext_name	label	responder_id
+Init.auth.usrpwd.ext.ext_name	label	shm
+Init.auth.usrpwd.ext.ext_name	label	source_info
+Init.auth.usrpwd.ext.ext_name	label	target
+Init.auth.usrpwd.ext.ext_name	label	timeout
+Init.auth.usrpwd.ext.ext_name	label	timestamp
+Init.auth.usrpwd.ext.ext_name	label	usrpwd
+Init.auth.usrpwd.ext.ext_name	label	wire_expr
+Init.auth.usrpwd.ext.header	uint
+Init.auth.usrpwd.ext.m	flag
+Init.auth.usrpwd.ext.z	flag
+Init.auth.usrpwd.hmac	bytes
+Init.auth.usrpwd.hmac_len	uint
+Init.auth.usrpwd.user	bytes
+Init.auth.usrpwd.user_len	uint
+Init.auth.usrpwd.value_len	uint
+Init.auth.usrpwd.z64	uint
+Init.auth.usrpwd.zbuf	bytes
+Init.auth.value	bytes
+Init.auth.value_len	uint
+Init.batch_size	uint
+Init.cbyte	uint
+Init.compression	nested
+Init.compression.ext	nested
+Init.compression.ext.encoding	bits
+Init.compression.ext.ext_id	bits
+Init.compression.ext.ext_name	label
+Init.compression.ext.ext_name	label	attachment
+Init.compression.ext.ext_name	label	auth
+Init.compression.ext.ext_name	label	budget
+Init.compression.ext.ext_name	label	compression
+Init.compression.ext.ext_name	label	drop
+Init.compression.ext.ext_name	label	first
+Init.compression.ext.ext_name	label	low_latency
+Init.compression.ext.ext_name	label	multi_link
+Init.compression.ext.ext_name	label	multi_link_ack
+Init.compression.ext.ext_name	label	multi_link_syn
+Init.compression.ext.ext_name	label	node_id
+Init.compression.ext.ext_name	label	patch
+Init.compression.ext.ext_name	label	pubkey
+Init.compression.ext.ext_name	label	qos
+Init.compression.ext.ext_name	label	qos_link
+Init.compression.ext.ext_name	label	query_body
+Init.compression.ext.ext_name	label	queryable_info
+Init.compression.ext.ext_name	label	responder_id
+Init.compression.ext.ext_name	label	shm
+Init.compression.ext.ext_name	label	source_info
+Init.compression.ext.ext_name	label	target
+Init.compression.ext.ext_name	label	timeout
+Init.compression.ext.ext_name	label	timestamp
+Init.compression.ext.ext_name	label	usrpwd
+Init.compression.ext.ext_name	label	wire_expr
+Init.compression.ext.header	uint
+Init.compression.ext.m	flag
+Init.compression.ext.z	flag
+Init.cookie	bytes
+Init.cookie_len	uint
+Init.ext	nested
+Init.ext.encoding	bits
+Init.ext.ext_id	bits
+Init.ext.header	uint
+Init.ext.m	flag
+Init.ext.value_len	uint
+Init.ext.z	flag
+Init.ext.z64	uint
+Init.ext.zbuf	bytes
+Init.header	uint
+Init.low_latency	nested
+Init.low_latency.ext	nested
+Init.low_latency.ext.encoding	bits
+Init.low_latency.ext.ext_id	bits
+Init.low_latency.ext.ext_name	label
+Init.low_latency.ext.ext_name	label	attachment
+Init.low_latency.ext.ext_name	label	auth
+Init.low_latency.ext.ext_name	label	budget
+Init.low_latency.ext.ext_name	label	compression
+Init.low_latency.ext.ext_name	label	drop
+Init.low_latency.ext.ext_name	label	first
+Init.low_latency.ext.ext_name	label	low_latency
+Init.low_latency.ext.ext_name	label	multi_link
+Init.low_latency.ext.ext_name	label	multi_link_ack
+Init.low_latency.ext.ext_name	label	multi_link_syn
+Init.low_latency.ext.ext_name	label	node_id
+Init.low_latency.ext.ext_name	label	patch
+Init.low_latency.ext.ext_name	label	pubkey
+Init.low_latency.ext.ext_name	label	qos
+Init.low_latency.ext.ext_name	label	qos_link
+Init.low_latency.ext.ext_name	label	query_body
+Init.low_latency.ext.ext_name	label	queryable_info
+Init.low_latency.ext.ext_name	label	responder_id
+Init.low_latency.ext.ext_name	label	shm
+Init.low_latency.ext.ext_name	label	source_info
+Init.low_latency.ext.ext_name	label	target
+Init.low_latency.ext.ext_name	label	timeout
+Init.low_latency.ext.ext_name	label	timestamp
+Init.low_latency.ext.ext_name	label	usrpwd
+Init.low_latency.ext.ext_name	label	wire_expr
+Init.low_latency.ext.header	uint
+Init.low_latency.ext.m	flag
+Init.low_latency.ext.z	flag
+Init.mid	bits
+Init.multi_link	nested
+Init.multi_link.challenge	bytes
+Init.multi_link.challenge_len	uint
+Init.multi_link.ext	nested
+Init.multi_link.ext.encoding	bits
+Init.multi_link.ext.ext_id	bits
+Init.multi_link.ext.ext_name	label
+Init.multi_link.ext.ext_name	label	attachment
+Init.multi_link.ext.ext_name	label	auth
+Init.multi_link.ext.ext_name	label	budget
+Init.multi_link.ext.ext_name	label	compression
+Init.multi_link.ext.ext_name	label	drop
+Init.multi_link.ext.ext_name	label	first
+Init.multi_link.ext.ext_name	label	low_latency
+Init.multi_link.ext.ext_name	label	multi_link
+Init.multi_link.ext.ext_name	label	multi_link_ack
+Init.multi_link.ext.ext_name	label	multi_link_syn
+Init.multi_link.ext.ext_name	label	node_id
+Init.multi_link.ext.ext_name	label	patch
+Init.multi_link.ext.ext_name	label	pubkey
+Init.multi_link.ext.ext_name	label	qos
+Init.multi_link.ext.ext_name	label	qos_link
+Init.multi_link.ext.ext_name	label	query_body
+Init.multi_link.ext.ext_name	label	queryable_info
+Init.multi_link.ext.ext_name	label	responder_id
+Init.multi_link.ext.ext_name	label	shm
+Init.multi_link.ext.ext_name	label	source_info
+Init.multi_link.ext.ext_name	label	target
+Init.multi_link.ext.ext_name	label	timeout
+Init.multi_link.ext.ext_name	label	timestamp
+Init.multi_link.ext.ext_name	label	usrpwd
+Init.multi_link.ext.ext_name	label	wire_expr
+Init.multi_link.ext.header	uint
+Init.multi_link.ext.m	flag
+Init.multi_link.ext.z	flag
+Init.multi_link.pubkey_e	bytes
+Init.multi_link.pubkey_e_len	uint
+Init.multi_link.pubkey_n	bytes
+Init.multi_link.pubkey_n_len	uint
+Init.multi_link.value	bytes
+Init.multi_link.value_len	uint
+Init.patch	nested
+Init.patch.absent_to_receiver	flag
+Init.patch.ext	nested
+Init.patch.ext.encoding	bits
+Init.patch.ext.ext_id	bits
+Init.patch.ext.ext_name	label
+Init.patch.ext.ext_name	label	attachment
+Init.patch.ext.ext_name	label	auth
+Init.patch.ext.ext_name	label	budget
+Init.patch.ext.ext_name	label	compression
+Init.patch.ext.ext_name	label	drop
+Init.patch.ext.ext_name	label	first
+Init.patch.ext.ext_name	label	low_latency
+Init.patch.ext.ext_name	label	multi_link
+Init.patch.ext.ext_name	label	multi_link_ack
+Init.patch.ext.ext_name	label	multi_link_syn
+Init.patch.ext.ext_name	label	node_id
+Init.patch.ext.ext_name	label	patch
+Init.patch.ext.ext_name	label	pubkey
+Init.patch.ext.ext_name	label	qos
+Init.patch.ext.ext_name	label	qos_link
+Init.patch.ext.ext_name	label	query_body
+Init.patch.ext.ext_name	label	queryable_info
+Init.patch.ext.ext_name	label	responder_id
+Init.patch.ext.ext_name	label	shm
+Init.patch.ext.ext_name	label	source_info
+Init.patch.ext.ext_name	label	target
+Init.patch.ext.ext_name	label	timeout
+Init.patch.ext.ext_name	label	timestamp
+Init.patch.ext.ext_name	label	usrpwd
+Init.patch.ext.ext_name	label	wire_expr
+Init.patch.ext.header	uint
+Init.patch.ext.m	flag
+Init.patch.ext.z	flag
+Init.patch.read_as	bits
+Init.patch.undefined_bits	bits
+Init.patch.value	uint
+Init.qos	nested
+Init.qos.ext	nested
+Init.qos.ext.encoding	bits
+Init.qos.ext.ext_id	bits
+Init.qos.ext.ext_name	label
+Init.qos.ext.ext_name	label	attachment
+Init.qos.ext.ext_name	label	auth
+Init.qos.ext.ext_name	label	budget
+Init.qos.ext.ext_name	label	compression
+Init.qos.ext.ext_name	label	drop
+Init.qos.ext.ext_name	label	first
+Init.qos.ext.ext_name	label	low_latency
+Init.qos.ext.ext_name	label	multi_link
+Init.qos.ext.ext_name	label	multi_link_ack
+Init.qos.ext.ext_name	label	multi_link_syn
+Init.qos.ext.ext_name	label	node_id
+Init.qos.ext.ext_name	label	patch
+Init.qos.ext.ext_name	label	pubkey
+Init.qos.ext.ext_name	label	qos
+Init.qos.ext.ext_name	label	qos_link
+Init.qos.ext.ext_name	label	query_body
+Init.qos.ext.ext_name	label	queryable_info
+Init.qos.ext.ext_name	label	responder_id
+Init.qos.ext.ext_name	label	shm
+Init.qos.ext.ext_name	label	source_info
+Init.qos.ext.ext_name	label	target
+Init.qos.ext.ext_name	label	timeout
+Init.qos.ext.ext_name	label	timestamp
+Init.qos.ext.ext_name	label	usrpwd
+Init.qos.ext.ext_name	label	wire_expr
+Init.qos.ext.header	uint
+Init.qos.ext.m	flag
+Init.qos.ext.z	flag
+Init.qos_link	nested
+Init.qos_link.ext	nested
+Init.qos_link.ext.encoding	bits
+Init.qos_link.ext.ext_id	bits
+Init.qos_link.ext.ext_name	label
+Init.qos_link.ext.ext_name	label	attachment
+Init.qos_link.ext.ext_name	label	auth
+Init.qos_link.ext.ext_name	label	budget
+Init.qos_link.ext.ext_name	label	compression
+Init.qos_link.ext.ext_name	label	drop
+Init.qos_link.ext.ext_name	label	first
+Init.qos_link.ext.ext_name	label	low_latency
+Init.qos_link.ext.ext_name	label	multi_link
+Init.qos_link.ext.ext_name	label	multi_link_ack
+Init.qos_link.ext.ext_name	label	multi_link_syn
+Init.qos_link.ext.ext_name	label	node_id
+Init.qos_link.ext.ext_name	label	patch
+Init.qos_link.ext.ext_name	label	pubkey
+Init.qos_link.ext.ext_name	label	qos
+Init.qos_link.ext.ext_name	label	qos_link
+Init.qos_link.ext.ext_name	label	query_body
+Init.qos_link.ext.ext_name	label	queryable_info
+Init.qos_link.ext.ext_name	label	responder_id
+Init.qos_link.ext.ext_name	label	shm
+Init.qos_link.ext.ext_name	label	source_info
+Init.qos_link.ext.ext_name	label	target
+Init.qos_link.ext.ext_name	label	timeout
+Init.qos_link.ext.ext_name	label	timestamp
+Init.qos_link.ext.ext_name	label	usrpwd
+Init.qos_link.ext.ext_name	label	wire_expr
+Init.qos_link.ext.header	uint
+Init.qos_link.ext.m	flag
+Init.qos_link.ext.z	flag
+Init.qos_link.value	uint
+Init.s	flag
+Init.shm	nested
+Init.shm.alice_challenge	uint
+Init.shm.alice_segment	uint
+Init.shm.bob_segment	uint
+Init.shm.ext	nested
+Init.shm.ext.encoding	bits
+Init.shm.ext.ext_id	bits
+Init.shm.ext.ext_name	label
+Init.shm.ext.ext_name	label	attachment
+Init.shm.ext.ext_name	label	auth
+Init.shm.ext.ext_name	label	budget
+Init.shm.ext.ext_name	label	compression
+Init.shm.ext.ext_name	label	drop
+Init.shm.ext.ext_name	label	first
+Init.shm.ext.ext_name	label	low_latency
+Init.shm.ext.ext_name	label	multi_link
+Init.shm.ext.ext_name	label	multi_link_ack
+Init.shm.ext.ext_name	label	multi_link_syn
+Init.shm.ext.ext_name	label	node_id
+Init.shm.ext.ext_name	label	patch
+Init.shm.ext.ext_name	label	pubkey
+Init.shm.ext.ext_name	label	qos
+Init.shm.ext.ext_name	label	qos_link
+Init.shm.ext.ext_name	label	query_body
+Init.shm.ext.ext_name	label	queryable_info
+Init.shm.ext.ext_name	label	responder_id
+Init.shm.ext.ext_name	label	shm
+Init.shm.ext.ext_name	label	source_info
+Init.shm.ext.ext_name	label	target
+Init.shm.ext.ext_name	label	timeout
+Init.shm.ext.ext_name	label	timestamp
+Init.shm.ext.ext_name	label	usrpwd
+Init.shm.ext.ext_name	label	wire_expr
+Init.shm.ext.header	uint
+Init.shm.ext.m	flag
+Init.shm.ext.z	flag
+Init.shm.value	bytes
+Init.shm.value_len	uint
+Init.sn_res	uint
+Init.sn_res_frame_sn	label
+Init.sn_res_frame_sn	label	16bit
+Init.sn_res_frame_sn	label	32bit
+Init.sn_res_frame_sn	label	64bit
+Init.sn_res_frame_sn	label	8bit
+Init.sn_res_request_id	label
+Init.sn_res_request_id	label	16bit
+Init.sn_res_request_id	label	32bit
+Init.sn_res_request_id	label	64bit
+Init.sn_res_request_id	label	8bit
+Init.version	uint
+Init.whatami	bits
+Init.z	flag
+Init.zid	zid
+Init.zid_len	bits
+Interest	nested
+Interest.body	nested
+Interest.body.header	uint
+Interest.body.keyexpr	nested
+Interest.body.keyexpr.id	uint
+Interest.body.keyexpr.mapping	bits
+Interest.body.keyexpr.suffix	text
+Interest.body.keyexpr.suffix_len	uint
+Interest.body.keyexprs	flag
+Interest.body.n	flag
+Interest.body.queryables	flag
+Interest.body.restricted	flag
+Interest.body.subscribers	flag
+Interest.body.tokens	flag
+Interest.current	flag
+Interest.ext	nested
+Interest.ext.encoding	bits
+Interest.ext.ext_id	bits
+Interest.ext.header	uint
+Interest.ext.m	flag
+Interest.ext.value_len	uint
+Interest.ext.z	flag
+Interest.ext.z64	uint
+Interest.ext.zbuf	bytes
+Interest.future	flag
+Interest.header	uint
+Interest.interest_id	uint
+Interest.mid	bits
+Interest.node_id	nested
+Interest.node_id.absent_to_receiver	flag
+Interest.node_id.ext	nested
+Interest.node_id.ext.encoding	bits
+Interest.node_id.ext.ext_id	bits
+Interest.node_id.ext.ext_name	label
+Interest.node_id.ext.ext_name	label	attachment
+Interest.node_id.ext.ext_name	label	auth
+Interest.node_id.ext.ext_name	label	budget
+Interest.node_id.ext.ext_name	label	compression
+Interest.node_id.ext.ext_name	label	drop
+Interest.node_id.ext.ext_name	label	first
+Interest.node_id.ext.ext_name	label	low_latency
+Interest.node_id.ext.ext_name	label	multi_link
+Interest.node_id.ext.ext_name	label	multi_link_ack
+Interest.node_id.ext.ext_name	label	multi_link_syn
+Interest.node_id.ext.ext_name	label	node_id
+Interest.node_id.ext.ext_name	label	patch
+Interest.node_id.ext.ext_name	label	pubkey
+Interest.node_id.ext.ext_name	label	qos
+Interest.node_id.ext.ext_name	label	qos_link
+Interest.node_id.ext.ext_name	label	query_body
+Interest.node_id.ext.ext_name	label	queryable_info
+Interest.node_id.ext.ext_name	label	responder_id
+Interest.node_id.ext.ext_name	label	shm
+Interest.node_id.ext.ext_name	label	source_info
+Interest.node_id.ext.ext_name	label	target
+Interest.node_id.ext.ext_name	label	timeout
+Interest.node_id.ext.ext_name	label	timestamp
+Interest.node_id.ext.ext_name	label	usrpwd
+Interest.node_id.ext.ext_name	label	wire_expr
+Interest.node_id.ext.header	uint
+Interest.node_id.ext.m	flag
+Interest.node_id.ext.z	flag
+Interest.node_id.read_as	bits
+Interest.node_id.undefined_bits	bits
+Interest.node_id.value	uint
+Interest.qos	nested
+Interest.qos.congestion	label
+Interest.qos.congestion	label	Block
+Interest.qos.congestion	label	BlockFirst
+Interest.qos.congestion	label	Drop
+Interest.qos.express	flag
+Interest.qos.ext	nested
+Interest.qos.ext.encoding	bits
+Interest.qos.ext.ext_id	bits
+Interest.qos.ext.ext_name	label
+Interest.qos.ext.ext_name	label	attachment
+Interest.qos.ext.ext_name	label	auth
+Interest.qos.ext.ext_name	label	budget
+Interest.qos.ext.ext_name	label	compression
+Interest.qos.ext.ext_name	label	drop
+Interest.qos.ext.ext_name	label	first
+Interest.qos.ext.ext_name	label	low_latency
+Interest.qos.ext.ext_name	label	multi_link
+Interest.qos.ext.ext_name	label	multi_link_ack
+Interest.qos.ext.ext_name	label	multi_link_syn
+Interest.qos.ext.ext_name	label	node_id
+Interest.qos.ext.ext_name	label	patch
+Interest.qos.ext.ext_name	label	pubkey
+Interest.qos.ext.ext_name	label	qos
+Interest.qos.ext.ext_name	label	qos_link
+Interest.qos.ext.ext_name	label	query_body
+Interest.qos.ext.ext_name	label	queryable_info
+Interest.qos.ext.ext_name	label	responder_id
+Interest.qos.ext.ext_name	label	shm
+Interest.qos.ext.ext_name	label	source_info
+Interest.qos.ext.ext_name	label	target
+Interest.qos.ext.ext_name	label	timeout
+Interest.qos.ext.ext_name	label	timestamp
+Interest.qos.ext.ext_name	label	usrpwd
+Interest.qos.ext.ext_name	label	wire_expr
+Interest.qos.ext.header	uint
+Interest.qos.ext.m	flag
+Interest.qos.ext.z	flag
+Interest.qos.priority	label
+Interest.qos.priority	label	Background
+Interest.qos.priority	label	Control
+Interest.qos.priority	label	Data
+Interest.qos.priority	label	DataHigh
+Interest.qos.priority	label	DataLow
+Interest.qos.priority	label	InteractiveHigh
+Interest.qos.priority	label	InteractiveLow
+Interest.qos.priority	label	RealTime
+Interest.qos.undefined_bits	bits
+Interest.qos.value	uint
+Interest.timestamp	nested
+Interest.timestamp.ext	nested
+Interest.timestamp.ext.encoding	bits
+Interest.timestamp.ext.ext_id	bits
+Interest.timestamp.ext.ext_name	label
+Interest.timestamp.ext.ext_name	label	attachment
+Interest.timestamp.ext.ext_name	label	auth
+Interest.timestamp.ext.ext_name	label	budget
+Interest.timestamp.ext.ext_name	label	compression
+Interest.timestamp.ext.ext_name	label	drop
+Interest.timestamp.ext.ext_name	label	first
+Interest.timestamp.ext.ext_name	label	low_latency
+Interest.timestamp.ext.ext_name	label	multi_link
+Interest.timestamp.ext.ext_name	label	multi_link_ack
+Interest.timestamp.ext.ext_name	label	multi_link_syn
+Interest.timestamp.ext.ext_name	label	node_id
+Interest.timestamp.ext.ext_name	label	patch
+Interest.timestamp.ext.ext_name	label	pubkey
+Interest.timestamp.ext.ext_name	label	qos
+Interest.timestamp.ext.ext_name	label	qos_link
+Interest.timestamp.ext.ext_name	label	query_body
+Interest.timestamp.ext.ext_name	label	queryable_info
+Interest.timestamp.ext.ext_name	label	responder_id
+Interest.timestamp.ext.ext_name	label	shm
+Interest.timestamp.ext.ext_name	label	source_info
+Interest.timestamp.ext.ext_name	label	target
+Interest.timestamp.ext.ext_name	label	timeout
+Interest.timestamp.ext.ext_name	label	timestamp
+Interest.timestamp.ext.ext_name	label	usrpwd
+Interest.timestamp.ext.ext_name	label	wire_expr
+Interest.timestamp.ext.header	uint
+Interest.timestamp.ext.m	flag
+Interest.timestamp.ext.z	flag
+Interest.timestamp.time	uint
+Interest.timestamp.value	bytes
+Interest.timestamp.value_len	uint
+Interest.timestamp.zid	zid
+Interest.timestamp.zid_len	uint
+Interest.z	flag
+Join	nested
+Join.batch_size	uint
+Join.cbyte	uint
+Join.ext	nested
+Join.ext.encoding	bits
+Join.ext.ext_id	bits
+Join.ext.header	uint
+Join.ext.m	flag
+Join.ext.value_len	uint
+Join.ext.z	flag
+Join.ext.z64	uint
+Join.ext.zbuf	bytes
+Join.header	uint
+Join.lease	uint
+Join.mid	bits
+Join.next_sn_best_effort	uint
+Join.next_sn_reliable	uint
+Join.patch	nested
+Join.patch.absent_to_receiver	flag
+Join.patch.ext	nested
+Join.patch.ext.encoding	bits
+Join.patch.ext.ext_id	bits
+Join.patch.ext.ext_name	label
+Join.patch.ext.ext_name	label	attachment
+Join.patch.ext.ext_name	label	auth
+Join.patch.ext.ext_name	label	budget
+Join.patch.ext.ext_name	label	compression
+Join.patch.ext.ext_name	label	drop
+Join.patch.ext.ext_name	label	first
+Join.patch.ext.ext_name	label	low_latency
+Join.patch.ext.ext_name	label	multi_link
+Join.patch.ext.ext_name	label	multi_link_ack
+Join.patch.ext.ext_name	label	multi_link_syn
+Join.patch.ext.ext_name	label	node_id
+Join.patch.ext.ext_name	label	patch
+Join.patch.ext.ext_name	label	pubkey
+Join.patch.ext.ext_name	label	qos
+Join.patch.ext.ext_name	label	qos_link
+Join.patch.ext.ext_name	label	query_body
+Join.patch.ext.ext_name	label	queryable_info
+Join.patch.ext.ext_name	label	responder_id
+Join.patch.ext.ext_name	label	shm
+Join.patch.ext.ext_name	label	source_info
+Join.patch.ext.ext_name	label	target
+Join.patch.ext.ext_name	label	timeout
+Join.patch.ext.ext_name	label	timestamp
+Join.patch.ext.ext_name	label	usrpwd
+Join.patch.ext.ext_name	label	wire_expr
+Join.patch.ext.header	uint
+Join.patch.ext.m	flag
+Join.patch.ext.z	flag
+Join.patch.read_as	bits
+Join.patch.undefined_bits	bits
+Join.patch.value	uint
+Join.qos	nested
+Join.qos.ext	nested
+Join.qos.ext.encoding	bits
+Join.qos.ext.ext_id	bits
+Join.qos.ext.ext_name	label
+Join.qos.ext.ext_name	label	attachment
+Join.qos.ext.ext_name	label	auth
+Join.qos.ext.ext_name	label	budget
+Join.qos.ext.ext_name	label	compression
+Join.qos.ext.ext_name	label	drop
+Join.qos.ext.ext_name	label	first
+Join.qos.ext.ext_name	label	low_latency
+Join.qos.ext.ext_name	label	multi_link
+Join.qos.ext.ext_name	label	multi_link_ack
+Join.qos.ext.ext_name	label	multi_link_syn
+Join.qos.ext.ext_name	label	node_id
+Join.qos.ext.ext_name	label	patch
+Join.qos.ext.ext_name	label	pubkey
+Join.qos.ext.ext_name	label	qos
+Join.qos.ext.ext_name	label	qos_link
+Join.qos.ext.ext_name	label	query_body
+Join.qos.ext.ext_name	label	queryable_info
+Join.qos.ext.ext_name	label	responder_id
+Join.qos.ext.ext_name	label	shm
+Join.qos.ext.ext_name	label	source_info
+Join.qos.ext.ext_name	label	target
+Join.qos.ext.ext_name	label	timeout
+Join.qos.ext.ext_name	label	timestamp
+Join.qos.ext.ext_name	label	usrpwd
+Join.qos.ext.ext_name	label	wire_expr
+Join.qos.ext.header	uint
+Join.qos.ext.m	flag
+Join.qos.ext.z	flag
+Join.qos.priority_sn	nested
+Join.qos.priority_sn.next_sn_best_effort	uint
+Join.qos.priority_sn.next_sn_reliable	uint
+Join.qos.priority_sn.priority	label
+Join.qos.priority_sn.priority	label	Background
+Join.qos.priority_sn.priority	label	Control
+Join.qos.priority_sn.priority	label	Data
+Join.qos.priority_sn.priority	label	DataHigh
+Join.qos.priority_sn.priority	label	DataLow
+Join.qos.priority_sn.priority	label	InteractiveHigh
+Join.qos.priority_sn.priority	label	InteractiveLow
+Join.qos.priority_sn.priority	label	RealTime
+Join.qos.value	bytes
+Join.qos.value_len	uint
+Join.s	flag
+Join.shm	nested
+Join.shm.ext	nested
+Join.shm.ext.encoding	bits
+Join.shm.ext.ext_id	bits
+Join.shm.ext.ext_name	label
+Join.shm.ext.ext_name	label	attachment
+Join.shm.ext.ext_name	label	auth
+Join.shm.ext.ext_name	label	budget
+Join.shm.ext.ext_name	label	compression
+Join.shm.ext.ext_name	label	drop
+Join.shm.ext.ext_name	label	first
+Join.shm.ext.ext_name	label	low_latency
+Join.shm.ext.ext_name	label	multi_link
+Join.shm.ext.ext_name	label	multi_link_ack
+Join.shm.ext.ext_name	label	multi_link_syn
+Join.shm.ext.ext_name	label	node_id
+Join.shm.ext.ext_name	label	patch
+Join.shm.ext.ext_name	label	pubkey
+Join.shm.ext.ext_name	label	qos
+Join.shm.ext.ext_name	label	qos_link
+Join.shm.ext.ext_name	label	query_body
+Join.shm.ext.ext_name	label	queryable_info
+Join.shm.ext.ext_name	label	responder_id
+Join.shm.ext.ext_name	label	shm
+Join.shm.ext.ext_name	label	source_info
+Join.shm.ext.ext_name	label	target
+Join.shm.ext.ext_name	label	timeout
+Join.shm.ext.ext_name	label	timestamp
+Join.shm.ext.ext_name	label	usrpwd
+Join.shm.ext.ext_name	label	wire_expr
+Join.shm.ext.header	uint
+Join.shm.ext.m	flag
+Join.shm.ext.z	flag
+Join.shm.value	bytes
+Join.shm.value_len	uint
+Join.sn_res	uint
+Join.sn_res_frame_sn	label
+Join.sn_res_frame_sn	label	16bit
+Join.sn_res_frame_sn	label	32bit
+Join.sn_res_frame_sn	label	64bit
+Join.sn_res_frame_sn	label	8bit
+Join.sn_res_request_id	label
+Join.sn_res_request_id	label	16bit
+Join.sn_res_request_id	label	32bit
+Join.sn_res_request_id	label	64bit
+Join.sn_res_request_id	label	8bit
+Join.t	flag
+Join.version	uint
+Join.whatami	bits
+Join.z	flag
+Join.zid	zid
+Join.zid_len	bits
+KeepAlive	nested
+KeepAlive.ext	nested
+KeepAlive.ext.encoding	bits
+KeepAlive.ext.ext_id	bits
+KeepAlive.ext.header	uint
+KeepAlive.ext.m	flag
+KeepAlive.ext.value_len	uint
+KeepAlive.ext.z	flag
+KeepAlive.ext.z64	uint
+KeepAlive.ext.zbuf	bytes
+KeepAlive.header	uint
+KeepAlive.mid	bits
+KeepAlive.z	flag
+Oam	nested
+Oam.body	bytes
+Oam.encoding	bits
+Oam.ext	nested
+Oam.ext.encoding	bits
+Oam.ext.ext_id	bits
+Oam.ext.header	uint
+Oam.ext.m	flag
+Oam.ext.value_len	uint
+Oam.ext.z	flag
+Oam.ext.z64	uint
+Oam.ext.zbuf	bytes
+Oam.header	uint
+Oam.id	uint
+Oam.linkstate	nested
+Oam.linkstate.link_states	nested
+Oam.linkstate.link_states.linkstate_entry	nested
+Oam.linkstate.link_states.linkstate_entry.links	nested
+Oam.linkstate.link_states.linkstate_entry.links.psid	uint
+Oam.linkstate.link_states.linkstate_entry.links_len	uint
+Oam.linkstate.link_states.linkstate_entry.locators	nested
+Oam.linkstate.link_states.linkstate_entry.locators.locator_entry	nested
+Oam.linkstate.link_states.linkstate_entry.locators.locator_entry.locator	text
+Oam.linkstate.link_states.linkstate_entry.locators.locator_entry.locator_len	uint
+Oam.linkstate.link_states.linkstate_entry.num_locators	uint
+Oam.linkstate.link_states.linkstate_entry.options	uint
+Oam.linkstate.link_states.linkstate_entry.psid	uint
+Oam.linkstate.link_states.linkstate_entry.sn	uint
+Oam.linkstate.link_states.linkstate_entry.weights	nested
+Oam.linkstate.link_states.linkstate_entry.weights.weight	uint
+Oam.linkstate.link_states.linkstate_entry.whatami	uint
+Oam.linkstate.link_states.linkstate_entry.zid	zid
+Oam.linkstate.link_states.linkstate_entry.zid_len	uint
+Oam.linkstate.num_link_states	uint
+Oam.mid	bits
+Oam.qos	nested
+Oam.qos.congestion	label
+Oam.qos.congestion	label	Block
+Oam.qos.congestion	label	BlockFirst
+Oam.qos.congestion	label	Drop
+Oam.qos.express	flag
+Oam.qos.ext	nested
+Oam.qos.ext.encoding	bits
+Oam.qos.ext.ext_id	bits
+Oam.qos.ext.ext_name	label
+Oam.qos.ext.ext_name	label	attachment
+Oam.qos.ext.ext_name	label	auth
+Oam.qos.ext.ext_name	label	budget
+Oam.qos.ext.ext_name	label	compression
+Oam.qos.ext.ext_name	label	drop
+Oam.qos.ext.ext_name	label	first
+Oam.qos.ext.ext_name	label	low_latency
+Oam.qos.ext.ext_name	label	multi_link
+Oam.qos.ext.ext_name	label	multi_link_ack
+Oam.qos.ext.ext_name	label	multi_link_syn
+Oam.qos.ext.ext_name	label	node_id
+Oam.qos.ext.ext_name	label	patch
+Oam.qos.ext.ext_name	label	pubkey
+Oam.qos.ext.ext_name	label	qos
+Oam.qos.ext.ext_name	label	qos_link
+Oam.qos.ext.ext_name	label	query_body
+Oam.qos.ext.ext_name	label	queryable_info
+Oam.qos.ext.ext_name	label	responder_id
+Oam.qos.ext.ext_name	label	shm
+Oam.qos.ext.ext_name	label	source_info
+Oam.qos.ext.ext_name	label	target
+Oam.qos.ext.ext_name	label	timeout
+Oam.qos.ext.ext_name	label	timestamp
+Oam.qos.ext.ext_name	label	usrpwd
+Oam.qos.ext.ext_name	label	wire_expr
+Oam.qos.ext.header	uint
+Oam.qos.ext.m	flag
+Oam.qos.ext.z	flag
+Oam.qos.priority	label
+Oam.qos.priority	label	Background
+Oam.qos.priority	label	Control
+Oam.qos.priority	label	Data
+Oam.qos.priority	label	DataHigh
+Oam.qos.priority	label	DataLow
+Oam.qos.priority	label	InteractiveHigh
+Oam.qos.priority	label	InteractiveLow
+Oam.qos.priority	label	RealTime
+Oam.qos.undefined_bits	bits
+Oam.qos.value	uint
+Oam.timestamp	nested
+Oam.timestamp.ext	nested
+Oam.timestamp.ext.encoding	bits
+Oam.timestamp.ext.ext_id	bits
+Oam.timestamp.ext.ext_name	label
+Oam.timestamp.ext.ext_name	label	attachment
+Oam.timestamp.ext.ext_name	label	auth
+Oam.timestamp.ext.ext_name	label	budget
+Oam.timestamp.ext.ext_name	label	compression
+Oam.timestamp.ext.ext_name	label	drop
+Oam.timestamp.ext.ext_name	label	first
+Oam.timestamp.ext.ext_name	label	low_latency
+Oam.timestamp.ext.ext_name	label	multi_link
+Oam.timestamp.ext.ext_name	label	multi_link_ack
+Oam.timestamp.ext.ext_name	label	multi_link_syn
+Oam.timestamp.ext.ext_name	label	node_id
+Oam.timestamp.ext.ext_name	label	patch
+Oam.timestamp.ext.ext_name	label	pubkey
+Oam.timestamp.ext.ext_name	label	qos
+Oam.timestamp.ext.ext_name	label	qos_link
+Oam.timestamp.ext.ext_name	label	query_body
+Oam.timestamp.ext.ext_name	label	queryable_info
+Oam.timestamp.ext.ext_name	label	responder_id
+Oam.timestamp.ext.ext_name	label	shm
+Oam.timestamp.ext.ext_name	label	source_info
+Oam.timestamp.ext.ext_name	label	target
+Oam.timestamp.ext.ext_name	label	timeout
+Oam.timestamp.ext.ext_name	label	timestamp
+Oam.timestamp.ext.ext_name	label	usrpwd
+Oam.timestamp.ext.ext_name	label	wire_expr
+Oam.timestamp.ext.header	uint
+Oam.timestamp.ext.m	flag
+Oam.timestamp.ext.z	flag
+Oam.timestamp.time	uint
+Oam.timestamp.value	bytes
+Oam.timestamp.value_len	uint
+Oam.timestamp.zid	zid
+Oam.timestamp.zid_len	uint
+Oam.value_len	uint
+Oam.z	flag
+Oam.z64	uint
+Oam.zbuf	bytes
+Open	nested
+Open.a	flag
+Open.auth	nested
+Open.auth.ext	nested
+Open.auth.ext.encoding	bits
+Open.auth.ext.ext_id	bits
+Open.auth.ext.ext_name	label
+Open.auth.ext.ext_name	label	attachment
+Open.auth.ext.ext_name	label	auth
+Open.auth.ext.ext_name	label	budget
+Open.auth.ext.ext_name	label	compression
+Open.auth.ext.ext_name	label	drop
+Open.auth.ext.ext_name	label	first
+Open.auth.ext.ext_name	label	low_latency
+Open.auth.ext.ext_name	label	multi_link
+Open.auth.ext.ext_name	label	multi_link_ack
+Open.auth.ext.ext_name	label	multi_link_syn
+Open.auth.ext.ext_name	label	node_id
+Open.auth.ext.ext_name	label	patch
+Open.auth.ext.ext_name	label	pubkey
+Open.auth.ext.ext_name	label	qos
+Open.auth.ext.ext_name	label	qos_link
+Open.auth.ext.ext_name	label	query_body
+Open.auth.ext.ext_name	label	queryable_info
+Open.auth.ext.ext_name	label	responder_id
+Open.auth.ext.ext_name	label	shm
+Open.auth.ext.ext_name	label	source_info
+Open.auth.ext.ext_name	label	target
+Open.auth.ext.ext_name	label	timeout
+Open.auth.ext.ext_name	label	timestamp
+Open.auth.ext.ext_name	label	usrpwd
+Open.auth.ext.ext_name	label	wire_expr
+Open.auth.ext.header	uint
+Open.auth.ext.m	flag
+Open.auth.ext.value_len	uint
+Open.auth.ext.z	flag
+Open.auth.ext.z64	uint
+Open.auth.ext.zbuf	bytes
+Open.auth.pubkey	nested
+Open.auth.pubkey.challenge	bytes
+Open.auth.pubkey.challenge_len	uint
+Open.auth.pubkey.ext	nested
+Open.auth.pubkey.ext.encoding	bits
+Open.auth.pubkey.ext.ext_id	bits
+Open.auth.pubkey.ext.ext_name	label
+Open.auth.pubkey.ext.ext_name	label	attachment
+Open.auth.pubkey.ext.ext_name	label	auth
+Open.auth.pubkey.ext.ext_name	label	budget
+Open.auth.pubkey.ext.ext_name	label	compression
+Open.auth.pubkey.ext.ext_name	label	drop
+Open.auth.pubkey.ext.ext_name	label	first
+Open.auth.pubkey.ext.ext_name	label	low_latency
+Open.auth.pubkey.ext.ext_name	label	multi_link
+Open.auth.pubkey.ext.ext_name	label	multi_link_ack
+Open.auth.pubkey.ext.ext_name	label	multi_link_syn
+Open.auth.pubkey.ext.ext_name	label	node_id
+Open.auth.pubkey.ext.ext_name	label	patch
+Open.auth.pubkey.ext.ext_name	label	pubkey
+Open.auth.pubkey.ext.ext_name	label	qos
+Open.auth.pubkey.ext.ext_name	label	qos_link
+Open.auth.pubkey.ext.ext_name	label	query_body
+Open.auth.pubkey.ext.ext_name	label	queryable_info
+Open.auth.pubkey.ext.ext_name	label	responder_id
+Open.auth.pubkey.ext.ext_name	label	shm
+Open.auth.pubkey.ext.ext_name	label	source_info
+Open.auth.pubkey.ext.ext_name	label	target
+Open.auth.pubkey.ext.ext_name	label	timeout
+Open.auth.pubkey.ext.ext_name	label	timestamp
+Open.auth.pubkey.ext.ext_name	label	usrpwd
+Open.auth.pubkey.ext.ext_name	label	wire_expr
+Open.auth.pubkey.ext.header	uint
+Open.auth.pubkey.ext.m	flag
+Open.auth.pubkey.ext.z	flag
+Open.auth.pubkey.pubkey_e	bytes
+Open.auth.pubkey.pubkey_e_len	uint
+Open.auth.pubkey.pubkey_n	bytes
+Open.auth.pubkey.pubkey_n_len	uint
+Open.auth.pubkey.value	bytes
+Open.auth.pubkey.value_len	uint
+Open.auth.usrpwd	nested
+Open.auth.usrpwd.ext	nested
+Open.auth.usrpwd.ext.encoding	bits
+Open.auth.usrpwd.ext.ext_id	bits
+Open.auth.usrpwd.ext.ext_name	label
+Open.auth.usrpwd.ext.ext_name	label	attachment
+Open.auth.usrpwd.ext.ext_name	label	auth
+Open.auth.usrpwd.ext.ext_name	label	budget
+Open.auth.usrpwd.ext.ext_name	label	compression
+Open.auth.usrpwd.ext.ext_name	label	drop
+Open.auth.usrpwd.ext.ext_name	label	first
+Open.auth.usrpwd.ext.ext_name	label	low_latency
+Open.auth.usrpwd.ext.ext_name	label	multi_link
+Open.auth.usrpwd.ext.ext_name	label	multi_link_ack
+Open.auth.usrpwd.ext.ext_name	label	multi_link_syn
+Open.auth.usrpwd.ext.ext_name	label	node_id
+Open.auth.usrpwd.ext.ext_name	label	patch
+Open.auth.usrpwd.ext.ext_name	label	pubkey
+Open.auth.usrpwd.ext.ext_name	label	qos
+Open.auth.usrpwd.ext.ext_name	label	qos_link
+Open.auth.usrpwd.ext.ext_name	label	query_body
+Open.auth.usrpwd.ext.ext_name	label	queryable_info
+Open.auth.usrpwd.ext.ext_name	label	responder_id
+Open.auth.usrpwd.ext.ext_name	label	shm
+Open.auth.usrpwd.ext.ext_name	label	source_info
+Open.auth.usrpwd.ext.ext_name	label	target
+Open.auth.usrpwd.ext.ext_name	label	timeout
+Open.auth.usrpwd.ext.ext_name	label	timestamp
+Open.auth.usrpwd.ext.ext_name	label	usrpwd
+Open.auth.usrpwd.ext.ext_name	label	wire_expr
+Open.auth.usrpwd.ext.header	uint
+Open.auth.usrpwd.ext.m	flag
+Open.auth.usrpwd.ext.z	flag
+Open.auth.usrpwd.hmac	bytes
+Open.auth.usrpwd.hmac_len	uint
+Open.auth.usrpwd.user	bytes
+Open.auth.usrpwd.user_len	uint
+Open.auth.usrpwd.value_len	uint
+Open.auth.usrpwd.z64	uint
+Open.auth.usrpwd.zbuf	bytes
+Open.auth.value	bytes
+Open.auth.value_len	uint
+Open.compression	nested
+Open.compression.ext	nested
+Open.compression.ext.encoding	bits
+Open.compression.ext.ext_id	bits
+Open.compression.ext.ext_name	label
+Open.compression.ext.ext_name	label	attachment
+Open.compression.ext.ext_name	label	auth
+Open.compression.ext.ext_name	label	budget
+Open.compression.ext.ext_name	label	compression
+Open.compression.ext.ext_name	label	drop
+Open.compression.ext.ext_name	label	first
+Open.compression.ext.ext_name	label	low_latency
+Open.compression.ext.ext_name	label	multi_link
+Open.compression.ext.ext_name	label	multi_link_ack
+Open.compression.ext.ext_name	label	multi_link_syn
+Open.compression.ext.ext_name	label	node_id
+Open.compression.ext.ext_name	label	patch
+Open.compression.ext.ext_name	label	pubkey
+Open.compression.ext.ext_name	label	qos
+Open.compression.ext.ext_name	label	qos_link
+Open.compression.ext.ext_name	label	query_body
+Open.compression.ext.ext_name	label	queryable_info
+Open.compression.ext.ext_name	label	responder_id
+Open.compression.ext.ext_name	label	shm
+Open.compression.ext.ext_name	label	source_info
+Open.compression.ext.ext_name	label	target
+Open.compression.ext.ext_name	label	timeout
+Open.compression.ext.ext_name	label	timestamp
+Open.compression.ext.ext_name	label	usrpwd
+Open.compression.ext.ext_name	label	wire_expr
+Open.compression.ext.header	uint
+Open.compression.ext.m	flag
+Open.compression.ext.z	flag
+Open.cookie	bytes
+Open.cookie_len	uint
+Open.ext	nested
+Open.ext.encoding	bits
+Open.ext.ext_id	bits
+Open.ext.header	uint
+Open.ext.m	flag
+Open.ext.value_len	uint
+Open.ext.z	flag
+Open.ext.z64	uint
+Open.ext.zbuf	bytes
+Open.header	uint
+Open.initial_sn	uint
+Open.lease	uint
+Open.low_latency	nested
+Open.low_latency.ext	nested
+Open.low_latency.ext.encoding	bits
+Open.low_latency.ext.ext_id	bits
+Open.low_latency.ext.ext_name	label
+Open.low_latency.ext.ext_name	label	attachment
+Open.low_latency.ext.ext_name	label	auth
+Open.low_latency.ext.ext_name	label	budget
+Open.low_latency.ext.ext_name	label	compression
+Open.low_latency.ext.ext_name	label	drop
+Open.low_latency.ext.ext_name	label	first
+Open.low_latency.ext.ext_name	label	low_latency
+Open.low_latency.ext.ext_name	label	multi_link
+Open.low_latency.ext.ext_name	label	multi_link_ack
+Open.low_latency.ext.ext_name	label	multi_link_syn
+Open.low_latency.ext.ext_name	label	node_id
+Open.low_latency.ext.ext_name	label	patch
+Open.low_latency.ext.ext_name	label	pubkey
+Open.low_latency.ext.ext_name	label	qos
+Open.low_latency.ext.ext_name	label	qos_link
+Open.low_latency.ext.ext_name	label	query_body
+Open.low_latency.ext.ext_name	label	queryable_info
+Open.low_latency.ext.ext_name	label	responder_id
+Open.low_latency.ext.ext_name	label	shm
+Open.low_latency.ext.ext_name	label	source_info
+Open.low_latency.ext.ext_name	label	target
+Open.low_latency.ext.ext_name	label	timeout
+Open.low_latency.ext.ext_name	label	timestamp
+Open.low_latency.ext.ext_name	label	usrpwd
+Open.low_latency.ext.ext_name	label	wire_expr
+Open.low_latency.ext.header	uint
+Open.low_latency.ext.m	flag
+Open.low_latency.ext.z	flag
+Open.mid	bits
+Open.multi_link_ack	nested
+Open.multi_link_ack.ext	nested
+Open.multi_link_ack.ext.encoding	bits
+Open.multi_link_ack.ext.ext_id	bits
+Open.multi_link_ack.ext.ext_name	label
+Open.multi_link_ack.ext.ext_name	label	attachment
+Open.multi_link_ack.ext.ext_name	label	auth
+Open.multi_link_ack.ext.ext_name	label	budget
+Open.multi_link_ack.ext.ext_name	label	compression
+Open.multi_link_ack.ext.ext_name	label	drop
+Open.multi_link_ack.ext.ext_name	label	first
+Open.multi_link_ack.ext.ext_name	label	low_latency
+Open.multi_link_ack.ext.ext_name	label	multi_link
+Open.multi_link_ack.ext.ext_name	label	multi_link_ack
+Open.multi_link_ack.ext.ext_name	label	multi_link_syn
+Open.multi_link_ack.ext.ext_name	label	node_id
+Open.multi_link_ack.ext.ext_name	label	patch
+Open.multi_link_ack.ext.ext_name	label	pubkey
+Open.multi_link_ack.ext.ext_name	label	qos
+Open.multi_link_ack.ext.ext_name	label	qos_link
+Open.multi_link_ack.ext.ext_name	label	query_body
+Open.multi_link_ack.ext.ext_name	label	queryable_info
+Open.multi_link_ack.ext.ext_name	label	responder_id
+Open.multi_link_ack.ext.ext_name	label	shm
+Open.multi_link_ack.ext.ext_name	label	source_info
+Open.multi_link_ack.ext.ext_name	label	target
+Open.multi_link_ack.ext.ext_name	label	timeout
+Open.multi_link_ack.ext.ext_name	label	timestamp
+Open.multi_link_ack.ext.ext_name	label	usrpwd
+Open.multi_link_ack.ext.ext_name	label	wire_expr
+Open.multi_link_ack.ext.header	uint
+Open.multi_link_ack.ext.m	flag
+Open.multi_link_ack.ext.z	flag
+Open.multi_link_syn	nested
+Open.multi_link_syn.challenge	bytes
+Open.multi_link_syn.challenge_len	uint
+Open.multi_link_syn.ext	nested
+Open.multi_link_syn.ext.encoding	bits
+Open.multi_link_syn.ext.ext_id	bits
+Open.multi_link_syn.ext.ext_name	label
+Open.multi_link_syn.ext.ext_name	label	attachment
+Open.multi_link_syn.ext.ext_name	label	auth
+Open.multi_link_syn.ext.ext_name	label	budget
+Open.multi_link_syn.ext.ext_name	label	compression
+Open.multi_link_syn.ext.ext_name	label	drop
+Open.multi_link_syn.ext.ext_name	label	first
+Open.multi_link_syn.ext.ext_name	label	low_latency
+Open.multi_link_syn.ext.ext_name	label	multi_link
+Open.multi_link_syn.ext.ext_name	label	multi_link_ack
+Open.multi_link_syn.ext.ext_name	label	multi_link_syn
+Open.multi_link_syn.ext.ext_name	label	node_id
+Open.multi_link_syn.ext.ext_name	label	patch
+Open.multi_link_syn.ext.ext_name	label	pubkey
+Open.multi_link_syn.ext.ext_name	label	qos
+Open.multi_link_syn.ext.ext_name	label	qos_link
+Open.multi_link_syn.ext.ext_name	label	query_body
+Open.multi_link_syn.ext.ext_name	label	queryable_info
+Open.multi_link_syn.ext.ext_name	label	responder_id
+Open.multi_link_syn.ext.ext_name	label	shm
+Open.multi_link_syn.ext.ext_name	label	source_info
+Open.multi_link_syn.ext.ext_name	label	target
+Open.multi_link_syn.ext.ext_name	label	timeout
+Open.multi_link_syn.ext.ext_name	label	timestamp
+Open.multi_link_syn.ext.ext_name	label	usrpwd
+Open.multi_link_syn.ext.ext_name	label	wire_expr
+Open.multi_link_syn.ext.header	uint
+Open.multi_link_syn.ext.m	flag
+Open.multi_link_syn.ext.z	flag
+Open.multi_link_syn.pubkey_e	bytes
+Open.multi_link_syn.pubkey_e_len	uint
+Open.multi_link_syn.pubkey_n	bytes
+Open.multi_link_syn.pubkey_n_len	uint
+Open.multi_link_syn.value	bytes
+Open.multi_link_syn.value_len	uint
+Open.qos	nested
+Open.qos.ext	nested
+Open.qos.ext.encoding	bits
+Open.qos.ext.ext_id	bits
+Open.qos.ext.ext_name	label
+Open.qos.ext.ext_name	label	attachment
+Open.qos.ext.ext_name	label	auth
+Open.qos.ext.ext_name	label	budget
+Open.qos.ext.ext_name	label	compression
+Open.qos.ext.ext_name	label	drop
+Open.qos.ext.ext_name	label	first
+Open.qos.ext.ext_name	label	low_latency
+Open.qos.ext.ext_name	label	multi_link
+Open.qos.ext.ext_name	label	multi_link_ack
+Open.qos.ext.ext_name	label	multi_link_syn
+Open.qos.ext.ext_name	label	node_id
+Open.qos.ext.ext_name	label	patch
+Open.qos.ext.ext_name	label	pubkey
+Open.qos.ext.ext_name	label	qos
+Open.qos.ext.ext_name	label	qos_link
+Open.qos.ext.ext_name	label	query_body
+Open.qos.ext.ext_name	label	queryable_info
+Open.qos.ext.ext_name	label	responder_id
+Open.qos.ext.ext_name	label	shm
+Open.qos.ext.ext_name	label	source_info
+Open.qos.ext.ext_name	label	target
+Open.qos.ext.ext_name	label	timeout
+Open.qos.ext.ext_name	label	timestamp
+Open.qos.ext.ext_name	label	usrpwd
+Open.qos.ext.ext_name	label	wire_expr
+Open.qos.ext.header	uint
+Open.qos.ext.m	flag
+Open.qos.ext.z	flag
+Open.shm	nested
+Open.shm.ext	nested
+Open.shm.ext.encoding	bits
+Open.shm.ext.ext_id	bits
+Open.shm.ext.ext_name	label
+Open.shm.ext.ext_name	label	attachment
+Open.shm.ext.ext_name	label	auth
+Open.shm.ext.ext_name	label	budget
+Open.shm.ext.ext_name	label	compression
+Open.shm.ext.ext_name	label	drop
+Open.shm.ext.ext_name	label	first
+Open.shm.ext.ext_name	label	low_latency
+Open.shm.ext.ext_name	label	multi_link
+Open.shm.ext.ext_name	label	multi_link_ack
+Open.shm.ext.ext_name	label	multi_link_syn
+Open.shm.ext.ext_name	label	node_id
+Open.shm.ext.ext_name	label	patch
+Open.shm.ext.ext_name	label	pubkey
+Open.shm.ext.ext_name	label	qos
+Open.shm.ext.ext_name	label	qos_link
+Open.shm.ext.ext_name	label	query_body
+Open.shm.ext.ext_name	label	queryable_info
+Open.shm.ext.ext_name	label	responder_id
+Open.shm.ext.ext_name	label	shm
+Open.shm.ext.ext_name	label	source_info
+Open.shm.ext.ext_name	label	target
+Open.shm.ext.ext_name	label	timeout
+Open.shm.ext.ext_name	label	timestamp
+Open.shm.ext.ext_name	label	usrpwd
+Open.shm.ext.ext_name	label	wire_expr
+Open.shm.ext.header	uint
+Open.shm.ext.m	flag
+Open.shm.ext.z	flag
+Open.shm.value	uint
+Open.t	flag
+Open.z	flag
+Push	nested
+Push.del	nested
+Push.del.attachment	nested
+Push.del.attachment.ext	nested
+Push.del.attachment.ext.encoding	bits
+Push.del.attachment.ext.ext_id	bits
+Push.del.attachment.ext.ext_name	label
+Push.del.attachment.ext.ext_name	label	attachment
+Push.del.attachment.ext.ext_name	label	auth
+Push.del.attachment.ext.ext_name	label	budget
+Push.del.attachment.ext.ext_name	label	compression
+Push.del.attachment.ext.ext_name	label	drop
+Push.del.attachment.ext.ext_name	label	first
+Push.del.attachment.ext.ext_name	label	low_latency
+Push.del.attachment.ext.ext_name	label	multi_link
+Push.del.attachment.ext.ext_name	label	multi_link_ack
+Push.del.attachment.ext.ext_name	label	multi_link_syn
+Push.del.attachment.ext.ext_name	label	node_id
+Push.del.attachment.ext.ext_name	label	patch
+Push.del.attachment.ext.ext_name	label	pubkey
+Push.del.attachment.ext.ext_name	label	qos
+Push.del.attachment.ext.ext_name	label	qos_link
+Push.del.attachment.ext.ext_name	label	query_body
+Push.del.attachment.ext.ext_name	label	queryable_info
+Push.del.attachment.ext.ext_name	label	responder_id
+Push.del.attachment.ext.ext_name	label	shm
+Push.del.attachment.ext.ext_name	label	source_info
+Push.del.attachment.ext.ext_name	label	target
+Push.del.attachment.ext.ext_name	label	timeout
+Push.del.attachment.ext.ext_name	label	timestamp
+Push.del.attachment.ext.ext_name	label	usrpwd
+Push.del.attachment.ext.ext_name	label	wire_expr
+Push.del.attachment.ext.header	uint
+Push.del.attachment.ext.m	flag
+Push.del.attachment.ext.z	flag
+Push.del.attachment.value	bytes
+Push.del.attachment.value_len	uint
+Push.del.ext	nested
+Push.del.ext.encoding	bits
+Push.del.ext.ext_id	bits
+Push.del.ext.header	uint
+Push.del.ext.m	flag
+Push.del.ext.value_len	uint
+Push.del.ext.z	flag
+Push.del.ext.z64	uint
+Push.del.ext.zbuf	bytes
+Push.del.header	uint
+Push.del.mid	bits
+Push.del.source_info	nested
+Push.del.source_info.eid	uint
+Push.del.source_info.ext	nested
+Push.del.source_info.ext.encoding	bits
+Push.del.source_info.ext.ext_id	bits
+Push.del.source_info.ext.ext_name	label
+Push.del.source_info.ext.ext_name	label	attachment
+Push.del.source_info.ext.ext_name	label	auth
+Push.del.source_info.ext.ext_name	label	budget
+Push.del.source_info.ext.ext_name	label	compression
+Push.del.source_info.ext.ext_name	label	drop
+Push.del.source_info.ext.ext_name	label	first
+Push.del.source_info.ext.ext_name	label	low_latency
+Push.del.source_info.ext.ext_name	label	multi_link
+Push.del.source_info.ext.ext_name	label	multi_link_ack
+Push.del.source_info.ext.ext_name	label	multi_link_syn
+Push.del.source_info.ext.ext_name	label	node_id
+Push.del.source_info.ext.ext_name	label	patch
+Push.del.source_info.ext.ext_name	label	pubkey
+Push.del.source_info.ext.ext_name	label	qos
+Push.del.source_info.ext.ext_name	label	qos_link
+Push.del.source_info.ext.ext_name	label	query_body
+Push.del.source_info.ext.ext_name	label	queryable_info
+Push.del.source_info.ext.ext_name	label	responder_id
+Push.del.source_info.ext.ext_name	label	shm
+Push.del.source_info.ext.ext_name	label	source_info
+Push.del.source_info.ext.ext_name	label	target
+Push.del.source_info.ext.ext_name	label	timeout
+Push.del.source_info.ext.ext_name	label	timestamp
+Push.del.source_info.ext.ext_name	label	usrpwd
+Push.del.source_info.ext.ext_name	label	wire_expr
+Push.del.source_info.ext.header	uint
+Push.del.source_info.ext.m	flag
+Push.del.source_info.ext.z	flag
+Push.del.source_info.hdr	uint
+Push.del.source_info.sn	uint
+Push.del.source_info.value	bytes
+Push.del.source_info.value_len	uint
+Push.del.source_info.zid	zid
+Push.del.source_info.zid_len_m1	bits
+Push.del.t	flag
+Push.del.timestamp	nested
+Push.del.timestamp.time	uint
+Push.del.timestamp.zid	zid
+Push.del.timestamp.zid_len	uint
+Push.del.z	flag
+Push.ext	nested
+Push.ext.encoding	bits
+Push.ext.ext_id	bits
+Push.ext.header	uint
+Push.ext.m	flag
+Push.ext.value_len	uint
+Push.ext.z	flag
+Push.ext.z64	uint
+Push.ext.zbuf	bytes
+Push.header	uint
+Push.keyexpr	nested
+Push.keyexpr.id	uint
+Push.keyexpr.mapping	bits
+Push.keyexpr.suffix	text
+Push.keyexpr.suffix_len	uint
+Push.m	flag
+Push.mid	bits
+Push.n	flag
+Push.node_id	nested
+Push.node_id.absent_to_receiver	flag
+Push.node_id.ext	nested
+Push.node_id.ext.encoding	bits
+Push.node_id.ext.ext_id	bits
+Push.node_id.ext.ext_name	label
+Push.node_id.ext.ext_name	label	attachment
+Push.node_id.ext.ext_name	label	auth
+Push.node_id.ext.ext_name	label	budget
+Push.node_id.ext.ext_name	label	compression
+Push.node_id.ext.ext_name	label	drop
+Push.node_id.ext.ext_name	label	first
+Push.node_id.ext.ext_name	label	low_latency
+Push.node_id.ext.ext_name	label	multi_link
+Push.node_id.ext.ext_name	label	multi_link_ack
+Push.node_id.ext.ext_name	label	multi_link_syn
+Push.node_id.ext.ext_name	label	node_id
+Push.node_id.ext.ext_name	label	patch
+Push.node_id.ext.ext_name	label	pubkey
+Push.node_id.ext.ext_name	label	qos
+Push.node_id.ext.ext_name	label	qos_link
+Push.node_id.ext.ext_name	label	query_body
+Push.node_id.ext.ext_name	label	queryable_info
+Push.node_id.ext.ext_name	label	responder_id
+Push.node_id.ext.ext_name	label	shm
+Push.node_id.ext.ext_name	label	source_info
+Push.node_id.ext.ext_name	label	target
+Push.node_id.ext.ext_name	label	timeout
+Push.node_id.ext.ext_name	label	timestamp
+Push.node_id.ext.ext_name	label	usrpwd
+Push.node_id.ext.ext_name	label	wire_expr
+Push.node_id.ext.header	uint
+Push.node_id.ext.m	flag
+Push.node_id.ext.z	flag
+Push.node_id.read_as	bits
+Push.node_id.undefined_bits	bits
+Push.node_id.value	uint
+Push.put	nested
+Push.put.attachment	nested
+Push.put.attachment.ext	nested
+Push.put.attachment.ext.encoding	bits
+Push.put.attachment.ext.ext_id	bits
+Push.put.attachment.ext.ext_name	label
+Push.put.attachment.ext.ext_name	label	attachment
+Push.put.attachment.ext.ext_name	label	auth
+Push.put.attachment.ext.ext_name	label	budget
+Push.put.attachment.ext.ext_name	label	compression
+Push.put.attachment.ext.ext_name	label	drop
+Push.put.attachment.ext.ext_name	label	first
+Push.put.attachment.ext.ext_name	label	low_latency
+Push.put.attachment.ext.ext_name	label	multi_link
+Push.put.attachment.ext.ext_name	label	multi_link_ack
+Push.put.attachment.ext.ext_name	label	multi_link_syn
+Push.put.attachment.ext.ext_name	label	node_id
+Push.put.attachment.ext.ext_name	label	patch
+Push.put.attachment.ext.ext_name	label	pubkey
+Push.put.attachment.ext.ext_name	label	qos
+Push.put.attachment.ext.ext_name	label	qos_link
+Push.put.attachment.ext.ext_name	label	query_body
+Push.put.attachment.ext.ext_name	label	queryable_info
+Push.put.attachment.ext.ext_name	label	responder_id
+Push.put.attachment.ext.ext_name	label	shm
+Push.put.attachment.ext.ext_name	label	source_info
+Push.put.attachment.ext.ext_name	label	target
+Push.put.attachment.ext.ext_name	label	timeout
+Push.put.attachment.ext.ext_name	label	timestamp
+Push.put.attachment.ext.ext_name	label	usrpwd
+Push.put.attachment.ext.ext_name	label	wire_expr
+Push.put.attachment.ext.header	uint
+Push.put.attachment.ext.m	flag
+Push.put.attachment.ext.z	flag
+Push.put.attachment.value	bytes
+Push.put.attachment.value_len	uint
+Push.put.e	flag
+Push.put.encoding	nested
+Push.put.encoding.has_schema	flag
+Push.put.encoding.id	bits
+Push.put.encoding.packed_id	uint
+Push.put.encoding.schema	text
+Push.put.encoding.schema_len	uint
+Push.put.ext	nested
+Push.put.ext.encoding	bits
+Push.put.ext.ext_id	bits
+Push.put.ext.header	uint
+Push.put.ext.m	flag
+Push.put.ext.value_len	uint
+Push.put.ext.z	flag
+Push.put.ext.z64	uint
+Push.put.ext.zbuf	bytes
+Push.put.header	uint
+Push.put.mid	bits
+Push.put.payload	bytes
+Push.put.payload_len	uint
+Push.put.shm	nested
+Push.put.shm.ext	nested
+Push.put.shm.ext.encoding	bits
+Push.put.shm.ext.ext_id	bits
+Push.put.shm.ext.ext_name	label
+Push.put.shm.ext.ext_name	label	attachment
+Push.put.shm.ext.ext_name	label	auth
+Push.put.shm.ext.ext_name	label	budget
+Push.put.shm.ext.ext_name	label	compression
+Push.put.shm.ext.ext_name	label	drop
+Push.put.shm.ext.ext_name	label	first
+Push.put.shm.ext.ext_name	label	low_latency
+Push.put.shm.ext.ext_name	label	multi_link
+Push.put.shm.ext.ext_name	label	multi_link_ack
+Push.put.shm.ext.ext_name	label	multi_link_syn
+Push.put.shm.ext.ext_name	label	node_id
+Push.put.shm.ext.ext_name	label	patch
+Push.put.shm.ext.ext_name	label	pubkey
+Push.put.shm.ext.ext_name	label	qos
+Push.put.shm.ext.ext_name	label	qos_link
+Push.put.shm.ext.ext_name	label	query_body
+Push.put.shm.ext.ext_name	label	queryable_info
+Push.put.shm.ext.ext_name	label	responder_id
+Push.put.shm.ext.ext_name	label	shm
+Push.put.shm.ext.ext_name	label	source_info
+Push.put.shm.ext.ext_name	label	target
+Push.put.shm.ext.ext_name	label	timeout
+Push.put.shm.ext.ext_name	label	timestamp
+Push.put.shm.ext.ext_name	label	usrpwd
+Push.put.shm.ext.ext_name	label	wire_expr
+Push.put.shm.ext.header	uint
+Push.put.shm.ext.m	flag
+Push.put.shm.ext.z	flag
+Push.put.slice_count	uint
+Push.put.slices	nested
+Push.put.slices.slice_entry	nested
+Push.put.slices.slice_entry.bytes	bytes
+Push.put.slices.slice_entry.kind	uint
+Push.put.slices.slice_entry.len	uint
+Push.put.slices.slice_entry.shm_descriptor	opaque
+Push.put.source_info	nested
+Push.put.source_info.eid	uint
+Push.put.source_info.ext	nested
+Push.put.source_info.ext.encoding	bits
+Push.put.source_info.ext.ext_id	bits
+Push.put.source_info.ext.ext_name	label
+Push.put.source_info.ext.ext_name	label	attachment
+Push.put.source_info.ext.ext_name	label	auth
+Push.put.source_info.ext.ext_name	label	budget
+Push.put.source_info.ext.ext_name	label	compression
+Push.put.source_info.ext.ext_name	label	drop
+Push.put.source_info.ext.ext_name	label	first
+Push.put.source_info.ext.ext_name	label	low_latency
+Push.put.source_info.ext.ext_name	label	multi_link
+Push.put.source_info.ext.ext_name	label	multi_link_ack
+Push.put.source_info.ext.ext_name	label	multi_link_syn
+Push.put.source_info.ext.ext_name	label	node_id
+Push.put.source_info.ext.ext_name	label	patch
+Push.put.source_info.ext.ext_name	label	pubkey
+Push.put.source_info.ext.ext_name	label	qos
+Push.put.source_info.ext.ext_name	label	qos_link
+Push.put.source_info.ext.ext_name	label	query_body
+Push.put.source_info.ext.ext_name	label	queryable_info
+Push.put.source_info.ext.ext_name	label	responder_id
+Push.put.source_info.ext.ext_name	label	shm
+Push.put.source_info.ext.ext_name	label	source_info
+Push.put.source_info.ext.ext_name	label	target
+Push.put.source_info.ext.ext_name	label	timeout
+Push.put.source_info.ext.ext_name	label	timestamp
+Push.put.source_info.ext.ext_name	label	usrpwd
+Push.put.source_info.ext.ext_name	label	wire_expr
+Push.put.source_info.ext.header	uint
+Push.put.source_info.ext.m	flag
+Push.put.source_info.ext.z	flag
+Push.put.source_info.hdr	uint
+Push.put.source_info.sn	uint
+Push.put.source_info.value	bytes
+Push.put.source_info.value_len	uint
+Push.put.source_info.zid	zid
+Push.put.source_info.zid_len_m1	bits
+Push.put.t	flag
+Push.put.timestamp	nested
+Push.put.timestamp.time	uint
+Push.put.timestamp.zid	zid
+Push.put.timestamp.zid_len	uint
+Push.put.z	flag
+Push.qos	nested
+Push.qos.congestion	label
+Push.qos.congestion	label	Block
+Push.qos.congestion	label	BlockFirst
+Push.qos.congestion	label	Drop
+Push.qos.express	flag
+Push.qos.ext	nested
+Push.qos.ext.encoding	bits
+Push.qos.ext.ext_id	bits
+Push.qos.ext.ext_name	label
+Push.qos.ext.ext_name	label	attachment
+Push.qos.ext.ext_name	label	auth
+Push.qos.ext.ext_name	label	budget
+Push.qos.ext.ext_name	label	compression
+Push.qos.ext.ext_name	label	drop
+Push.qos.ext.ext_name	label	first
+Push.qos.ext.ext_name	label	low_latency
+Push.qos.ext.ext_name	label	multi_link
+Push.qos.ext.ext_name	label	multi_link_ack
+Push.qos.ext.ext_name	label	multi_link_syn
+Push.qos.ext.ext_name	label	node_id
+Push.qos.ext.ext_name	label	patch
+Push.qos.ext.ext_name	label	pubkey
+Push.qos.ext.ext_name	label	qos
+Push.qos.ext.ext_name	label	qos_link
+Push.qos.ext.ext_name	label	query_body
+Push.qos.ext.ext_name	label	queryable_info
+Push.qos.ext.ext_name	label	responder_id
+Push.qos.ext.ext_name	label	shm
+Push.qos.ext.ext_name	label	source_info
+Push.qos.ext.ext_name	label	target
+Push.qos.ext.ext_name	label	timeout
+Push.qos.ext.ext_name	label	timestamp
+Push.qos.ext.ext_name	label	usrpwd
+Push.qos.ext.ext_name	label	wire_expr
+Push.qos.ext.header	uint
+Push.qos.ext.m	flag
+Push.qos.ext.z	flag
+Push.qos.priority	label
+Push.qos.priority	label	Background
+Push.qos.priority	label	Control
+Push.qos.priority	label	Data
+Push.qos.priority	label	DataHigh
+Push.qos.priority	label	DataLow
+Push.qos.priority	label	InteractiveHigh
+Push.qos.priority	label	InteractiveLow
+Push.qos.priority	label	RealTime
+Push.qos.undefined_bits	bits
+Push.qos.value	uint
+Push.timestamp	nested
+Push.timestamp.ext	nested
+Push.timestamp.ext.encoding	bits
+Push.timestamp.ext.ext_id	bits
+Push.timestamp.ext.ext_name	label
+Push.timestamp.ext.ext_name	label	attachment
+Push.timestamp.ext.ext_name	label	auth
+Push.timestamp.ext.ext_name	label	budget
+Push.timestamp.ext.ext_name	label	compression
+Push.timestamp.ext.ext_name	label	drop
+Push.timestamp.ext.ext_name	label	first
+Push.timestamp.ext.ext_name	label	low_latency
+Push.timestamp.ext.ext_name	label	multi_link
+Push.timestamp.ext.ext_name	label	multi_link_ack
+Push.timestamp.ext.ext_name	label	multi_link_syn
+Push.timestamp.ext.ext_name	label	node_id
+Push.timestamp.ext.ext_name	label	patch
+Push.timestamp.ext.ext_name	label	pubkey
+Push.timestamp.ext.ext_name	label	qos
+Push.timestamp.ext.ext_name	label	qos_link
+Push.timestamp.ext.ext_name	label	query_body
+Push.timestamp.ext.ext_name	label	queryable_info
+Push.timestamp.ext.ext_name	label	responder_id
+Push.timestamp.ext.ext_name	label	shm
+Push.timestamp.ext.ext_name	label	source_info
+Push.timestamp.ext.ext_name	label	target
+Push.timestamp.ext.ext_name	label	timeout
+Push.timestamp.ext.ext_name	label	timestamp
+Push.timestamp.ext.ext_name	label	usrpwd
+Push.timestamp.ext.ext_name	label	wire_expr
+Push.timestamp.ext.header	uint
+Push.timestamp.ext.m	flag
+Push.timestamp.ext.z	flag
+Push.timestamp.time	uint
+Push.timestamp.value	bytes
+Push.timestamp.value_len	uint
+Push.timestamp.zid	zid
+Push.timestamp.zid_len	uint
+Push.z	flag
+Request	nested
+Request.budget	nested
+Request.budget.absent_to_receiver	flag
+Request.budget.ext	nested
+Request.budget.ext.encoding	bits
+Request.budget.ext.ext_id	bits
+Request.budget.ext.ext_name	label
+Request.budget.ext.ext_name	label	attachment
+Request.budget.ext.ext_name	label	auth
+Request.budget.ext.ext_name	label	budget
+Request.budget.ext.ext_name	label	compression
+Request.budget.ext.ext_name	label	drop
+Request.budget.ext.ext_name	label	first
+Request.budget.ext.ext_name	label	low_latency
+Request.budget.ext.ext_name	label	multi_link
+Request.budget.ext.ext_name	label	multi_link_ack
+Request.budget.ext.ext_name	label	multi_link_syn
+Request.budget.ext.ext_name	label	node_id
+Request.budget.ext.ext_name	label	patch
+Request.budget.ext.ext_name	label	pubkey
+Request.budget.ext.ext_name	label	qos
+Request.budget.ext.ext_name	label	qos_link
+Request.budget.ext.ext_name	label	query_body
+Request.budget.ext.ext_name	label	queryable_info
+Request.budget.ext.ext_name	label	responder_id
+Request.budget.ext.ext_name	label	shm
+Request.budget.ext.ext_name	label	source_info
+Request.budget.ext.ext_name	label	target
+Request.budget.ext.ext_name	label	timeout
+Request.budget.ext.ext_name	label	timestamp
+Request.budget.ext.ext_name	label	usrpwd
+Request.budget.ext.ext_name	label	wire_expr
+Request.budget.ext.header	uint
+Request.budget.ext.m	flag
+Request.budget.ext.z	flag
+Request.budget.read_as	bits
+Request.budget.undefined_bits	bits
+Request.budget.value	uint
+Request.del	nested
+Request.del.attachment	nested
+Request.del.attachment.ext	nested
+Request.del.attachment.ext.encoding	bits
+Request.del.attachment.ext.ext_id	bits
+Request.del.attachment.ext.ext_name	label
+Request.del.attachment.ext.ext_name	label	attachment
+Request.del.attachment.ext.ext_name	label	auth
+Request.del.attachment.ext.ext_name	label	budget
+Request.del.attachment.ext.ext_name	label	compression
+Request.del.attachment.ext.ext_name	label	drop
+Request.del.attachment.ext.ext_name	label	first
+Request.del.attachment.ext.ext_name	label	low_latency
+Request.del.attachment.ext.ext_name	label	multi_link
+Request.del.attachment.ext.ext_name	label	multi_link_ack
+Request.del.attachment.ext.ext_name	label	multi_link_syn
+Request.del.attachment.ext.ext_name	label	node_id
+Request.del.attachment.ext.ext_name	label	patch
+Request.del.attachment.ext.ext_name	label	pubkey
+Request.del.attachment.ext.ext_name	label	qos
+Request.del.attachment.ext.ext_name	label	qos_link
+Request.del.attachment.ext.ext_name	label	query_body
+Request.del.attachment.ext.ext_name	label	queryable_info
+Request.del.attachment.ext.ext_name	label	responder_id
+Request.del.attachment.ext.ext_name	label	shm
+Request.del.attachment.ext.ext_name	label	source_info
+Request.del.attachment.ext.ext_name	label	target
+Request.del.attachment.ext.ext_name	label	timeout
+Request.del.attachment.ext.ext_name	label	timestamp
+Request.del.attachment.ext.ext_name	label	usrpwd
+Request.del.attachment.ext.ext_name	label	wire_expr
+Request.del.attachment.ext.header	uint
+Request.del.attachment.ext.m	flag
+Request.del.attachment.ext.z	flag
+Request.del.attachment.value	bytes
+Request.del.attachment.value_len	uint
+Request.del.ext	nested
+Request.del.ext.encoding	bits
+Request.del.ext.ext_id	bits
+Request.del.ext.header	uint
+Request.del.ext.m	flag
+Request.del.ext.value_len	uint
+Request.del.ext.z	flag
+Request.del.ext.z64	uint
+Request.del.ext.zbuf	bytes
+Request.del.header	uint
+Request.del.mid	bits
+Request.del.source_info	nested
+Request.del.source_info.eid	uint
+Request.del.source_info.ext	nested
+Request.del.source_info.ext.encoding	bits
+Request.del.source_info.ext.ext_id	bits
+Request.del.source_info.ext.ext_name	label
+Request.del.source_info.ext.ext_name	label	attachment
+Request.del.source_info.ext.ext_name	label	auth
+Request.del.source_info.ext.ext_name	label	budget
+Request.del.source_info.ext.ext_name	label	compression
+Request.del.source_info.ext.ext_name	label	drop
+Request.del.source_info.ext.ext_name	label	first
+Request.del.source_info.ext.ext_name	label	low_latency
+Request.del.source_info.ext.ext_name	label	multi_link
+Request.del.source_info.ext.ext_name	label	multi_link_ack
+Request.del.source_info.ext.ext_name	label	multi_link_syn
+Request.del.source_info.ext.ext_name	label	node_id
+Request.del.source_info.ext.ext_name	label	patch
+Request.del.source_info.ext.ext_name	label	pubkey
+Request.del.source_info.ext.ext_name	label	qos
+Request.del.source_info.ext.ext_name	label	qos_link
+Request.del.source_info.ext.ext_name	label	query_body
+Request.del.source_info.ext.ext_name	label	queryable_info
+Request.del.source_info.ext.ext_name	label	responder_id
+Request.del.source_info.ext.ext_name	label	shm
+Request.del.source_info.ext.ext_name	label	source_info
+Request.del.source_info.ext.ext_name	label	target
+Request.del.source_info.ext.ext_name	label	timeout
+Request.del.source_info.ext.ext_name	label	timestamp
+Request.del.source_info.ext.ext_name	label	usrpwd
+Request.del.source_info.ext.ext_name	label	wire_expr
+Request.del.source_info.ext.header	uint
+Request.del.source_info.ext.m	flag
+Request.del.source_info.ext.z	flag
+Request.del.source_info.hdr	uint
+Request.del.source_info.sn	uint
+Request.del.source_info.value	bytes
+Request.del.source_info.value_len	uint
+Request.del.source_info.zid	zid
+Request.del.source_info.zid_len_m1	bits
+Request.del.t	flag
+Request.del.timestamp	nested
+Request.del.timestamp.time	uint
+Request.del.timestamp.zid	zid
+Request.del.timestamp.zid_len	uint
+Request.del.z	flag
+Request.ext	nested
+Request.ext.encoding	bits
+Request.ext.ext_id	bits
+Request.ext.header	uint
+Request.ext.m	flag
+Request.ext.value_len	uint
+Request.ext.z	flag
+Request.ext.z64	uint
+Request.ext.zbuf	bytes
+Request.header	uint
+Request.keyexpr	nested
+Request.keyexpr.id	uint
+Request.keyexpr.mapping	bits
+Request.keyexpr.suffix	text
+Request.keyexpr.suffix_len	uint
+Request.m	flag
+Request.mid	bits
+Request.n	flag
+Request.node_id	nested
+Request.node_id.absent_to_receiver	flag
+Request.node_id.ext	nested
+Request.node_id.ext.encoding	bits
+Request.node_id.ext.ext_id	bits
+Request.node_id.ext.ext_name	label
+Request.node_id.ext.ext_name	label	attachment
+Request.node_id.ext.ext_name	label	auth
+Request.node_id.ext.ext_name	label	budget
+Request.node_id.ext.ext_name	label	compression
+Request.node_id.ext.ext_name	label	drop
+Request.node_id.ext.ext_name	label	first
+Request.node_id.ext.ext_name	label	low_latency
+Request.node_id.ext.ext_name	label	multi_link
+Request.node_id.ext.ext_name	label	multi_link_ack
+Request.node_id.ext.ext_name	label	multi_link_syn
+Request.node_id.ext.ext_name	label	node_id
+Request.node_id.ext.ext_name	label	patch
+Request.node_id.ext.ext_name	label	pubkey
+Request.node_id.ext.ext_name	label	qos
+Request.node_id.ext.ext_name	label	qos_link
+Request.node_id.ext.ext_name	label	query_body
+Request.node_id.ext.ext_name	label	queryable_info
+Request.node_id.ext.ext_name	label	responder_id
+Request.node_id.ext.ext_name	label	shm
+Request.node_id.ext.ext_name	label	source_info
+Request.node_id.ext.ext_name	label	target
+Request.node_id.ext.ext_name	label	timeout
+Request.node_id.ext.ext_name	label	timestamp
+Request.node_id.ext.ext_name	label	usrpwd
+Request.node_id.ext.ext_name	label	wire_expr
+Request.node_id.ext.header	uint
+Request.node_id.ext.m	flag
+Request.node_id.ext.z	flag
+Request.node_id.read_as	bits
+Request.node_id.undefined_bits	bits
+Request.node_id.value	uint
+Request.put	nested
+Request.put.attachment	nested
+Request.put.attachment.ext	nested
+Request.put.attachment.ext.encoding	bits
+Request.put.attachment.ext.ext_id	bits
+Request.put.attachment.ext.ext_name	label
+Request.put.attachment.ext.ext_name	label	attachment
+Request.put.attachment.ext.ext_name	label	auth
+Request.put.attachment.ext.ext_name	label	budget
+Request.put.attachment.ext.ext_name	label	compression
+Request.put.attachment.ext.ext_name	label	drop
+Request.put.attachment.ext.ext_name	label	first
+Request.put.attachment.ext.ext_name	label	low_latency
+Request.put.attachment.ext.ext_name	label	multi_link
+Request.put.attachment.ext.ext_name	label	multi_link_ack
+Request.put.attachment.ext.ext_name	label	multi_link_syn
+Request.put.attachment.ext.ext_name	label	node_id
+Request.put.attachment.ext.ext_name	label	patch
+Request.put.attachment.ext.ext_name	label	pubkey
+Request.put.attachment.ext.ext_name	label	qos
+Request.put.attachment.ext.ext_name	label	qos_link
+Request.put.attachment.ext.ext_name	label	query_body
+Request.put.attachment.ext.ext_name	label	queryable_info
+Request.put.attachment.ext.ext_name	label	responder_id
+Request.put.attachment.ext.ext_name	label	shm
+Request.put.attachment.ext.ext_name	label	source_info
+Request.put.attachment.ext.ext_name	label	target
+Request.put.attachment.ext.ext_name	label	timeout
+Request.put.attachment.ext.ext_name	label	timestamp
+Request.put.attachment.ext.ext_name	label	usrpwd
+Request.put.attachment.ext.ext_name	label	wire_expr
+Request.put.attachment.ext.header	uint
+Request.put.attachment.ext.m	flag
+Request.put.attachment.ext.z	flag
+Request.put.attachment.value	bytes
+Request.put.attachment.value_len	uint
+Request.put.e	flag
+Request.put.encoding	nested
+Request.put.encoding.has_schema	flag
+Request.put.encoding.id	bits
+Request.put.encoding.packed_id	uint
+Request.put.encoding.schema	text
+Request.put.encoding.schema_len	uint
+Request.put.ext	nested
+Request.put.ext.encoding	bits
+Request.put.ext.ext_id	bits
+Request.put.ext.header	uint
+Request.put.ext.m	flag
+Request.put.ext.value_len	uint
+Request.put.ext.z	flag
+Request.put.ext.z64	uint
+Request.put.ext.zbuf	bytes
+Request.put.header	uint
+Request.put.mid	bits
+Request.put.payload	bytes
+Request.put.payload_len	uint
+Request.put.shm	nested
+Request.put.shm.ext	nested
+Request.put.shm.ext.encoding	bits
+Request.put.shm.ext.ext_id	bits
+Request.put.shm.ext.ext_name	label
+Request.put.shm.ext.ext_name	label	attachment
+Request.put.shm.ext.ext_name	label	auth
+Request.put.shm.ext.ext_name	label	budget
+Request.put.shm.ext.ext_name	label	compression
+Request.put.shm.ext.ext_name	label	drop
+Request.put.shm.ext.ext_name	label	first
+Request.put.shm.ext.ext_name	label	low_latency
+Request.put.shm.ext.ext_name	label	multi_link
+Request.put.shm.ext.ext_name	label	multi_link_ack
+Request.put.shm.ext.ext_name	label	multi_link_syn
+Request.put.shm.ext.ext_name	label	node_id
+Request.put.shm.ext.ext_name	label	patch
+Request.put.shm.ext.ext_name	label	pubkey
+Request.put.shm.ext.ext_name	label	qos
+Request.put.shm.ext.ext_name	label	qos_link
+Request.put.shm.ext.ext_name	label	query_body
+Request.put.shm.ext.ext_name	label	queryable_info
+Request.put.shm.ext.ext_name	label	responder_id
+Request.put.shm.ext.ext_name	label	shm
+Request.put.shm.ext.ext_name	label	source_info
+Request.put.shm.ext.ext_name	label	target
+Request.put.shm.ext.ext_name	label	timeout
+Request.put.shm.ext.ext_name	label	timestamp
+Request.put.shm.ext.ext_name	label	usrpwd
+Request.put.shm.ext.ext_name	label	wire_expr
+Request.put.shm.ext.header	uint
+Request.put.shm.ext.m	flag
+Request.put.shm.ext.z	flag
+Request.put.slice_count	uint
+Request.put.slices	nested
+Request.put.slices.slice_entry	nested
+Request.put.slices.slice_entry.bytes	bytes
+Request.put.slices.slice_entry.kind	uint
+Request.put.slices.slice_entry.len	uint
+Request.put.slices.slice_entry.shm_descriptor	opaque
+Request.put.source_info	nested
+Request.put.source_info.eid	uint
+Request.put.source_info.ext	nested
+Request.put.source_info.ext.encoding	bits
+Request.put.source_info.ext.ext_id	bits
+Request.put.source_info.ext.ext_name	label
+Request.put.source_info.ext.ext_name	label	attachment
+Request.put.source_info.ext.ext_name	label	auth
+Request.put.source_info.ext.ext_name	label	budget
+Request.put.source_info.ext.ext_name	label	compression
+Request.put.source_info.ext.ext_name	label	drop
+Request.put.source_info.ext.ext_name	label	first
+Request.put.source_info.ext.ext_name	label	low_latency
+Request.put.source_info.ext.ext_name	label	multi_link
+Request.put.source_info.ext.ext_name	label	multi_link_ack
+Request.put.source_info.ext.ext_name	label	multi_link_syn
+Request.put.source_info.ext.ext_name	label	node_id
+Request.put.source_info.ext.ext_name	label	patch
+Request.put.source_info.ext.ext_name	label	pubkey
+Request.put.source_info.ext.ext_name	label	qos
+Request.put.source_info.ext.ext_name	label	qos_link
+Request.put.source_info.ext.ext_name	label	query_body
+Request.put.source_info.ext.ext_name	label	queryable_info
+Request.put.source_info.ext.ext_name	label	responder_id
+Request.put.source_info.ext.ext_name	label	shm
+Request.put.source_info.ext.ext_name	label	source_info
+Request.put.source_info.ext.ext_name	label	target
+Request.put.source_info.ext.ext_name	label	timeout
+Request.put.source_info.ext.ext_name	label	timestamp
+Request.put.source_info.ext.ext_name	label	usrpwd
+Request.put.source_info.ext.ext_name	label	wire_expr
+Request.put.source_info.ext.header	uint
+Request.put.source_info.ext.m	flag
+Request.put.source_info.ext.z	flag
+Request.put.source_info.hdr	uint
+Request.put.source_info.sn	uint
+Request.put.source_info.value	bytes
+Request.put.source_info.value_len	uint
+Request.put.source_info.zid	zid
+Request.put.source_info.zid_len_m1	bits
+Request.put.t	flag
+Request.put.timestamp	nested
+Request.put.timestamp.time	uint
+Request.put.timestamp.zid	zid
+Request.put.timestamp.zid_len	uint
+Request.put.z	flag
+Request.qos	nested
+Request.qos.congestion	label
+Request.qos.congestion	label	Block
+Request.qos.congestion	label	BlockFirst
+Request.qos.congestion	label	Drop
+Request.qos.express	flag
+Request.qos.ext	nested
+Request.qos.ext.encoding	bits
+Request.qos.ext.ext_id	bits
+Request.qos.ext.ext_name	label
+Request.qos.ext.ext_name	label	attachment
+Request.qos.ext.ext_name	label	auth
+Request.qos.ext.ext_name	label	budget
+Request.qos.ext.ext_name	label	compression
+Request.qos.ext.ext_name	label	drop
+Request.qos.ext.ext_name	label	first
+Request.qos.ext.ext_name	label	low_latency
+Request.qos.ext.ext_name	label	multi_link
+Request.qos.ext.ext_name	label	multi_link_ack
+Request.qos.ext.ext_name	label	multi_link_syn
+Request.qos.ext.ext_name	label	node_id
+Request.qos.ext.ext_name	label	patch
+Request.qos.ext.ext_name	label	pubkey
+Request.qos.ext.ext_name	label	qos
+Request.qos.ext.ext_name	label	qos_link
+Request.qos.ext.ext_name	label	query_body
+Request.qos.ext.ext_name	label	queryable_info
+Request.qos.ext.ext_name	label	responder_id
+Request.qos.ext.ext_name	label	shm
+Request.qos.ext.ext_name	label	source_info
+Request.qos.ext.ext_name	label	target
+Request.qos.ext.ext_name	label	timeout
+Request.qos.ext.ext_name	label	timestamp
+Request.qos.ext.ext_name	label	usrpwd
+Request.qos.ext.ext_name	label	wire_expr
+Request.qos.ext.header	uint
+Request.qos.ext.m	flag
+Request.qos.ext.z	flag
+Request.qos.priority	label
+Request.qos.priority	label	Background
+Request.qos.priority	label	Control
+Request.qos.priority	label	Data
+Request.qos.priority	label	DataHigh
+Request.qos.priority	label	DataLow
+Request.qos.priority	label	InteractiveHigh
+Request.qos.priority	label	InteractiveLow
+Request.qos.priority	label	RealTime
+Request.qos.undefined_bits	bits
+Request.qos.value	uint
+Request.query	nested
+Request.query.attachment	nested
+Request.query.attachment.ext	nested
+Request.query.attachment.ext.encoding	bits
+Request.query.attachment.ext.ext_id	bits
+Request.query.attachment.ext.ext_name	label
+Request.query.attachment.ext.ext_name	label	attachment
+Request.query.attachment.ext.ext_name	label	auth
+Request.query.attachment.ext.ext_name	label	budget
+Request.query.attachment.ext.ext_name	label	compression
+Request.query.attachment.ext.ext_name	label	drop
+Request.query.attachment.ext.ext_name	label	first
+Request.query.attachment.ext.ext_name	label	low_latency
+Request.query.attachment.ext.ext_name	label	multi_link
+Request.query.attachment.ext.ext_name	label	multi_link_ack
+Request.query.attachment.ext.ext_name	label	multi_link_syn
+Request.query.attachment.ext.ext_name	label	node_id
+Request.query.attachment.ext.ext_name	label	patch
+Request.query.attachment.ext.ext_name	label	pubkey
+Request.query.attachment.ext.ext_name	label	qos
+Request.query.attachment.ext.ext_name	label	qos_link
+Request.query.attachment.ext.ext_name	label	query_body
+Request.query.attachment.ext.ext_name	label	queryable_info
+Request.query.attachment.ext.ext_name	label	responder_id
+Request.query.attachment.ext.ext_name	label	shm
+Request.query.attachment.ext.ext_name	label	source_info
+Request.query.attachment.ext.ext_name	label	target
+Request.query.attachment.ext.ext_name	label	timeout
+Request.query.attachment.ext.ext_name	label	timestamp
+Request.query.attachment.ext.ext_name	label	usrpwd
+Request.query.attachment.ext.ext_name	label	wire_expr
+Request.query.attachment.ext.header	uint
+Request.query.attachment.ext.m	flag
+Request.query.attachment.ext.z	flag
+Request.query.attachment.slice_count	uint
+Request.query.attachment.slices	nested
+Request.query.attachment.slices.slice_entry	nested
+Request.query.attachment.slices.slice_entry.bytes	bytes
+Request.query.attachment.slices.slice_entry.kind	uint
+Request.query.attachment.slices.slice_entry.len	uint
+Request.query.attachment.slices.slice_entry.shm_descriptor	opaque
+Request.query.attachment.value	bytes
+Request.query.attachment.value_encoding	nested
+Request.query.attachment.value_encoding.has_schema	flag
+Request.query.attachment.value_encoding.id	bits
+Request.query.attachment.value_encoding.packed_id	uint
+Request.query.attachment.value_encoding.schema	text
+Request.query.attachment.value_encoding.schema_len	uint
+Request.query.attachment.value_len	uint
+Request.query.c	flag
+Request.query.consolidation	uint
+Request.query.ext	nested
+Request.query.ext.encoding	bits
+Request.query.ext.ext_id	bits
+Request.query.ext.header	uint
+Request.query.ext.m	flag
+Request.query.ext.slice_count	uint
+Request.query.ext.slices	nested
+Request.query.ext.slices.slice_entry	nested
+Request.query.ext.slices.slice_entry.bytes	bytes
+Request.query.ext.slices.slice_entry.kind	uint
+Request.query.ext.slices.slice_entry.len	uint
+Request.query.ext.slices.slice_entry.shm_descriptor	opaque
+Request.query.ext.value_encoding	nested
+Request.query.ext.value_encoding.has_schema	flag
+Request.query.ext.value_encoding.id	bits
+Request.query.ext.value_encoding.packed_id	uint
+Request.query.ext.value_encoding.schema	text
+Request.query.ext.value_encoding.schema_len	uint
+Request.query.ext.value_len	uint
+Request.query.ext.z	flag
+Request.query.ext.z64	uint
+Request.query.ext.zbuf	bytes
+Request.query.header	uint
+Request.query.mid	bits
+Request.query.p	flag
+Request.query.parameters	bytes
+Request.query.parameters_len	uint
+Request.query.query_body	nested
+Request.query.query_body.encoding	nested
+Request.query.query_body.encoding.has_schema	flag
+Request.query.query_body.encoding.id	bits
+Request.query.query_body.encoding.packed_id	uint
+Request.query.query_body.encoding.schema	text
+Request.query.query_body.encoding.schema_len	uint
+Request.query.query_body.ext	nested
+Request.query.query_body.ext.encoding	bits
+Request.query.query_body.ext.ext_id	bits
+Request.query.query_body.ext.ext_name	label
+Request.query.query_body.ext.ext_name	label	attachment
+Request.query.query_body.ext.ext_name	label	auth
+Request.query.query_body.ext.ext_name	label	budget
+Request.query.query_body.ext.ext_name	label	compression
+Request.query.query_body.ext.ext_name	label	drop
+Request.query.query_body.ext.ext_name	label	first
+Request.query.query_body.ext.ext_name	label	low_latency
+Request.query.query_body.ext.ext_name	label	multi_link
+Request.query.query_body.ext.ext_name	label	multi_link_ack
+Request.query.query_body.ext.ext_name	label	multi_link_syn
+Request.query.query_body.ext.ext_name	label	node_id
+Request.query.query_body.ext.ext_name	label	patch
+Request.query.query_body.ext.ext_name	label	pubkey
+Request.query.query_body.ext.ext_name	label	qos
+Request.query.query_body.ext.ext_name	label	qos_link
+Request.query.query_body.ext.ext_name	label	query_body
+Request.query.query_body.ext.ext_name	label	queryable_info
+Request.query.query_body.ext.ext_name	label	responder_id
+Request.query.query_body.ext.ext_name	label	shm
+Request.query.query_body.ext.ext_name	label	source_info
+Request.query.query_body.ext.ext_name	label	target
+Request.query.query_body.ext.ext_name	label	timeout
+Request.query.query_body.ext.ext_name	label	timestamp
+Request.query.query_body.ext.ext_name	label	usrpwd
+Request.query.query_body.ext.ext_name	label	wire_expr
+Request.query.query_body.ext.header	uint
+Request.query.query_body.ext.m	flag
+Request.query.query_body.ext.z	flag
+Request.query.query_body.payload	bytes
+Request.query.query_body.slice_count	uint
+Request.query.query_body.slices	nested
+Request.query.query_body.slices.slice_entry	nested
+Request.query.query_body.slices.slice_entry.bytes	bytes
+Request.query.query_body.slices.slice_entry.kind	uint
+Request.query.query_body.slices.slice_entry.len	uint
+Request.query.query_body.slices.slice_entry.shm_descriptor	opaque
+Request.query.query_body.value	bytes
+Request.query.query_body.value_encoding	nested
+Request.query.query_body.value_encoding.has_schema	flag
+Request.query.query_body.value_encoding.id	bits
+Request.query.query_body.value_encoding.packed_id	uint
+Request.query.query_body.value_encoding.schema	text
+Request.query.query_body.value_encoding.schema_len	uint
+Request.query.query_body.value_len	uint
+Request.query.source_info	nested
+Request.query.source_info.eid	uint
+Request.query.source_info.ext	nested
+Request.query.source_info.ext.encoding	bits
+Request.query.source_info.ext.ext_id	bits
+Request.query.source_info.ext.ext_name	label
+Request.query.source_info.ext.ext_name	label	attachment
+Request.query.source_info.ext.ext_name	label	auth
+Request.query.source_info.ext.ext_name	label	budget
+Request.query.source_info.ext.ext_name	label	compression
+Request.query.source_info.ext.ext_name	label	drop
+Request.query.source_info.ext.ext_name	label	first
+Request.query.source_info.ext.ext_name	label	low_latency
+Request.query.source_info.ext.ext_name	label	multi_link
+Request.query.source_info.ext.ext_name	label	multi_link_ack
+Request.query.source_info.ext.ext_name	label	multi_link_syn
+Request.query.source_info.ext.ext_name	label	node_id
+Request.query.source_info.ext.ext_name	label	patch
+Request.query.source_info.ext.ext_name	label	pubkey
+Request.query.source_info.ext.ext_name	label	qos
+Request.query.source_info.ext.ext_name	label	qos_link
+Request.query.source_info.ext.ext_name	label	query_body
+Request.query.source_info.ext.ext_name	label	queryable_info
+Request.query.source_info.ext.ext_name	label	responder_id
+Request.query.source_info.ext.ext_name	label	shm
+Request.query.source_info.ext.ext_name	label	source_info
+Request.query.source_info.ext.ext_name	label	target
+Request.query.source_info.ext.ext_name	label	timeout
+Request.query.source_info.ext.ext_name	label	timestamp
+Request.query.source_info.ext.ext_name	label	usrpwd
+Request.query.source_info.ext.ext_name	label	wire_expr
+Request.query.source_info.ext.header	uint
+Request.query.source_info.ext.m	flag
+Request.query.source_info.ext.z	flag
+Request.query.source_info.hdr	uint
+Request.query.source_info.slice_count	uint
+Request.query.source_info.slices	nested
+Request.query.source_info.slices.slice_entry	nested
+Request.query.source_info.slices.slice_entry.bytes	bytes
+Request.query.source_info.slices.slice_entry.kind	uint
+Request.query.source_info.slices.slice_entry.len	uint
+Request.query.source_info.slices.slice_entry.shm_descriptor	opaque
+Request.query.source_info.sn	uint
+Request.query.source_info.value	bytes
+Request.query.source_info.value_encoding	nested
+Request.query.source_info.value_encoding.has_schema	flag
+Request.query.source_info.value_encoding.id	bits
+Request.query.source_info.value_encoding.packed_id	uint
+Request.query.source_info.value_encoding.schema	text
+Request.query.source_info.value_encoding.schema_len	uint
+Request.query.source_info.value_len	uint
+Request.query.source_info.zid	zid
+Request.query.source_info.zid_len_m1	bits
+Request.query.z	flag
+Request.rid	uint
+Request.target	nested
+Request.target.ext	nested
+Request.target.ext.encoding	bits
+Request.target.ext.ext_id	bits
+Request.target.ext.ext_name	label
+Request.target.ext.ext_name	label	attachment
+Request.target.ext.ext_name	label	auth
+Request.target.ext.ext_name	label	budget
+Request.target.ext.ext_name	label	compression
+Request.target.ext.ext_name	label	drop
+Request.target.ext.ext_name	label	first
+Request.target.ext.ext_name	label	low_latency
+Request.target.ext.ext_name	label	multi_link
+Request.target.ext.ext_name	label	multi_link_ack
+Request.target.ext.ext_name	label	multi_link_syn
+Request.target.ext.ext_name	label	node_id
+Request.target.ext.ext_name	label	patch
+Request.target.ext.ext_name	label	pubkey
+Request.target.ext.ext_name	label	qos
+Request.target.ext.ext_name	label	qos_link
+Request.target.ext.ext_name	label	query_body
+Request.target.ext.ext_name	label	queryable_info
+Request.target.ext.ext_name	label	responder_id
+Request.target.ext.ext_name	label	shm
+Request.target.ext.ext_name	label	source_info
+Request.target.ext.ext_name	label	target
+Request.target.ext.ext_name	label	timeout
+Request.target.ext.ext_name	label	timestamp
+Request.target.ext.ext_name	label	usrpwd
+Request.target.ext.ext_name	label	wire_expr
+Request.target.ext.header	uint
+Request.target.ext.m	flag
+Request.target.ext.z	flag
+Request.target.target	label
+Request.target.target	label	All
+Request.target.target	label	AllComplete
+Request.target.target	label	BestMatching
+Request.target.value	uint
+Request.timeout	nested
+Request.timeout.ext	nested
+Request.timeout.ext.encoding	bits
+Request.timeout.ext.ext_id	bits
+Request.timeout.ext.ext_name	label
+Request.timeout.ext.ext_name	label	attachment
+Request.timeout.ext.ext_name	label	auth
+Request.timeout.ext.ext_name	label	budget
+Request.timeout.ext.ext_name	label	compression
+Request.timeout.ext.ext_name	label	drop
+Request.timeout.ext.ext_name	label	first
+Request.timeout.ext.ext_name	label	low_latency
+Request.timeout.ext.ext_name	label	multi_link
+Request.timeout.ext.ext_name	label	multi_link_ack
+Request.timeout.ext.ext_name	label	multi_link_syn
+Request.timeout.ext.ext_name	label	node_id
+Request.timeout.ext.ext_name	label	patch
+Request.timeout.ext.ext_name	label	pubkey
+Request.timeout.ext.ext_name	label	qos
+Request.timeout.ext.ext_name	label	qos_link
+Request.timeout.ext.ext_name	label	query_body
+Request.timeout.ext.ext_name	label	queryable_info
+Request.timeout.ext.ext_name	label	responder_id
+Request.timeout.ext.ext_name	label	shm
+Request.timeout.ext.ext_name	label	source_info
+Request.timeout.ext.ext_name	label	target
+Request.timeout.ext.ext_name	label	timeout
+Request.timeout.ext.ext_name	label	timestamp
+Request.timeout.ext.ext_name	label	usrpwd
+Request.timeout.ext.ext_name	label	wire_expr
+Request.timeout.ext.header	uint
+Request.timeout.ext.m	flag
+Request.timeout.ext.z	flag
+Request.timeout.value	uint
+Request.timestamp	nested
+Request.timestamp.ext	nested
+Request.timestamp.ext.encoding	bits
+Request.timestamp.ext.ext_id	bits
+Request.timestamp.ext.ext_name	label
+Request.timestamp.ext.ext_name	label	attachment
+Request.timestamp.ext.ext_name	label	auth
+Request.timestamp.ext.ext_name	label	budget
+Request.timestamp.ext.ext_name	label	compression
+Request.timestamp.ext.ext_name	label	drop
+Request.timestamp.ext.ext_name	label	first
+Request.timestamp.ext.ext_name	label	low_latency
+Request.timestamp.ext.ext_name	label	multi_link
+Request.timestamp.ext.ext_name	label	multi_link_ack
+Request.timestamp.ext.ext_name	label	multi_link_syn
+Request.timestamp.ext.ext_name	label	node_id
+Request.timestamp.ext.ext_name	label	patch
+Request.timestamp.ext.ext_name	label	pubkey
+Request.timestamp.ext.ext_name	label	qos
+Request.timestamp.ext.ext_name	label	qos_link
+Request.timestamp.ext.ext_name	label	query_body
+Request.timestamp.ext.ext_name	label	queryable_info
+Request.timestamp.ext.ext_name	label	responder_id
+Request.timestamp.ext.ext_name	label	shm
+Request.timestamp.ext.ext_name	label	source_info
+Request.timestamp.ext.ext_name	label	target
+Request.timestamp.ext.ext_name	label	timeout
+Request.timestamp.ext.ext_name	label	timestamp
+Request.timestamp.ext.ext_name	label	usrpwd
+Request.timestamp.ext.ext_name	label	wire_expr
+Request.timestamp.ext.header	uint
+Request.timestamp.ext.m	flag
+Request.timestamp.ext.z	flag
+Request.timestamp.time	uint
+Request.timestamp.value	bytes
+Request.timestamp.value_len	uint
+Request.timestamp.zid	zid
+Request.timestamp.zid_len	uint
+Request.z	flag
+Response	nested
+Response.err	nested
+Response.err.e	flag
+Response.err.encoding	nested
+Response.err.encoding.has_schema	flag
+Response.err.encoding.id	bits
+Response.err.encoding.packed_id	uint
+Response.err.encoding.schema	text
+Response.err.encoding.schema_len	uint
+Response.err.ext	nested
+Response.err.ext.encoding	bits
+Response.err.ext.ext_id	bits
+Response.err.ext.header	uint
+Response.err.ext.m	flag
+Response.err.ext.value_len	uint
+Response.err.ext.z	flag
+Response.err.ext.z64	uint
+Response.err.ext.zbuf	bytes
+Response.err.header	uint
+Response.err.mid	bits
+Response.err.payload	bytes
+Response.err.payload_len	uint
+Response.err.shm	nested
+Response.err.shm.ext	nested
+Response.err.shm.ext.encoding	bits
+Response.err.shm.ext.ext_id	bits
+Response.err.shm.ext.ext_name	label
+Response.err.shm.ext.ext_name	label	attachment
+Response.err.shm.ext.ext_name	label	auth
+Response.err.shm.ext.ext_name	label	budget
+Response.err.shm.ext.ext_name	label	compression
+Response.err.shm.ext.ext_name	label	drop
+Response.err.shm.ext.ext_name	label	first
+Response.err.shm.ext.ext_name	label	low_latency
+Response.err.shm.ext.ext_name	label	multi_link
+Response.err.shm.ext.ext_name	label	multi_link_ack
+Response.err.shm.ext.ext_name	label	multi_link_syn
+Response.err.shm.ext.ext_name	label	node_id
+Response.err.shm.ext.ext_name	label	patch
+Response.err.shm.ext.ext_name	label	pubkey
+Response.err.shm.ext.ext_name	label	qos
+Response.err.shm.ext.ext_name	label	qos_link
+Response.err.shm.ext.ext_name	label	query_body
+Response.err.shm.ext.ext_name	label	queryable_info
+Response.err.shm.ext.ext_name	label	responder_id
+Response.err.shm.ext.ext_name	label	shm
+Response.err.shm.ext.ext_name	label	source_info
+Response.err.shm.ext.ext_name	label	target
+Response.err.shm.ext.ext_name	label	timeout
+Response.err.shm.ext.ext_name	label	timestamp
+Response.err.shm.ext.ext_name	label	usrpwd
+Response.err.shm.ext.ext_name	label	wire_expr
+Response.err.shm.ext.header	uint
+Response.err.shm.ext.m	flag
+Response.err.shm.ext.z	flag
+Response.err.shm_descriptor	opaque
+Response.err.source_info	nested
+Response.err.source_info.eid	uint
+Response.err.source_info.ext	nested
+Response.err.source_info.ext.encoding	bits
+Response.err.source_info.ext.ext_id	bits
+Response.err.source_info.ext.ext_name	label
+Response.err.source_info.ext.ext_name	label	attachment
+Response.err.source_info.ext.ext_name	label	auth
+Response.err.source_info.ext.ext_name	label	budget
+Response.err.source_info.ext.ext_name	label	compression
+Response.err.source_info.ext.ext_name	label	drop
+Response.err.source_info.ext.ext_name	label	first
+Response.err.source_info.ext.ext_name	label	low_latency
+Response.err.source_info.ext.ext_name	label	multi_link
+Response.err.source_info.ext.ext_name	label	multi_link_ack
+Response.err.source_info.ext.ext_name	label	multi_link_syn
+Response.err.source_info.ext.ext_name	label	node_id
+Response.err.source_info.ext.ext_name	label	patch
+Response.err.source_info.ext.ext_name	label	pubkey
+Response.err.source_info.ext.ext_name	label	qos
+Response.err.source_info.ext.ext_name	label	qos_link
+Response.err.source_info.ext.ext_name	label	query_body
+Response.err.source_info.ext.ext_name	label	queryable_info
+Response.err.source_info.ext.ext_name	label	responder_id
+Response.err.source_info.ext.ext_name	label	shm
+Response.err.source_info.ext.ext_name	label	source_info
+Response.err.source_info.ext.ext_name	label	target
+Response.err.source_info.ext.ext_name	label	timeout
+Response.err.source_info.ext.ext_name	label	timestamp
+Response.err.source_info.ext.ext_name	label	usrpwd
+Response.err.source_info.ext.ext_name	label	wire_expr
+Response.err.source_info.ext.header	uint
+Response.err.source_info.ext.m	flag
+Response.err.source_info.ext.z	flag
+Response.err.source_info.hdr	uint
+Response.err.source_info.sn	uint
+Response.err.source_info.value	bytes
+Response.err.source_info.value_len	uint
+Response.err.source_info.zid	zid
+Response.err.source_info.zid_len_m1	bits
+Response.err.z	flag
+Response.ext	nested
+Response.ext.encoding	bits
+Response.ext.ext_id	bits
+Response.ext.header	uint
+Response.ext.m	flag
+Response.ext.value_len	uint
+Response.ext.z	flag
+Response.ext.z64	uint
+Response.ext.zbuf	bytes
+Response.header	uint
+Response.keyexpr	nested
+Response.keyexpr.id	uint
+Response.keyexpr.mapping	bits
+Response.keyexpr.suffix	text
+Response.keyexpr.suffix_len	uint
+Response.m	flag
+Response.mid	bits
+Response.n	flag
+Response.qos	nested
+Response.qos.congestion	label
+Response.qos.congestion	label	Block
+Response.qos.congestion	label	BlockFirst
+Response.qos.congestion	label	Drop
+Response.qos.express	flag
+Response.qos.ext	nested
+Response.qos.ext.encoding	bits
+Response.qos.ext.ext_id	bits
+Response.qos.ext.ext_name	label
+Response.qos.ext.ext_name	label	attachment
+Response.qos.ext.ext_name	label	auth
+Response.qos.ext.ext_name	label	budget
+Response.qos.ext.ext_name	label	compression
+Response.qos.ext.ext_name	label	drop
+Response.qos.ext.ext_name	label	first
+Response.qos.ext.ext_name	label	low_latency
+Response.qos.ext.ext_name	label	multi_link
+Response.qos.ext.ext_name	label	multi_link_ack
+Response.qos.ext.ext_name	label	multi_link_syn
+Response.qos.ext.ext_name	label	node_id
+Response.qos.ext.ext_name	label	patch
+Response.qos.ext.ext_name	label	pubkey
+Response.qos.ext.ext_name	label	qos
+Response.qos.ext.ext_name	label	qos_link
+Response.qos.ext.ext_name	label	query_body
+Response.qos.ext.ext_name	label	queryable_info
+Response.qos.ext.ext_name	label	responder_id
+Response.qos.ext.ext_name	label	shm
+Response.qos.ext.ext_name	label	source_info
+Response.qos.ext.ext_name	label	target
+Response.qos.ext.ext_name	label	timeout
+Response.qos.ext.ext_name	label	timestamp
+Response.qos.ext.ext_name	label	usrpwd
+Response.qos.ext.ext_name	label	wire_expr
+Response.qos.ext.header	uint
+Response.qos.ext.m	flag
+Response.qos.ext.z	flag
+Response.qos.priority	label
+Response.qos.priority	label	Background
+Response.qos.priority	label	Control
+Response.qos.priority	label	Data
+Response.qos.priority	label	DataHigh
+Response.qos.priority	label	DataLow
+Response.qos.priority	label	InteractiveHigh
+Response.qos.priority	label	InteractiveLow
+Response.qos.priority	label	RealTime
+Response.qos.undefined_bits	bits
+Response.qos.value	uint
+Response.reply	nested
+Response.reply.c	flag
+Response.reply.consolidation	uint
+Response.reply.del	nested
+Response.reply.del.attachment	nested
+Response.reply.del.attachment.ext	nested
+Response.reply.del.attachment.ext.encoding	bits
+Response.reply.del.attachment.ext.ext_id	bits
+Response.reply.del.attachment.ext.ext_name	label
+Response.reply.del.attachment.ext.ext_name	label	attachment
+Response.reply.del.attachment.ext.ext_name	label	auth
+Response.reply.del.attachment.ext.ext_name	label	budget
+Response.reply.del.attachment.ext.ext_name	label	compression
+Response.reply.del.attachment.ext.ext_name	label	drop
+Response.reply.del.attachment.ext.ext_name	label	first
+Response.reply.del.attachment.ext.ext_name	label	low_latency
+Response.reply.del.attachment.ext.ext_name	label	multi_link
+Response.reply.del.attachment.ext.ext_name	label	multi_link_ack
+Response.reply.del.attachment.ext.ext_name	label	multi_link_syn
+Response.reply.del.attachment.ext.ext_name	label	node_id
+Response.reply.del.attachment.ext.ext_name	label	patch
+Response.reply.del.attachment.ext.ext_name	label	pubkey
+Response.reply.del.attachment.ext.ext_name	label	qos
+Response.reply.del.attachment.ext.ext_name	label	qos_link
+Response.reply.del.attachment.ext.ext_name	label	query_body
+Response.reply.del.attachment.ext.ext_name	label	queryable_info
+Response.reply.del.attachment.ext.ext_name	label	responder_id
+Response.reply.del.attachment.ext.ext_name	label	shm
+Response.reply.del.attachment.ext.ext_name	label	source_info
+Response.reply.del.attachment.ext.ext_name	label	target
+Response.reply.del.attachment.ext.ext_name	label	timeout
+Response.reply.del.attachment.ext.ext_name	label	timestamp
+Response.reply.del.attachment.ext.ext_name	label	usrpwd
+Response.reply.del.attachment.ext.ext_name	label	wire_expr
+Response.reply.del.attachment.ext.header	uint
+Response.reply.del.attachment.ext.m	flag
+Response.reply.del.attachment.ext.z	flag
+Response.reply.del.attachment.value	bytes
+Response.reply.del.attachment.value_len	uint
+Response.reply.del.ext	nested
+Response.reply.del.ext.encoding	bits
+Response.reply.del.ext.ext_id	bits
+Response.reply.del.ext.header	uint
+Response.reply.del.ext.m	flag
+Response.reply.del.ext.value_len	uint
+Response.reply.del.ext.z	flag
+Response.reply.del.ext.z64	uint
+Response.reply.del.ext.zbuf	bytes
+Response.reply.del.header	uint
+Response.reply.del.mid	bits
+Response.reply.del.source_info	nested
+Response.reply.del.source_info.eid	uint
+Response.reply.del.source_info.ext	nested
+Response.reply.del.source_info.ext.encoding	bits
+Response.reply.del.source_info.ext.ext_id	bits
+Response.reply.del.source_info.ext.ext_name	label
+Response.reply.del.source_info.ext.ext_name	label	attachment
+Response.reply.del.source_info.ext.ext_name	label	auth
+Response.reply.del.source_info.ext.ext_name	label	budget
+Response.reply.del.source_info.ext.ext_name	label	compression
+Response.reply.del.source_info.ext.ext_name	label	drop
+Response.reply.del.source_info.ext.ext_name	label	first
+Response.reply.del.source_info.ext.ext_name	label	low_latency
+Response.reply.del.source_info.ext.ext_name	label	multi_link
+Response.reply.del.source_info.ext.ext_name	label	multi_link_ack
+Response.reply.del.source_info.ext.ext_name	label	multi_link_syn
+Response.reply.del.source_info.ext.ext_name	label	node_id
+Response.reply.del.source_info.ext.ext_name	label	patch
+Response.reply.del.source_info.ext.ext_name	label	pubkey
+Response.reply.del.source_info.ext.ext_name	label	qos
+Response.reply.del.source_info.ext.ext_name	label	qos_link
+Response.reply.del.source_info.ext.ext_name	label	query_body
+Response.reply.del.source_info.ext.ext_name	label	queryable_info
+Response.reply.del.source_info.ext.ext_name	label	responder_id
+Response.reply.del.source_info.ext.ext_name	label	shm
+Response.reply.del.source_info.ext.ext_name	label	source_info
+Response.reply.del.source_info.ext.ext_name	label	target
+Response.reply.del.source_info.ext.ext_name	label	timeout
+Response.reply.del.source_info.ext.ext_name	label	timestamp
+Response.reply.del.source_info.ext.ext_name	label	usrpwd
+Response.reply.del.source_info.ext.ext_name	label	wire_expr
+Response.reply.del.source_info.ext.header	uint
+Response.reply.del.source_info.ext.m	flag
+Response.reply.del.source_info.ext.z	flag
+Response.reply.del.source_info.hdr	uint
+Response.reply.del.source_info.sn	uint
+Response.reply.del.source_info.value	bytes
+Response.reply.del.source_info.value_len	uint
+Response.reply.del.source_info.zid	zid
+Response.reply.del.source_info.zid_len_m1	bits
+Response.reply.del.t	flag
+Response.reply.del.timestamp	nested
+Response.reply.del.timestamp.time	uint
+Response.reply.del.timestamp.zid	zid
+Response.reply.del.timestamp.zid_len	uint
+Response.reply.del.z	flag
+Response.reply.ext	nested
+Response.reply.ext.encoding	bits
+Response.reply.ext.ext_id	bits
+Response.reply.ext.header	uint
+Response.reply.ext.m	flag
+Response.reply.ext.value_len	uint
+Response.reply.ext.z	flag
+Response.reply.ext.z64	uint
+Response.reply.ext.zbuf	bytes
+Response.reply.header	uint
+Response.reply.mid	bits
+Response.reply.put	nested
+Response.reply.put.attachment	nested
+Response.reply.put.attachment.ext	nested
+Response.reply.put.attachment.ext.encoding	bits
+Response.reply.put.attachment.ext.ext_id	bits
+Response.reply.put.attachment.ext.ext_name	label
+Response.reply.put.attachment.ext.ext_name	label	attachment
+Response.reply.put.attachment.ext.ext_name	label	auth
+Response.reply.put.attachment.ext.ext_name	label	budget
+Response.reply.put.attachment.ext.ext_name	label	compression
+Response.reply.put.attachment.ext.ext_name	label	drop
+Response.reply.put.attachment.ext.ext_name	label	first
+Response.reply.put.attachment.ext.ext_name	label	low_latency
+Response.reply.put.attachment.ext.ext_name	label	multi_link
+Response.reply.put.attachment.ext.ext_name	label	multi_link_ack
+Response.reply.put.attachment.ext.ext_name	label	multi_link_syn
+Response.reply.put.attachment.ext.ext_name	label	node_id
+Response.reply.put.attachment.ext.ext_name	label	patch
+Response.reply.put.attachment.ext.ext_name	label	pubkey
+Response.reply.put.attachment.ext.ext_name	label	qos
+Response.reply.put.attachment.ext.ext_name	label	qos_link
+Response.reply.put.attachment.ext.ext_name	label	query_body
+Response.reply.put.attachment.ext.ext_name	label	queryable_info
+Response.reply.put.attachment.ext.ext_name	label	responder_id
+Response.reply.put.attachment.ext.ext_name	label	shm
+Response.reply.put.attachment.ext.ext_name	label	source_info
+Response.reply.put.attachment.ext.ext_name	label	target
+Response.reply.put.attachment.ext.ext_name	label	timeout
+Response.reply.put.attachment.ext.ext_name	label	timestamp
+Response.reply.put.attachment.ext.ext_name	label	usrpwd
+Response.reply.put.attachment.ext.ext_name	label	wire_expr
+Response.reply.put.attachment.ext.header	uint
+Response.reply.put.attachment.ext.m	flag
+Response.reply.put.attachment.ext.z	flag
+Response.reply.put.attachment.value	bytes
+Response.reply.put.attachment.value_len	uint
+Response.reply.put.e	flag
+Response.reply.put.encoding	nested
+Response.reply.put.encoding.has_schema	flag
+Response.reply.put.encoding.id	bits
+Response.reply.put.encoding.packed_id	uint
+Response.reply.put.encoding.schema	text
+Response.reply.put.encoding.schema_len	uint
+Response.reply.put.ext	nested
+Response.reply.put.ext.encoding	bits
+Response.reply.put.ext.ext_id	bits
+Response.reply.put.ext.header	uint
+Response.reply.put.ext.m	flag
+Response.reply.put.ext.value_len	uint
+Response.reply.put.ext.z	flag
+Response.reply.put.ext.z64	uint
+Response.reply.put.ext.zbuf	bytes
+Response.reply.put.header	uint
+Response.reply.put.mid	bits
+Response.reply.put.payload	bytes
+Response.reply.put.payload_len	uint
+Response.reply.put.shm	nested
+Response.reply.put.shm.ext	nested
+Response.reply.put.shm.ext.encoding	bits
+Response.reply.put.shm.ext.ext_id	bits
+Response.reply.put.shm.ext.ext_name	label
+Response.reply.put.shm.ext.ext_name	label	attachment
+Response.reply.put.shm.ext.ext_name	label	auth
+Response.reply.put.shm.ext.ext_name	label	budget
+Response.reply.put.shm.ext.ext_name	label	compression
+Response.reply.put.shm.ext.ext_name	label	drop
+Response.reply.put.shm.ext.ext_name	label	first
+Response.reply.put.shm.ext.ext_name	label	low_latency
+Response.reply.put.shm.ext.ext_name	label	multi_link
+Response.reply.put.shm.ext.ext_name	label	multi_link_ack
+Response.reply.put.shm.ext.ext_name	label	multi_link_syn
+Response.reply.put.shm.ext.ext_name	label	node_id
+Response.reply.put.shm.ext.ext_name	label	patch
+Response.reply.put.shm.ext.ext_name	label	pubkey
+Response.reply.put.shm.ext.ext_name	label	qos
+Response.reply.put.shm.ext.ext_name	label	qos_link
+Response.reply.put.shm.ext.ext_name	label	query_body
+Response.reply.put.shm.ext.ext_name	label	queryable_info
+Response.reply.put.shm.ext.ext_name	label	responder_id
+Response.reply.put.shm.ext.ext_name	label	shm
+Response.reply.put.shm.ext.ext_name	label	source_info
+Response.reply.put.shm.ext.ext_name	label	target
+Response.reply.put.shm.ext.ext_name	label	timeout
+Response.reply.put.shm.ext.ext_name	label	timestamp
+Response.reply.put.shm.ext.ext_name	label	usrpwd
+Response.reply.put.shm.ext.ext_name	label	wire_expr
+Response.reply.put.shm.ext.header	uint
+Response.reply.put.shm.ext.m	flag
+Response.reply.put.shm.ext.z	flag
+Response.reply.put.slice_count	uint
+Response.reply.put.slices	nested
+Response.reply.put.slices.slice_entry	nested
+Response.reply.put.slices.slice_entry.bytes	bytes
+Response.reply.put.slices.slice_entry.kind	uint
+Response.reply.put.slices.slice_entry.len	uint
+Response.reply.put.slices.slice_entry.shm_descriptor	opaque
+Response.reply.put.source_info	nested
+Response.reply.put.source_info.eid	uint
+Response.reply.put.source_info.ext	nested
+Response.reply.put.source_info.ext.encoding	bits
+Response.reply.put.source_info.ext.ext_id	bits
+Response.reply.put.source_info.ext.ext_name	label
+Response.reply.put.source_info.ext.ext_name	label	attachment
+Response.reply.put.source_info.ext.ext_name	label	auth
+Response.reply.put.source_info.ext.ext_name	label	budget
+Response.reply.put.source_info.ext.ext_name	label	compression
+Response.reply.put.source_info.ext.ext_name	label	drop
+Response.reply.put.source_info.ext.ext_name	label	first
+Response.reply.put.source_info.ext.ext_name	label	low_latency
+Response.reply.put.source_info.ext.ext_name	label	multi_link
+Response.reply.put.source_info.ext.ext_name	label	multi_link_ack
+Response.reply.put.source_info.ext.ext_name	label	multi_link_syn
+Response.reply.put.source_info.ext.ext_name	label	node_id
+Response.reply.put.source_info.ext.ext_name	label	patch
+Response.reply.put.source_info.ext.ext_name	label	pubkey
+Response.reply.put.source_info.ext.ext_name	label	qos
+Response.reply.put.source_info.ext.ext_name	label	qos_link
+Response.reply.put.source_info.ext.ext_name	label	query_body
+Response.reply.put.source_info.ext.ext_name	label	queryable_info
+Response.reply.put.source_info.ext.ext_name	label	responder_id
+Response.reply.put.source_info.ext.ext_name	label	shm
+Response.reply.put.source_info.ext.ext_name	label	source_info
+Response.reply.put.source_info.ext.ext_name	label	target
+Response.reply.put.source_info.ext.ext_name	label	timeout
+Response.reply.put.source_info.ext.ext_name	label	timestamp
+Response.reply.put.source_info.ext.ext_name	label	usrpwd
+Response.reply.put.source_info.ext.ext_name	label	wire_expr
+Response.reply.put.source_info.ext.header	uint
+Response.reply.put.source_info.ext.m	flag
+Response.reply.put.source_info.ext.z	flag
+Response.reply.put.source_info.hdr	uint
+Response.reply.put.source_info.sn	uint
+Response.reply.put.source_info.value	bytes
+Response.reply.put.source_info.value_len	uint
+Response.reply.put.source_info.zid	zid
+Response.reply.put.source_info.zid_len_m1	bits
+Response.reply.put.t	flag
+Response.reply.put.timestamp	nested
+Response.reply.put.timestamp.time	uint
+Response.reply.put.timestamp.zid	zid
+Response.reply.put.timestamp.zid_len	uint
+Response.reply.put.z	flag
+Response.reply.z	flag
+Response.request_id	uint
+Response.responder_id	nested
+Response.responder_id.eid	uint
+Response.responder_id.ext	nested
+Response.responder_id.ext.encoding	bits
+Response.responder_id.ext.ext_id	bits
+Response.responder_id.ext.ext_name	label
+Response.responder_id.ext.ext_name	label	attachment
+Response.responder_id.ext.ext_name	label	auth
+Response.responder_id.ext.ext_name	label	budget
+Response.responder_id.ext.ext_name	label	compression
+Response.responder_id.ext.ext_name	label	drop
+Response.responder_id.ext.ext_name	label	first
+Response.responder_id.ext.ext_name	label	low_latency
+Response.responder_id.ext.ext_name	label	multi_link
+Response.responder_id.ext.ext_name	label	multi_link_ack
+Response.responder_id.ext.ext_name	label	multi_link_syn
+Response.responder_id.ext.ext_name	label	node_id
+Response.responder_id.ext.ext_name	label	patch
+Response.responder_id.ext.ext_name	label	pubkey
+Response.responder_id.ext.ext_name	label	qos
+Response.responder_id.ext.ext_name	label	qos_link
+Response.responder_id.ext.ext_name	label	query_body
+Response.responder_id.ext.ext_name	label	queryable_info
+Response.responder_id.ext.ext_name	label	responder_id
+Response.responder_id.ext.ext_name	label	shm
+Response.responder_id.ext.ext_name	label	source_info
+Response.responder_id.ext.ext_name	label	target
+Response.responder_id.ext.ext_name	label	timeout
+Response.responder_id.ext.ext_name	label	timestamp
+Response.responder_id.ext.ext_name	label	usrpwd
+Response.responder_id.ext.ext_name	label	wire_expr
+Response.responder_id.ext.header	uint
+Response.responder_id.ext.m	flag
+Response.responder_id.ext.z	flag
+Response.responder_id.hdr	uint
+Response.responder_id.value	bytes
+Response.responder_id.value_len	uint
+Response.responder_id.zid	zid
+Response.responder_id.zid_len_m1	bits
+Response.timestamp	nested
+Response.timestamp.ext	nested
+Response.timestamp.ext.encoding	bits
+Response.timestamp.ext.ext_id	bits
+Response.timestamp.ext.ext_name	label
+Response.timestamp.ext.ext_name	label	attachment
+Response.timestamp.ext.ext_name	label	auth
+Response.timestamp.ext.ext_name	label	budget
+Response.timestamp.ext.ext_name	label	compression
+Response.timestamp.ext.ext_name	label	drop
+Response.timestamp.ext.ext_name	label	first
+Response.timestamp.ext.ext_name	label	low_latency
+Response.timestamp.ext.ext_name	label	multi_link
+Response.timestamp.ext.ext_name	label	multi_link_ack
+Response.timestamp.ext.ext_name	label	multi_link_syn
+Response.timestamp.ext.ext_name	label	node_id
+Response.timestamp.ext.ext_name	label	patch
+Response.timestamp.ext.ext_name	label	pubkey
+Response.timestamp.ext.ext_name	label	qos
+Response.timestamp.ext.ext_name	label	qos_link
+Response.timestamp.ext.ext_name	label	query_body
+Response.timestamp.ext.ext_name	label	queryable_info
+Response.timestamp.ext.ext_name	label	responder_id
+Response.timestamp.ext.ext_name	label	shm
+Response.timestamp.ext.ext_name	label	source_info
+Response.timestamp.ext.ext_name	label	target
+Response.timestamp.ext.ext_name	label	timeout
+Response.timestamp.ext.ext_name	label	timestamp
+Response.timestamp.ext.ext_name	label	usrpwd
+Response.timestamp.ext.ext_name	label	wire_expr
+Response.timestamp.ext.header	uint
+Response.timestamp.ext.m	flag
+Response.timestamp.ext.z	flag
+Response.timestamp.time	uint
+Response.timestamp.value	bytes
+Response.timestamp.value_len	uint
+Response.timestamp.zid	zid
+Response.timestamp.zid_len	uint
+Response.z	flag
+ResponseFinal	nested
+ResponseFinal.ext	nested
+ResponseFinal.ext.encoding	bits
+ResponseFinal.ext.ext_id	bits
+ResponseFinal.ext.header	uint
+ResponseFinal.ext.m	flag
+ResponseFinal.ext.value_len	uint
+ResponseFinal.ext.z	flag
+ResponseFinal.ext.z64	uint
+ResponseFinal.ext.zbuf	bytes
+ResponseFinal.header	uint
+ResponseFinal.mid	bits
+ResponseFinal.qos	nested
+ResponseFinal.qos.congestion	label
+ResponseFinal.qos.congestion	label	Block
+ResponseFinal.qos.congestion	label	BlockFirst
+ResponseFinal.qos.congestion	label	Drop
+ResponseFinal.qos.express	flag
+ResponseFinal.qos.ext	nested
+ResponseFinal.qos.ext.encoding	bits
+ResponseFinal.qos.ext.ext_id	bits
+ResponseFinal.qos.ext.ext_name	label
+ResponseFinal.qos.ext.ext_name	label	attachment
+ResponseFinal.qos.ext.ext_name	label	auth
+ResponseFinal.qos.ext.ext_name	label	budget
+ResponseFinal.qos.ext.ext_name	label	compression
+ResponseFinal.qos.ext.ext_name	label	drop
+ResponseFinal.qos.ext.ext_name	label	first
+ResponseFinal.qos.ext.ext_name	label	low_latency
+ResponseFinal.qos.ext.ext_name	label	multi_link
+ResponseFinal.qos.ext.ext_name	label	multi_link_ack
+ResponseFinal.qos.ext.ext_name	label	multi_link_syn
+ResponseFinal.qos.ext.ext_name	label	node_id
+ResponseFinal.qos.ext.ext_name	label	patch
+ResponseFinal.qos.ext.ext_name	label	pubkey
+ResponseFinal.qos.ext.ext_name	label	qos
+ResponseFinal.qos.ext.ext_name	label	qos_link
+ResponseFinal.qos.ext.ext_name	label	query_body
+ResponseFinal.qos.ext.ext_name	label	queryable_info
+ResponseFinal.qos.ext.ext_name	label	responder_id
+ResponseFinal.qos.ext.ext_name	label	shm
+ResponseFinal.qos.ext.ext_name	label	source_info
+ResponseFinal.qos.ext.ext_name	label	target
+ResponseFinal.qos.ext.ext_name	label	timeout
+ResponseFinal.qos.ext.ext_name	label	timestamp
+ResponseFinal.qos.ext.ext_name	label	usrpwd
+ResponseFinal.qos.ext.ext_name	label	wire_expr
+ResponseFinal.qos.ext.header	uint
+ResponseFinal.qos.ext.m	flag
+ResponseFinal.qos.ext.z	flag
+ResponseFinal.qos.priority	label
+ResponseFinal.qos.priority	label	Background
+ResponseFinal.qos.priority	label	Control
+ResponseFinal.qos.priority	label	Data
+ResponseFinal.qos.priority	label	DataHigh
+ResponseFinal.qos.priority	label	DataLow
+ResponseFinal.qos.priority	label	InteractiveHigh
+ResponseFinal.qos.priority	label	InteractiveLow
+ResponseFinal.qos.priority	label	RealTime
+ResponseFinal.qos.undefined_bits	bits
+ResponseFinal.qos.value	uint
+ResponseFinal.request_id	uint
+ResponseFinal.responder_id	nested
+ResponseFinal.responder_id.eid	uint
+ResponseFinal.responder_id.ext	nested
+ResponseFinal.responder_id.ext.encoding	bits
+ResponseFinal.responder_id.ext.ext_id	bits
+ResponseFinal.responder_id.ext.ext_name	label
+ResponseFinal.responder_id.ext.ext_name	label	attachment
+ResponseFinal.responder_id.ext.ext_name	label	auth
+ResponseFinal.responder_id.ext.ext_name	label	budget
+ResponseFinal.responder_id.ext.ext_name	label	compression
+ResponseFinal.responder_id.ext.ext_name	label	drop
+ResponseFinal.responder_id.ext.ext_name	label	first
+ResponseFinal.responder_id.ext.ext_name	label	low_latency
+ResponseFinal.responder_id.ext.ext_name	label	multi_link
+ResponseFinal.responder_id.ext.ext_name	label	multi_link_ack
+ResponseFinal.responder_id.ext.ext_name	label	multi_link_syn
+ResponseFinal.responder_id.ext.ext_name	label	node_id
+ResponseFinal.responder_id.ext.ext_name	label	patch
+ResponseFinal.responder_id.ext.ext_name	label	pubkey
+ResponseFinal.responder_id.ext.ext_name	label	qos
+ResponseFinal.responder_id.ext.ext_name	label	qos_link
+ResponseFinal.responder_id.ext.ext_name	label	query_body
+ResponseFinal.responder_id.ext.ext_name	label	queryable_info
+ResponseFinal.responder_id.ext.ext_name	label	responder_id
+ResponseFinal.responder_id.ext.ext_name	label	shm
+ResponseFinal.responder_id.ext.ext_name	label	source_info
+ResponseFinal.responder_id.ext.ext_name	label	target
+ResponseFinal.responder_id.ext.ext_name	label	timeout
+ResponseFinal.responder_id.ext.ext_name	label	timestamp
+ResponseFinal.responder_id.ext.ext_name	label	usrpwd
+ResponseFinal.responder_id.ext.ext_name	label	wire_expr
+ResponseFinal.responder_id.ext.header	uint
+ResponseFinal.responder_id.ext.m	flag
+ResponseFinal.responder_id.ext.z	flag
+ResponseFinal.responder_id.hdr	uint
+ResponseFinal.responder_id.value	bytes
+ResponseFinal.responder_id.value_len	uint
+ResponseFinal.responder_id.zid	zid
+ResponseFinal.responder_id.zid_len_m1	bits
+ResponseFinal.timestamp	nested
+ResponseFinal.timestamp.ext	nested
+ResponseFinal.timestamp.ext.encoding	bits
+ResponseFinal.timestamp.ext.ext_id	bits
+ResponseFinal.timestamp.ext.ext_name	label
+ResponseFinal.timestamp.ext.ext_name	label	attachment
+ResponseFinal.timestamp.ext.ext_name	label	auth
+ResponseFinal.timestamp.ext.ext_name	label	budget
+ResponseFinal.timestamp.ext.ext_name	label	compression
+ResponseFinal.timestamp.ext.ext_name	label	drop
+ResponseFinal.timestamp.ext.ext_name	label	first
+ResponseFinal.timestamp.ext.ext_name	label	low_latency
+ResponseFinal.timestamp.ext.ext_name	label	multi_link
+ResponseFinal.timestamp.ext.ext_name	label	multi_link_ack
+ResponseFinal.timestamp.ext.ext_name	label	multi_link_syn
+ResponseFinal.timestamp.ext.ext_name	label	node_id
+ResponseFinal.timestamp.ext.ext_name	label	patch
+ResponseFinal.timestamp.ext.ext_name	label	pubkey
+ResponseFinal.timestamp.ext.ext_name	label	qos
+ResponseFinal.timestamp.ext.ext_name	label	qos_link
+ResponseFinal.timestamp.ext.ext_name	label	query_body
+ResponseFinal.timestamp.ext.ext_name	label	queryable_info
+ResponseFinal.timestamp.ext.ext_name	label	responder_id
+ResponseFinal.timestamp.ext.ext_name	label	shm
+ResponseFinal.timestamp.ext.ext_name	label	source_info
+ResponseFinal.timestamp.ext.ext_name	label	target
+ResponseFinal.timestamp.ext.ext_name	label	timeout
+ResponseFinal.timestamp.ext.ext_name	label	timestamp
+ResponseFinal.timestamp.ext.ext_name	label	usrpwd
+ResponseFinal.timestamp.ext.ext_name	label	wire_expr
+ResponseFinal.timestamp.ext.header	uint
+ResponseFinal.timestamp.ext.m	flag
+ResponseFinal.timestamp.ext.z	flag
+ResponseFinal.timestamp.time	uint
+ResponseFinal.timestamp.value	bytes
+ResponseFinal.timestamp.value_len	uint
+ResponseFinal.timestamp.zid	zid
+ResponseFinal.timestamp.zid_len	uint
+ResponseFinal.z	flag
+Scout	nested
+Scout.cbyte	uint
+Scout.header	uint
+Scout.i	flag
+Scout.mid	bits
+Scout.version	uint
+Scout.what	bits
+Scout.zid	zid
+Scout.zid_len_m1	bits
+Unknown	nested
+Unknown.body	bytes
+Unknown.ext	nested
+Unknown.ext.encoding	bits
+Unknown.ext.ext_id	bits
+Unknown.ext.header	uint
+Unknown.ext.m	flag
+Unknown.ext.value_len	uint
+Unknown.ext.z	flag
+Unknown.ext.z64	uint
+Unknown.ext.zbuf	bytes
+Unknown.header	uint
+Unknown.mid	bits
+Unknown.z	flag
+unparsed	bytes

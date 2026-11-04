@@ -525,6 +525,11 @@ pub struct RowFacts<'a> {
     /// well (`["Frame", "Push"]`). A `msg` term is `yes` when ANY of them is
     /// the name asked, as a display filter reads a packet's layers.
     pub messages: &'a [&'a str],
+    /// Whether the row may carry a message `messages` does not name: the part
+    /// of a batch past where its walk stopped, which may hold a record no
+    /// reader named. A `msg` term naming none of `messages` is then undecided
+    /// rather than `no` ([`Self::with_an_unread_remainder`]).
+    pub unread_remainder: bool,
     /// The packet carrying the message's first byte, as the documents number
     /// it (a datagram row's `packet`, a stream row's `first_byte.packet`), or
     /// `None` where the reader cannot place it.
@@ -610,12 +615,22 @@ impl<'a> RowFacts<'a> {
         };
         Self {
             messages,
+            unread_remainder: false,
             packet: packet.map(|p| p as u64),
             flow: list as u64,
             link: flow.link(),
             src,
             dst,
             zenoh,
+        }
+    }
+
+    /// These facts for the unread remainder of the row's batch: a record that
+    /// may stand there has no name any reader gave it.
+    pub fn with_an_unread_remainder(self) -> Self {
+        Self {
+            unread_remainder: true,
+            ..self
         }
     }
 }
@@ -953,6 +968,20 @@ pub fn selector_fields_json() -> String {
         }
         out.push('}');
     }
+    // Every rename since paths were first published: a former name a saved
+    // selector holds still reads as the field it named, and this is what a
+    // consumer rewrites its stored text by.
+    out.push_str("],\"renamed\":[");
+    for (i, r) in crate::field_path::renamed().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"from\":");
+        wz_session_core::json::escape_into(r.from, &mut out);
+        out.push_str(",\"to\":");
+        wz_session_core::json::escape_into(r.to, &mut out);
+        let _ = fmt::Write::write_fmt(&mut out, format_args!(",\"since\":{}}}", r.since));
+    }
     out.push_str("]}");
     out
 }
@@ -1266,7 +1295,10 @@ impl Term {
             // them, decided everywhere else.
             Self::Msg(want) => match record.row {
                 None => Truth::Unknown,
-                Some(row) => Truth::of(row.messages.contains(want)),
+                Some(row) if row.messages.contains(want) => Truth::Yes,
+                // A message past the stop may be the one asked for.
+                Some(row) if row.unread_remainder => Truth::Unknown,
+                Some(_) => Truth::No,
             },
             Self::Address { end, want } => match record.row {
                 None => Truth::Unknown,
@@ -1534,6 +1566,21 @@ fn parse_zid(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
     wz_session_core::zid_hex::zenoh_hex_to_zid(&value.to_ascii_lowercase()).ok_or_else(refuse)
 }
 
+/// A zid literal compared with a zid FIELD of a message's tree: [`parse_zid`],
+/// and the zero id, spelled `0`.
+///
+/// The `zid` term names a node, and no node has the zero id, which is why
+/// [`parse_zid`] refuses it as zenoh does. A path names a field, and a field
+/// holds what the wire held: the zero id is a value a field can show, and is
+/// shown as `0` ([`wz_session_core::zid_hex::zid_to_zenoh_hex`]), so a
+/// selector must be able to write it back.
+fn parse_zid_field(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
+    if value == "0" {
+        return Ok(wz_session_core::zid_hex::canonical_zid(&[0u8; 16]).to_vec());
+    }
+    parse_zid(value, at)
+}
+
 /// The parsed expression tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Node {
@@ -1628,6 +1675,14 @@ impl Filter {
     /// literal [`Filter::any`].
     pub fn is_any(&self) -> bool {
         self.root == Node::Any
+    }
+
+    /// The filter that answers `not` this one: `yes` where this is `no`, `no`
+    /// where it is `yes`, and undecided where it is.
+    pub fn negated(&self) -> Self {
+        Self {
+            root: Node::Not(alloc::boxed::Box::new(self.root.clone())),
+        }
     }
 
     /// Compile a selector.
@@ -2889,12 +2944,41 @@ enum TokenKind {
 /// for the admin prefix, `#`/`?` because a selector value is not always a
 /// keyexpr) minus everything the grammar itself uses. Anything outside it is
 /// still expressible — in quotes.
-fn is_word_char(c: char) -> bool {
+pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(
             c,
             '/' | '*' | '$' | '-' | '_' | '.' | '@' | '#' | '?' | '%' | '+' | ':' | ','
         )
+}
+
+/// Whether the lexer reads `word` as a logic keyword and not as a word: an
+/// unquoted run spelling one of these is never a field or a value.
+pub(crate) fn is_keyword(word: &str) -> bool {
+    matches!(word, "and" | "or" | "not")
+}
+
+/// Whether `word` is a field of the fixed table, which a term reads before any
+/// path of the same spelling.
+pub(crate) fn names_a_fixed_field(word: &str) -> bool {
+    Field::from_name(word).is_some()
+}
+
+/// `source` as the left side of an `and` a sentence is joined to it by: `None`
+/// for the empty selector, which an `and` would only restate, and otherwise
+/// the text, put in brackets when its top level is an `or` (which binds looser
+/// than `and`, so `a or b and c` would read as `a or (b and c)`).
+///
+/// A `node` term is accepted: the binder resolves names in the text a consumer
+/// keeps, and a sentence added to that text is bound with it.
+pub(crate) fn conjunct(source: &str) -> Result<Option<String>, FilterError> {
+    let filter = Filter::parse_tree(source)?;
+    let text = source.trim();
+    Ok(match filter.root {
+        Node::Any => None,
+        Node::Or(_) => Some(alloc::format!("({text})")),
+        _ => Some(String::from(text)),
+    })
 }
 
 /// R2174 (open-debt item 551) — THE WALK IS OVER CHARACTERS, AND `at` STAYS A
@@ -3791,7 +3875,9 @@ fn build_path(
             ),
             PathKind::Zid => {
                 let written = text(&value.literal)?;
-                PathTest::Zid(parse_zid(&written, value.at).map_err(|_| refuse_value(written))?)
+                PathTest::Zid(
+                    parse_zid_field(&written, value.at).map_err(|_| refuse_value(written))?,
+                )
             }
         },
         _ => return Err(refuse_op(op_word)),

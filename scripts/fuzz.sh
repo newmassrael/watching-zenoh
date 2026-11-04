@@ -39,6 +39,13 @@ triple="x86_64-unknown-linux-gnu"
 # the fuzzer may grow an input to this.
 max_len=$((64 * 1024 + 64))
 
+# The seconds one input may take, where a target's is not the default (10 when
+# fuzzing, 60 when replaying). `selector_term` holds a property and not only a
+# contract: it renders the field document once per distinct sentence of the
+# capture, which on a capture at the size limit is hundreds of documents, and
+# an input that takes long is a slow input of that property and not a hang.
+declare -A input_seconds=([selector_term]=600)
+
 usage() {
     sed -n '/^#   bash/p' "${BASH_SOURCE[0]}" | sed 's/^# *//' >&2
     exit 2
@@ -111,7 +118,8 @@ regress() {
             shopt -u nullglob
         fi
         log="$fuzz_home/regress-$target.log"
-        if "$(binary "$target")" -rss_limit_mb=4096 -timeout=60 "${inputs[@]}" >"$log" 2>&1; then
+        if "$(binary "$target")" -rss_limit_mb=4096 -timeout="${input_seconds[$target]:-60}" \
+            "${inputs[@]}" >"$log" 2>&1; then
             ran="$(grep -c '^Executed ' "$log" || true)"
             if [[ "$ran" -ne "${#inputs[@]}" ]]; then
                 echo "fuzz.sh: FAIL $target -- ran=$ran of ${#inputs[@]} input(s); log $log" >&2
@@ -137,10 +145,16 @@ run() {
     seeds="$(seed_dir "$target")"
     local regressions=()
     [[ -d "$fuzz_dir/regressions/$target" ]] && regressions=("$fuzz_dir/regressions/$target")
-    # The first directory is the one libFuzzer adds to; the seeds and the
-    # reproducers are read and left as they are.
-    "$(binary "$target")" "$corpus" "$seeds" "${regressions[@]}" \
-        -max_total_time="$seconds" -max_len="$max_len" -timeout=10 -rss_limit_mb=4096 \
+    # The corpus of the target whose inputs this one takes (`fuzz_seeds.py
+    # --reads`), where a run of that target left one.
+    local other shared=()
+    other="$(python3 "$seeds_py" --reads "$target")"
+    [[ -n "$other" && -d "$fuzz_home/corpus/$other" ]] && shared=("$fuzz_home/corpus/$other")
+    # The first directory is the one libFuzzer adds to; the seeds, the
+    # reproducers and a shared corpus are read and left as they are.
+    "$(binary "$target")" "$corpus" "$seeds" "${regressions[@]}" "${shared[@]}" \
+        -max_total_time="$seconds" -max_len="$max_len" -timeout="${input_seconds[$target]:-10}" \
+        -rss_limit_mb=4096 \
         -artifact_prefix="$artifacts" -jobs="$jobs" -workers="$jobs" -print_final_stats=1
 }
 

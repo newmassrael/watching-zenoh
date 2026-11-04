@@ -168,6 +168,18 @@ pub struct MessageList {
     /// here instead of folding the rows before.
     #[cfg(feature = "reassembly")]
     chains: ChainFacts,
+    /// The bytes of each datagram unit the list keeps WHOLE, by the
+    /// produced-index of its first row, with how many rows it holds.
+    ///
+    /// A unit an entry cannot stand for (a record inadmissible on its link, a
+    /// coordinate past an entry's fields) keeps its rows as decoded frames, and
+    /// a frame does not carry the bytes it was read from. Those bytes are what
+    /// a reader walks a row's tree from ([`Messages::unit_bytes`]), and the
+    /// field document, which re-reads the packet, shows that tree all the same;
+    /// without them every other reader of the row would answer a path about it
+    /// `undecided` where the document shows the field. Such units are rare, so
+    /// they are kept here, once a unit, and let go with their last row.
+    whole_units: alloc::collections::BTreeMap<u64, (u64, alloc::boxed::Box<[u8]>)>,
 }
 
 /// The chain fold over every message a list was ever appended, and what it made
@@ -298,7 +310,15 @@ impl MessageList {
             chain_prefix: ChainFold::default(),
             #[cfg(feature = "reassembly")]
             chains: ChainFacts::default(),
+            whole_units: alloc::collections::BTreeMap::new(),
         }
+    }
+
+    /// The bytes of the unit kept whole that the row at produced-index
+    /// `produced` belongs to, if it is one ([`Self::whole_units`]).
+    fn whole_unit(&self, produced: u64) -> Option<&[u8]> {
+        let (&first, (rows, bytes)) = self.whole_units.range(..=produced).next_back()?;
+        (produced < first + rows).then_some(&**bytes)
     }
 
     /// What the chain fold made of the row at produced-index `produced`: the
@@ -400,13 +420,20 @@ impl MessageList {
         in_container: Option<usize>,
         handshake: LinkHandshake,
     ) {
-        self.push_logged(
+        let first = self.produced;
+        let rows = unit.frames.len() as u64;
+        let logged = self.push_logged(
             unit,
             bytes.len(),
             |log| log.place(bytes, in_container),
             None,
             handshake,
         );
+        // A unit kept whole keeps its bytes beside its rows, for the reader
+        // that walks a row's tree ([`Self::whole_units`]).
+        if !logged && rows > 0 {
+            self.whole_units.insert(first, (rows, bytes.into()));
+        }
     }
 
     /// [`Self::push_datagram`] for a unit whose bytes are the stream's own: they
@@ -466,7 +493,8 @@ impl MessageList {
 
     /// The body of all three: the unit's `len` bytes are at the place `place`
     /// gives the log, and its records are read again from there. `spans` are the
-    /// stretches of a [`LogPlace::Frames`] unit, which the index keeps.
+    /// stretches of a [`LogPlace::Frames`] unit, which the index keeps. `false`
+    /// where the unit is kept whole instead and logs nothing.
     fn push_logged(
         &mut self,
         unit: ReadUnit,
@@ -474,7 +502,7 @@ impl MessageList {
         place: impl FnOnce(&mut UnitLog) -> LogPlace,
         spans: Option<Vec<StreamSpan>>,
         handshake: LinkHandshake,
-    ) {
+    ) -> bool {
         let ReadUnit { start, frames } = unit;
         // A unit a layer below framed (a WebSocket message) says where its bytes
         // end in the stream it was carried in, which its own bytes cannot say;
@@ -488,7 +516,7 @@ impl MessageList {
         });
         let Some(start) = readable else {
             self.append(frames);
-            return;
+            return false;
         };
         let produced = self.produced;
         for (k, frame) in frames.iter().enumerate() {
@@ -509,6 +537,7 @@ impl MessageList {
             spans,
         );
         self.produced += frames.len() as u64;
+        true
     }
 
     /// The list's index, made of the rows it keeps whole if it has none yet:
@@ -566,6 +595,13 @@ impl MessageList {
         // A row no longer held has no fact to be read.
         #[cfg(feature = "reassembly")]
         self.chains.rows.remove(&first_produced);
+        // A unit kept whole is let go with its last row.
+        while let Some((&first, &(rows, _))) = self.whole_units.first_key_value() {
+            if first + rows > first_produced + 1 {
+                break;
+            }
+            self.whole_units.pop_first();
+        }
         Some(Discarded {
             // `produced` deliberately does NOT move here. It counts what was
             // ever appended, and a trim is the one event a consumer's watermark
@@ -995,6 +1031,13 @@ impl MessageList {
         };
         ListMemory {
             chains: self.chain_bytes(),
+            // The bytes of the units kept whole are units' bytes the list keeps.
+            unit_log: held.unit_log
+                + self
+                    .whole_units
+                    .values()
+                    .map(|(_, bytes)| bytes.len())
+                    .sum::<usize>(),
             ..held
         }
     }
@@ -2166,16 +2209,21 @@ impl<'a> Messages<'a> {
 
     /// The bytes of the framing unit the message at `index` was read out of,
     /// as they crossed the wire past any length prefix: what the list reads the
-    /// message again from (open-debt item 924, D8). `None` for a message the
-    /// list keeps whole, whose unit's bytes it does not keep, for one whose
-    /// source no longer holds them, and past the end.
+    /// message again from (open-debt item 924, D8), or the bytes kept beside
+    /// a datagram unit the list keeps whole ([`MessageList::whole_units`]).
+    /// `None` for any other message the list keeps whole, for one whose source
+    /// no longer holds them, and past the end.
     pub fn unit_bytes(&self, index: usize) -> Option<Cow<'a, [u8]>> {
         let list: &'a MessageList = self.list;
         let source: &'a dyn UnitBytes = self.source;
+        let whole = || {
+            list.whole_unit(self.first_produced() + index as u64)
+                .map(Cow::Borrowed)
+        };
         match &list.rows {
-            Store::Held(_) => None,
+            Store::Held(log) => log.get(index).and_then(|_| whole()),
             Store::Indexed(entries) => match entries.entry(index)? {
-                Entry::Held => None,
+                Entry::Held => whole(),
                 Entry::Unit(row) => entries.held_unit_bytes(&row, source),
             },
         }

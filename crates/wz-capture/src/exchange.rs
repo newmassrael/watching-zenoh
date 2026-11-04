@@ -490,7 +490,7 @@ pub struct OpenExchange {
 /// A two-state enum and not `Option<Option<u64>>`, because the two `None`s
 /// there mean different things — "no close" and "no clock on the close" — and a
 /// caller reading the signature would have to guess which nesting was which.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Ending {
     /// A `ResponseFinal` closed it, at this capture instant in nanoseconds, and
     /// was carried by this message row. `at` is `None` when the frame that
@@ -502,6 +502,10 @@ enum Ending {
         record: usize,
         /// The close's row, whose row terms are its own.
         place: RowPlace,
+        /// The close's own tree, where the selector reads one: what its row
+        /// shows, read beside the request's ([`crate::field_path::RecordTree`]).
+        /// Boxed, as a tree is large beside the other fields of an ending.
+        tree: Option<alloc::boxed::Box<crate::field_path::RecordTree>>,
     },
     /// The capture never showed a close: the flow's frames ran out, or the rid
     /// was reused before one arrived.
@@ -541,26 +545,6 @@ pub struct Answer {
     /// exchange. `None` on a later reply, and on a first reply when an end had
     /// no clock or the two read backwards.
     pub round_trip_ns: Option<u64>,
-}
-
-/// The batch of network records a frame carries, which is the thing this plane
-/// folds, or `None` for a frame that carries none (nothing, a fragment, a batch
-/// that could not be read at all).
-///
-/// Matched by name and without a catch-all for the reason
-/// [`ExchangeTable::observe_frame_where`] matches: a new `Carried` variant must
-/// fail to compile here rather than join the silent set. A renderer that has to
-/// find the same records the fold saw asks this and not its own match.
-#[cfg(feature = "dissect")]
-pub(crate) fn batch_of(frame: &PassiveFrame) -> Option<&BatchParse> {
-    match &frame.carried {
-        Carried::Batch(batch) => Some(batch),
-        #[cfg(feature = "reassembly")]
-        Carried::Reassembled { batch, .. } => Some(batch),
-        Carried::Undecompressible | Carried::Nothing => None,
-        #[cfg(feature = "reassembly")]
-        Carried::FragmentWithoutResolution | Carried::Fragment(_) => None,
-    }
 }
 
 /// Query/Reply exchanges and their latencies, over one or more flows.
@@ -655,9 +639,9 @@ impl ExchangeTable {
     /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
     /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
     /// wrong unit.
-    pub fn observe_flow_where(
+    pub fn observe_flow_where<'r>(
         &mut self,
-        frames: impl IntoIterator<Item = impl core::ops::Deref<Target = PassiveFrame>>,
+        frames: impl IntoIterator<Item = crate::messages::Row<'r>>,
         filter: &Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,
@@ -702,7 +686,7 @@ impl ExchangeTable {
     /// and this round does not answer it.
     pub fn observe_frame_where(
         &mut self,
-        frame: &PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         filter: &Filter,
         ctx: crate::node::ListContext<'_>,
         open: &mut OpenExchanges,
@@ -749,7 +733,7 @@ impl ExchangeTable {
         spaces: &mut KeyexprSpaces,
         open: &mut OpenExchanges,
         ctx: crate::node::ListContext<'_>,
-        frame: &PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         batch: &BatchParse,
         filter: &Filter,
     ) {
@@ -778,7 +762,7 @@ impl ExchangeTable {
         spaces: &mut KeyexprSpaces,
         open: &mut OpenExchanges,
         ctx: crate::node::ListContext<'_>,
-        frame: &PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         (record, message, place): (usize, &NetworkMessage, crate::field_path::RecordAt<'_>),
         filter: &Filter,
     ) {
@@ -886,6 +870,7 @@ impl ExchangeTable {
                     self.gaps.orphan_responses += 1;
                     return;
                 };
+                let tree = place.tree(frame).map(alloc::boxed::Box::new);
                 let row = crate::payload::RowKey::of(list, frame);
                 let place = RowPlace::of(ctx, frame, message);
                 self.finish(
@@ -895,6 +880,7 @@ impl ExchangeTable {
                         row,
                         record,
                         place,
+                        tree,
                     },
                     filter,
                 );
@@ -1016,17 +1002,27 @@ impl ExchangeTable {
         // close the capture never saw leaves the request's row the only one.
         self.row_verdicts.record(entry.row, truth);
         if let Ending::Closed {
-            row, record, place, ..
+            row,
+            record,
+            place,
+            tree,
+            ..
         } = ending
         {
             // The close's row answers every record term as the request does,
             // and its ROW terms as itself: `msg == ResponseFinal` and its own
-            // packet are facts of the close, not of the request. A selector
-            // with no row term reads the two views alike and the verdict is the
-            // exchange's.
-            let close_truth = if filter.reads_row() {
+            // packet are facts of the close, not of the request. Its paths are
+            // read in the request's tree and in its own, beside it, which is
+            // what its row shows. A selector with no row term and no path reads
+            // the two views alike and the verdict is the exchange's.
+            let close_truth = if filter.reads_row() || filter.reads_tree() {
+                let beside = match (&entry.tree, tree) {
+                    (Some(request), Some(close)) => Some(request.clone().beside(*close)),
+                    (request, _) => request.clone(),
+                };
                 filter.matches(&RecordView {
                     row: place.facts(),
+                    tree: beside.as_ref(),
                     ..view
                 })
             } else {
@@ -1394,7 +1390,7 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
         flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
-        frame: &wz_session_core::passive::PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {

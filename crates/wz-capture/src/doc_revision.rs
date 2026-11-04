@@ -3617,6 +3617,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_BIND_R1_CARRIES,
     },
+    // THE SENTENCE A NODE OFFERS, first revision.
+    //
+    // A field document's node names its field (`selector_path`) and shows its
+    // value; the selector that filters by it, adds it to the selector typed or
+    // excludes it is the grammar's to write, so a consumer does not hold a
+    // second copy of the quoting, the tail and the bracket rules. The refusal's
+    // word DECIDES what arrives beside it (`carries` below): a refusal about the
+    // selector typed has its caret, one about the node's field names the path,
+    // and one about the node text or a node that names no field has neither.
+    DocumentShape {
+        document: SELECTOR_TERM,
+        revision: 1,
+        keys: SELECTOR_TERM_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_TERM_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_TERM_R1_CARRIES,
+    },
     // A RECORD'S DISSECTION JOINS THE LANGUAGE, and two token classes join the
     // verdict. No key moves.
     //
@@ -3709,6 +3727,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: SELECTOR_FIELDS,
         revision: 4,
         keys: SELECTOR_FIELDS_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_FIELDS_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_FIELDS_R1_CARRIES,
+    },
+    // A PATH ONCE PUBLISHED IS A NAME A CONSUMER KEEPS, and `renamed` joins the
+    // list: every rename of a declared node since paths were first published,
+    // oldest first. The selector reads a former name as the field it names now,
+    // so a saved selector keeps selecting what it selected; the list is what a
+    // consumer rewrites its stored text by. It is empty at this revision: no
+    // path has been renamed. An entry is `{"from","to","since"}` (the full path
+    // before, the full path now, the field document revision whose shape first
+    // carried the new name), and the first rename appends the revision that
+    // pins those three keys (`dissect_schema::RENAMED` is held to that).
+    DocumentShape {
+        document: SELECTOR_FIELDS,
+        revision: 5,
+        keys: SELECTOR_FIELDS_R5_KEYS,
         retiring: &[],
         families: SELECTOR_FIELDS_R1_FAMILIES,
         planes: &[],
@@ -4018,6 +4054,10 @@ pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
 /// (`wz_dissect_selector_bind`): the selector to hand the doors, or the typed
 /// refusal that says which term could not be resolved and why.
 pub const SELECTOR_BIND: &str = "selector_bind";
+/// The selector a field document's node offers (`wz_dissect_selector_term`):
+/// the node's sentence and the selector it makes with the one typed, or the
+/// typed refusal that says why the node offers none.
+pub const SELECTOR_TERM: &str = "selector_term";
 /// Every field a selector can name, with its operators and closed words
 /// (`wz_dissect_selector_fields`).
 pub const SELECTOR_FIELDS: &str = "selector_fields";
@@ -10522,6 +10562,22 @@ pub const SELECTOR_FIELDS_R1_KEYS: &[&str] = &[
     "words",
 ];
 
+/// The field list's key set at revision 5: revision 1's and `renamed`.
+pub const SELECTOR_FIELDS_R5_KEYS: &[&str] = &[
+    "document",
+    "fields",
+    "kind",
+    "len",
+    "matches",
+    "name",
+    "operators",
+    "path",
+    "paths",
+    "renamed",
+    "revision",
+    "words",
+];
+
 /// What a path's `kind` says at field-list revision 1: the kind words of the
 /// dissection's values, `wz_session_core::dissect::FieldValue::kind_words`.
 pub const PATH_KIND_R1: &[&str] = &[
@@ -10641,6 +10697,59 @@ pub const SELECTOR_BIND_R1_CARRIES: &[KeyCarries] = &[KeyCarries {
         WordCarries {
             word: "unknown_node",
             shapes: &[&["document", "end", "message", "name", "ok", "start"]],
+        },
+    ]),
+}];
+
+/// The node sentence's key set at revision 1, over EVERY shape it takes: the
+/// success (`term`, `selector`) and the five refusals (`refusal`, `message`,
+/// and the `path` or the caret `start`, `end` a refusal adds).
+pub const SELECTOR_TERM_R1_KEYS: &[&str] = &[
+    "document", "end", "message", "name", "ok", "path", "refusal", "revision", "selector", "start",
+    "term",
+];
+
+/// What a node sentence's `refusal` says at revision 1: the node text is not a
+/// field object, the selector typed does not compile, the field is a scouting
+/// datagram's, the node names no field, the grammar cannot spell it.
+pub const SELECTOR_TERM_REFUSAL_R1: &[&str] =
+    &["node", "selector", "unjudged", "unnamed", "unwritable"];
+
+/// The node sentence's value families at revision 1: the refusal.
+pub const SELECTOR_TERM_R1_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "refusal",
+    values: SELECTOR_TERM_REFUSAL_R1,
+}];
+
+/// A `refusal` is a DISCRIMINANT, the binder's argument over another text:
+///
+/// * `node`, `unnamed` -- the fault is the node's, and there is no place in
+///   the selector and no field to name;
+/// * `selector` -- the text typed does not compile; `start` and `end` are the
+///   caret `wz_dissect_selector_diagnose` would put (`at`), a zero-width span;
+/// * `unjudged`, `unwritable` -- the node's field, as `path`.
+pub const SELECTOR_TERM_R1_CARRIES: &[KeyCarries] = &[KeyCarries {
+    key: "refusal",
+    shape: CarriesShape::Discriminant(&[
+        WordCarries {
+            word: "node",
+            shapes: &[&["document", "message", "ok"]],
+        },
+        WordCarries {
+            word: "selector",
+            shapes: &[&["document", "end", "message", "ok", "start"]],
+        },
+        WordCarries {
+            word: "unjudged",
+            shapes: &[&["document", "message", "ok", "path"]],
+        },
+        WordCarries {
+            word: "unnamed",
+            shapes: &[&["document", "message", "ok"]],
+        },
+        WordCarries {
+            word: "unwritable",
+            shapes: &[&["document", "message", "ok", "path"]],
         },
     ]),
 }];
@@ -22816,10 +22925,13 @@ mod tests {
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),
+            // The sentence a field document's node offers.
+            (SELECTOR_TERM, 1),
             // Every field a selector can name. To 2 when the row's facts joined.
             // To 3 when `zenoh`, the flow's word, joined.
             // To 4 when its words became the sequential test's three.
-            (SELECTOR_FIELDS, 4),
+            // To 5 when `renamed`, the renames of published paths, joined.
+            (SELECTOR_FIELDS, 5),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             (DECLARATIONS_DIAGNOSE, 2),

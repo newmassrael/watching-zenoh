@@ -232,7 +232,7 @@ pub(crate) fn for_each_row<'d>(
             let held = flow.frames().row(position);
             let frame: &wz_session_core::passive::PassiveFrame = &held;
             let verdict = match (verdicts, list) {
-                (Some(census), Some(list)) => Some(row_verdict_of(census, list, frame)),
+                (Some(census), Some(list)) => Some(row_verdict_of(census, list, &held)),
                 _ => None,
             };
             each(Row {

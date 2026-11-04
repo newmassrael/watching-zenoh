@@ -968,6 +968,14 @@ round_fed_gates=(
     # files (a capture moved or removed leaves a pinned input pointing at nothing): the selftest
     # derives every target's seeds from the tree. A text read; the targets themselves are Layer Fz.
     "fuzz_seeds.py --selftest"
+    # The registry of every fact the dissection has published to a selector
+    # (crates/wz-session-core/src/published_selector_paths.txt), append-only. Round-fed by
+    # that file alone: `--check` refuses a line origin/main published and this tree lost or
+    # changed (a moved field is renamed in dissect_schema::RENAMED, never removed). The
+    # Rust half, that the shape still declares every line, is
+    # dissect_schema::tests::every_published_fact_still_holds. A text read and one git show.
+    "publish_selector_paths.py --selftest"
+    "publish_selector_paths.py --check origin/main"
     # The closed key set's generator (docs/closed-key-set.md, phase 1). Round-fed by
     # deploy/wz-config.toml (the key limit) and crates/wz-session-core/tests/key_set_data/: the
     # selftest holds each refusal and ends by checking the fixture's derived table and matcher corpus

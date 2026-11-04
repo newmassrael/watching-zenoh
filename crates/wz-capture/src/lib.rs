@@ -321,6 +321,13 @@ mod row_plane;
 mod selector_path_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod selector_row_tests;
+/// The selector a field document's node offers: the sentence that filters by,
+/// adds or excludes the field it shows, written by the grammar that reads it.
+/// Ungated with [`filter`]: in a build without `dissect` no path is declared and
+/// every node is refused as one the grammar cannot spell.
+pub mod selector_term;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod selector_term_tests;
 // R311y724 — DELIBERATELY UNDOCUMENTED HERE, and the reason is a trap this
 // round paid for. An outer `///` on a `mod` declaration is CONCATENATED with
 // the module's own `//!` docs, and the merged block then resolves its

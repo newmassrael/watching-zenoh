@@ -420,6 +420,38 @@ ALLOWED = [
         "that visited too little",
     ),
     (
+        "wz-capture/selector_term/soundness.rs",
+        "while let Some((node, in_record, depth)) = stack.pop() {",
+        "the soundness oracle's depth-first walk of one row of a field "
+        "document. The stack holds borrows of a document the oracle itself "
+        "rendered, and every node popped is counted (`report.nodes`) and "
+        "judged before the next; nothing captured is in it",
+    ),
+    (
+        "wz-capture/selector_term/soundness.rs",
+        "while let Some(node) = stack.pop() {",
+        "the soundness oracle's depth-first walk of one record's tree. The "
+        "stack holds borrows of a tree the oracle built from the held "
+        "message bytes, and every node popped is counted (`report.nodes`) "
+        "and judged before the next; nothing captured is in it",
+    ),
+    (
+        "wz-capture/selector_term/soundness.rs",
+        "open.remove(w);",
+        "the soundness oracle's greedy cover striking a (row, word) pair the "
+        "sentence it picked reaches. The set holds the pairs no picked "
+        "sentence reaches yet, all of them wanted; striking one is the cover "
+        "reaching it, and the picked sentence is read at that row after",
+    ),
+    (
+        "wz-capture/selector_term_tests.rs",
+        "while let Some(dir) = dirs.pop() {",
+        "a test's walk of the `captures/` directory tree for seed files; "
+        "the list holds directory paths still to read, and each popped is "
+        "read before the next. The test's floor on documents and records "
+        "fails a walk that found too little",
+    ),
+    (
         "wz-capture/proto_describe.rs",
         ".remove(&idx)",
         "R3306 -- the description of a schema takes each message's computed "
@@ -697,14 +729,6 @@ ALLOWED = [
         "handle when it was taken; no capture evidence is in the map",
     ),
     (
-        "wz-capture/fields_json.rs",
-        "self.produced.retain(|_, produced| *produced >= first_held);",
-        "the request index forgetting requests whose messages a ceiling took. It "
-        "maps a request's place to the produced-index a final names its row by; "
-        "the messages themselves were counted as dropped when taken, and the "
-        "entry answers nothing once its row is gone",
-    ),
-    (
         "wz-capture/lib.rs",
         "let Some(row) = self.rows.pop_front() else {",
         "`ScoutingList::discard_oldest`, THE DOOR: it reports whether it "
@@ -728,6 +752,17 @@ ALLOWED = [
 
 def indent_of(line):
     return len(line) - len(line.lstrip())
+
+
+def qualified_name(path):
+    """`<crate>/<path under its src>`: `wz-capture/agg.rs` for a module at the
+    crate's root, `wz-capture/selector_term/soundness.rs` for one nested under a
+    module. The crate is named because four crates are scanned and three have a
+    `lib.rs`; the whole path under `src` is named because a nested module's
+    parent directory is `src` or a module name, and either alone would let a
+    nested file's entry excuse another crate's (or another module's) site."""
+    crate, _src, *rest = path.relative_to(ROOT / "crates").parts
+    return "/".join([crate, *rest])
 
 
 def windows(text):
@@ -796,7 +831,7 @@ def main():
         text = path.read_text(encoding="utf-8")
         for line_no, stripped, window in windows(text):
             total += 1
-            qualified = f"{path.parents[1].name}/{path.name}"
+            qualified = qualified_name(path)
             allowed = [
                 a for a in ALLOWED if a[0] == qualified and a[1] == stripped
             ]

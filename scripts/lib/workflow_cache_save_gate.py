@@ -28,7 +28,12 @@ states the class and derives the members.
 2. Every `actions/cache/restore` step has, in the SAME job, an
    `actions/cache/save` step whose key either references the restore
    (`steps.<id>.`) or is the restore's key text verbatim. A restore nobody
-   saves for is a cache that never warms.
+   saves for is a cache that never warms. In a matrix job a save writes one
+   key per cell, so its key is read with each `${{ matrix.<axis> }}` replaced
+   by each value the job's matrix lists: a cell that also reads another cell's
+   cache (the `selector_term` fuzz target reads the `pcap` corpus) is paired by
+   the save that cell runs, and stops being paired the day that cell leaves
+   the matrix.
 
 It does NOT require the save to carry `always()`. Measured: two correct saves
 (the Zephyr workspace and the rocksdb-engine composite) gate on `success()` or on
@@ -46,6 +51,8 @@ stopped reading.
 
 from __future__ import annotations
 
+import itertools
+import re
 import sys
 from pathlib import Path
 
@@ -66,6 +73,47 @@ def _steps_by_job(doc: dict) -> dict[str, list[dict]]:
     return {"<composite>": list(runs.get("steps") or [])}
 
 
+def _matrices_by_job(doc: dict) -> dict[str, dict[str, list[str]]]:
+    """Each job's matrix axes that are plain lists of scalars, as strings. An
+    axis built by an expression or from objects is left out, so a key that
+    names it is not expanded and pairs only by its text."""
+    out: dict[str, dict[str, list[str]]] = {}
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return out
+    for name, job in jobs.items():
+        matrix = ((job or {}).get("strategy") or {}).get("matrix") if isinstance(job, dict) else None
+        axes: dict[str, list[str]] = {}
+        if isinstance(matrix, dict):
+            for axis, values in matrix.items():
+                if isinstance(values, list) and values and all(
+                    isinstance(v, (str, int, float, bool)) for v in values
+                ):
+                    axes[axis] = [str(v) for v in values]
+        out[name] = axes
+    return out
+
+
+_MATRIX_REF = re.compile(r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}")
+
+
+def _written_keys(save_key: str, axes: dict[str, list[str]]) -> set[str]:
+    """The keys a save step writes across the job's matrix cells: its key text,
+    and that text with every `${{ matrix.<axis> }}` replaced by each value of
+    the axis. A restore in one cell that reads another cell's cache (the fuzz
+    target that also reads the `pcap` target's corpus) is paired by the save
+    that cell runs; the key it names is one of these. An axis the job does not
+    declare as a list leaves the text unexpanded."""
+    keys = {save_key}
+    named = sorted(set(_MATRIX_REF.findall(save_key)))
+    if not named or any(axis not in axes for axis in named):
+        return keys
+    for cell in itertools.product(*(axes[axis] for axis in named)):
+        value = dict(zip(named, cell))
+        keys.add(_MATRIX_REF.sub(lambda m: value[m.group(1)], save_key))
+    return keys
+
+
 def _uses(step: dict) -> str:
     return str(step.get("uses") or "")
 
@@ -75,6 +123,7 @@ def check(docs: dict[str, dict]) -> tuple[list[str], int]:
     failures: list[str] = []
     seen = 0
     for path, doc in sorted(docs.items()):
+        matrices = _matrices_by_job(doc)
         for job, steps in _steps_by_job(doc).items():
             restores = []
             saves = []
@@ -97,11 +146,13 @@ def check(docs: dict[str, dict]) -> tuple[list[str], int]:
                 elif uses.startswith("actions/cache/save@"):
                     saves.append(step)
             save_keys = [str((s.get("with") or {}).get("key") or "") for s in saves]
+            axes = matrices.get(job, {})
+            written = set().union(*(_written_keys(sk, axes) for sk in save_keys)) if save_keys else set()
             for step in restores:
                 rid = step.get("id")
                 key = str((step.get("with") or {}).get("key") or "")
-                paired = any(
-                    (rid and f"steps.{rid}." in sk) or (key and sk == key) for sk in save_keys
+                paired = any(rid and f"steps.{rid}." in sk for sk in save_keys) or (
+                    bool(key) and key in written
                 )
                 if not paired:
                     failures.append(
@@ -158,6 +209,23 @@ def selftest() -> int:
         "with": {"path": "p", "key": "${{ steps.c.outputs.cache-primary-key }}"},
     }
     save_literal = {"uses": "actions/cache/save@v4", "with": {"path": "p", "key": "k-1"}}
+
+    def matrix_wf(targets: list[str], reads: str) -> dict:
+        """A matrix job whose cells each save `c-<target>-1`, and one restore
+        of `reads` beside its own."""
+        own = {
+            "id": "own",
+            "uses": "actions/cache/restore@v4",
+            "with": {"path": "p", "key": "c-${{ matrix.target }}-1"},
+        }
+        other = {"uses": "actions/cache/restore@v4", "with": {"path": "q", "key": reads}}
+        save = {
+            "uses": "actions/cache/save@v4",
+            "with": {"path": "p", "key": "c-${{ matrix.target }}-1"},
+        }
+        job = {"strategy": {"matrix": {"target": targets}}, "steps": [own, other, save]}
+        return {"jobs": {"j": job}}
+
     cases = [
         ("combined cache", {"a.yml": wf({"uses": "actions/cache@v4"})}, "COMBINED"),
         ("combined cache, other version", {"a.yml": wf({"uses": "actions/cache@v3"})}, "COMBINED"),
@@ -169,6 +237,21 @@ def selftest() -> int:
         ),
         ("save by reference pairs", {"a.yml": wf(restore, save_ref)}, None),
         ("save by verbatim key pairs", {"a.yml": wf(restore, save_literal)}, None),
+        (
+            "a restore of another matrix cell's cache pairs by that cell's save",
+            {"a.yml": matrix_wf(["pcap", "term"], "c-pcap-1")},
+            None,
+        ),
+        (
+            "a restore of a cell the matrix does not run does not pair",
+            {"a.yml": matrix_wf(["live", "term"], "c-pcap-1")},
+            "never warms",
+        ),
+        (
+            "an axis the job does not declare is not expanded",
+            {"a.yml": {"jobs": {"j": {"steps": matrix_wf(["pcap"], "c-pcap-1")["jobs"]["j"]["steps"]}}}},
+            "never warms",
+        ),
         (
             "composite action is read",
             {"x/action.yml": {"runs": {"using": "composite", "steps": [{"uses": "actions/cache@v4"}]}}},

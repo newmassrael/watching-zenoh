@@ -1746,7 +1746,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 51
+#define WZ_DISSECT_ABI_REVISION 52
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2812,6 +2812,84 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
 int wz_dissect_selector_bind(const char *selector, const char *names_json,
                              char **out);
 
+/* (ABI 52) -- THE SELECTOR A NODE OF THE FIELD DOCUMENT OFFERS: filter by the
+ * field it shows, add it to the selector typed, or exclude it.
+ *
+ * Writing `<selector_path> == <value>` is the selector grammar's work and not
+ * yours: which tail of the path to write, how a value of each kind is spelled
+ * (the quotes and their escapes, bytes as hex, a zid in zenoh's spelling, a
+ * flag as `yes`), and how the sentence joins a selector already typed. A
+ * consumer that does it holds a second copy of the grammar. Hand this door the
+ * node and the verb instead:
+ *
+ *   `node`      ONE field object of a field document, as you read it (field
+ *               document revision 56 or later, which carries `selector_path`):
+ *               {"name":"sn","start":1,"end":2,"selector_path":"Frame.sn",
+ *                "kind":"uint","value":9}
+ *               Only `selector_path`, `kind` and `value` are read; `fields` and
+ *               the span may be there or not.
+ *   `verb`      WZ_DISSECT_TERM_FILTER (0), WZ_DISSECT_TERM_ADD (1) or
+ *               WZ_DISSECT_TERM_EXCLUDE (2). Any other number is
+ *               WZ_DISSECT_ERR_INVALID_ARG and no string.
+ *   `selector`  the selector typed, or null or empty for none. FILTER ignores
+ *               it. A `node` term in it is kept for wz_dissect_selector_bind.
+ *
+ * Returns WZ_DISSECT_OK for any readable text and writes a verdict, so the
+ * memory rule is wz_dissect_selector_bind's: OK means a string you own, an
+ * error means none.
+ *
+ *     {"document":{"name":"selector_term","revision":1},"ok":true,
+ *      "term":"Frame.sn == 9",
+ *      "selector":"(kind == put or kind == del) and Frame.sn == 9"}
+ *
+ * `term` is the node's sentence alone; `selector` is the text to hand the doors:
+ * `term` for FILTER (and for ADD with nothing typed), `<typed> and <term>` for
+ * ADD, `<typed> and not <term>` for EXCLUDE (`not <term>` with nothing typed).
+ * A typed selector whose top level is an `or` is put in brackets.
+ *
+ * WHAT THE SENTENCE SAYS. Over the record whose tree holds the node it is
+ * `yes`, and its exclusion is `no` there; the library's own tests hold that over
+ * every node of every record of its test captures and of seeded noise over
+ * every message id.
+ *
+ *   * A node with a value: `<tail> == <value>`.
+ *   * A group (`nested`) or a body this build does not walk (`opaque`) has no
+ *     value: the sentence is the presence test, `<tail>` alone.
+ *   * The tail is the shortest that names the node's field and no other field:
+ *     `Frame.sn` stays whole because `sn` also ends `Fragment.sn`, and a record's
+ *     field under `Frame.payload` is written from where it is one field
+ *     (`Push.put.payload`), which names it under a Frame and alone alike.
+ *
+ * A refusal carries `"ok":false`, `"refusal"`, a human `"message"`, and the keys
+ * the word decides. None is ever written as null; a key a word does not carry is
+ * absent:
+ *
+ *     `node`        the text is not a field object: not JSON, not an object, no
+ *                   `selector_path` (a document older than revision 56) or
+ *                   `kind`, or a `value` its `kind` does not carry.
+ *     `unnamed`     `selector_path` is null: the node is the extension chain or
+ *                   a body shown under its entry, and names no field.
+ *     `unjudged`    `path`: the node is a field of a scouting datagram, and the
+ *                   selector judges no scouting row (they read `unjudged`).
+ *     `unwritable`  `path`: the grammar cannot spell the path or the value in
+ *                   this build (a path its declared shape does not hold).
+ *     `selector`    the selector typed does not compile. `start` and `end` are
+ *                   the caret wz_dissect_selector_diagnose would give (its
+ *                   `at`), a span of no width.
+ *
+ * A verb you did not get from these names is WZ_DISSECT_ERR_INVALID_ARG and
+ * never a quiet fall back to FILTER: a caller that believes it asked to exclude
+ * must not be handed the sentence that selects.
+ *
+ * @values selector_term refusal
+ * @carries selector_term refusal discriminant
+ * @unknown TERM caller-supplied */
+#define WZ_DISSECT_TERM_FILTER 0
+#define WZ_DISSECT_TERM_ADD 1
+#define WZ_DISSECT_TERM_EXCLUDE 2
+int wz_dissect_selector_term(const char *node, int verb, const char *selector,
+                             char **out);
+
 /* (ABI 44) -- EVERY FIELD A SELECTOR CAN NAME, with the operators each one
  * admits and, where its values are a closed set, the words.
  *
@@ -2822,7 +2900,7 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":4},
+ *     {"document":{"name":"selector_fields","revision":5},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
@@ -2832,7 +2910,8 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  *                "words":["Control","RealTime",...,"Background"]},
  *               {"path":"Push.put.payload","kind":"bytes","len":true,
  *                "operators":["==","!=","in","contains","matches"]},
- *               ...]}
+ *               ...],
+ *      "renamed":[]}
  *
  *   `matches`    whether this build compiles `matches` patterns (the library's
  *                `filter-regex` feature). Where it is false, NO operator list
@@ -2850,6 +2929,21 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  *                bytes and not characters). `operators` never lists `not in`,
  *                which every `in` admits, nor the presence test, which every
  *                path admits.
+ *   `renamed`    (revision 5) every rename of a path since paths were first
+ *                published, oldest first: {"from":<full path before>,
+ *                "to":<full path now>,"since":<the field document revision
+ *                whose shape first carried "to">}. Empty today. A PATH ONCE
+ *                PUBLISHED IS NEVER TAKEN BACK: a saved selector that writes a
+ *                former name, or any tail of one, is read as the field it names
+ *                now and keeps selecting what it selected, so a stored filter
+ *                does not break when a name moves. Rewrite the text you store
+ *                by this list when you want it spelled as today; you need not.
+ *                The library holds itself to the rule: every path, kind and
+ *                label word it has published is in a registry that only grows,
+ *                and a test refuses a shape that drops one without a rename. A
+ *                field whose kind changes takes a new name, so a former name
+ *                never becomes a comparison of another kind. The first rename
+ *                moves this document's revision, which pins the entry's keys.
  *
  * The same network message appears under its own root (`Push...`) and under a
  * Frame's batch (`Frame.payload.Push...`); a record term reads the first, and

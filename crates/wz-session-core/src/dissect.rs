@@ -3802,7 +3802,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
                 if batch.unparsed_bytes > 0 {
                     let unparsed_start = payload_start + rem - batch.unparsed_bytes;
                     children.push(Field {
-                        name: "unparsed".into(),
+                        name: crate::dissect_schema::BATCH_REMAINDER.into(),
                         span: Span {
                             start: unparsed_start,
                             end: payload_start + rem,

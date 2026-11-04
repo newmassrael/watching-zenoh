@@ -44,7 +44,7 @@ jobs:
       matrix:
         # The targets `scripts/fuzz.sh targets` prints; Layer C0 does not read
         # this list, so a target added there is added here in the same commit.
-        target: [pcap, live, transport, text, proto, e2e, replay, config, sender]
+        target: [pcap, live, transport, text, proto, e2e, replay, config, sender, selector_term]
     env:
       WZ_FUZZ_SECONDS: ${{ github.event.inputs.seconds || '1200' }}
     steps:
@@ -62,6 +62,19 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
+
+      # A target that takes another's inputs (`fuzz_seeds.py --reads`) reads
+      # that target's corpus as well: `selector_term` holds the field
+      # document's sentences to their property over every capture the `pcap`
+      # target has reached. Restored only, never saved under that name here.
+      - name: Restore the corpus ${{ matrix.target }} also reads
+        if: matrix.target == 'selector_term'
+        uses: actions/cache/restore@v4
+        with:
+          path: crates/target/fuzz/corpus/pcap
+          key: fuzz-corpus-pcap-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-pcap-
 
       - name: Fuzz ${{ matrix.target }}
         run: bash scripts/fuzz.sh run "${{ matrix.target }}" "$WZ_FUZZ_SECONDS" 2

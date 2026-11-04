@@ -3683,7 +3683,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[21];
+    } revisioned[22];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -4268,7 +4268,8 @@ int main(void) {
      * facts join the fixed fields. 3: `zenoh`, the flow's word, joins them.
      * 4: its words become the sequential test's three. */
     revisioned[19].name = "selector_fields";
-    revisioned[19].revision = 4;
+    /* 5: `renamed`, the renames of published paths, joined; empty here. */
+    revisioned[19].revision = 5;
     revisioned[19].doc = NULL;
     rc = wz_dissect_selector_fields(&revisioned[19].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);
@@ -4341,6 +4342,37 @@ int main(void) {
         rc = wz_dissect_live_memory(kept, NULL);
         CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out memory rc=%d", rc);
         wz_dissect_live_close(kept);
+    }
+    /* (ABI 52) -- the sentence a node of the field document offers, at 1. The
+     * node object is the one the field document above writes for a Frame's
+     * `sn`, handed back as this consumer read it; the sentence is the
+     * library's, so this file holds no quoting or tail rule of its own. */
+    revisioned[21].name = "selector_term";
+    revisioned[21].revision = 1;
+    revisioned[21].doc = NULL;
+    rc = wz_dissect_selector_term(
+        "{\"name\":\"sn\",\"start\":1,\"end\":2,\"selector_path\":\"Frame.sn\","
+        "\"kind\":\"uint\",\"value\":9}",
+        WZ_DISSECT_TERM_ADD, "kind == put or kind == del",
+        &revisioned[21].doc);
+    CHECK(rc == WZ_DISSECT_OK, "selector_term document rc=%d", rc);
+    CHECK(strstr(revisioned[21].doc,
+                 "\"term\":\"Frame.sn == 9\",\"selector\":"
+                 "\"(kind == put or kind == del) and Frame.sn == 9\"") != NULL,
+          "the node's sentence, joined to the selector typed: %s",
+          revisioned[21].doc);
+    {
+        /* The sentence is one the doors take. */
+        char *taken = NULL;
+        rc = wz_dissect_selector_diagnose("not Frame.sn == 9", &taken);
+        CHECK(rc == WZ_DISSECT_OK && taken != NULL &&
+                  strstr(taken, "\"ok\":true") != NULL,
+              "an excluded sentence is refused: %s", taken ? taken : "(null)");
+        wz_dissect_string_free(taken);
+        char *refused = NULL;
+        rc = wz_dissect_selector_term("{}", 3, NULL, &refused);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && refused == NULL,
+              "a verb outside the three rc=%d", rc);
     }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop

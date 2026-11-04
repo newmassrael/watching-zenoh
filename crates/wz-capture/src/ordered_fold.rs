@@ -49,7 +49,6 @@ use crate::link::FlowKey;
 use crate::node::SessionGrouping;
 use crate::progress::Progress;
 use crate::{Dissection, OrderMarks, TrimPolicy};
-use wz_session_core::passive::PassiveFrame;
 
 /// What a plane keeps while it folds a capture in capture order.
 pub(crate) trait OrderedFold: Clone {
@@ -78,18 +77,20 @@ pub(crate) trait OrderedFold: Clone {
     /// Required for the reason [`Self::reads_flow_word`] is.
     fn reads_tree(&self) -> bool;
 
-    /// Take one message. `list` is its position in
-    /// [`Dissection::message_lists_with_origin`] and `packet` the capture packet
+    /// Take one message: the row `frame` of the list at `list`, its position in
+    /// [`Dissection::message_lists_with_origin`], and `packet` the capture packet
     /// it resolves to; `grouping` is the capture's session grouping. `message`
     /// is the bytes the capture holds of the frame's transport message, where
     /// the fold reads a tree and the frame carried a batch, and `None`
-    /// otherwise.
+    /// otherwise. The ROW and not its frame, because a fold that keys what it
+    /// says by row keys it by the row's place in its list
+    /// ([`crate::payload::RowKey`]).
     fn feed(
         &mut self,
         flow: &FlowKey,
         list: usize,
         packet: usize,
-        frame: &PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         message: Option<&[u8]>,
         grouping: &SessionGrouping,
     );
@@ -113,8 +114,8 @@ pub(crate) fn fold_whole_capture<F: OrderedFold>(
 }
 
 /// The bytes a fold that reads a tree is handed for `frame`: its transport
-/// message's, where it carried a batch out of a `Frame` (the only message a
-/// record has a transport envelope in), and `None` otherwise.
+/// message's, where its records have one as their envelope (a `Frame` that
+/// carried their batch, a `Fragment` that completed it), and `None` otherwise.
 fn held_for_fold<'d>(
     reads_tree: bool,
     order: &crate::OrderedFrames<'d>,
@@ -122,7 +123,7 @@ fn held_for_fold<'d>(
     list: usize,
     frame: &crate::messages::Row<'_>,
 ) -> Option<alloc::borrow::Cow<'d, [u8]>> {
-    (reads_tree && crate::field_path::carried_in_a_frame(frame))
+    (reads_tree && crate::field_path::records_carrier(frame).is_some())
         .then(|| order.held_message_bytes(dissection, list, frame))
         .flatten()
 }
@@ -441,7 +442,7 @@ impl OrderedFold for CensusFold {
         flow: &FlowKey,
         list: usize,
         packet: usize,
-        frame: &PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         message: Option<&[u8]>,
         grouping: &SessionGrouping,
     ) {

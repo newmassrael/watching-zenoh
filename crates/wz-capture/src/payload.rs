@@ -962,28 +962,28 @@ pub struct Contradiction {
     pub reason: Mismatch,
 }
 
-/// R2765 (open debt 788) — WHICH message row a record sat in, as the three
-/// facts the field document already puts on that row.
+/// R2765 (open debt 788) — WHICH message row a record sat in: its list, the
+/// direction it travelled, and its place in the list.
 ///
-/// # Why these three and not a coordinate of their own
+/// # Why the place is the row's produced-index
 ///
-/// Both walks see the same `PassiveFrame`, so nothing has to be translated:
-/// the renderer writes `direction` and `message_at` straight off the frame,
-/// and the list index is what its caller already resolves for the keyexpr
-/// owner. Inventing a join coordinate would have been the failure
-/// [`wz_session_core::passive::PassiveFrame::batch_offset`] names — a
-/// fabricated number read as a measured one.
+/// Every walk that keys a row holds the row itself, and a list numbers its
+/// rows as it produces them ([`crate::messages::Row::produced`]): one number a
+/// row, untouched by a front trim, the same in every walk over one dissection.
+/// So the place is that number and nothing is translated or invented.
+///
+/// It was the message's first byte (`FlowDissection::message_at`) until the
+/// selector's soundness oracle found two rows of one datagram list under one
+/// key. A row anchored at a PACKET has a packet index where a stream row has a
+/// byte, and the byte inside its unit added to that index named a place that
+/// is no place: a message 3 bytes into packet 9 and the first message of packet
+/// 12 summed to the same 12, and the verdicts of the two rows were folded as
+/// one row's.
 ///
 /// ⛔ THE LIST INDEX IS LOAD-BEARING and a flow key would not do. A TCP flow
 /// and a UDP flow may carry the identical 5-tuple, which
 /// [`crate::node::ObservedLink::list`] records as the reason a grouping keyed
 /// by flow hands one session's rows to the other.
-///
-/// ⚠ `message_at` IS NOT ALWAYS A BYTE OFFSET. For a datagram row it is built
-/// from a packet index, which is why the document carries `offset_space`
-/// beside it. As a KEY that does not matter — it only has to be unique within
-/// a list and direction, which it is either way — but a reader must not add it
-/// to anything.
 // R2766 (open debt 788) — GATED AS ITS CONSUMERS ARE, and gate 2h taught this
 // file the rule twice in one round. Every reader of these types is behind
 // `network-codecs`: the impl below, the census that holds them, and
@@ -995,28 +995,28 @@ pub struct Contradiction {
 pub struct RowKey {
     list: usize,
     direction: usize,
-    message_at: usize,
+    produced: usize,
 }
 
 #[cfg(feature = "network-codecs")]
 impl RowKey {
-    /// The key's three coordinates: the list, the direction and the message's
-    /// place. For a structure that keeps rows by them in arrays and so has to take
-    /// them apart ([`crate::verdict_column`]).
+    /// The key's three coordinates: the list, the direction and the row's
+    /// produced-index. For a structure that keeps rows by them in arrays and so
+    /// has to take them apart ([`crate::verdict_column`]).
     pub(crate) const fn parts(&self) -> (usize, usize, usize) {
-        (self.list, self.direction, self.message_at)
+        (self.list, self.direction, self.produced)
     }
 
     /// The key [`Self::parts`] took apart.
-    pub(crate) const fn from_parts(list: usize, direction: usize, message_at: usize) -> Self {
+    pub(crate) const fn from_parts(list: usize, direction: usize, produced: usize) -> Self {
         Self {
             list,
             direction,
-            message_at,
+            produced,
         }
     }
 
-    /// The row one frame's records belong to.
+    /// The key of `row`, a row of the list at `list`.
     ///
     /// ⚠ IT TAKES THE LIST INDEX AND NOT A [`crate::node::ListContext`], even
     /// though the producing walk holds one. A context also carries node
@@ -1025,31 +1025,24 @@ impl RowKey {
     /// to pass a number, and that constructor MEANS "this caller knows no
     /// node". A signature that demands what it does not use teaches the wrong
     /// thing at every call site.
-    pub fn of(list: usize, frame: &wz_session_core::passive::PassiveFrame) -> Self {
+    pub fn of(list: usize, row: &crate::messages::Row<'_>) -> Self {
         Self {
             list,
-            direction: crate::agg::dir_index(frame.direction),
-            message_at: crate::FlowDissection::message_at(frame),
+            direction: crate::agg::dir_index(row.direction),
+            produced: Self::place(row),
         }
     }
 
-    /// Where the row stands WITHIN its list: the direction it travelled and its
-    /// message position. The list is the other half of the key, and a caller that
-    /// is already walking one list names the rest by this pair.
-    #[cfg(feature = "dissect")]
-    pub(crate) fn position_in_list(&self) -> (usize, usize) {
-        (self.direction, self.message_at)
+    /// A row's produced-index as a key's place. A list that has produced more
+    /// rows than an address can count has none it could hold.
+    fn place(row: &crate::messages::Row<'_>) -> usize {
+        usize::try_from(row.produced()).unwrap_or(usize::MAX)
     }
 
-    /// The pair [`Self::position_in_list`] names, for a frame of the list being
-    /// walked, so a renderer indexes a row without building a key it has no list
-    /// for.
+    /// The row's produced-index in its list.
     #[cfg(feature = "dissect")]
-    pub(crate) fn position_of(frame: &wz_session_core::passive::PassiveFrame) -> (usize, usize) {
-        (
-            crate::agg::dir_index(frame.direction),
-            crate::FlowDissection::message_at(frame),
-        )
+    pub(crate) const fn produced(&self) -> u64 {
+        self.produced as u64
     }
 }
 
@@ -1282,11 +1275,9 @@ impl PayloadCensus {
     /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
     /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
     /// wrong unit.
-    pub fn observe_flow_where(
+    pub fn observe_flow_where<'r>(
         &mut self,
-        frames: impl IntoIterator<
-            Item = impl core::ops::Deref<Target = wz_session_core::passive::PassiveFrame>,
-        >,
+        frames: impl IntoIterator<Item = crate::messages::Row<'r>>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
@@ -1311,7 +1302,7 @@ impl PayloadCensus {
     /// disagreed about what a caller must know. They take the same value now.
     pub fn observe_frame_where(
         &mut self,
-        frame: &wz_session_core::passive::PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
@@ -1339,7 +1330,7 @@ impl PayloadCensus {
     fn observe_batch(
         &mut self,
         spaces: &mut crate::agg::KeyexprSpaces,
-        frame: &wz_session_core::passive::PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         batch: &wz_session_core::network_message::BatchParse,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
@@ -1360,7 +1351,7 @@ impl PayloadCensus {
     fn observe_message(
         &mut self,
         spaces: &mut crate::agg::KeyexprSpaces,
-        frame: &wz_session_core::passive::PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         message: &wz_session_core::network_message::NetworkMessage,
         at: crate::field_path::RecordAt<'_>,
         filter: &crate::filter::Filter,
@@ -1722,7 +1713,7 @@ impl crate::ordered_fold::OrderedFold for PayloadFold {
         flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
-        frame: &wz_session_core::passive::PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {

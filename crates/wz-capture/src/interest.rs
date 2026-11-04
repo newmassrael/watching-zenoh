@@ -1406,7 +1406,7 @@ impl crate::ordered_fold::OrderedFold for InterestFold {
         flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
-        frame: &wz_session_core::passive::PassiveFrame,
+        frame: &crate::messages::Row<'_>,
         _message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {

@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 51
+EXPECTED_VERSION = 52
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -441,6 +441,15 @@ EXPECTED_SYMBOLS = {
     # structure, as the `memory` document. One symbol, a read of a handle (const),
     # a string released by `wz_dissect_string_free`. No memory rule moves.
     "wz_dissect_live_memory",
+    # (ABI 52) -- the SELECTOR A FIELD DOCUMENT'S NODE OFFERS: the sentence that
+    # filters by, adds or excludes the field the node shows, written by the
+    # grammar that reads it, so a consumer keeps no copy of the quoting, the
+    # tail and the bracket rules. One symbol and one document. The memory rule
+    # does not move: the verdict is a `char*` released by
+    # `wz_dissect_string_free`, the node object and the selector typed cross as
+    # C strings the CALLER holds, the verb as an `int`, nothing is retained
+    # between calls, and no callback runs.
+    "wz_dissect_selector_term",
     # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
     # sets: how many one flow keeps, and how many the handle keeps in all. One
     # symbol: two integers in and the handle through a pointer the CALLER owns,

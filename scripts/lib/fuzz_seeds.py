@@ -8,11 +8,12 @@ copy of them.
 
     fuzz_seeds.py <target> <out-dir>     write the seeds of <target>
     fuzz_seeds.py --targets              print the targets, one a line
+    fuzz_seeds.py --reads <target>       print the target whose corpus <target> also reads
     fuzz_seeds.py --selftest             check every target writes seeds
 
 Each seed is the input layout its target's header comment states:
 
-- `pcap`, `live`: eight bytes of arguments, then a capture from `captures/`
+- `pcap`, `live`, `selector_term`: eight bytes of arguments, then a capture from `captures/`
   (classic pcap or pcapng, at most `MAX_CAPTURE` bytes; files with the same
   bytes count once).
 - `transport`: four bytes of arguments, a session context and a ring word
@@ -47,7 +48,14 @@ MAX_CAPTURE = 64 * 1024
 # How many packet payloads the `transport` target is seeded with.
 MAX_PAYLOADS = 256
 
-TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay", "config", "sender")
+TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay", "config", "sender", "selector_term")
+
+# A target whose input layout is another's, and which also reads the corpus
+# that target's fuzzing grows: `selector_term` holds the sentences of the field
+# document to their soundness property over every capture the `pcap` target has
+# reached, beside the ones it reaches itself. `fuzz.sh run` adds that corpus as
+# an input directory it reads and does not write.
+READS_CORPUS_OF = {"selector_term": "pcap"}
 
 # Inputs that once made a target fail and are made of a tracked capture: the
 # arguments and the capture's path under `captures/`, so the reproducer is
@@ -224,7 +232,9 @@ def derived(target: str) -> list[bytes]:
     # one pass over the captures. Every set crossed with every capture made the
     # replay six times longer for coverage the fuzzer reaches in its first
     # minutes anyway.
-    if target == "pcap":
+    # `selector_term` takes the `pcap` layout and reads only its byte 0 (the
+    # limits preset), so the same inputs are its seeds.
+    if target in ("pcap", "selector_term"):
         heads = (bytes(8), bytes([1, 4, 1, 0, 0, 1, 1, 0]), bytes([0, 255, 3, 0, 1, 2, 2, 0]))
         return [heads[n % len(heads)] + c for n, c in enumerate(captures())]
     if target == "live":
@@ -289,6 +299,18 @@ def write(target: str, out_dir: pathlib.Path) -> int:
 
 
 def selftest() -> int:
+    for reader, read in READS_CORPUS_OF.items():
+        if reader not in TARGETS or read not in TARGETS or reader == read:
+            print(f"fuzz_seeds: FAIL -- `{reader}` reads the corpus of `{read}`, "
+                  "and both must be distinct targets", file=sys.stderr)
+            return 1
+        # Reading another target's corpus is only sound when every input of it
+        # is an input of this one: the two derive the same seeds (the pinned
+        # reproducers are each target's own).
+        if derived(reader) != derived(read):
+            print(f"fuzz_seeds: FAIL -- `{reader}` reads the corpus of `{read}` and "
+                  "its seeds are not that target's: their layouts have parted", file=sys.stderr)
+            return 1
     for target in TARGETS:
         count = len(seeds(target))
         if count == 0:
@@ -305,6 +327,14 @@ def main(argv: list[str]) -> int:
         return 0
     if argv == ["--selftest"]:
         return selftest()
+    if len(argv) == 2 and argv[0] == "--reads":
+        if argv[1] not in TARGETS:
+            print(f"fuzz_seeds: no target `{argv[1]}`", file=sys.stderr)
+            return 2
+        other = READS_CORPUS_OF.get(argv[1])
+        if other is not None:
+            print(other)
+        return 0
     if len(argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2

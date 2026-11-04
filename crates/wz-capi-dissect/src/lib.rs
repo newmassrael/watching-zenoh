@@ -446,6 +446,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // The memory rule moves with them: the handle retains the caller's pointer.
     // 51, for `wz_dissect_live_memory`: what a handle holds in memory, by
     // structure, as the `memory` document. One symbol, a read of a handle.
+    // 52, for `wz_dissect_selector_term`: the selector a field document's node
+    // offers, filtering by, adding or excluding the field it shows.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -463,7 +465,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 51;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 52;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3180,6 +3182,50 @@ pub unsafe extern "C" fn wz_dissect_selector_bind(
         }
     };
     write_string(wz_capture::filter::bind_json(expr, names), out)
+}
+
+/// ABI 52 -- the selector a field document's node offers.
+///
+/// `node` is one field object of a field document (revision 56 or later, which
+/// carry `selector_path`), as the caller read it; `verb` is
+/// `WZ_DISSECT_TERM_FILTER` (0), `WZ_DISSECT_TERM_ADD` (1) or
+/// `WZ_DISSECT_TERM_EXCLUDE` (2); `selector` is the text typed, null or empty
+/// for none. The document is `selector_term`
+/// (`wz_capture::selector_term::term_json`): the node's sentence and the
+/// selector it makes with the one typed, or the typed refusal that says why the
+/// node offers none. A refusal is a successful verdict and not an error, as for
+/// [`wz_dissect_selector_bind`]: OK means a string you own, an error means none.
+///
+/// # Safety
+/// `node` must be a NUL-terminated C string, `selector` null or one, and `out` a
+/// writable pointer to a `*mut c_char`. `node` and `out` may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_term(
+    node: *const c_char,
+    verb: c_int,
+    selector: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if node.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(verb) = wz_capture::selector_term::Verb::from_code(verb) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let Ok(node) = unsafe { std::ffi::CStr::from_ptr(node) }.to_str() else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let typed = if selector.is_null() {
+        ""
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    write_string(wz_capture::selector_term::term_json(node, verb, typed), out)
 }
 
 /// ABI 44 -- every field a selector can name, the operators each admits and,
@@ -9317,7 +9363,11 @@ mod tests {
         // two symbols, and the handle retains the caller's container pointer.
         // 51, for `wz_dissect_live_memory`: one symbol, a read of a handle that
         // returns the `memory` document.
-        assert_eq!(wz_dissect_abi_version(), 51);
+        // 52, for `wz_dissect_selector_term`: one symbol, a `char*` released by
+        // `wz_dissect_string_free`; the node object and the selector typed cross
+        // as C strings the caller already holds, the verb as an `int`, and no
+        // struct is new.
+        assert_eq!(wz_dissect_abi_version(), 52);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -10075,6 +10125,8 @@ mod tests {
             // The binder's verdict over every shape it writes: a success and a
             // refusal of each of its four words, whose keys differ by word.
             (rev::SELECTOR_BIND, bind_documents()),
+            // The node sentence over every shape it writes, for the same reason.
+            (rev::SELECTOR_TERM, term_documents()),
             // The field list has one shape: it takes no input.
             (rev::SELECTOR_FIELDS, vec![call_selector_fields()]),
             (rev::DECLARATIONS_DIAGNOSE, decl),
@@ -10254,6 +10306,11 @@ mod tests {
             (
                 rev::SELECTOR_BIND,
                 bind_documents().into_iter().next().expect("a document"),
+            ),
+            // Declares no plane either.
+            (
+                rev::SELECTOR_TERM,
+                term_documents().into_iter().next().expect("a document"),
             ),
             // Declares no plane either.
             (rev::SELECTOR_FIELDS, call_selector_fields()),
@@ -10484,6 +10541,8 @@ mod tests {
             // Every shape the binder writes: no refusal writes a `null`, the
             // position keys are simply absent where the word has none.
             (rev::SELECTOR_BIND, bind_documents()),
+            // The node sentence, on the same rule.
+            (rev::SELECTOR_TERM, term_documents()),
             // One shape, no input: `words` is absent, never null, off a label.
             (rev::SELECTOR_FIELDS, vec![call_selector_fields()]),
             (
@@ -10701,6 +10760,93 @@ mod tests {
     }
 
     /// Every shape the binder's verdict takes, success first.
+    /// Drive the node sentence the way C does.
+    fn call_selector_term(node: &str, verb: c_int, selector: Option<&str>) -> String {
+        let node = CString::new(node).expect("no interior NUL");
+        let typed = selector.map(|s| CString::new(s).expect("no interior NUL"));
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_term(
+                node.as_ptr(),
+                verb,
+                typed.as_ref().map_or(core::ptr::null(), |t| t.as_ptr()),
+                &mut out,
+            )
+        };
+        assert_eq!(
+            rc, WZ_DISSECT_OK,
+            "a refused node is a successful verdict, not an error"
+        );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
+    /// The node sentence over every shape it writes: a success, and each of
+    /// its five refusals, whose keys differ by word.
+    fn term_documents() -> Vec<String> {
+        const SN: &str =
+            r#"{"name":"sn","start":1,"end":2,"selector_path":"Frame.sn","kind":"uint","value":9}"#;
+        vec![
+            call_selector_term(SN, 1, Some("kind == put or kind == del")),
+            call_selector_term("[]", 0, None),
+            call_selector_term(SN, 2, Some("kind ==")),
+            call_selector_term(
+                r#"{"selector_path":"Scout.zid","kind":"zid","value":"a1"}"#,
+                0,
+                None,
+            ),
+            call_selector_term(
+                r#"{"selector_path":null,"kind":"nested","fields":[]}"#,
+                0,
+                None,
+            ),
+            call_selector_term(
+                r#"{"selector_path":"Frame.nosuch","kind":"uint","value":1}"#,
+                0,
+                None,
+            ),
+        ]
+    }
+
+    /// The door's sentences, its refusals, and its two argument errors.
+    #[test]
+    fn a_node_offers_its_sentence_through_the_door() {
+        let docs = term_documents();
+        assert!(
+            docs[0].contains(
+                r#""ok":true,"term":"Frame.sn == 9","selector":"(kind == put or kind == del) and Frame.sn == 9""#
+            ),
+            "{}",
+            docs[0]
+        );
+        for (doc, word) in
+            docs[1..]
+                .iter()
+                .zip(["node", "selector", "unjudged", "unnamed", "unwritable"])
+        {
+            assert!(
+                doc.contains(&format!("\"refusal\":\"{word}\"")),
+                "{word}: {doc}"
+            );
+        }
+        let node = CString::new("{}").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { wz_dissect_selector_term(node.as_ptr(), 3, core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "a verb outside the three"
+        );
+        assert_eq!(
+            unsafe { wz_dissect_selector_term(core::ptr::null(), 0, core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert!(out.is_null(), "an error hands back no string");
+    }
+
     fn bind_documents() -> Vec<String> {
         const NAMES: &str = r#"{"cam":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2"}"#;
         vec![

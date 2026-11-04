@@ -1452,6 +1452,11 @@ pub mod dissect;
 #[cfg(feature = "dissect")]
 pub mod dissect_schema;
 
+/// A reproducible source of message-shaped bytes, for the property tests that
+/// walk every shape the dissection can produce.
+#[cfg(feature = "dissect")]
+pub mod wire_noise;
+
 // R311y585 (A4) — the OBSERVER's per-direction key-expression tables.
 //
 // A participant keeps one table per link (the peer's ids) because the other

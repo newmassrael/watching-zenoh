@@ -3395,6 +3395,12 @@ layer_c0_test_discipline() {
     # names no upper crate and the list of server modules not yet moved out of it only shrinks.
     python3 scripts/lib/layer_direction_gate.py --selftest || return 1
     python3 scripts/lib/layer_direction_gate.py --check || return 1
+    # Every fact the dissection has published to a selector stays published: the registry
+    # crates/wz-session-core/src/published_selector_paths.txt only grows, and a line
+    # origin/main holds that this tree lost or changed is refused (a moved field is renamed in
+    # dissect_schema::RENAMED). Where origin/main is not in the clone the check says so.
+    python3 scripts/lib/publish_selector_paths.py --selftest || return 1
+    python3 scripts/lib/publish_selector_paths.py --check origin/main || return 1
     # The stats golden's provenance line against the oracle's lock (round 3976 moved the pin and the
     # golden kept its old versions; Layer E17 is where that showed, hosted and a build later).
     python3 scripts/lib/zenoh_stats_golden.py --header-selftest || return 1

@@ -1809,6 +1809,17 @@ pub enum BatchHalt {
     },
 }
 
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+impl BatchHalt {
+    /// Where in the payload the walk stopped: the byte everything from on is
+    /// unparsed.
+    pub const fn offset(&self) -> usize {
+        match self {
+            Self::UnknownMid { offset, .. } | Self::CodecError { offset, .. } => *offset,
+        }
+    }
+}
+
 /// R311y578 — the outcome of a BEST-EFFORT batch parse.
 ///
 /// [`parse_frame_payload`] is the PARTICIPANT contract: a record it cannot
