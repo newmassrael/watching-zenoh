@@ -12,9 +12,15 @@
 //! buffers from the image's tables, a session over it reaches the established state on both ends,
 //! and the close frees what the link took.
 //!
+//! It runs on both storage profiles: by default lwIP's connections are made on the heap, and with
+//! `static-link-storage` (a node's real profile, with `session-slot`) in the cells of each node's
+//! own pool, declared below as an image declares them.
+//!
 //! Host-test level: no board runs it.
 
 use wz_link_lwip::tcp::LwipTcpListener;
+#[cfg(feature = "static-link-storage")]
+use wz_link_lwip::tcp::TcpSocketPool;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{
     Accept, IpEndpoint, Locator, PumpSlots, SessionDriveConfig, SessionRole, SlotStack,
@@ -59,7 +65,10 @@ impl wz_session_core::entropy::EntropySource for Counting {
 const RX: usize = 4_096;
 
 type LinkRef = &'static LwipLink;
-type Stack = LwipTcpStack<LinkRef, RX>;
+/// The connections a node holds at once: one, dialled or accepted.
+const CELLS: usize = 1;
+
+type Stack = LwipTcpStack<LinkRef, RX, CELLS>;
 type Driver = <Stack as SlotStack>::Driver;
 type Pump = <Stack as SlotStack>::Pump;
 type Rt = CoopRuntime<Frozen, Driver>;
@@ -98,7 +107,59 @@ fn ignoring() -> impl FnMut(IterationEvent<'_, '_>) + 'static {
 }
 
 static RUNTIME: RuntimeCell<Frozen, 8, 1_024, 4> = RuntimeCell::new();
-static LISTENER: LwipTcpListener<RX, 1> = LwipTcpListener::new();
+static LISTENER: LwipTcpListener<RX, 1, CELLS> = LwipTcpListener::new();
+
+/// The cells a node's connections are made in: a pool with `static-link-storage`, nothing on the
+/// heap profile.
+#[cfg(feature = "static-link-storage")]
+type Cells = TcpSocketPool<RX, CELLS>;
+#[cfg(not(feature = "static-link-storage"))]
+type Cells = ();
+
+// Each node's cells: the dialler's for the connection it dials, the acceptor's for the one its
+// listener takes and for its own dial (which this test does not use).
+static DIAL_CELLS: Cells = cells();
+static ACCEPT_DIAL_CELLS: Cells = cells();
+static ACCEPT_CELLS: Cells = cells();
+
+const fn cells() -> Cells {
+    #[cfg(feature = "static-link-storage")]
+    {
+        TcpSocketPool::new()
+    }
+    #[cfg(not(feature = "static-link-storage"))]
+    {}
+}
+
+/// A node's dial over `link`, its connections made in `cells`.
+fn dial(link: LinkRef, cells: &'static Cells) -> LwipTcpDial<LinkRef, RX, CELLS> {
+    #[cfg(feature = "static-link-storage")]
+    {
+        LwipTcpDial::new(link, cells)
+    }
+    #[cfg(not(feature = "static-link-storage"))]
+    {
+        let _: &() = cells;
+        LwipTcpDial::new(link)
+    }
+}
+
+/// `listener` listening on `port`, the connections it takes made in `cells`.
+fn listen(
+    listener: &'static LwipTcpListener<RX, 1, CELLS>,
+    port: u16,
+    cells: &'static Cells,
+) -> Result<(), wz_link_lwip::tcp::TcpError> {
+    #[cfg(feature = "static-link-storage")]
+    {
+        listener.listen_in(port, cells)
+    }
+    #[cfg(not(feature = "static-link-storage"))]
+    {
+        let _: &() = cells;
+        listener.listen(port)
+    }
+}
 
 // Each node's tables: one session, one pump, and the byte tables its links take their buffers from
 // (a link's receive buffer holds a batch with its length).
@@ -120,15 +181,15 @@ fn a_session_opens_over_tcp_between_a_dialling_node_and_an_accepting_one() {
     let runtime: Rt = RUNTIME.start(Frozen).expect("the runtime starts once");
     let local = CoopLocalSet::new(&runtime);
 
-    LISTENER.listen(PORT).expect("the node listens");
+    listen(&LISTENER, PORT, &ACCEPT_CELLS).expect("the node listens");
     let accept_stack = Stack::new(
         [127, 0, 0, 1],
         &ACCEPT_RX,
         &ACCEPT_TX,
-        LwipTcpDial::new(link),
+        dial(link, &ACCEPT_DIAL_CELLS),
     );
     let mut acceptor = accept_stack.acceptor(LwipTcpListen::new(link, &LISTENER));
-    let dial_stack = Stack::new([127, 0, 0, 1], &DIAL_RX, &DIAL_TX, LwipTcpDial::new(link));
+    let dial_stack = Stack::new([127, 0, 0, 1], &DIAL_RX, &DIAL_TX, dial(link, &DIAL_CELLS));
     let dialler: Host<1, 1> = SessionHost::new(
         CoopLocalSet::new(&runtime),
         &DIAL_SESSIONS,

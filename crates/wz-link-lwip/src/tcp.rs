@@ -108,6 +108,13 @@ struct TcpInner<const RX: usize> {
     _pin: PhantomPinned,
 }
 
+// SAFETY: the profile's rule, as for the datagram socket's state (`Inner` in `lib.rs`): a
+// connection's state is touched by the one cooperative thread that drives lwIP and by lwIP's
+// callbacks, which run on that thread inside a poll, never at once. The control-block pointer is
+// what rules out the automatic marker. `Send` is what a `TcpSocketPool` needs of its cells to be
+// `Sync`, and so a `static`, which is how an image declares one.
+unsafe impl<const RX: usize> Send for TcpInner<RX> {}
+
 impl<const RX: usize> TcpInner<RX> {
     /// Write a connection's state, before its control block exists, at `at`, field by field: the
     /// receive buffer is in it, and a value of that size is not one to build on a stack.
@@ -768,6 +775,21 @@ mod tests {
 
     /// 4096 is above the window of the host port (`TCP_WND` is four segments of 536).
     const RX: usize = 4096;
+
+    /// A pool is what an image declares as a `static`: its cells are `Send`, so the pool is
+    /// `Sync`, and a connection made in it gives its cell back when it drops.
+    #[cfg(feature = "static-link-storage")]
+    #[test]
+    fn a_socket_pool_is_a_static_an_image_declares() {
+        static POOL: TcpSocketPool<RX, 1> = TcpSocketPool::new();
+        let (_gate, link) = lwip_test_link();
+        echo_server(47_290);
+        let socket = LwipTcpSocket::<RX>::connect_in(&link, [127, 0, 0, 1], 47_290, &POOL)
+            .expect("a cell is free");
+        assert_eq!(POOL.in_use(), 1);
+        drop(socket);
+        assert_eq!(POOL.in_use(), 0);
+    }
 
     /// An echo server on `port`: whatever arrives is written back, and `bye` ends the
     /// connection from the server's side. Raw API, as a peer on the same stack.

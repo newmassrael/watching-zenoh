@@ -871,6 +871,80 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # compiled on that profile only). Once on each profile, as the link's rows above.
     "wz-session-lwip|hook|tcp|stream::"
     "wz-session-lwip|hook|tcp,static-link-storage|stream::"
+    # The same stream under the slot profile (`session-slot` with `tcp`): the engine's slot stack
+    # over lwIP's streams (`stream::`), a session opened over `tcp/` (`session_over_tcp`) and the
+    # engine's admin node over it (`admin_node_over_tcp`). One feature set for the three, the
+    # union of the two files' `required-features`, so they share a build; once on each profile,
+    # `static-link-storage` with `session-slot` being a node's real one.
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        tcp,\
+        transport-keepalive\
+        |stream::"
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        tcp,\
+        transport-keepalive\
+        |--test=session_over_tcp"
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        tcp,\
+        transport-keepalive\
+        |--test=admin_node_over_tcp"
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage,\
+        tcp,\
+        transport-keepalive\
+        |stream::"
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage,\
+        tcp,\
+        transport-keepalive\
+        |--test=session_over_tcp"
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage,\
+        tcp,\
+        transport-keepalive\
+        |--test=admin_node_over_tcp"
     # Fixed-memory step S5 — the same crate under the PER-SESSION SLOT profile, a
     # separate row because `session-slot` is a selector that CHANGES the types of
     # the session (its handle, its sink, its parameters, its extension chains) and

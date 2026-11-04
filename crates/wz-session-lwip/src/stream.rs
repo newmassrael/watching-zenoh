@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[cfg(feature = "session-slot")]
-    static SLOT_LISTENER: LwipTcpListener<RX, 2> = LwipTcpListener::new();
+    static SLOT_LISTENER: LwipTcpListener<RX, 2, 2> = LwipTcpListener::new();
     #[cfg(feature = "session-slot")]
     static SLOT_RX: wz_session_core::byte_cells::ByteCells<2_050, 2> =
         wz_session_core::byte_cells::ByteCells::new();
@@ -518,7 +518,8 @@ mod tests {
     /// The engine's slot stack over lwIP's streams: a `tcp/` dial and an accept yield the drivers a
     /// session host runs, the buffers of both from the image's tables, a `udp/` dial is refused as
     /// unsupported before a buffer is claimed, and a batch crosses each way through the drivers.
-    #[cfg(all(feature = "session-slot", not(feature = "static-link-storage")))]
+    /// On both storage profiles: `static-link-storage` with `session-slot` is a node's real one.
+    #[cfg(feature = "session-slot")]
     #[test]
     fn a_tcp_only_slot_stack_dials_and_accepts_tcp_and_refuses_udp_as_unsupported() {
         use wz_runtime_coop::ip_stack::IpDriver;
@@ -530,13 +531,13 @@ mod tests {
 
         let (_gate, link) = lwip_test_link();
         let link: &'static LwipLink = std::boxed::Box::leak(std::boxed::Box::new(link));
-        SLOT_LISTENER.listen(47_601).unwrap();
+        wz_link_lwip::test_bind::tcp_listen(&SLOT_LISTENER, 47_601).unwrap();
 
-        let mut stack = LwipTcpStack::<&'static LwipLink, RX>::new(
+        let mut stack = LwipTcpStack::<&'static LwipLink, RX, 2>::new(
             [127, 0, 0, 1],
             &SLOT_RX,
             &SLOT_TX,
-            LwipTcpDial::new(link),
+            dial(link),
         );
         let router = IpEndpoint {
             addr: [127, 0, 0, 1],

@@ -18,6 +18,8 @@
 use std::cell::RefCell;
 
 use wz_link_lwip::tcp::LwipTcpListener;
+#[cfg(feature = "static-link-storage")]
+use wz_link_lwip::tcp::TcpSocketPool;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::ip_stack::IpAcceptor;
 use wz_runtime_coop::session_drive::{PumpSlots, SlotStack};
@@ -80,14 +82,60 @@ const TASK_BYTES: usize = 12_288;
 const RX: usize = 4_096;
 
 type LinkRef = &'static LwipLink;
-type Stack = LwipTcpStack<LinkRef, RX>;
+type Stack = LwipTcpStack<LinkRef, RX, N>;
 type Driver = <Stack as SlotStack>::Driver;
 type Pump = <Stack as SlotStack>::Pump;
 type Rt = CoopRuntime<Frozen, Driver>;
 type Slots<const S: usize> = SessionSlots<Rt, CoopTime<Frozen>, Driver, Counting, S>;
 type Pumps<const P: usize> = PumpSlots<Frozen, Pump, P, Driver>;
 type Host<const S: usize> = SessionHost<Frozen, Stack, Counting, S, S>;
-type Acceptor = IpAcceptor<LwipTcpListen<LinkRef, RX, 1>, NoDatagram, NoStream>;
+type Acceptor = IpAcceptor<LwipTcpListen<LinkRef, RX, 1, ACCEPTED>, NoDatagram, NoStream>;
+
+/// The cells a node's connections are made in: a pool with `static-link-storage` (a node's real
+/// profile), nothing on the heap profile, where lwIP's connections are made on the heap.
+#[cfg(feature = "static-link-storage")]
+type Cells<const C: usize> = TcpSocketPool<RX, C>;
+#[cfg(not(feature = "static-link-storage"))]
+type Cells<const C: usize> = ();
+
+const fn cells<const C: usize>() -> Cells<C> {
+    #[cfg(feature = "static-link-storage")]
+    {
+        TcpSocketPool::new()
+    }
+    #[cfg(not(feature = "static-link-storage"))]
+    {}
+}
+
+/// A node's dial over `link`, its connections made in `cells`.
+fn dial(link: LinkRef, cells: &'static Cells<N>) -> LwipTcpDial<LinkRef, RX, N> {
+    #[cfg(feature = "static-link-storage")]
+    {
+        LwipTcpDial::new(link, cells)
+    }
+    #[cfg(not(feature = "static-link-storage"))]
+    {
+        let _: &() = cells;
+        LwipTcpDial::new(link)
+    }
+}
+
+/// `listener` listening on `port`, the connections it takes made in `cells`.
+fn listen(
+    listener: &'static LwipTcpListener<RX, 1, ACCEPTED>,
+    port: u16,
+    cells: &'static Cells<ACCEPTED>,
+) -> Result<(), wz_link_lwip::tcp::TcpError> {
+    #[cfg(feature = "static-link-storage")]
+    {
+        listener.listen_in(port, cells)
+    }
+    #[cfg(not(feature = "static-link-storage"))]
+    {
+        let _: &() = cells;
+        listener.listen(port)
+    }
+}
 type Node<const S: usize> =
     AcceptingAdminNode<'static, Frozen, Stack, Stack, Factory<S>, Acceptor, S, S, ACCEPTED>;
 type Sinks<const S: usize> = AdminSinks<1024, S>;
@@ -101,7 +149,10 @@ struct Statics<const S: usize> {
     /// length, a frame buffer the same.
     rx: ByteCells<2_050, S>,
     tx: ByteCells<2_050, S>,
-    listener: LwipTcpListener<RX, 1>,
+    listener: LwipTcpListener<RX, 1, ACCEPTED>,
+    /// The cells of the connections the node dials and of the ones its listener takes.
+    dial_cells: Cells<N>,
+    accept_cells: Cells<ACCEPTED>,
     status: FixedNodeStatus<S>,
     control: ConnectControl,
     peers: PeerStore,
@@ -118,6 +169,8 @@ impl<const S: usize> Statics<S> {
             rx: ByteCells::new(),
             tx: ByteCells::new(),
             listener: LwipTcpListener::new(),
+            dial_cells: cells::<N>(),
+            accept_cells: cells::<ACCEPTED>(),
             status: FixedNodeStatus::new(true),
             control: ConnectControl::new(true),
             peers: PeerStore::new(),
@@ -207,8 +260,8 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
         })
         .expect("the observer is installed once");
 
-    s.listener.listen(port).expect("the node listens");
-    let stack = Stack::new([127, 0, 0, 1], &s.rx, &s.tx, LwipTcpDial::new(link));
+    listen(&s.listener, port, &s.accept_cells).expect("the node listens");
+    let stack = Stack::new([127, 0, 0, 1], &s.rx, &s.tx, dial(link, &s.dial_cells));
     let acceptor = stack.acceptor(LwipTcpListen::new(link, &s.listener));
     let host: &'static Host<S> = Box::leak(Box::new(SessionHost::new(
         CoopLocalSet::new(&runtime),
