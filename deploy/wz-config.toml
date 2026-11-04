@@ -2681,6 +2681,50 @@ the code that serves it is not in the image. The peers it holds are the ones dec
 built, and its connection machines only reconnect them.
 '''
 
+# The protocol the links of the lwIP node run on. The node's session tier is the same on both, the
+# slot profile's: what differs is the stack's link (a datagram socket, or a stream over lwIP's TCP
+# with the engine's stream link) and the locators the node reports and takes (`udp/` or `tcp/`).
+[[axis]]
+id = "link-protocol"
+image = "zephyr-admin-node"
+kconfig = "WZ_LINK_PROTOCOL"
+prompt = "The protocol the lwIP node's links run on"
+default = "udp"
+help = '''
+The node over lwIP on the fixed-memory profile opens and accepts its sessions over one protocol
+and reports its locators in it. `udp` is the node that has been on the T2G kit. `tcp` is the same
+node over lwIP's TCP (lwIP is built with its TCP sources, and the node's polls pump the MACs
+while a connect or a write waits); it has been built and not run on a board.
+'''
+
+[[axis_option]]
+id = "udp"
+axis = "link-protocol"
+kconfig = "WZ_LINK_UDP"
+prompt = "udp/: a datagram for each batch"
+help = '''
+The node's links are UDP sockets of lwIP, one datagram for each batch, as zenoh's udp/ link.
+'''
+
+[[axis_option]]
+id = "tcp"
+axis = "link-protocol"
+kconfig = "WZ_LINK_TCP"
+prompt = "tcp/: a byte stream with each batch behind its length"
+requires = "WZ_NET_BACKEND_LWIP_MAC && WZ_FIXED_MEMORY"
+help = '''
+The node's links are TCP connections of lwIP, a batch written behind a two-byte length as zenoh's
+tcp/ link. The connection pool, the receive rings and the byte tables the links take their buffers
+from are the image's statics (`fixed_tcp.rs`), and lwIP's TCP options are the port's
+(`lwip-port/lwipopts.h`). Only the fixed-memory node over lwIP has it.
+'''
+
+[[cargo_rule]]
+image = "zephyr-admin-node"
+when = ["WZ_NET_BACKEND_LWIP_MAC", "WZ_FIXED_MEMORY", "WZ_LINK_TCP"]
+features = ["fixed-tcp"]
+defaults = "off"
+
 [[cargo_rule]]
 image = "zephyr-admin-node"
 when = ["WZ_LIFECYCLE_DECLARED"]

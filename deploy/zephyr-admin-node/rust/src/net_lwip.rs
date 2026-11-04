@@ -39,7 +39,7 @@ use core::ffi::CStr;
 #[cfg(storage_fixed)]
 use wz::link_lwip::ethernet::EthernetPool;
 use wz::link_lwip::ethernet::{EthernetIf, Ipv4Config};
-#[cfg(storage_fixed)]
+#[cfg(all(storage_fixed, not(feature = "fixed-tcp")))]
 use wz::link_lwip::rx_sockets::SessionRxPool;
 use wz::link_lwip::LwipLink;
 use wz::runtime_coop::ClockSource;
@@ -264,8 +264,59 @@ impl PortStorage for crate::mac_lan865x::T1sMac {
 
 /// The session sockets of the node: one for the listener and one per session it dials.
 /// The cell count is `fixed_node::SOCKETS`, which sizes it.
-#[cfg(storage_fixed)]
+#[cfg(all(storage_fixed, not(feature = "fixed-tcp")))]
 pub static SOCKETS: SessionRxPool<{ crate::fixed_node::SOCKETS }> = SessionRxPool::new();
+
+/// The node's ports, in a `static`: a function can pump them, which a wait inside a session's
+/// stream needs (`pump_ports`). The node's loop owns the table by the profile's rule, one
+/// cooperative thread, and [`pump_ports`] is the only code that reaches it besides `add_port`.
+#[cfg(storage_fixed)]
+struct PortTable(core::cell::UnsafeCell<BoundedVec<PortCell, MAX_PORTS>>);
+
+// SAFETY: the profile's rule, stated on the type: the node runs on one thread and nothing else
+// reaches the table; a pump that is entered again from inside itself is refused (`PUMPING`).
+#[cfg(storage_fixed)]
+unsafe impl Sync for PortTable {}
+
+#[cfg(storage_fixed)]
+static PORTS: PortTable = PortTable(core::cell::UnsafeCell::new(BoundedVec::new()));
+
+/// Whether a pump of the ports is running now, so one entered from inside it (a MAC's poll that
+/// reached a session's wait) does nothing instead of aliasing the table.
+#[cfg(storage_fixed)]
+static PUMPING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// One pass over the ports: frames in on every one, then lwIP's timers, then each MAC's own
+/// housekeeping, in the heap form's order. Whether a frame came in, which is the pass that has work
+/// for the node's loop to do next. A plain function, so a stream that waits can run it
+/// (`wz_session_lwip::stream::Service`).
+#[cfg(storage_fixed)]
+pub fn pump_ports() -> bool {
+    use core::sync::atomic::Ordering;
+    if PUMPING.swap(true, Ordering::Acquire) {
+        return false;
+    }
+    // SAFETY: `PUMPING` was clear and is now ours, so no other reference to the table exists, and
+    // the profile's rule keeps every other caller on this thread.
+    let ports = unsafe { &mut *PORTS.0.get() };
+    let mut taken = 0;
+    for port in ports.iter_mut() {
+        taken += port.poll();
+    }
+    LwipLink::init_static().check_timeouts();
+    let now_ms = ZephyrClock::<TICK_HZ>.now_us() / 1000;
+    for port in ports.iter_mut() {
+        port.service(now_ms);
+    }
+    PUMPING.store(false, Ordering::Release);
+    taken > 0
+}
+
+/// [`pump_ports`] as the `fn()` a stream's polls run first.
+#[cfg(storage_fixed)]
+pub fn service_ports() {
+    let _ = pump_ports();
+}
 
 /// The node's stack in storage declared here (`fixed-memory`): `start` and `add_port`
 /// are the heap form's, so the board's bring-up does not change, and the rest is what
@@ -273,7 +324,6 @@ pub static SOCKETS: SessionRxPool<{ crate::fixed_node::SOCKETS }> = SessionRxPoo
 #[cfg(storage_fixed)]
 pub struct LwipMacNet {
     link: &'static LwipLink,
-    ports: BoundedVec<PortCell, MAX_PORTS>,
     addresses: BoundedVec<[u8; 4], MAX_PORTS>,
     zid: [u8; 6],
 }
@@ -285,7 +335,6 @@ impl LwipMacNet {
     pub fn start() -> Self {
         Self {
             link: LwipLink::init_static(),
-            ports: BoundedVec::new(),
             addresses: BoundedVec::new(),
             zid: [0; 6],
         }
@@ -301,10 +350,13 @@ impl LwipMacNet {
         mac: M,
         addressing: Addressing,
     ) -> Result<(), &'static CStr> {
-        if self.ports.len() == MAX_PORTS {
+        // SAFETY: bring-up runs before the node's loop and on its thread, and no pump is running
+        // (the table is reached only by this and by `pump_ports`, which this does not call).
+        let ports = unsafe { &mut *PORTS.0.get() };
+        if ports.len() == MAX_PORTS {
             return Err(c"wz: FAIL - the node has no cell for another interface");
         }
-        let first = self.ports.is_empty().then(|| mac.mac_address());
+        let first = ports.is_empty().then(|| mac.mac_address());
         let ethernet = EthernetIf::add_in(
             self.link,
             mac,
@@ -318,7 +370,7 @@ impl LwipMacNet {
         .map_err(|_| c"wz: FAIL - lwIP refused an Ethernet interface")?;
         // The capacity was checked above, so neither push can be refused.
         let _ = self.addresses.push(addressing.address);
-        let _ = self.ports.push(M::cell(ethernet));
+        let _ = ports.push(M::cell(ethernet));
         if let Some(address) = first {
             self.zid = address;
         }
@@ -344,15 +396,6 @@ impl LwipMacNet {
     /// then each MAC's own housekeeping, in the heap form's order. Whether a frame came
     /// in, which is the pass that has work for the node's loop to do next.
     pub fn pump(&mut self) -> bool {
-        let mut taken = 0;
-        for port in self.ports.iter_mut() {
-            taken += port.poll();
-        }
-        self.link.check_timeouts();
-        let now_ms = ZephyrClock::<TICK_HZ>.now_us() / 1000;
-        for port in self.ports.iter_mut() {
-            port.service(now_ms);
-        }
-        taken > 0
+        pump_ports()
     }
 }

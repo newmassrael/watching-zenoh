@@ -92,8 +92,17 @@ use wz_session_mcu::connect_manager::StaticEndpoints;
 mod fixed_client;
 #[cfg(all(feature = "get", role_client, storage_fixed))]
 mod fixed_get;
-#[cfg(all(role_admin, storage_fixed, feature = "net-lwip-mac"))]
+#[cfg(all(
+    role_admin,
+    storage_fixed,
+    feature = "net-lwip-mac",
+    not(feature = "fixed-tcp")
+))]
 mod fixed_node;
+// The same node with its links on `tcp/` over lwIP's streams (`CONFIG_WZ_LINK_TCP`): it replaces
+// `fixed_node`, which is the datagram node, and a build has one of them.
+#[cfg(all(role_admin, storage_fixed, feature = "fixed-tcp"))]
+mod fixed_tcp;
 // The admin node over Zephyr's sockets, which takes a session only through the secure channel.
 #[cfg(feature = "fixed-admin")]
 mod fixed_admin;
@@ -860,8 +869,11 @@ fn start() -> i32 {
     #[cfg(not(storage_fixed))]
     return run(net);
     // S9c -- the same node over the statics of `fixed_node`.
-    #[cfg(all(role_admin, storage_fixed))]
-    fixed_node::run(net)
+    #[cfg(all(role_admin, storage_fixed, not(feature = "fixed-tcp")))]
+    return fixed_node::run(net);
+    // The same node with its links on `tcp/` (`fixed_tcp`).
+    #[cfg(all(role_admin, storage_fixed, feature = "fixed-tcp"))]
+    fixed_tcp::run(net)
 }
 
 /// What `wz_app_main` returns when the core does not run at the clock the image

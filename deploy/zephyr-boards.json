@@ -129,6 +129,18 @@
     },
     {
       "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
+      "link": "rmii-dp83825i-fixed-tcp",
+      "app": "zephyr-admin-node",
+      "network": "lwip-mac",
+      "rust_target": "thumbv7em-none-eabi",
+      "grade": "BUILT",
+      "witness": {"lane": "Qzb"},
+      "requires": ["zephyr-cm0p-launcher"],
+      "conf_overlay": ["overlays/t2g_fixed.conf", "overlays/t2g_tcp.conf"],
+      "note": "The onboard RMII image on the fixed-memory profile with its links on tcp/ (CONFIG_WZ_LINK_TCP): the node of fixed_tcp.rs, wz_session_mcu::slot_admin::AcceptingAdminNode over wz_session_lwip::stream::LwipTcpStack, whose connections, receive rings, byte tables, sessions, listener and observer are statics the image declares and whose Rust image links no allocator. lwIP is built with its TCP sources and the port's TCP options (lwip-port/lwipopts.h); every wait inside a session's stream pumps the MACs through net_lwip::service_ports, so a SYN-ACK that comes in through the MAC is seen while a dial waits. The overlays are the fixed-memory profile's and the TCP axis's; neither pool is in it, because both are the datagram path's (the transmit pool carries a datagram in a slot, the receive pool lends a datagram in place). It is BUILT and not HARDWARE: the host tests run the same stream, stack and node over lwIP's loopback (session_over_tcp, admin_node_over_tcp of wz-session-lwip), and nothing has run through the MAC on silicon, so a dial that waits on a frame from the wire, the window and the send buffer under a real round trip, and the stack the node takes are all unmeasured. HARDWARE_VERDICT.md has no step for it."
+    },
+    {
+      "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
       "link": "zeth-sockets-client-fixed",
       "app": "zephyr-admin-node",
       "network": "zephyr-sockets",

@@ -189,6 +189,12 @@ fixed-memory = [
     "wz-session-mcu/adminspace-fixed",
     "wz-session-core/session-slot",
 ]
+# The fixed-memory node with its links on `tcp/` (`CONFIG_WZ_LINK_TCP`, `fixed_tcp.rs`): the same
+# node as `fixed-memory` over lwIP's streams instead of its datagrams, so lwIP is built with its TCP
+# sources (`wz-session-lwip/tcp`, through `wz-link-lwip/tcp` and `lwip-sys/tcp`) and the lwIP port
+# turns TCP on (`lwip-port/lwipopts.h`, which leaves it off unless the build defines it). The
+# crates are named only to turn their selectors on.
+fixed-tcp = ["fixed-memory", "wz-session-lwip/tcp", "wz-link-lwip/tcp"]
 # The fixed admin node binds no lifecycle verb (`CONFIG_WZ_LIFECYCLE_DECLARED`, decision D7 of
 # docs/session-lifecycle-intent.md): its opener is `NoOpening`, so the code that serves
 # `session/open` is not in the image, and the peers it holds are the ones the build declares. A

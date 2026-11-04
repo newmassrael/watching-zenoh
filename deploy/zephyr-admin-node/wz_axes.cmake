@@ -6,6 +6,10 @@
 
 set(wz_axes_features "")
 set(wz_axes_no_default_features "")
+if(CONFIG_WZ_NET_BACKEND_LWIP_MAC AND CONFIG_WZ_FIXED_MEMORY AND CONFIG_WZ_LINK_TCP)
+  list(APPEND wz_axes_features fixed-tcp)
+  set(wz_axes_no_default_features NO_DEFAULT_FEATURES)
+endif()
 if(CONFIG_WZ_LIFECYCLE_DECLARED)
   list(APPEND wz_axes_features lifecycle-declared)
 endif()

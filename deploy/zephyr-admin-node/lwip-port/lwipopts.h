@@ -28,7 +28,12 @@
 /* --- Protocols: UDP over IPv4 on Ethernet --- */
 #define LWIP_RAW                        0
 #define LWIP_UDP                        1
+/* TCP is the image's `fixed-tcp` feature (CONFIG_WZ_LINK_TCP): lwip-sys's build.rs defines
+ * LWIP_TCP=1 on the command line when its `tcp` feature is on, and this port leaves TCP off
+ * otherwise. */
+#ifndef LWIP_TCP
 #define LWIP_TCP                        0
+#endif
 #define LWIP_ICMP                       1
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       0
@@ -54,8 +59,14 @@
 #define MEM_ALIGNMENT                   4
 /* The heap pbufs for a transmitted datagram come from, and the stack's own
  * bookkeeping. A session's batch is at most 1472 bytes (`BATCH_SIZE`: one
- * Ethernet frame's UDP payload, so no session datagram is fragmented). */
+ * Ethernet frame's UDP payload, so no session datagram is fragmented). With
+ * TCP, a connection's unacknowledged data (TCP_SND_BUF) is copied into this
+ * heap by `tcp_write`, so it holds the send buffers of every connection. */
+#if LWIP_TCP
+#define MEM_SIZE                        (24 * 1024 + 4 * TCP_SND_BUF)
+#else
 #define MEM_SIZE                        (24 * 1024)
+#endif
 
 /* --- Pools --- */
 /* Received frames arrive in pool pbufs, 592 bytes each by default, so a 1514
@@ -66,6 +77,21 @@
 #define MEMP_NUM_UDP_PCB                8
 #define MEMP_NUM_NETBUF                 0
 #define MEMP_NUM_SYS_TIMEOUT            8
+
+/* --- TCP (the `fixed-tcp` image) --- */
+#if LWIP_TCP
+/* The largest segment an Ethernet frame carries: 1500 - 20 (IPv4) - 20 (TCP). */
+#define TCP_MSS                         1460
+/* The window the node advertises, and what a connection's receive ring must hold at least
+ * (`LwipTcpSocket::connect` refuses a ring below it): `fixed_tcp::CONN_RX` is sized to it. */
+#define TCP_WND                         (2 * TCP_MSS)
+#define TCP_SND_BUF                     (2 * TCP_MSS)
+/* Connections: one for each session the node holds, one waiting to be taken, and the ones that
+ * linger in TIME_WAIT (lwIP reclaims the oldest of those when a new one is needed). */
+#define MEMP_NUM_TCP_PCB                6
+#define MEMP_NUM_TCP_PCB_LISTEN         1
+#define MEMP_NUM_TCP_SEG                16
+#endif
 
 /* --- Checksums: software --- */
 #define LWIP_CHECKSUM_ON_COPY           0

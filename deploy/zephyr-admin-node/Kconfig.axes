@@ -90,3 +90,28 @@ config WZ_LIFECYCLE_DECLARED
 	  built, and its connection machines only reconnect them.
 
 endchoice
+
+choice WZ_LINK_PROTOCOL
+	prompt "The protocol the lwIP node's links run on"
+	default WZ_LINK_UDP
+	help
+	  The node over lwIP on the fixed-memory profile opens and accepts its sessions over one protocol
+	  and reports its locators in it. `udp` is the node that has been on the T2G kit. `tcp` is the same
+	  node over lwIP's TCP (lwIP is built with its TCP sources, and the node's polls pump the MACs
+	  while a connect or a write waits); it has been built and not run on a board.
+
+config WZ_LINK_UDP
+	bool "udp/: a datagram for each batch"
+	help
+	  The node's links are UDP sockets of lwIP, one datagram for each batch, as zenoh's udp/ link.
+
+config WZ_LINK_TCP
+	bool "tcp/: a byte stream with each batch behind its length"
+	depends on WZ_NET_BACKEND_LWIP_MAC && WZ_FIXED_MEMORY
+	help
+	  The node's links are TCP connections of lwIP, a batch written behind a two-byte length as zenoh's
+	  tcp/ link. The connection pool, the receive rings and the byte tables the links take their buffers
+	  from are the image's statics (`fixed_tcp.rs`), and lwIP's TCP options are the port's
+	  (`lwip-port/lwipopts.h`). Only the fixed-memory node over lwIP has it.
+
+endchoice
