@@ -1033,13 +1033,25 @@ impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
 /// What the group is told, and asked, is the caller's: a group carries no handshake and no
 /// router, so whether this subscriber's `Interest` goes out (and its `Interest(Final)` when it
 /// is retracted) depends on the ABI that declares it, as the other group declarations do
-/// ([`Session::ask`] and [`Session::ask_final`]). The handle therefore depends on the observer
-/// alone, as [`Subscriber`] does, and not on a typed session.
+#[cfg_attr(
+    feature = "codec-push",
+    doc = "([`Session::ask`] and [`Session::ask_final`])."
+)]
+#[cfg_attr(
+    not(feature = "codec-push"),
+    doc = "(`Session::ask` and `Session::ask_final`, which a build with `codec-push` has; this one \
+           cannot ask)."
+)]
+/// The handle therefore depends on the observer alone, as [`Subscriber`] does, and not on a
+/// typed session.
 ///
 /// The slot hears a member's token whether or not the member was asked: a member announces a
 /// token to the group when it declares it, and the registry keeps the tokens of its peers, so a
 /// subscriber declared with `history` is replayed the ones announced before it.
-#[cfg(feature = "liveliness-subscriber")]
+///
+/// It exists where its maker does: only a multicast session declares one
+/// ([`Session::declare_group_liveliness_subscriber`]).
+#[cfg(all(feature = "transport-multicast", feature = "liveliness-subscriber"))]
 pub struct GroupLivelinessSubscriber<R: SessionRuntime = TokioRuntime> {
     observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
     interest_id: u64,
@@ -1050,7 +1062,7 @@ pub struct GroupLivelinessSubscriber<R: SessionRuntime = TokioRuntime> {
     armed: bool,
 }
 
-#[cfg(feature = "liveliness-subscriber")]
+#[cfg(all(feature = "transport-multicast", feature = "liveliness-subscriber"))]
 impl<R: SessionRuntime> GroupLivelinessSubscriber<R> {
     /// The id the registry holds the slot by, which is the id of the `Interest` that asks the
     /// group for the tokens (the answer's `DeclFinal` names it).
@@ -1081,7 +1093,7 @@ impl<R: SessionRuntime> GroupLivelinessSubscriber<R> {
     }
 }
 
-#[cfg(feature = "liveliness-subscriber")]
+#[cfg(all(feature = "transport-multicast", feature = "liveliness-subscriber"))]
 impl<R: SessionRuntime> Drop for GroupLivelinessSubscriber<R> {
     fn drop(&mut self) {
         self.teardown();
@@ -1094,7 +1106,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// in this session's registry, which hears the tokens the group's members declare and
     /// retract ([`Self::dispatch_multicast_iteration_event`]), and with `history` replayed
     /// the ones it already holds. It emits NO wire message, as [`Self::declare_subscriber`]
-    /// emits none; asking the group is [`Self::ask`], and the caller's.
+    /// emits none; asking the group is the caller's,
+    #[cfg_attr(feature = "codec-push", doc = "by [`Self::ask`].")]
+    #[cfg_attr(
+        not(feature = "codec-push"),
+        doc = "by `ask`, which a build with `codec-push` has."
+    )]
     ///
     /// zenoh-pico does the same in this order: the replay of the tokens it holds, then the
     /// `Interest` (`vendor/zenoh-pico/src/net/liveliness.c` @

@@ -138,7 +138,7 @@ wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0425]: can
 wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0425]: cannot find type `LivelinessSubscriberOptions` in module `crate::session`: not found in `crate::session`
 wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	4	error[E0425]: cannot find type `LivelinessSubscriber` in module `crate::session`: not found in `crate::session`
 wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0425]: cannot find type `LivelinessToken` in module `crate::session`: not found in `crate::session`
-wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0425]: cannot find type `OwnedLivelinessSample` in module `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0425]: cannot find type `OwnedLivelinessSample` in module `crate::session`: not found in `crate::session`
 wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0432]: unresolved import `crate::session::QueryOptions`: no `QueryOptions` in `session`
 wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0432]: unresolved import `crate::session_glue`: could not find `session_glue` in the crate root
 wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0432]: unresolved imports `crate::session::LivelinessSubscriberAliasError`, `crate::session::LivelinessSubscriberOptions`: no `LivelinessSubscriberAliasError` in `session`, no `LivelinessSubscriberOptions` in `session`
@@ -334,7 +334,6 @@ wz-session-core	-	1	error: unresolved link to `crate::extlowlatency`
 wz-session-core	-	1	error: unresolved link to `crate::extshm`
 wz-session-core	-	1	error: unresolved link to `crate::inbound::inbound_to_fsm_event`
 wz-session-core	-	1	error: unresolved link to `crate::lent_control::NamedKeyexpr`
-wz-session-core	-	1	error: unresolved link to `crate::lent_response::ResponseWriter`
 wz-session-core	-	1	error: unresolved link to `crate::multicast_join`
 wz-session-core	-	1	error: unresolved link to `crate::push_routing_context`
 wz-session-core	-	1	error: unresolved link to `crate::queryable_info`

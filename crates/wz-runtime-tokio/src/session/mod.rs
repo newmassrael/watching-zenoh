@@ -3255,9 +3255,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// Hold liveliness token `id` on `keyexpr`, the literal it is declared on, so that a member's
     /// `Interest` for the tokens that stand is answered with it, as zenoh-pico answers one from
     /// its `_local_tokens` (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_declare_liveliness_token`).
-    /// What the session announces to the group ([`Self::announce`]) reaches the members that
-    /// listen when it is declared; this is what reaches the ones that listen later. Holding an id
-    /// held already changes nothing.
+    #[cfg_attr(
+        all(feature = "codec-push", feature = "codec-declare"),
+        doc = "What the session announces to the group ([`Self::announce`]) reaches the members"
+    )]
+    #[cfg_attr(
+        not(all(feature = "codec-push", feature = "codec-declare")),
+        doc = "What the session announces to the group (`announce`, which a build with \
+               `codec-push` and `codec-declare` has) reaches the members"
+    )]
+    /// that listen when it is declared; this is what reaches the ones that listen later. Holding
+    /// an id held already changes nothing.
     #[cfg(feature = "liveliness-token")]
     pub fn hold_token(&self, id: u64, keyexpr: &str) {
         R::with_mutex_mut(&self.observer, |observer| {

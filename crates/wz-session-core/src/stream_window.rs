@@ -7,25 +7,32 @@
 //! bytes on the universal path, four under `transport-lowlatency`, little-endian. A reader that
 //! does not size its reads (a registered-slot read on a host, a TCP receive callback on a node
 //! with no heap) is handed whatever arrived: several frames, one, a frame and a piece of the next,
-//! or a single byte of a prefix. [`RxWindow`] turns "these bytes arrived" into "these frames
-//! ended", and it is the one decision of that kind: the host's reader and a node's reader both
-//! run it, so a link does not mean one thing on a host and another on a node.
+//! or a single byte of a prefix. [`RxWindow`](crate::stream_window::RxWindow) turns "these bytes
+//! arrived" into "these frames ended", and it is the one decision of that kind: the host's reader
+//! and a node's reader both run it, so a link does not mean one thing on a host and another on a
+//! node.
 //!
 //! Three states, because a stream can break in exactly three places: between frames, inside a
 //! prefix, and inside a payload. Only the third copies, and only a frame that does not lie whole
-//! inside one push: such a frame is assembled in the window's [`Carry`], whose storage is the
-//! caller's choice. A host gives it a `Vec` (the frame can be as large as the prefix allows); a
-//! node with no heap gives it [`FixedCarry`], and a spanning frame larger than that is refused
-//! ([`WindowError::CarryTooSmall`]) where a whole frame of the same size would still be passed
-//! through.
+//! inside one push: such a frame is assembled in the window's
+//! [`Carry`](crate::stream_window::Carry), whose storage is the caller's choice. A host gives it a
+//! `Vec` (the frame can be as large as the prefix allows); a node with no heap gives it
+//! [`FixedCarry`](crate::stream_window::FixedCarry), and a spanning frame larger than that is
+//! refused ([`WindowError::CarryTooSmall`](crate::stream_window::WindowError::CarryTooSmall))
+//! where a whole frame of the same size would still be passed through.
+//!
+//! The links of these module docs name their targets from the crate root, as the crate's other
+//! modules documented on their `pub mod` line too do (`pool_gauge`): by their short names rustdoc
+//! resolved none of them, under every feature set of the crate.
 //!
 //! Rules the window keeps, all of them what the host's sized reader keeps:
 //!
 //! * The prefix width is read when a prefix STARTS and carried with it, so a flag flip between
 //!   two pushes never widens a prefix that is half read.
 //! * A zero-length batch is skipped, not passed up: an empty payload parses to nothing.
-//! * A four-byte prefix is an untrusted `u32`: one naming more than [`MAX_FRAME_PAYLOAD`] is
-//!   refused before anything is carried, and the window is left between frames.
+//! * A four-byte prefix is an untrusted `u32`: one naming more than
+//!   [`MAX_FRAME_PAYLOAD`](crate::stream_window::MAX_FRAME_PAYLOAD) is refused before anything is
+//!   carried, and the window is left between frames.
 //!
 //! Unconditional, no_std and no_alloc; the `Vec` carry exists with the `alloc` feature.
 
