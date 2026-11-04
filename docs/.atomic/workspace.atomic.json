@@ -308914,6 +308914,36 @@
         "A hosted reading of Layers C1z, C1AM, C1bp, C1cn and C1bzr at this round's head."
       ]
     },
+    "Round 4208": {
+      "decision_summary": "Item 751 step (b), a repair of Round 4206. The publisher test of the C ABI node called z_publisher_id without a cfg, and that export is unstable API: a build with router-node and the feature zenoh-c-no-unstable-api (the all-features arm of the nondefault-features leg) could not compile the test file. The import and the assertion that the publisher's id is an entity of the node's session are now held under not(zenoh-c-no-unstable-api), as the export is. The subscriber's dead zid field that the same build showed was repaired by a peer session and landed apart (f9cf21d40e); with both in place that configuration is clean.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/session_roles.rs: the import of z_publisher_id and the id assertion of the node publisher test are held under not(zenoh-c-no-unstable-api)."
+      ],
+      "verification_bullets": [
+        "Clippy -D warnings with all targets on origin/main plus this change: clean for wz-capi-c with router-node and with router-node and zenoh-c-no-unstable-api. The same configuration failed before the change on the unresolved import of z_publisher_id in the test file, which is what the change repairs. One run of the unstable-off build ended at the bx reservation (exit 137) and was rerun alone; it is not a code verdict. Not run: the tests of that configuration (compile only), the all-features build of other crates, the hosted C1cn leg."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Stage four of the C ABI node: get, the queryable and the querier, then liveliness and the matching of publishers and queriers, then shared memory, the advanced pair, the group, the info peers and routers, the transport and link events, the declared key expressions and the timestamp. Read the hosted run of the nondefault-features leg for the C1cn arm after this change. The rest of the carry of Round 4206 stands: a put of shared memory goes out as bytes on a node, a C ABI router that keeps no south is the registry of faces, router-node has no Kconfig switch or footprint budget, a client told no router that keeps a south is refused, and the dialled-subregion cases have no stock zenohd witness."
+      ],
+      "publishable_decision_summary": "Item 751 step (b), a repair of Round 4206. The publisher test of the C ABI node called z_publisher_id without a cfg, and that export is unstable API: a build with router-node and the feature zenoh-c-no-unstable-api (the all-features arm of the nondefault-features leg) could not compile the test file. The import and the assertion that the publisher's id is an entity of the node's session are now held under not(zenoh-c-no-unstable-api), as the export is. The subscriber's dead zid field that the same build showed was repaired by a peer session and landed apart (f9cf21d40e); with both in place that configuration is clean.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/session_roles.rs: the import of z_publisher_id and the id assertion of the node publisher test are held under not(zenoh-c-no-unstable-api)."
+      ],
+      "publishable_verification_bullets": [
+        "Clippy -D warnings with all targets on origin/main plus this change: clean for wz-capi-c with router-node and with router-node and zenoh-c-no-unstable-api. The same configuration failed before the change on the unresolved import of z_publisher_id in the test file, which is what the change repairs. One run of the unstable-off build ended at the bx reservation (exit 137) and was rerun alone; it is not a code verdict. Not run: the tests of that configuration (compile only), the all-features build of other crates, the hosted C1cn leg."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Stage four of the C ABI node: get, the queryable and the querier, then liveliness and the matching of publishers and queriers, then shared memory, the advanced pair, the group, the info peers and routers, the transport and link events, the declared key expressions and the timestamp. Read the hosted run of the nondefault-features leg for the C1cn arm after this change. The rest of the carry of Round 4206 stands: a put of shared memory goes out as bytes on a node, a C ABI router that keeps no south is the registry of faces, router-node has no Kconfig switch or footprint budget, a client told no router that keeps a south is refused, and the dialled-subregion cases have no stock zenohd witness."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
