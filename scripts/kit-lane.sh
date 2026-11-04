@@ -466,7 +466,7 @@ PY
     # that commit one; it is the figure the quarter of free stack applies to, and the kit's reading lies under it.
     local bound_rows
     bound_rows="$(python3 "$ROOT/scripts/lib/stack_bound_gate.py" --list)"
-    if [[ "$KIND" == measure || "$KIND" == verify || "$KIND" == admin ]] || is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
+    if [[ "$KIND" == measure || "$KIND" == verify ]] || is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
         :
     elif [[ $'\n'"$bound_rows"$'\n' == *$'\n'"$key"$'\n'* ]]; then
         if python3 "$ROOT/scripts/lib/stack_bound_gate.py" --check "$key" --elf "$elf" >"$out/stack-bound.log" 2>&1; then
