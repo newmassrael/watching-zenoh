@@ -251,6 +251,48 @@ pub(crate) struct NodeQuerier {
     node: Arc<wz_capi_core::drive::RouterState>,
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
     base: QueryOptions,
+    /// The id of the interest the querier declared on the node's data plane, which tells the
+    /// querier's node the queryables beyond its router: what its matching reads.
+    interest: u64,
+    /// A background matching listener, retired with the querier.
+    matching: Mutex<Option<MatchingHold>>,
+}
+
+#[cfg(feature = "router-node")]
+impl NodeQuerier {
+    /// The node the querier is declared on.
+    pub(crate) fn node(&self) -> &Arc<wz_capi_core::drive::RouterState> {
+        &self.node
+    }
+
+    /// The key the querier asks on.
+    pub(crate) fn key(&self) -> &str {
+        self.keyexpr.literal()
+    }
+
+    /// What the querier's matching counts: the queryables, only the complete ones when its
+    /// target is `ALL_COMPLETE`, as zenoh's querier asks for its matching.
+    pub(crate) fn plane(&self) -> wz_runtime_tokio::router_forward::MatchPlane {
+        wz_runtime_tokio::router_forward::MatchPlane::Queryables {
+            complete_required: self.base.effective_target()
+                == Some(wz_runtime_tokio::session_glue::QueryTarget::AllComplete),
+        }
+    }
+
+    /// Record a background matching listener, retiring any previous one.
+    fn attach_matching(&self, hold: MatchingHold) {
+        let mut slot = self.matching.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(hold);
+    }
+}
+
+#[cfg(feature = "router-node")]
+impl Drop for NodeQuerier {
+    fn drop(&mut self) {
+        self.node
+            .forwarder()
+            .undeclare_local_interest(self.interest, true);
+    }
 }
 
 impl QuerierHandle {
@@ -281,39 +323,6 @@ pub(crate) unsafe fn querier_handle<'a>(
     }
     // SAFETY: a live `Box<QuerierHandle>` this crate leaked.
     Some(unsafe { &*(handle as *const QuerierHandle) })
-}
-
-/// Read the [`QuerierState`] of a querier of the registry behind a loaned querier: `None` for a
-/// handle that is not there and for a querier of a node, which an operation written over the
-/// registry cannot be run on. What such an operation answers when it finds none is
-/// [`not_a_registry_querier`].
-///
-/// # Safety
-/// As [`querier_handle`].
-pub(crate) unsafe fn querier_state<'a>(
-    this_: *const z_loaned_querier_t,
-) -> Option<&'a QuerierState> {
-    // SAFETY: the caller's contract.
-    match unsafe { querier_handle(this_) }? {
-        QuerierHandle::Registry(state) => Some(state),
-        #[cfg(feature = "router-node")]
-        QuerierHandle::Node(_) => None,
-    }
-}
-
-/// What an operation written over the registry answers when [`querier_state`] found none:
-/// `Z_EUNAVAILABLE` for a querier of a node, which is there but does not carry the operation
-/// yet, and `Z_ENULL` for a handle that is not there.
-///
-/// # Safety
-/// As [`querier_handle`].
-pub(crate) unsafe fn not_a_registry_querier(this_: *const z_loaned_querier_t) -> ZResult {
-    // SAFETY: the caller's contract.
-    match unsafe { querier_handle(this_) } {
-        #[cfg(feature = "router-node")]
-        Some(QuerierHandle::Node(_)) => crate::result::Z_EUNAVAILABLE,
-        _ => Z_ENULL,
-    }
 }
 
 /// Declare a querier (zenoh-c `z_declare_querier`).
@@ -370,11 +379,20 @@ pub unsafe extern "C" fn z_declare_querier(
             // A node asks as its own face: the querier keeps the node and the options its gets
             // start from.
             #[cfg(feature = "router-node")]
-            SessionHandle::Node(node) => QuerierHandle::Node(NodeQuerier {
-                node: Arc::clone(node),
-                keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
-                base,
-            }),
+            SessionHandle::Node(node) => {
+                // The node holds the declarations of every face it serves, and its router tells
+                // a peer below it a declaration only for an interest it holds: so a querier asks
+                // for the queryables of its key, as the Rust API's node does.
+                let interest = crate::matching::next_interest_id();
+                node.forwarder().declare_local_interest(interest, &ke, true);
+                QuerierHandle::Node(NodeQuerier {
+                    node: Arc::clone(node),
+                    keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
+                    base,
+                    interest,
+                    matching: Mutex::new(None),
+                })
+            }
         });
         // Bind AFTER boxing — the state is at its final address only here.
         match &mut *boxed {
@@ -678,29 +696,44 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
         *owned = z_owned_closure_matching_status_t::null_value();
 
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { querier_state(querier) }) else {
-            return unsafe { not_a_registry_querier(querier) };
+        let Some(held) = (unsafe { querier_handle(querier) }) else {
+            return Z_ENULL;
         };
         let closure = Arc::new(cclosure);
-        let complete_required = state.matching_needs_complete();
-        let id = state.shared.declare_querier_matching_listener(
-            state.keyexpr.literal().to_owned(),
-            Arc::new(move |matching: bool| {
-                let Some(call) = closure.call else {
-                    return;
-                };
-                let status = z_matching_status_t { matching };
-                let ctx = closure.context.0;
-                // SAFETY: `call` is the C callback and `status` outlives it. An
-                // unwind out of the callback across `extern "C"` is UB, so it is
-                // caught — the drive loop survives a misbehaving callback.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                    call(&status, ctx);
-                }));
-            }),
-            complete_required,
-        );
-        state.attach_matching(MatchingHold::new(state.shared.clone(), id));
+        let sink: Arc<dyn Fn(bool) + Send + Sync> = Arc::new(move |matching: bool| {
+            let Some(call) = closure.call else {
+                return;
+            };
+            let status = z_matching_status_t { matching };
+            let ctx = closure.context.0;
+            // SAFETY: `call` is the C callback and `status` outlives it. An
+            // unwind out of the callback across `extern "C"` is UB, so it is
+            // caught — the drive loop survives a misbehaving callback.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                call(&status, ctx);
+            }));
+        });
+        match held {
+            QuerierHandle::Registry(state) => {
+                let id = state.shared.declare_querier_matching_listener(
+                    state.keyexpr.literal().to_owned(),
+                    sink,
+                    state.matching_needs_complete(),
+                );
+                state.attach_matching(MatchingHold::new(state.shared.clone(), id));
+            }
+            // A node's own face is told whether anything of the queryables matches the key.
+            #[cfg(feature = "router-node")]
+            QuerierHandle::Node(node) => {
+                let id = node.node().watch_matching(
+                    node.plane(),
+                    node.key(),
+                    wz_runtime_tokio::locality::Locality::Any,
+                    Box::new(move |matching| sink(matching)),
+                );
+                node.attach_matching(MatchingHold::node(Arc::clone(node.node()), id));
+            }
+        }
         Z_OK
     })
 }

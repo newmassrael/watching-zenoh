@@ -43,7 +43,11 @@ use wz_capi_c::liveliness::{
 };
 #[cfg(feature = "router-node")]
 use wz_capi_c::matching::{
-    z_matching_status_t, z_publisher_get_matching_status, z_querier_get_matching_status,
+    z_closure_matching_status, z_matching_status_t, z_moved_closure_matching_status_t,
+    z_owned_closure_matching_status_t, z_owned_matching_listener_t,
+    z_publisher_declare_background_matching_listener, z_publisher_declare_matching_listener,
+    z_publisher_get_matching_status, z_querier_declare_matching_listener,
+    z_querier_get_matching_status, z_undeclare_matching_listener,
 };
 #[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
 use wz_capi_c::publisher::z_publisher_id;
@@ -400,8 +404,7 @@ fn a_node_opened_through_the_c_abi_puts_and_subscribes() {
 
 /// A publisher declared on a node publishes as the node does: a registry peer that dials it hears
 /// what the publisher puts, the publisher answers its key and an id of the node's session, a delete
-/// goes out, and the publisher is let go. The matching of a publisher is not carried by the node
-/// yet and says so.
+/// goes out, and the publisher is let go.
 #[cfg(feature = "router-node")]
 #[test]
 fn a_publisher_declared_on_a_node_publishes() {
@@ -469,12 +472,6 @@ fn a_publisher_declared_on_a_node_publishes() {
             "what the node's publisher put never reached the peer"
         );
         assert_eq!(z_publisher_delete(loaned, std::ptr::null_mut()), Z_OK);
-        let mut status: z_matching_status_t = std::mem::zeroed();
-        assert_eq!(
-            z_publisher_get_matching_status(loaned, &mut status),
-            Z_EUNAVAILABLE,
-            "the matching of a publisher is not carried by the node yet"
-        );
         assert_eq!(
             z_undeclare_publisher((&mut publisher as *mut z_owned_publisher_t).cast()),
             Z_OK
@@ -736,9 +733,217 @@ fn a_node_opened_through_the_c_abi_takes_part_in_liveliness() {
     }
 }
 
+/// The matching handler of the node tests: count each time a status says something matches.
+#[cfg(feature = "router-node")]
+unsafe extern "C" fn on_matching(status: *const z_matching_status_t, ctx: *mut c_void) {
+    if (*status).matching {
+        (*(ctx as *const CountCtx))
+            .hits
+            .fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Declare an owned matching listener through `declare`, counting the statuses that say something
+/// matches. The context is leaked rather than freed under a delivery that may still be under way.
+#[cfg(feature = "router-node")]
+unsafe fn count_matching(
+    declare: impl FnOnce(*mut z_owned_matching_listener_t, *mut z_moved_closure_matching_status_t) -> i8,
+) -> (z_owned_matching_listener_t, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(CountCtx { hits: hits.clone() }));
+    let mut closure: z_owned_closure_matching_status_t = std::mem::zeroed();
+    z_closure_matching_status(&mut closure, Some(on_matching), None, ctx.cast());
+    let mut listener: z_owned_matching_listener_t = std::mem::zeroed();
+    assert_eq!(
+        declare(
+            &mut listener,
+            (&mut closure as *mut z_owned_closure_matching_status_t)
+                .cast::<z_moved_closure_matching_status_t>(),
+        ),
+        Z_OK,
+        "a matching listener is declared"
+    );
+    (listener, hits)
+}
+
+/// Wait up to ten seconds for `check` to hold, and say whether it did.
+#[cfg(feature = "router-node")]
+fn eventually(check: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !check() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    check()
+}
+
+/// The matching of a node's publisher and querier: a registry peer that dials the node holds a
+/// subscriber and a queryable on the key, and the node's publisher and querier on that key say
+/// that something matches, by status and by listener (owned and background), while a publisher on
+/// another key does not.
+#[cfg(feature = "router-node")]
+#[test]
+fn the_matching_of_a_node_publisher_and_querier_reads_the_peer() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the contexts are freed after them.
+    unsafe {
+        let key = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        let other = CString::new("wz/session-roles/elsewhere").unwrap();
+        let mut other_view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut other_view, other.as_ptr()),
+            Z_OK
+        );
+
+        let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+        let mut elsewhere: z_owned_publisher_t = std::mem::zeroed();
+        let mut querier: z_owned_querier_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(&node),
+                &mut publisher,
+                z_view_keyexpr_loan(&view),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(&node),
+                &mut elsewhere,
+                z_view_keyexpr_loan(&other_view),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_declare_querier(
+                z_session_loan(&node),
+                &mut querier,
+                z_view_keyexpr_loan(&view),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        let publisher_loaned = z_publisher_loan(&publisher);
+        let elsewhere_loaned = z_publisher_loan(&elsewhere);
+        let querier_loaned = z_querier_loan(&querier);
+
+        // Listeners declared before the peer holds anything are told when it does.
+        let (mut on_publisher, publisher_told) = count_matching(|listener, closure| {
+            z_publisher_declare_matching_listener(publisher_loaned, listener, closure)
+        });
+        let (mut on_querier, querier_told) = count_matching(|listener, closure| {
+            z_querier_declare_matching_listener(querier_loaned, listener, closure)
+        });
+        let background_told = Arc::new(AtomicUsize::new(0));
+        let background_ctx = Box::into_raw(Box::new(CountCtx {
+            hits: background_told.clone(),
+        }));
+        let mut background: z_owned_closure_matching_status_t = std::mem::zeroed();
+        z_closure_matching_status(
+            &mut background,
+            Some(on_matching),
+            None,
+            background_ctx.cast(),
+        );
+        assert_eq!(
+            z_publisher_declare_background_matching_listener(
+                publisher_loaned,
+                (&mut background as *mut z_owned_closure_matching_status_t)
+                    .cast::<z_moved_closure_matching_status_t>(),
+            ),
+            Z_OK
+        );
+
+        let (_subscription_hits, subscription_ctx) = count_samples(&peer);
+        let (mut peer_queryable, _handled, peer_ctx) = declare_answering(&peer);
+
+        let status_of = |loaned| {
+            let mut status: z_matching_status_t = std::mem::zeroed();
+            assert_eq!(z_publisher_get_matching_status(loaned, &mut status), Z_OK);
+            status.matching
+        };
+        assert!(
+            eventually(|| status_of(publisher_loaned)),
+            "the status of the node's publisher never said the peer's subscriber matches"
+        );
+        assert!(
+            eventually(|| {
+                let mut status: z_matching_status_t = std::mem::zeroed();
+                assert_eq!(
+                    z_querier_get_matching_status(querier_loaned, &mut status),
+                    Z_OK
+                );
+                status.matching
+            }),
+            "the status of the node's querier never said the peer's queryable matches"
+        );
+        assert!(
+            eventually(|| publisher_told.load(Ordering::SeqCst) > 0),
+            "the owned listener of the node's publisher was never told"
+        );
+        assert!(
+            eventually(|| querier_told.load(Ordering::SeqCst) > 0),
+            "the owned listener of the node's querier was never told"
+        );
+        assert!(
+            eventually(|| background_told.load(Ordering::SeqCst) > 0),
+            "the background listener of the node's publisher was never told"
+        );
+        assert!(
+            !status_of(elsewhere_loaned),
+            "a publisher on a key nothing subscribes to does not match"
+        );
+
+        assert_eq!(
+            z_undeclare_matching_listener(
+                (&mut on_publisher as *mut z_owned_matching_listener_t).cast()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_matching_listener(
+                (&mut on_querier as *mut z_owned_matching_listener_t).cast()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_publisher((&mut publisher as *mut z_owned_publisher_t).cast()),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_publisher((&mut elsewhere as *mut z_owned_publisher_t).cast()),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_querier((&mut querier as *mut z_owned_querier_t).cast()),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_queryable((&mut peer_queryable as *mut z_owned_queryable_t).cast()),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
+        drop(Box::from_raw(peer_ctx));
+        drop(Box::from_raw(subscription_ctx));
+    }
+}
+
 /// A querier declared on a node asks as the node does: the queryable of a registry peer that dials
-/// the node answers its gets, the querier answers its key and an id of the node's session, and its
-/// matching, which the node does not carry yet, says so.
+/// the node answers its gets, and the querier answers its key and an id of the node's session.
 #[cfg(feature = "router-node")]
 #[test]
 fn a_querier_declared_on_a_node_asks() {
@@ -787,12 +992,6 @@ fn a_querier_declared_on_a_node_asks() {
             "what the node's querier asked was never answered by the peer's queryable"
         );
         assert!(peer_handled.load(Ordering::SeqCst) > 0);
-        let mut status: z_matching_status_t = std::mem::zeroed();
-        assert_eq!(
-            z_querier_get_matching_status(loaned, &mut status),
-            Z_EUNAVAILABLE,
-            "the matching of a querier is not carried by the node yet"
-        );
         assert_eq!(
             z_undeclare_querier((&mut querier as *mut z_owned_querier_t).cast()),
             Z_OK

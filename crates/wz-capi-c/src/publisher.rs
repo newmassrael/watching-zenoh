@@ -582,13 +582,18 @@ pub(crate) enum PublisherHandle {
 /// A node names every key whole on the wire, so the publisher takes no declaration of its key.
 #[cfg(feature = "router-node")]
 pub(crate) struct NodePublisher {
-    forwarder: Arc<wz_runtime_tokio::router_forward::RouterForwarder>,
+    node: Arc<wz_capi_core::drive::RouterState>,
     /// The identity of the session, which `z_publisher_id` answers.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     zid: [u8; 16],
     keyexpr: KeyexprState,
     loaned_keyexpr: z_loaned_keyexpr_t,
     base: PublishOptions,
+    /// The id of the interest the publisher declared on the node's data plane, which tells the
+    /// publisher's node the subscribers beyond its router: what its matching reads.
+    interest: u64,
+    /// The background matching listener this publisher declared, if any: retired with it.
+    matching: std::sync::Mutex<Option<crate::matching::MatchingHold>>,
 }
 
 #[cfg(feature = "router-node")]
@@ -597,6 +602,34 @@ impl NodePublisher {
     fn bind(&mut self) {
         self.loaned_keyexpr =
             z_loaned_keyexpr_t::from_handle(&self.keyexpr as *const KeyexprState as *mut c_void);
+    }
+
+    /// The node the publisher is declared on.
+    pub(crate) fn node(&self) -> &Arc<wz_capi_core::drive::RouterState> {
+        &self.node
+    }
+
+    /// The key the publisher publishes on.
+    pub(crate) fn key(&self) -> &str {
+        &self.keyexpr.keyexpr
+    }
+
+    /// Record a background matching listener, retiring any previous one.
+    pub(crate) fn attach_matching(&self, hold: crate::matching::MatchingHold) {
+        let previous = match self.matching.lock() {
+            Ok(mut guard) => guard.replace(hold),
+            Err(poisoned) => poisoned.into_inner().replace(hold),
+        };
+        drop(previous);
+    }
+}
+
+#[cfg(feature = "router-node")]
+impl Drop for NodePublisher {
+    fn drop(&mut self) {
+        self.node
+            .forwarder()
+            .undeclare_local_interest(self.interest, false);
     }
 }
 
@@ -638,39 +671,6 @@ pub(crate) unsafe fn publisher_handle<'a>(
     }
     // SAFETY: as above — a live `Box<PublisherHandle>` this crate leaked.
     Some(unsafe { &*(handle as *const PublisherHandle) })
-}
-
-/// Read the state of a publisher of the registry behind a loaned publisher: `None` for a handle
-/// that is not there and for a publisher of a node, which an operation written over the registry
-/// cannot be run on. What such an operation answers when it finds none is
-/// [`not_a_registry_publisher`].
-///
-/// # Safety
-/// As [`publisher_handle`].
-pub(crate) unsafe fn publisher_state<'a>(
-    this_: *const z_loaned_publisher_t,
-) -> Option<&'a PublisherState> {
-    // SAFETY: the caller's contract.
-    match unsafe { publisher_handle(this_) }? {
-        PublisherHandle::Registry(state) => Some(state),
-        #[cfg(feature = "router-node")]
-        PublisherHandle::Node(_) => None,
-    }
-}
-
-/// What an operation written over the registry answers when [`publisher_state`] found none:
-/// `Z_EUNAVAILABLE` for a publisher of a node, which is there but does not carry the operation
-/// yet, and `Z_ENULL` for a handle that is not there.
-///
-/// # Safety
-/// As [`publisher_handle`].
-pub(crate) unsafe fn not_a_registry_publisher(this_: *const z_loaned_publisher_t) -> ZResult {
-    // SAFETY: the caller's contract.
-    match unsafe { publisher_handle(this_) } {
-        #[cfg(feature = "router-node")]
-        Some(PublisherHandle::Node(_)) => crate::result::Z_EUNAVAILABLE,
-        _ => Z_ENULL,
-    }
 }
 
 /// Fill in the default publisher options (zenoh-c `z_publisher_options_default`).
@@ -775,8 +775,16 @@ pub unsafe extern "C" fn z_declare_publisher(
             SessionHandle::Node(node) => {
                 // SAFETY: the caller's contract for `options`.
                 let base = unsafe { resolve_publisher_options(options) };
+                // The node holds the declarations of every face it serves, and its router tells
+                // a peer below it a declaration only for an interest it holds: so a publisher
+                // asks for the subscribers of its key, as the Rust API's node does.
+                let interest = crate::matching::next_interest_id();
+                node.forwarder()
+                    .declare_local_interest(interest, &keyexpr, false);
                 let mut boxed = Box::new(PublisherHandle::Node(NodePublisher {
-                    forwarder: node.shared_forwarder(),
+                    node: Arc::clone(node),
+                    interest,
+                    matching: std::sync::Mutex::new(None),
                     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
                     zid: held.zid(),
                     keyexpr: crate::keyexpr::KeyexprState {
@@ -878,7 +886,7 @@ pub unsafe extern "C" fn z_publisher_put(
             PublisherHandle::Node(node) => {
                 let publish = overrides.apply(node.base.clone());
                 return crate::put::node_publish(
-                    &node.forwarder,
+                    node.node.forwarder(),
                     &node.keyexpr.keyexpr,
                     payload.bytes(),
                     &publish,
@@ -982,7 +990,7 @@ pub unsafe extern "C" fn z_publisher_delete(
             #[cfg(feature = "router-node")]
             PublisherHandle::Node(node) => {
                 return crate::put::node_publish(
-                    &node.forwarder,
+                    node.node.forwarder(),
                     &node.keyexpr.keyexpr,
                     &[],
                     &options,

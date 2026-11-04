@@ -206,21 +206,76 @@ unsafe impl Sync for CMatchClosure {}
 /// cannot forget — the same reason the liveliness token's retraction is in
 /// `TokenState::drop`.
 pub(crate) struct MatchingHold {
-    shared: Arc<SharedSession>,
-    id: MatchId,
+    /// Held for its drop, which retires the listener.
+    _target: MatchTarget,
+}
+
+/// What a matching listener is declared on, and so what retracts it.
+enum MatchTarget {
+    /// The registry of faces: the listener is a [`MatchId`] of its SSOT.
+    Registry {
+        shared: Arc<SharedSession>,
+        id: MatchId,
+    },
+    /// A node: the watch is held by the node's own face, which the listener holds counted so that
+    /// the watch can be ended after the session handle has been let go of.
+    #[cfg(feature = "router-node")]
+    Node {
+        node: Arc<wz_capi_core::drive::RouterState>,
+        id: u64,
+    },
+}
+
+impl Drop for MatchTarget {
+    fn drop(&mut self) {
+        match self {
+            Self::Registry { shared, id } => shared.undeclare_matching_listener(*id),
+            #[cfg(feature = "router-node")]
+            Self::Node { node, id } => node.unwatch_matching(*id),
+        }
+    }
 }
 
 impl MatchingHold {
     /// Record a live listener so it is retired with its publisher.
     pub(crate) fn new(shared: Arc<SharedSession>, id: MatchId) -> Self {
-        Self { shared, id }
+        Self {
+            _target: MatchTarget::Registry { shared, id },
+        }
+    }
+
+    /// Record a watch of a node so it is retired with its publisher or querier.
+    #[cfg(feature = "router-node")]
+    pub(crate) fn node(node: Arc<wz_capi_core::drive::RouterState>, id: u64) -> Self {
+        Self {
+            _target: MatchTarget::Node { node, id },
+        }
     }
 }
 
-impl Drop for MatchingHold {
-    fn drop(&mut self) {
-        self.shared.undeclare_matching_listener(self.id);
-    }
+/// The ids the interests of a node's publishers and queriers are held under on its data plane:
+/// one counter for the process, since an id only has to differ from the others of its node.
+#[cfg(feature = "router-node")]
+pub(crate) fn next_interest_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Watch whether anything of `plane` matches `key` as the session of `node`, and tell `sink` now
+/// and each time that changes. The id answered ends the watch.
+#[cfg(feature = "router-node")]
+fn watch_on_node(
+    node: &wz_capi_core::drive::RouterState,
+    plane: wz_runtime_tokio::router_forward::MatchPlane,
+    key: &str,
+    sink: Arc<dyn Fn(bool) + Send + Sync>,
+) -> u64 {
+    node.watch_matching(
+        plane,
+        key,
+        wz_runtime_tokio::locality::Locality::Any,
+        Box::new(move |matching| sink(matching)),
+    )
 }
 
 /// Construct a matching-status closure from its parts (zenoh-c
@@ -305,27 +360,29 @@ pub unsafe extern "C" fn z_publisher_declare_background_matching_listener(
         *owned = z_owned_closure_matching_status_t::null_value();
 
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { crate::publisher::publisher_state(publisher) }) else {
-            return unsafe { crate::publisher::not_a_registry_publisher(publisher) };
+        let Some(held) = (unsafe { crate::publisher::publisher_handle(publisher) }) else {
+            return Z_ENULL;
         };
-        let closure = Arc::new(cclosure);
-        let id = state.shared.declare_matching_listener(
-            state.keyexpr.keyexpr.clone(),
-            Arc::new(move |matching: bool| {
-                let Some(call) = closure.call else {
-                    return;
-                };
-                let status = z_matching_status_t { matching };
-                let ctx = closure.context.0;
-                // SAFETY: `call` is the C callback and `status` outlives it. An
-                // unwind out of the callback across `extern "C"` is UB, so it is
-                // caught — the drive loop survives a misbehaving callback.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                    call(&status, ctx);
-                }));
-            }),
-        );
-        state.attach_matching(MatchingHold::new(state.shared.clone(), id));
+        let sink = matching_sink(Arc::new(cclosure));
+        match held {
+            crate::publisher::PublisherHandle::Registry(state) => {
+                let id = state
+                    .shared
+                    .declare_matching_listener(state.keyexpr.keyexpr.clone(), sink);
+                state.attach_matching(MatchingHold::new(state.shared.clone(), id));
+            }
+            // A node's own face is told whether anything of the subscribers matches the key.
+            #[cfg(feature = "router-node")]
+            crate::publisher::PublisherHandle::Node(node) => {
+                let id = watch_on_node(
+                    node.node(),
+                    wz_runtime_tokio::router_forward::MatchPlane::Subscribers,
+                    node.key(),
+                    sink,
+                );
+                node.attach_matching(MatchingHold::node(Arc::clone(node.node()), id));
+            }
+        }
         Z_OK
     })
 }
@@ -340,14 +397,7 @@ pub unsafe extern "C" fn z_publisher_declare_background_matching_listener(
 /// identical path and cannot drift — the same discipline
 /// [`MatchingHold`] uses for the background form.
 struct ListenerState {
-    shared: Arc<SharedSession>,
-    id: MatchId,
-}
-
-impl Drop for ListenerState {
-    fn drop(&mut self) {
-        self.shared.undeclare_matching_listener(self.id);
-    }
+    _target: MatchTarget,
 }
 
 /// Owned matching listener (zenoh-c `z_owned_matching_listener_t`) — 24 bytes
@@ -415,12 +465,8 @@ fn matching_sink(closure: Arc<CMatchClosure>) -> Arc<dyn Fn(bool) + Send + Sync>
 ///
 /// # Safety
 /// `out` must be valid and writable.
-unsafe fn install_listener(
-    out: *mut z_owned_matching_listener_t,
-    shared: Arc<SharedSession>,
-    id: MatchId,
-) {
-    let boxed = Box::into_raw(Box::new(ListenerState { shared, id })) as *mut c_void;
+unsafe fn install_listener(out: *mut z_owned_matching_listener_t, target: MatchTarget) {
+    let boxed = Box::into_raw(Box::new(ListenerState { _target: target })) as *mut c_void;
     // SAFETY: the caller's contract.
     unsafe {
         *out = z_owned_matching_listener_t {
@@ -453,14 +499,30 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
         // SAFETY: as above.
         let closure = unsafe { adopt_matching_closure(callback) };
         // SAFETY: as above.
-        let Some(state) = (unsafe { crate::publisher::publisher_state(publisher) }) else {
-            return unsafe { crate::publisher::not_a_registry_publisher(publisher) };
+        let Some(held) = (unsafe { crate::publisher::publisher_handle(publisher) }) else {
+            return Z_ENULL;
         };
-        let id = state
-            .shared
-            .declare_matching_listener(state.keyexpr.keyexpr.clone(), matching_sink(closure));
+        let target = match held {
+            crate::publisher::PublisherHandle::Registry(state) => MatchTarget::Registry {
+                shared: state.shared.clone(),
+                id: state.shared.declare_matching_listener(
+                    state.keyexpr.keyexpr.clone(),
+                    matching_sink(closure),
+                ),
+            },
+            #[cfg(feature = "router-node")]
+            crate::publisher::PublisherHandle::Node(node) => MatchTarget::Node {
+                node: Arc::clone(node.node()),
+                id: watch_on_node(
+                    node.node(),
+                    wz_runtime_tokio::router_forward::MatchPlane::Subscribers,
+                    node.key(),
+                    matching_sink(closure),
+                ),
+            },
+        };
         // SAFETY: the slot was gravestoned above.
-        unsafe { install_listener(matching_listener, state.shared.clone(), id) };
+        unsafe { install_listener(matching_listener, target) };
         Z_OK
     })
 }
@@ -511,7 +573,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
         };
         let id = shared.declare_matching_listener(keyexpr, matching_sink(closure));
         // SAFETY: the slot was gravestoned above.
-        unsafe { install_listener(matching_listener, shared, id) };
+        unsafe { install_listener(matching_listener, MatchTarget::Registry { shared, id }) };
         Z_OK
     })
 }
@@ -596,16 +658,31 @@ pub unsafe extern "C" fn z_querier_declare_matching_listener(
         // SAFETY: as above.
         let closure = unsafe { adopt_matching_closure(callback) };
         // SAFETY: as above.
-        let Some(state) = (unsafe { crate::querier::querier_state(querier) }) else {
-            return unsafe { crate::querier::not_a_registry_querier(querier) };
+        let Some(held) = (unsafe { crate::querier::querier_handle(querier) }) else {
+            return Z_ENULL;
         };
-        let id = state.shared.declare_querier_matching_listener(
-            state.keyexpr.literal().to_owned(),
-            matching_sink(closure),
-            state.matching_needs_complete(),
-        );
+        let target = match held {
+            crate::querier::QuerierHandle::Registry(state) => MatchTarget::Registry {
+                shared: state.shared.clone(),
+                id: state.shared.declare_querier_matching_listener(
+                    state.keyexpr.literal().to_owned(),
+                    matching_sink(closure),
+                    state.matching_needs_complete(),
+                ),
+            },
+            #[cfg(feature = "router-node")]
+            crate::querier::QuerierHandle::Node(node) => MatchTarget::Node {
+                node: Arc::clone(node.node()),
+                id: watch_on_node(
+                    node.node(),
+                    node.plane(),
+                    node.key(),
+                    matching_sink(closure),
+                ),
+            },
+        };
         // SAFETY: the slot was gravestoned above.
-        unsafe { install_listener(matching_listener, state.shared.clone(), id) };
+        unsafe { install_listener(matching_listener, target) };
         Z_OK
     })
 }
@@ -632,11 +709,22 @@ pub unsafe extern "C" fn z_publisher_get_matching_status(
         // caller that ignores the code reads `false` rather than a stale value.
         unsafe { (*matching_status).matching = false };
         // SAFETY: as above.
-        let Some(state) = (unsafe { crate::publisher::publisher_state(this_) }) else {
-            return unsafe { crate::publisher::not_a_registry_publisher(this_) };
+        let Some(held) = (unsafe { crate::publisher::publisher_handle(this_) }) else {
+            return Z_ENULL;
+        };
+        let matching = match held {
+            crate::publisher::PublisherHandle::Registry(state) => {
+                state.shared.has_matching(&state.keyexpr.keyexpr)
+            }
+            #[cfg(feature = "router-node")]
+            crate::publisher::PublisherHandle::Node(node) => node.node().matching_status(
+                wz_runtime_tokio::router_forward::MatchPlane::Subscribers,
+                node.key(),
+                wz_runtime_tokio::locality::Locality::Any,
+            ),
         };
         // SAFETY: as above.
-        unsafe { (*matching_status).matching = state.shared.has_matching(&state.keyexpr.keyexpr) };
+        unsafe { (*matching_status).matching = matching };
         Z_OK
     })
 }
@@ -659,15 +747,22 @@ pub unsafe extern "C" fn z_querier_get_matching_status(
         // SAFETY: the caller's contract.
         unsafe { (*matching_status).matching = false };
         // SAFETY: as above.
-        let Some(state) = (unsafe { crate::querier::querier_state(this_) }) else {
-            return unsafe { crate::querier::not_a_registry_querier(this_) };
+        let Some(held) = (unsafe { crate::querier::querier_handle(this_) }) else {
+            return Z_ENULL;
+        };
+        let matching = match held {
+            crate::querier::QuerierHandle::Registry(state) => state
+                .shared
+                .has_matching_queryable(state.keyexpr.literal(), state.matching_needs_complete()),
+            #[cfg(feature = "router-node")]
+            crate::querier::QuerierHandle::Node(node) => node.node().matching_status(
+                node.plane(),
+                node.key(),
+                wz_runtime_tokio::locality::Locality::Any,
+            ),
         };
         // SAFETY: as above.
-        unsafe {
-            (*matching_status).matching = state
-                .shared
-                .has_matching_queryable(state.keyexpr.literal(), state.matching_needs_complete())
-        };
+        unsafe { (*matching_status).matching = matching };
         Z_OK
     })
 }
