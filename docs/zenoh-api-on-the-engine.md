@@ -1121,9 +1121,11 @@ Each lands whole with its surface lines, tests and faults in one round.
       `Z_EUNAVAILABLE` to the rest, which a handle that is not there (`Z_ENULL`) is not
       mistaken for. The operations come over to the node one family at a time: put, delete,
       the subscriber, the publisher, get, the queryable, the querier, liveliness and matching
-      are carried (a payload in shared memory goes out as its bytes, and a get is ended by
-      its cancellation token, which ends the one query the node's face holds for it), then
-      what is left (shared memory, the advanced pair, the group).
+      are carried (a put whose payload is a chunk of shared memory goes out as the chunk,
+      its descriptor to a face that negotiated shared memory; the value of a get goes out as
+      bytes; and a get is ended by its cancellation token, which ends the one query the
+      node's face holds for it), then what is left (the shared-memory provider, the advanced
+      pair, the group).
     - **Open:** `routing` (the two above) and `open_time` (its tests are ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
       to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome

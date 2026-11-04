@@ -885,10 +885,10 @@ pub unsafe extern "C" fn z_publisher_put(
             #[cfg(feature = "router-node")]
             PublisherHandle::Node(node) => {
                 let publish = overrides.apply(node.base.clone());
-                return crate::put::node_publish(
-                    node.node.forwarder(),
+                return crate::put::node_publish_payload(
+                    &node.node,
                     &node.keyexpr.keyexpr,
-                    payload.bytes(),
+                    &payload,
                     &publish,
                 );
             }

@@ -483,7 +483,6 @@ impl Outbound {
     #[cfg(any(
         test,
         feature = "queryable",
-        feature = "router-node",
         all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")

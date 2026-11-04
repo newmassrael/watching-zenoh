@@ -334,11 +334,11 @@ pub unsafe extern "C" fn z_put(
         let state = match held {
             SessionHandle::Registry(state) => state,
             // A node names every key whole on the wire, so a declared key is published by its
-            // text, and a payload in shared memory goes out as its bytes until the node carries
-            // the descriptor.
+            // text, and a payload in shared memory goes out as its descriptor to a face that
+            // negotiated shared memory.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
-                return node_publish(node.forwarder(), keyexpr, payload.bytes(), &publish);
+                return node_publish_payload(node, keyexpr, &payload, &publish);
             }
         };
         // R311y564 — a keyexpr that carries a DECLARATION publishes aliased, the
@@ -358,6 +358,33 @@ pub unsafe extern "C" fn z_put(
             Err(why) => publish_refusal(why),
         }
     })
+}
+
+/// [`node_publish`] for a payload as a put holds it: the bytes, or a chunk of shared memory, which
+/// the node sends as its descriptor to a face that negotiated shared memory and as its bytes to
+/// any other (`RouterState::publish_shm`).
+#[cfg(feature = "router-node")]
+pub(crate) fn node_publish_payload(
+    node: &wz_capi_core::drive::RouterState,
+    keyexpr: &str,
+    payload: &crate::bytes::Outbound,
+    options: &wz_runtime_tokio::session::PublishOptions,
+) -> ZResult {
+    match payload {
+        crate::bytes::Outbound::Bytes(bytes) => {
+            node_publish(node.forwarder(), keyexpr, bytes, options)
+        }
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        crate::bytes::Outbound::Chunk(chunk) => {
+            match node.publish_shm(keyexpr, chunk.send_handle(), options) {
+                Ok(()) => Z_OK,
+                Err(_) => publish_refusal(wz_capi_core::faces::FanoutError::ExceedsCapacity),
+            }
+        }
+    }
 }
 
 /// Publish `payload` on `keyexpr` as the session of `node`: to the subscribers it hosts and to

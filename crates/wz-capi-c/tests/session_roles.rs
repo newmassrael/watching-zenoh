@@ -659,6 +659,136 @@ unsafe fn declare_token(session: &z_owned_session_t) -> z_owned_liveliness_token
     token
 }
 
+/// What the subscriber of the shared-memory test counts: the samples it is handed, and those whose
+/// payload is a chunk of shared memory.
+#[cfg(all(
+    feature = "router-node",
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+struct ShmCtx {
+    seen: Arc<AtomicUsize>,
+    in_shm: Arc<AtomicUsize>,
+}
+
+#[cfg(all(
+    feature = "router-node",
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+unsafe extern "C" fn on_sample_shm(sample: *const z_loaned_sample_t, ctx: *mut c_void) {
+    let ctx = &*(ctx as *const ShmCtx);
+    ctx.seen.fetch_add(1, Ordering::SeqCst);
+    let mut loaned: *const wz_capi_c::shm::z_loaned_shm_t = std::ptr::null();
+    if wz_capi_c::shm::z_bytes_as_loaned_shm(
+        wz_capi_c::sample::z_sample_payload(sample),
+        &mut loaned,
+    ) == Z_OK
+    {
+        ctx.in_shm.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A put whose payload is a chunk of shared memory, made on a node, reaches a registry peer that
+/// dials it as a chunk of shared memory (the descriptor crossed, not a copy of the bytes), which
+/// is what the registry's put does for a face that negotiated shared memory.
+#[cfg(all(
+    feature = "router-node",
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+#[test]
+fn a_put_of_shared_memory_on_a_node_reaches_a_peer_as_shared_memory() {
+    use wz_capi_c::shm::{
+        z_buf_layout_alloc_result_t, z_bytes_from_shm_mut, z_moved_shm_mut_t,
+        z_moved_shm_provider_t, z_owned_shm_provider_t, z_shm_mut_data_mut, z_shm_mut_loan_mut,
+        z_shm_provider_alloc, z_shm_provider_default_new, z_shm_provider_drop, z_shm_provider_loan,
+        ZC_BUF_LAYOUT_ALLOC_STATUS_OK,
+    };
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the contexts are leaked or freed after them.
+    unsafe {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let in_shm = Arc::new(AtomicUsize::new(0));
+        let ctx = Box::into_raw(Box::new(ShmCtx {
+            seen: seen.clone(),
+            in_shm: in_shm.clone(),
+        }));
+        let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample_shm), None, ctx.cast());
+        let ke = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&peer),
+                &mut sub,
+                z_view_keyexpr_loan(&view),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+
+        let mut provider: z_owned_shm_provider_t = std::mem::zeroed();
+        assert_eq!(z_shm_provider_default_new(&mut provider, 1 << 16), Z_OK);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while in_shm.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            let mut alloc: z_buf_layout_alloc_result_t = std::mem::zeroed();
+            z_shm_provider_alloc(&mut alloc, z_shm_provider_loan(&provider), 5);
+            assert_eq!(alloc.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+            std::ptr::copy_nonoverlapping(
+                b"chunk".as_ptr(),
+                z_shm_mut_data_mut(z_shm_mut_loan_mut(&mut alloc.buf)),
+                5,
+            );
+            let mut payload: z_owned_bytes_t = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_from_shm_mut(
+                    &mut payload,
+                    (&mut alloc.buf as *mut wz_capi_c::shm::z_owned_shm_mut_t)
+                        .cast::<z_moved_shm_mut_t>(),
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                z_put(
+                    z_session_loan(&node),
+                    z_view_keyexpr_loan(&view),
+                    (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+                    std::ptr::null_mut(),
+                ),
+                Z_OK
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            seen.load(Ordering::SeqCst) > 0,
+            "what the node put never reached the peer"
+        );
+        assert!(
+            in_shm.load(Ordering::SeqCst) > 0,
+            "the peer was handed the bytes of the put and not the chunk of shared memory"
+        );
+        z_shm_provider_drop(
+            (&mut provider as *mut z_owned_shm_provider_t).cast::<z_moved_shm_provider_t>(),
+        );
+        close_session(node);
+        close_session(peer);
+    }
+}
+
 /// A queryable handler that holds the query for a few seconds before it answers, so that a get on
 /// it stays under way long enough to be cancelled.
 #[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
