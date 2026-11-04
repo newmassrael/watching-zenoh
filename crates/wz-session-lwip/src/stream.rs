@@ -115,6 +115,11 @@ where
 
 /// How a node opens its `tcp/` links over lwIP: a value the stack holds, so the stack and the
 /// stream link stay written once.
+///
+/// `Copy` when its link handle is (a `&'static LwipLink` is), and so is the [`LwipTcpStack`] built
+/// on it: the admin node of the engine holds a stack as its host's and as its binder, which are
+/// two copies of one value.
+#[derive(Clone, Copy)]
 pub struct LwipTcpDial<L, const RX: usize, const S: usize = 0>
 where
     L: Deref<Target = LwipLink> + Clone,
@@ -477,6 +482,16 @@ mod tests {
         );
         assert_eq!(client.lost(), None);
         assert_eq!(server.lost(), None);
+    }
+
+    /// The stack is `Copy`, which the engine's admin node needs: it takes the stack as its host's
+    /// and a copy of it as its binder (`AcceptingAdminNode::new(host, bind, acceptor, ..)`), so a
+    /// node of `tcp/` links is that node over this stack with no node code of its own.
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn the_tcp_slot_stack_is_copy_so_it_can_be_the_hosts_and_the_binders() {
+        fn copy<T: Copy>() {}
+        copy::<LwipTcpStack<&'static LwipLink, RX>>();
     }
 
     #[cfg(feature = "session-slot")]
