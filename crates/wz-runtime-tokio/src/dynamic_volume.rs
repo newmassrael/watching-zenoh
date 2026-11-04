@@ -19,7 +19,7 @@
 //!
 //! [`DynamicVolume`] implements the same runtime-agnostic
 //! [`Volume`] trait
-//! [`MemoryVolume`](wz_session_core::storage_volume::MemoryVolume) and
+//! [`MemoryVolume`](wz_storage::storage_volume::MemoryVolume) and
 //! [`FilesystemVolume`](crate::filesystem_storage::FilesystemVolume) do, so
 //! `RuntimeStorageManager::register_volume` takes it with no change and every
 //! storage-manager feature above it — strip-prefix, the complete flag, GC,
@@ -44,7 +44,7 @@
 //! the mirror is a value the PREVIOUS process stored — that reaches a fresh host
 //! only through
 //! [`store_entries`](wz_volume_abi::VolumeVTable::store_entries) at
-//! [`create_storage`](wz_session_core::storage_volume::Volume::create_storage)
+//! [`create_storage`](wz_storage::storage_volume::Volume::create_storage)
 //! time. Durability across a restart is therefore the discriminator the witness
 //! uses, not a bonus leg.
 //!
@@ -67,12 +67,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use wz_session_core::sample::{EncodingHint, TimestampHint};
-use wz_session_core::storage_backend::{
+use wz_session_core::storage_config::StorageConfig;
+use wz_storage::storage_backend::{
     History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteError,
     StorageWriteResult, StoredData,
 };
-use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_volume::{Capability, Persistence, Volume, VolumeError};
+use wz_storage::storage_volume::{Capability, Persistence, Volume, VolumeError};
 use wz_volume_abi::{
     Compatibility, EntryFn, StoreConfig, StoreHandle, StoredEntry, VolumeEntry, VolumeVTable,
     DELETED, ENTRY_SYMBOL, HISTORY_ALL, INSERTED, OK, PERSISTENCE_DURABLE, REPLACED,

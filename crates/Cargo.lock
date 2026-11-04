@@ -4149,6 +4149,7 @@ dependencies = [
  "wz-runtime-tokio-test-support",
  "wz-session-core",
  "wz-session-wire-fixtures",
+ "wz-storage",
  "zenoh-pico-sys",
 ]
 
@@ -4443,7 +4444,6 @@ dependencies = [
  "wz-session-core",
  "wz-session-core-test-support",
  "wz-switchboard-schema",
- "xxhash-rust",
  "zeroize",
  "zmij",
 ]
@@ -4507,7 +4507,11 @@ dependencies = [
 name = "wz-storage"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "log",
+ "serde",
  "wz-session-core",
+ "xxhash-rust",
 ]
 
 [[package]]

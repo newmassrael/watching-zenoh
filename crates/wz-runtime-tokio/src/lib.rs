@@ -2109,7 +2109,7 @@ pub use wz_node_time::node_clock;
 // tokio binding for the runtime-agnostic storage kernel. A
 // `storage_service::StorageService` declares a capture `Subscriber`
 // and a complete `Queryable` on a storage keyexpr and drives the
-// `wz_session_core::storage_state::StorageState` gate (Put / Delete
+// `wz_storage::storage_state::StorageState` gate (Put / Delete
 // capture -> newer-wins; query -> per-key reply). Gated on
 // `storage-backend` (which forwards the kernel + `query-queryable`), so a
 // profile without storage never compiles the driver.
@@ -2120,7 +2120,7 @@ pub mod storage_service;
 // filesystem-backed `filesystem_storage::FilesystemVolume` /
 // `filesystem_storage::FilesystemStorage` — the wz counterpart of zenoh's
 // `zenoh-backend-filesystem`. It implements the no_std storage seam
-// (`wz_session_core::storage_backend` / `wz_session_core::storage_volume`)
+// (`wz_storage::storage_backend` / `wz_storage::storage_volume`)
 // over a directory tree that mirrors the key space (R2801): each value a raw
 // file at its key's path, read from the directory on every get, written
 // durably (fsync'd) so the store survives a restart and a power loss. std-only;
@@ -2144,7 +2144,7 @@ pub mod filesystem_keypath;
 pub mod filesystem_datainfo;
 
 // R311y497 — the `storage-mgr-dynamic-volume-loading` atom (§5.24): a `dlopen`ed
-// storage `Volume` (`wz_session_core::storage_volume::Volume`), the storage-side
+// storage `Volume` (`wz_storage::storage_volume::Volume`), the storage-side
 // twin of `plugin`. R311y256 deprecated this atom on an explicit CONDITION —
 // "if `plugin-dynamic-loading` is ever built, this returns with it" — which
 // R311y492 fired; see the module doc. AP/std/unix-only and opt-in.
@@ -2196,7 +2196,7 @@ pub mod group;
 // Round 311vm — the storage-replication DRIVER, digest publisher half
 // (§5.11 storage, replication 6/N): the tokio binding that periodically
 // publishes this storage's replication
-// `wz_session_core::storage_replication::Digest` on
+// `wz_storage::storage_replication::Digest` on
 // `@-digest/<zid>/<config-fp>` so peer replicas can detect divergence. It
 // shares the live `storage_service::StorageService` state (the digest
 // reflects the actual stored data), and the spawned publish loop is
@@ -2209,10 +2209,10 @@ pub mod storage_replication_service;
 // aligner): the tokio binding that declares a `session::Queryable`
 // on this replica's aligner keyexpr (`@zid/<zid>/<config-fp>/aligner`) and
 // answers a peer's
-// `wz_session_core::storage_aligner::AlignmentQuery` with
+// `wz_storage::storage_aligner::AlignmentQuery` with
 // the entries it needs to converge. The decode / answer / emit core delegates
 // to the no_std kernel
-// (`wz_session_core::storage_state::StorageState::answer_alignment_query`);
+// (`wz_storage::storage_state::StorageState::answer_alignment_query`);
 // this module reads the query attachment, locks the shared
 // `storage_service::StorageService` state, and emits each response on the
 // reply seam. The queryable is RAII-bound (dropping the
@@ -2229,7 +2229,7 @@ pub mod storage_aligner_service;
 /// with the storage_volume module's own `storage-backend` SSOT gate in wz-session-core
 /// (the demo's `--storage-host` mode is the first such consumer).
 #[cfg(feature = "storage-backend")]
-pub use wz_session_core::storage_volume;
+pub use wz_storage::storage_volume;
 
 // R311y62 — the storage MANAGER DRIVER (§5.24): the AP tokio binding that
 // hosts N live `storage_service::StorageService`s over a volume registry.
@@ -2251,7 +2251,7 @@ pub mod storage_manager_service;
 // `storage_gc_service::GarbageCollector` spawns a loop that, every
 // `config.garbage_collection.period`, locks the shared
 // `storage_service::StorageService` state and calls the kernel
-// `wz_session_core::storage_state::StorageState::collect_garbage`
+// `wz_storage::storage_state::StorageState::collect_garbage`
 // with a wall-clock cutoff. Caller-driven + RAII-bound (dropping the collector
 // aborts the loop), mirroring `storage_replication_service::DigestPublisher`.
 // Gated on `storage-mgr-garbage-collection` (which pulls the kernel sweep +

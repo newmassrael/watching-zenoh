@@ -6,11 +6,11 @@
 //! periodically publishes this storage's replication Digest so peer replicas
 //! can detect divergence.
 //!
-//! The no_std kernel ([`wz_session_core::storage_replication`]) produces and
+//! The no_std kernel ([`wz_storage::storage_replication`]) produces and
 //! compares digests; this module is its tokio binding. A
 //! [`DigestPublisher`] spawns a task that, every `config.interval_ms`, builds
-//! the storage's current [`Digest`](wz_session_core::storage_replication::Digest)
-//! ([`StorageState::replication_digest`](wz_session_core::storage_state::StorageState::replication_digest)),
+//! the storage's current [`Digest`](wz_storage::storage_replication::Digest)
+//! ([`StorageState::replication_digest`](wz_storage::storage_state::StorageState::replication_digest)),
 //! encodes it ([`wire::encode`]),
 //! and publishes it on the digest keyexpr. It shares the live
 //! [`crate::storage_service::StorageService`] state (via
@@ -48,7 +48,7 @@
 //!
 //! - **Recompute, not an incremental log.** The digest is rebuilt from the
 //!   storage snapshot each tick (the kernel
-//!   [`StorageState::replication_digest`](wz_session_core::storage_state::StorageState::replication_digest)
+//!   [`StorageState::replication_digest`](wz_storage::storage_state::StorageState::replication_digest)
 //!   divergence note), so there is no `latest_updates` swap (core.rs:212-215).
 
 use std::sync::{Arc, Mutex};
@@ -57,11 +57,11 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
-use wz_session_core::storage_backend::StorageBackend;
-use wz_session_core::storage_replication::{
+use wz_storage::storage_backend::StorageBackend;
+use wz_storage::storage_replication::{
     wire, zid_to_zenoh_hex, DigestDiff, JitterSequence, ReplicationConfig,
 };
-use wz_session_core::storage_state::StorageState;
+use wz_storage::storage_state::StorageState;
 
 use crate::session::{
     PublishOptions, Session, SubscribeError, SubscribeOptions, Subscriber, Unicast,
@@ -309,7 +309,7 @@ pub fn digest_subscribe_keyexpr(config: &ReplicationConfig) -> String {
 /// (core.rs:331-399) up to the point it queries the aligner — wz produces the
 /// [`DigestDiff`] + peer identity (the typed aligner handoff). A payload that
 /// fails to decode, or a peer on an incompatible configuration
-/// ([`Digest::diff`](wz_session_core::storage_replication::Digest::diff) returns
+/// ([`Digest::diff`](wz_storage::storage_replication::Digest::diff) returns
 /// `None` on a config-fingerprint mismatch), is ignored — never fatal. Pure
 /// over the shared state: the deterministically tested core of the subscriber.
 fn handle_peer_digest<B: StorageBackend>(
@@ -398,8 +398,8 @@ impl<R: SessionRuntime> DigestSubscriber<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_session_core::storage_backend::MemoryStorage;
-    use wz_session_core::storage_replication::wire;
+    use wz_storage::storage_backend::MemoryStorage;
+    use wz_storage::storage_replication::wire;
 
     fn cfg() -> ReplicationConfig {
         // Short interval so the spawn loop's first tick is fast in tests; the

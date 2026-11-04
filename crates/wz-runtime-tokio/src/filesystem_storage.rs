@@ -4,10 +4,10 @@
 //! R311y279 — the `storage-backend-filesystem` atom (§5.24 storage): a
 //! **durable, filesystem-backed** [`Volume`] / [`StorageBackend`], the wz
 //! counterpart of zenoh's `zenoh-backend-filesystem` plugin. It plugs into the
-//! same runtime-agnostic seam ([`wz_session_core::storage_backend`] /
-//! [`wz_session_core::storage_volume`]) the in-memory
-//! [`MemoryStorage`](wz_session_core::storage_backend::MemoryStorage) /
-//! [`MemoryVolume`](wz_session_core::storage_volume::MemoryVolume) implement,
+//! same runtime-agnostic seam ([`wz_storage::storage_backend`] /
+//! [`wz_storage::storage_volume`]) the in-memory
+//! [`MemoryStorage`](wz_storage::storage_backend::MemoryStorage) /
+//! [`MemoryVolume`](wz_storage::storage_volume::MemoryVolume) implement,
 //! and lives in the std runtime crate because the `no_std` kernel has no
 //! filesystem.
 //!
@@ -18,9 +18,9 @@
 //! payload bytes -- and the two things a raw file cannot carry, the value's
 //! encoding and the timestamp that versioned it, live in the `.zenoh_datainfo`
 //! sidecar ([`crate::filesystem_datainfo`]). Every read goes to the directory:
-//! [`get`](wz_session_core::storage_backend::StorageBackend::get) opens the
+//! [`get`](wz_storage::storage_backend::StorageBackend::get) opens the
 //! key's file, and
-//! [`get_all_entries`](wz_session_core::storage_backend::StorageBackend::get_all_entries)
+//! [`get_all_entries`](wz_storage::storage_backend::StorageBackend::get_all_entries)
 //! walks the tree. That is
 //! upstream's backend, and it makes the directory a mirror of the key space in
 //! BOTH directions: a file an operator drops into the tree is a value this
@@ -87,12 +87,12 @@ use wz_session_core::encoding::encoding_from_mime;
 use wz_session_core::json5::Json5Value;
 use wz_session_core::ntp64::Ntp64;
 use wz_session_core::sample::{EncodingHint, TimestampHint};
-use wz_session_core::storage_backend::{
+use wz_session_core::storage_config::StorageConfig;
+use wz_storage::storage_backend::{
     History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteError,
     StorageWriteResult, StoredData,
 };
-use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_volume::{Capability, Persistence, Volume, VolumeError};
+use wz_storage::storage_volume::{Capability, Persistence, Volume, VolumeError};
 
 use crate::filesystem_datainfo::{self, DataInfo, DataInfoError, DataInfoStore, DB_FILENAME};
 use crate::filesystem_keypath::{

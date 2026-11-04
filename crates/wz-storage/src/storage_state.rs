@@ -41,10 +41,10 @@
 //!
 //! ## Timestamp ordering
 //!
-//! [`crate::sample::timestamp_strictly_newer`] mirrors uhlc's `Timestamp`
+//! [`wz_session_core::sample::timestamp_strictly_newer`] mirrors uhlc's `Timestamp`
 //! `Ord` (`uhlc-0.8.1/src/timestamp.rs:33-38`: derived `Ord` over
 //! `(time: NTP64, id: ID)`) — `time` first, then the id. The id tiebreak
-//! is uhlc-faithful: `crate::sample::timestamp_order_key` zero-pads the
+//! is uhlc-faithful: `wz_session_core::sample::timestamp_order_key` zero-pads the
 //! trimmed `zid` to the full 16-byte LE array uhlc's `ID` (`[u8; 16]`)
 //! compares, NOT a raw trimmed-`Vec` lexicographic compare (which diverges
 //! for a non-canonically-encoded zid). See it for the why.
@@ -71,7 +71,7 @@
 //!   slice 2). zenoh lets a wildcard Put/Delete override matching specific keys
 //!   (`overriding_wild_update`, service.rs:415-494). With the feature ON,
 //!   [`apply_sample`](StorageState::apply_sample) detects a wildcard keyexpr
-//!   ([`crate::keyexpr_match::is_wild`]), registers it in the
+//!   ([`wz_session_core::keyexpr_match::is_wild`]), registers it in the
 //!   `wildcard_puts` / `wildcard_deletes` registries (the wz analog of zenoh's
 //!   two `KeBoxTree`s — a `BTreeMap` keyed on the full keyexpr, matched via the
 //!   [`keyexpr_intersects_target`] SSOT, not string equality), materializes it
@@ -81,7 +81,7 @@
 //!   (verbatim prior behavior). One named divergence from zenoh:
 //!     1. **Resurrection-ordering on the ALIGN-receive path (R311wt slice 3,
 //!        divergence D-slice3-1).**
-//!        [`process_alignment_reply`](StorageState::process_alignment_reply) now
+//!        `StorageState::process_alignment_reply` (`storage-aligner`) now
 //!        APPLIES a wildcard received from a peer — register + materialize via the
 //!        shared `materialize_wildcard` (a
 //!        WildcardDelete needs no payload and materializes in the metadata round;
@@ -140,9 +140,9 @@
 //!   configured `strip_prefix` (`storage-mgr-strip-prefix`), the gate keys
 //!   on the STORED (stripped) key — `None` being the exact-prefix-match
 //!   mount-root slot, faithful to zenoh's `Option<OwnedKeyExpr>` backend
-//!   key. The replication/aligner snapshot ([`replication_digest`](StorageState::replication_digest),
-//!   [`replication_events`](StorageState::replication_events)) reads the same
-//!   `latest` map, and [`crate::storage_aligner::EventMetadata`] now carries an
+//!   key. The replication/aligner snapshot (`replication_digest`,
+//!   `replication_events`, under `storage-replication`) reads the same
+//!   `latest` map, and `storage_aligner::EventMetadata` now carries an
 //!   `Option<String>` key (R311y64), so the mount-root `None` value is carried
 //!   through the digest, the aligner events, AND the bincode wire faithfully —
 //!   mirroring zenoh's `Event.stripped_key: Option<OwnedKeyExpr>`. A mount-root
@@ -153,11 +153,6 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::keyexpr_match::keyexpr_intersects_target;
-use crate::query_sink::{QueryView, ReplyOut};
-use crate::sample::{EncodingHint, TimestampHint};
-use crate::sample_kind::SampleKind;
-use crate::sink::SampleView;
 #[cfg(feature = "storage-aligner")]
 use crate::storage_aligner::{
     Action, AlignmentFollowup, AlignmentQuery, AlignmentReply, AlignmentResponse, EventBuckets,
@@ -171,17 +166,22 @@ use crate::storage_backend::{
 use crate::storage_replication::{
     build_digest, Digest, IntervalIdx, ReplicationConfig, ReplicationLog,
 };
+use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::query_sink::{QueryView, ReplyOut};
+use wz_session_core::sample::{EncodingHint, TimestampHint};
+use wz_session_core::sample_kind::SampleKind;
+use wz_session_core::sink::SampleView;
 
 // R311y73 — the uhlc timestamp-order SSOT (`timestamp_order_key` /
 // `timestamp_strictly_newer`) moved to its natural home
-// [`crate::sample`], next to the [`TimestampHint`] it orders, so every
+// [`wz_session_core::sample`], next to the [`TimestampHint`] it orders, so every
 // `alloc` consumer (storage AND the ext-pubsub advanced subscriber) shares
 // one ordering recipe without pulling `storage-backend` (the
-// `crate::zid_hex` precedent for `zid_to_le_array`). storage_state keeps
+// `wz_session_core::zid_hex` precedent for `zid_to_le_array`). storage_state keeps
 // only the comparison it keys newer-wins on; the `zid_to_le_array`
 // re-export is retired — its remaining consumers (storage_replication,
-// storage_aligner) now import it from `crate::zid_hex` directly.
-use crate::sample::timestamp_strictly_newer;
+// storage_aligner) now import it from `wz_session_core::zid_hex` directly.
+use wz_session_core::sample::timestamp_strictly_newer;
 
 /// The storage service gate: a [`StorageBackend`] plus the newer-wins
 /// versioning + query-match logic that turns the dumb store into a storage.
@@ -298,7 +298,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// is stored under `<rest>` (and `<prefix>` exactly under the `None`
     /// mount-root slot), and restored to its full keyexpr on a query reply.
     /// `None` is equivalent to [`new`](Self::new), hydration included. The
-    /// [`crate::storage_state`] driver / [`crate::storage_config::StorageConfig`]
+    /// [`crate::storage_state`] driver / [`wz_session_core::storage_config::StorageConfig`]
     /// supply the prefix.
     #[cfg(feature = "storage-mgr-strip-prefix")]
     pub fn with_strip_prefix(
@@ -458,7 +458,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// R311y831 — a backend that could not commit the write returns
     /// [`StorageWriteError`] and the version record is NOT written. That is
     /// the load-bearing half: `latest` is what
-    /// [`replication_events`](Self::replication_events) and the aligner digest
+    /// `replication_events` (`storage-replication`) and the aligner digest
     /// are derived from, so recording an uncommitted put would make this
     /// replica advertise data it does not have — and a peer that believes you
     /// hold an event stops sending it. Upstream takes the same branch at the
@@ -625,7 +625,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// intersects an exact query, so the listing arm replied it and upstream,
     /// which reads the exact key, does not.
     fn reply_set(&self, query_keyexpr: &str) -> Vec<(String, Vec<StoredData>)> {
-        if crate::keyexpr_match::is_wild(query_keyexpr) {
+        if wz_session_core::keyexpr_match::is_wild(query_keyexpr) {
             return self.matching_versions(query_keyexpr);
         }
         // A key the configured prefix cannot strip has no stored form, so it
@@ -745,7 +745,7 @@ impl<B: StorageBackend> StorageState<B> {
         let kind = view.kind();
         let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
 
-        if crate::keyexpr_match::is_wild(full_key) {
+        if wz_session_core::keyexpr_match::is_wild(full_key) {
             // Register + materialize the wildcard (shared with the align-receive
             // path, R311wt slice 3). The live path's wildcard ke is the full
             // incoming keyexpr.
@@ -892,7 +892,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// So upstream logs a Put AND stores a put: it is internally consistent in
     /// the very case wz cited as its inconsistency, and it was wz that logged a
     /// Delete for a key upstream logs as a Put
-    /// ([`replication_events`](Self::replication_events) derives the action from
+    /// (`replication_events`, under `storage-replication`, derives the action from
     /// backend presence).
     #[cfg(feature = "storage-mgr-wildcard-updates")]
     fn apply_one_with_override(
@@ -1136,7 +1136,7 @@ impl<B: StorageBackend> StorageState<B> {
     ///
     /// `now_ntp64` is INJECTED (the kernel has no clock — the driver passes
     /// `crate::…wall_clock_ntp64`), mirroring the `now: u64` seam of
-    /// [`answer_alignment_query`](Self::answer_alignment_query). The comparison
+    /// `answer_alignment_query` (`storage-aligner`). The comparison
     /// is on the raw NTP64 `time` WORD only (age; the zid tiebreak is irrelevant
     /// — zenoh compares `get_time()` likewise), so an entry exactly AT the limit
     /// is RETAINED (matching zenoh's strict `<` removal).
@@ -1149,7 +1149,7 @@ impl<B: StorageBackend> StorageState<B> {
     ///   sync) would wrap the cutoff to ~u64::MAX and WIPE both registries. wz
     ///   saturates to `0`, so an un-set clock collects NOTHING (conservative).
     ///   The complementary over-long-`lifespan` overflow is guarded in
-    ///   [`Ntp64::from_duration`](crate::ntp64::Ntp64::from_duration) (a span
+    ///   [`Ntp64::from_duration`](wz_session_core::ntp64::Ntp64::from_duration) (a span
     ///   `> 2^32 - 1` s saturates to `u64::MAX`, so the cutoff clamps to `0` —
     ///   collect nothing — rather than the `secs << 32` wrap wiping everything).
     /// - **`latest` is NEVER swept.** zenoh time-GCs its `latest_updates` cache
@@ -1164,8 +1164,8 @@ impl<B: StorageBackend> StorageState<B> {
     ///   not time-GC a replicated log/cache either).
     #[cfg(feature = "storage-mgr-garbage-collection")]
     pub fn collect_garbage(&mut self, now_ntp64: u64, lifespan: core::time::Duration) {
-        let time_limit =
-            now_ntp64.saturating_sub(crate::ntp64::Ntp64::from_duration(lifespan).as_word());
+        let time_limit = now_ntp64
+            .saturating_sub(wz_session_core::ntp64::Ntp64::from_duration(lifespan).as_word());
         // R2354 — the sweep REMOVES replication events, so each collected
         // registration must leave the digest buckets it was hashed into. The
         // doomed set is read out before the retain: after it, the timestamps
@@ -2434,7 +2434,8 @@ mod tests {
             );
             outside.refuse_listing.set(false);
             s.apply_sample(
-                &crate::sample::Sample::new_put("demo/a", vec![1]).with_timestamp(ts(5, 1)),
+                &wz_session_core::sample::Sample::new_put("demo/a", vec![1])
+                    .with_timestamp(ts(5, 1)),
                 || unreachable!(),
             );
             assert_eq!(
@@ -2674,7 +2675,7 @@ mod tests {
     #[cfg(feature = "storage-mgr-strip-prefix")]
     mod strip {
         use super::*;
-        use crate::sample::Sample;
+        use wz_session_core::sample::Sample;
 
         fn stripped(prefix: &str) -> StorageState<MemoryStorage> {
             StorageState::with_strip_prefix(MemoryStorage::new(), Some(prefix.into())).unwrap()
@@ -2848,7 +2849,7 @@ mod tests {
     #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
     #[test]
     fn wildcard_key_is_stored_literally_when_the_engine_is_off() {
-        use crate::sample::Sample;
+        use wz_session_core::sample::Sample;
         let mut s = state();
         s.apply_sample(
             &Sample::new_put("demo/**", vec![42]).with_timestamp(ts(10, 1)),
@@ -2868,7 +2869,7 @@ mod tests {
     #[cfg(feature = "storage-mgr-wildcard-updates")]
     mod wildcard {
         use super::*;
-        use crate::sample::Sample;
+        use wz_session_core::sample::Sample;
 
         fn wput(s: &mut StorageState<MemoryStorage>, ke: &str, payload: Vec<u8>, t: u64, zid: u8) {
             s.apply_sample(
@@ -3732,8 +3733,8 @@ mod tests {
     #[cfg(all(feature = "storage-mgr-strip-prefix", feature = "storage-history"))]
     mod strip_history {
         use super::*;
-        use crate::sample::Sample;
         use crate::storage_history::HistoryStorage;
+        use wz_session_core::sample::Sample;
 
         #[test]
         fn matching_versions_under_strip_restores_the_full_key_for_every_version() {
@@ -3966,7 +3967,7 @@ mod tests {
         #[cfg(feature = "storage-mgr-wildcard-updates")]
         mod wildcard_events {
             use super::*;
-            use crate::sample::Sample;
+            use wz_session_core::sample::Sample;
 
             fn wput(s: &mut StorageState<MemoryStorage>, ke: &str, t: TimestampHint) {
                 s.apply_sample(
@@ -4077,8 +4078,8 @@ mod tests {
         #[cfg(feature = "storage-mgr-strip-prefix")]
         #[test]
         fn replication_carries_the_mount_root_none_keyed_event() {
-            use crate::sample::Sample;
             use crate::storage_replication::{IntervalIdx, ReplicationConfig};
+            use wz_session_core::sample::Sample;
 
             let mut s =
                 StorageState::with_strip_prefix(MemoryStorage::new(), Some("home/kitchen".into()))
@@ -4902,7 +4903,7 @@ mod tests {
             #[cfg(feature = "storage-mgr-strip-prefix")]
             #[test]
             fn strip_align_wildcard_delete_matches_on_the_action_ke_not_meta_key() {
-                use crate::sample::Sample;
+                use wz_session_core::sample::Sample;
                 let mut s = StorageState::with_strip_prefix(
                     MemoryStorage::new(),
                     Some("home/kitchen".into()),
@@ -4937,7 +4938,7 @@ mod tests {
             // (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `if key_expr.is_wild()`).
             mod wildcard_production {
                 use super::*;
-                use crate::sample::Sample;
+                use wz_session_core::sample::Sample;
 
                 fn wput(s: &mut StorageState<MemoryStorage>, ke: &str, payload: Vec<u8>, t: u64) {
                     s.apply_sample(

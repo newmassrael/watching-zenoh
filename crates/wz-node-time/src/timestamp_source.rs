@@ -9,7 +9,7 @@
 //! This is the AP/std home of the §5.18 time primitives. The runtime-agnostic
 //! no_std core owns the timestamp TYPE ([`wz_session_core::sample::TimestampHint`])
 //! and the source INJECTION point
-//! (`wz_session_core::storage_state::StorageState::apply_sample`
+//! (`wz_storage::storage_state::StorageState::apply_sample`
 //! takes the stamp as a `FnOnce`); only the concrete source IMPLEMENTATION
 //! lives here, std-side, where its physical clock ([`std::time::SystemTime`])
 //! and its consumers (the storage service of the tokio runtime, the advanced
@@ -98,7 +98,7 @@ use wz_session_core::sample::TimestampHint;
 /// Hot-era upper bound (the replication service of the tokio runtime), and the
 /// aligner answer `now` (its aligner service) all read it, so
 /// a downstream consumer seeding a
-/// `wz_session_core::storage_state::StorageState` (or the
+/// `wz_storage::storage_state::StorageState` (or the
 /// two-replica convergence e2e) shares the SAME recipe rather than a
 /// re-derived duplicate.
 pub fn wall_clock_ntp64() -> u64 {
@@ -136,7 +136,7 @@ impl wz_session_core::epoch::EpochSource for SystemEpoch {
 /// the UNIX epoch — the unit a replication INTERVAL BOUNDARY is defined in.
 ///
 /// Its one consumer is the digest publisher's start-up alignment
-/// (`wz_session_core::storage_replication::ReplicationConfig::alignment_delay_ms`,
+/// (`wz_storage::storage_replication::ReplicationConfig::alignment_delay_ms`,
 /// zenoh `Configuration::last_elapsed_interval`, configuration.rs:113-120),
 /// which needs an epoch every replica in the fleet agrees on. A monotonic
 /// reading cannot serve: two replicas' monotonic epochs are their own start

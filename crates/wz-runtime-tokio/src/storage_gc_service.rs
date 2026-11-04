@@ -7,7 +7,7 @@
 //! registries.
 //!
 //! The no_std kernel
-//! ([`StorageState::collect_garbage`](wz_session_core::storage_state::StorageState::collect_garbage))
+//! ([`StorageState::collect_garbage`](wz_storage::storage_state::StorageState::collect_garbage))
 //! owns the age math (remove every registered wildcard Put / Delete older than
 //! `now - lifespan`); this module is its tokio timer glue. A
 //! [`GarbageCollector`] spawns a task that, every
@@ -53,9 +53,9 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
-use wz_session_core::storage_backend::StorageBackend;
 use wz_session_core::storage_config::GarbageCollectionConfig;
-use wz_session_core::storage_state::StorageState;
+use wz_storage::storage_backend::StorageBackend;
+use wz_storage::storage_state::StorageState;
 
 use crate::session::{Session, Unicast};
 use crate::session_glue::SessionLinkActions;
@@ -84,7 +84,7 @@ impl GarbageCollector {
     /// [`StorageService::shared_state`](crate::storage_service::StorageService::shared_state)),
     /// so the sweep acts on the live registries. The loop sleeps
     /// `gc.period` then sweeps entries older than `gc.lifespan`. The kernel
-    /// [`StorageState::collect_garbage`](wz_session_core::storage_state::StorageState::collect_garbage)
+    /// [`StorageState::collect_garbage`](wz_storage::storage_state::StorageState::collect_garbage)
     /// is the deterministically tested body; this is the thin timer glue over it.
     ///
     /// The caller MUST keep the returned handle alive for the storage's lifetime
@@ -187,8 +187,8 @@ mod tests {
     use crate::storage_service::StorageService;
     use core::time::Duration;
     use wz_session_core::sample::{Sample, TimestampHint};
-    use wz_session_core::storage_backend::MemoryStorage;
     use wz_session_core::storage_config::{GarbageCollectionConfig, StorageConfig};
+    use wz_storage::storage_backend::MemoryStorage;
 
     fn session() -> TokioSession {
         let (actions, _driver) = crate::test_fixtures::recording_actions();

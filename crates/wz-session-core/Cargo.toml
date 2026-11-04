@@ -257,7 +257,7 @@ ext-pubsub-serde-codec = ["alloc"]
 # only `alloc`; the live `Group` + its tasks are the AP-only tokio half
 # in wz-runtime-tokio. INDEPENDENT of the advanced-pubsub family (its
 # own wire, not the @adv namespace).
-ext-pubsub-group-membership = ["alloc"]
+ext-pubsub-group-membership = ["alloc", "wire-bincode"]
 
 # Transport reassembly subsystem (Tier B). Gates the SCE-generated
 # reassembly slot statechart module (build.rs codegens
@@ -1083,95 +1083,24 @@ deferred-fire = ["alloc"]
 # never see it. Off, `RxBytes` is exactly the `Vec` it replaced.
 rx-shared-bytes = ["alloc"]
 
-# R311uw — storage-backend (§5.11 storage domain, atom 1/4). Gates the
-# `storage_backend` kernel module: the pluggable `StorageBackend` seam +
-# an in-memory backend, a faithful mirror of zenoh's `zenoh-backend-traits`
-# `Storage` trait + the bundled `memory_backend`. Pulls `alloc` for the
-# BTreeMap / String / Vec backing and the `crate::sample` TimestampHint /
-# EncodingHint the `StoredData` embeds. Runtime-agnostic backend layer; the
-# newer-wins service decision and the wz-runtime-tokio StorageService driver
-# (Subscriber + complete Queryable + select loop) are follow-up atoms.
-# wz-runtime-tokio / the wz facade forward this same-named feature once the
-# driver lands.
+# R311uw — storage-backend (§5.11 storage domain). In the core it gates the one
+# storage type still here, the `storage_config` data model the admin space's
+# storage-add arm resolves an intent to. The backend seam, the service gate, the
+# volume and the rest of the storage plane are the wz-storage crate's since the
+# server-layer split (step 4); that crate depends on this feature, and
+# wz-runtime-tokio's feature of the same name pulls the crate.
 storage-backend = ["alloc"]
 
-# R311uz — storage-history (§5.11 storage domain, atom 2/4). Gates the
-# `storage_history` module: an in-memory `History::All` backend
-# (`HistoryStorage`) that keeps every version per key, the multi-version
-# counterpart of `MemoryStorage`. Implies `storage-backend` (the backend
-# seam + the `History` capability + the `StorageState` history-aware gate
-# it builds on). The wz-runtime-tokio / wz facade forward this same-named
-# feature so a History::All storage is declarable end-to-end.
-storage-history = ["storage-backend"]
+# The shared bincode-1.3 cursor and widths (`wire_bincode`), public: the storage
+# plane's replication digest and aligner codecs (wz-storage) and the core's
+# group-membership codec build on it.
+wire-bincode = ["alloc"]
 
-# Round 311vh — storage-replication (§5.11 storage domain, replication 1/N).
-# Gates the `storage_replication` module: the digest primitives (Fingerprint,
-# interval/sub-interval classification, configuration + per-event xxh3
-# fingerprints) a replica's Digest is assembled from, a faithful mirror of
-# zenoh's `zenoh-plugin-storage-manager` `replication::{digest,classification,
-# configuration,log}`. Implies `storage-backend` (the Digest is built from a
-# storage's stored set, and replication runs on a History::Latest backend —
-# NOT `storage-history`: zenoh's digest assumes Latest). Pulls `xxhash-rust`
-# (xxh3) so the fingerprints are byte-exact with a real zenoh replica. The
-# wz-runtime-tokio / wz facade forward this same-named feature once the
-# publish/subscribe driver lands.
-storage-replication = ["storage-backend", "dep:xxhash-rust"]
-
-# Round 311vr — storage-aligner (§5.11 storage domain, aligner 1/N). Gates the
-# `storage_aligner` module: the alignment event metadata (`Action` +
-# `EventMetadata`) a replica exchanges to pull the entries a `DigestDiff`
-# localised, a faithful mirror of zenoh's `zenoh-plugin-storage-manager`
-# `replication::{log,core::aligner_query,core::aligner_reply}`. Implies
-# `storage-replication` (the aligner consumes a `DigestDiff` and reuses the
-# `event_fingerprint` / `Fingerprint` the Digest is built from, so an event's
-# identity agrees between the digest and the aligner). The wz-runtime-tokio /
-# wz facade forward this same-named feature once the aligner queryable +
-# query driver lands.
-storage-aligner = ["storage-replication"]
-# The StorageManager that hosts N named storages over a volume registry is the wz-storage
-# crate's (`storage-mgr-multi-storage-host` on wz-runtime-tokio and wz pulls it); it composes
-# `storage-backend` above.
-# R311y58 — storage-mgr-strip-prefix (§5.24): the strip_prefix / restore_prefix
-# key transforms (the `storage_strip_prefix` module), the wz mirror of zenoh's
-# strip_prefix/prefix. cfg-ACTIVE (a slim storage build omits strip support). The
-# logic is pure key-string work, so it composes only `alloc` (not storage-backend);
-# the future manager/service that APPLIES it composes the manager feature.
-# R311y105 — now selects `keyexpr-prefix`: the chunk-boundary strip + the
-# non-wild validation moved to the shared `keyexpr_prefix` SSOT (the concrete-key
-# strip is the wildcard-free special case of the namespace wild-target strip), so
-# `storage_strip_prefix` is a thin adapter over that core rather than open-coding
-# the chunk boundary + `.contains('*')` a second time.
-storage-mgr-strip-prefix = ["alloc", "keyexpr-prefix"]
-# R311wt slice 2 — storage-mgr-wildcard-updates (§5.24): the write-path wildcard
-# override engine (StorageState `wildcard_puts`/`wildcard_deletes` registries +
-# the `apply_sample_wildcard_aware` / `overriding_wild_update` methods), the wz
-# mirror of zenoh's `process_sample` wildcard ingest+materialize+shadow-check
-# (storages_mgt/service.rs:213-494). cfg-ACTIVE. Composes `storage-backend` (the
-# registries hold `StoredData` + materialize onto backend keys) and the keyexpr
-# wildcard matcher (`keyexpr-wildcard-single`/`-double`): a `demo/**` update must
-# match multi-chunk keys, else `keyexpr_intersects_target` degrades to literal
-# equality and the wildcard silently materializes onto nothing. Deliberately does
-# NOT compose `storage-aligner`: the write-path override is a storage-manager
-# concern independent of replication (zenoh's `Action` param is reduced here to
-# the two phase-selection booleans it drives, so no digest/xxhash edge is pulled
-# in). Precedent: `adminspace-core` selects the wildcard matcher the same way.
-storage-mgr-wildcard-updates = [
-    "storage-backend",
-    "keyexpr-wildcard-single",
-    "keyexpr-wildcard-double",
-]
-# R311wt slice 4 — storage-mgr-garbage-collection (§5.24): the periodic sweep of
-# the wildcard-update registries (StorageState::collect_garbage removes entries
-# older than `now - lifespan`), the wz mirror of zenoh's `GarbageCollectionEvent`
-# (storages_mgt/service.rs:661-713). cfg-ACTIVE. Composes
-# `storage-mgr-wildcard-updates` — MANDATORY: collect_garbage sweeps the
-# `wildcard_puts`/`wildcard_deletes` fields, which are themselves cfg-gated on
-# wildcard-updates, so GC cannot compile without them (and there is nothing to
-# collect without registries). Bounds ONLY the registry memory, NOT the `latest`
-# tombstone map (which stays unbounded — GCing it would drop tombstones a replica
-# needs for delete-convergence; the documented divergence). The periodic timer
-# DRIVER lives in wz-runtime-tokio (this is the no_std kernel sweep only).
-storage-mgr-garbage-collection = ["storage-mgr-wildcard-updates"]
+# storage-history, storage-replication, storage-aligner, storage-mgr-strip-prefix,
+# storage-mgr-wildcard-updates and storage-mgr-garbage-collection are the wz-storage
+# crate's features, with the modules they gate (server-layer split, step 4). What they
+# need of the core is named there: `wire-bincode`, `keyexpr-prefix` and the keyexpr
+# wildcard matcher.
 
 # R311y579 (G3) — `dissect`: the leaf-scalar field walker (`dissect` module).
 # Selects the WHOLE codec-* MID space rather than composing a subset, and that
@@ -1382,13 +1311,6 @@ sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", def
 # `alloc`) holds its tables in `bounded::BoundedVec` / `id_map::IdMap`'s fixed arm and
 # must not name this crate at all.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"], optional = true }
-# Round 311vh — xxh3 hasher for the storage-replication digest primitives
-# (storage_replication.rs). Optional, pulled only by `storage-replication`.
-# default-features = false keeps it no_std (xxh3 is a pure computation, no
-# std/alloc needed); the `xxh3` feature is the exact algorithm zenoh's
-# replication uses (`xxhash_rust::xxh3`, digest.rs:24), so wz fingerprints
-# are byte-identical to a real zenoh replica's.
-xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
 # R311du — log facade for the SubscriberRegistry keyexpr-resolution warn
 # path (register_with_locality emits log::warn! when a registered keyexpr
 # fails canonicalization). no_std-compatible facade; mirrors the

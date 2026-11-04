@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! Ungated keyexpr non-wild-prefix SSOT — the shared core behind §5.24 storage
-//! strip-prefix ([`crate::storage_strip_prefix`]) and §5.21 routing-namespace
+//! strip-prefix (the storage plane's `storage_strip_prefix`) and §5.21 routing-namespace
 //! ([`crate::namespace`]).
 //!
 //! [`strip_nonwild_prefix`] is the wz port of zenoh's
@@ -21,7 +21,7 @@
 //! [`NonWildKeyExpr`] makes "a prefix with no wildcard chunk" unrepresentable
 //! by construction (the wz analog of zenoh's `nonwild_keyexpr` /
 //! `OwnedNonWildKeyExpr`, `borrowed.rs:902`). It replaces the open-coded
-//! runtime `.contains('*')` check that [`crate::storage_strip_prefix`] used, so
+//! runtime `.contains('*')` check that `storage_strip_prefix` used, so
 //! both consumers validate non-wildness through ONE typed gate.
 //!
 //! @verbatim (`@`): IMPLEMENTED since R311y543, and this note used to say the

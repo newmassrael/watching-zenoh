@@ -567,16 +567,6 @@ wz-session-core	wz-session-core/src/stats.rs	1	error: unresolved link to `Transp
 wz-session-core	wz-session-core/src/stats.rs	2	error: unresolved link to `TransportStats::inc_tx_drop`: no item named `TransportStats` in scope
 wz-session-core	wz-session-core/src/stats.rs	1	error: unresolved link to `TransportStats`: no item named `TransportStats` in scope
 wz-session-core	wz-session-core/src/stats.rs	1	error: unresolved link to `crate::extshm`: no item named `extshm` in module `wz_session_core`
-wz-session-core	wz-session-core/src/storage_backend.rs	1	error: unresolved link to `crate::storage_history::HistoryStorage`: no item named `storage_history` in module `wz_session_core`
-wz-session-core	wz-session-core/src/storage_backend.rs	2	error: unresolved link to `crate::storage_strip_prefix`: no item named `storage_strip_prefix` in module `wz_session_core`
-wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `Self::answer_alignment_query`: the struct `StorageState` has no field or associated item named `answer_alignment_query`
-wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `Self::replication_events`: the struct `StorageState` has no field or associated item named `replication_events`
-wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `StorageState::process_alignment_reply`: the struct `StorageState` has no field or associated item named `process_alignment_reply`
-wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `StorageState::replication_digest`: the struct `StorageState` has no field or associated item named `replication_digest`
-wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `StorageState::replication_events`: the struct `StorageState` has no field or associated item named `replication_events`
-wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `crate::storage_aligner::EventMetadata`: no item named `storage_aligner` in module `wz_session_core`
-wz-session-core	wz-session-core/src/storage_strip_prefix.rs	1	error: unresolved link to `crate::storage_backend::StorageBackend::put`: no item named `storage_backend` in module `wz_session_core`
-wz-session-core	wz-session-core/src/storage_strip_prefix.rs	1	error: unresolved link to `crate::storage_state::StorageState`: no item named `storage_state` in module `wz_session_core`
 wz-session-core	wz-session-core/src/switchboard.rs	1	error: unresolved link to `SwitchboardRegistry::dispatch`: no item named `SwitchboardRegistry` in scope
 wz-session-core	wz-session-core/src/switchboard.rs	2	error: unresolved link to `SwitchboardRegistry`: no item named `SwitchboardRegistry` in scope
 wz-session-core	wz-session-core/src/wire.rs	1	error: unresolved link to `PushOwned`: no item named `PushOwned` in scope

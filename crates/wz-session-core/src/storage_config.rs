@@ -44,7 +44,7 @@
 //!
 //! The two halves that made it reachable: the wire gained upstream's object form
 //! (`<name>@<volume_id>?<k>=<v>&…`, the `adminspace` module's
-//! `parse_storage_add_payload`), and [`crate::storage_volume::Volume`]'s
+//! `parse_storage_add_payload`), and the storage plane's `Volume`'s
 //! `create_storage` already took the config, so every backend can read it (since
 //! R2802 it takes it `&mut`, so a backend can also amend what its storage keeps,
 //! as upstream's fs backend inserts `dir_full_path`). The LOAD-time `--storage-volume-config <text>` is a
@@ -56,7 +56,7 @@
 //! (`complete` -> storage-mgr-complete-flag, `strip_prefix` -> storage-mgr-strip-prefix,
 //! `garbage_collection` -> storage-mgr-garbage-collection), and the consumer that
 //! turns a `StorageConfig` into a live storage is storage-mgr-multi-storage-host
-//! (which will pass it to [`crate::storage_volume::Volume::create_storage`], closing
+//! (which will pass it to the storage plane's `Volume::create_storage`, closing
 //! that R311y55 MVP config-free divergence).
 
 // ⚠ EVERY intra-doc link in the `//!` block above is written as a FULL
@@ -112,7 +112,7 @@ pub struct StorageConfig {
     /// The keyexpr this storage owns (the data it captures + answers queries on).
     pub key_expr: String,
     /// The name of the volume that backs this storage (zenoh `volume_id`); the
-    /// manager resolves it to a [`crate::storage_volume::Volume`].
+    /// manager resolves it to a `Volume` of the storage plane.
     pub volume_id: String,
     /// Whether this storage is AUTHORITATIVE for its keyexpr (a "complete"
     /// queryable that fully owns the space) vs partial. zenoh `complete`. WIRED

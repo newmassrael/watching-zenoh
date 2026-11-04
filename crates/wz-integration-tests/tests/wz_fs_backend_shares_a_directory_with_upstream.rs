@@ -48,9 +48,9 @@ use wz_integration_tests::common::wz_zenoh_oracle_binary;
 use wz_runtime_tokio::filesystem_storage::FilesystemVolume;
 use wz_session_core::json5::Json5Value;
 use wz_session_core::sample::{EncodingHint, TimestampHint};
-use wz_session_core::storage_backend::{StorageBackend, StoredData};
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_volume::Volume;
+use wz_storage::storage_backend::{StorageBackend, StoredData};
+use wz_storage::storage_volume::Volume;
 
 /// The storage's `dir` under the volume root, the same on both sides.
 const DIR: &str = "shared";

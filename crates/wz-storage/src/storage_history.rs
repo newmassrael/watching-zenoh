@@ -100,13 +100,13 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::sample::{EncodingHint, TimestampHint};
 use crate::storage_backend::{
     History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteResult,
     StoredData,
 };
+use wz_session_core::sample::{EncodingHint, TimestampHint};
 
-use crate::sample::timestamp_order_key;
+use wz_session_core::sample::timestamp_order_key;
 
 /// One entry in a key's timeline: a stored value, or the tombstone a
 /// Delete leaves behind. Both carry the timestamp that orders them, and

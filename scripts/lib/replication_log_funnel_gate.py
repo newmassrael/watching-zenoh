@@ -66,7 +66,7 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-TARGET = pathlib.Path("crates/wz-session-core/src/storage_state.rs")
+TARGET = pathlib.Path("crates/wz-storage/src/storage_state.rs")
 
 #: The function whose body DEFINES what the digest is a function of. Named
 #: here (rather than the fields) because it is one name, it is load-bearing in

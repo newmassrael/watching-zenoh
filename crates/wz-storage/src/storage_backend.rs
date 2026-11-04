@@ -11,7 +11,7 @@
 //! / influxdb). This module lands the **backend layer** — the trait every
 //! backend implements and the in-memory implementation — runtime-agnostic
 //! and `no_std`, so the same kernel composes on AP and (heap-permitting)
-//! MCU profiles, mirroring the `crate::routing` data-plane kernel split.
+//! MCU profiles, mirroring the `wz_session_core::routing` data-plane kernel split.
 //!
 //! ## zenoh anchor
 //!
@@ -42,7 +42,7 @@
 //!   `Option<&str>`, `None` being the exact-prefix-match slot. The
 //!   strip/restore that *produces* the `None` lives one layer up in the
 //!   storage service gate ([`crate::storage_state::StorageState`] +
-//!   [`crate::storage_strip_prefix`]); the bare backend just stores under
+//!   `storage_strip_prefix` under its feature); the bare backend just stores under
 //!   whatever (already-stripped) key it is handed. Before R311y61 the key
 //!   was a bare `&str` (no `strip_prefix` support); the Option key is the
 //!   seam change that lets a strip-configured storage hold the mount-root
@@ -79,7 +79,7 @@
 //! - **`StoredData.encoding` is `Option<EncodingHint>`, not a concrete
 //!   `Encoding`**: zenoh's `StoredData.encoding` is a non-optional
 //!   `Encoding` (it defaults to `Encoding::default()`); wz models an absent
-//!   encoding as `None`, matching how a wz [`crate::sample::Sample`] carries
+//!   encoding as `None`, matching how a wz [`wz_session_core::sample::Sample`] carries
 //!   `Option<EncodingHint>` on the receive side. The stored encoding IS
 //!   served back on the query reply (the `reply_keyed_stamped` encoding
 //!   leg, mirroring zenoh's `q.reply(..).encoding(entry.encoding)`), so the
@@ -100,7 +100,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::sample::{EncodingHint, TimestampHint};
+use wz_session_core::sample::{EncodingHint, TimestampHint};
 
 /// The four-way outcome of a storage mutation. zenoh
 /// `StorageInsertionResult` (`zenoh-backend-traits/src/lib.rs:170-175`).
@@ -129,7 +129,7 @@ pub enum StorageInsertionResult {
 /// (`zenoh-backend-filesystem/src/lib.rs:294-353`); wz mirrors the *presence*
 /// of the error channel, not its payload.
 ///
-/// **Payload-free on purpose** (the [`EntropyUnavailable`](crate::entropy::EntropyUnavailable)
+/// **Payload-free on purpose** (the [`EntropyUnavailable`](wz_session_core::entropy::EntropyUnavailable)
 /// precedent). Two things follow from that choice. The kernel is `no_std` and
 /// this type sits in the return value of every `put` / `delete`, so a
 /// `String`/`Box<dyn Error>` payload would be carried on the success path of an
@@ -199,7 +199,7 @@ pub enum History {
     #[default]
     Latest,
     /// Keep every value per key, including historical / out-of-order ones
-    /// (the `storage-history` [`crate::storage_history::HistoryStorage`]
+    /// (the `storage-history` `storage_history::HistoryStorage`
     /// mode). zenoh `History::All`.
     All,
 }
@@ -207,9 +207,9 @@ pub enum History {
 /// A single versioned value held by a backend. zenoh `StoredData`
 /// (`zenoh-backend-traits/src/lib.rs:177-182`:
 /// `{ payload: ZBytes, encoding: Encoding, timestamp: Timestamp }`). wz
-/// projects the codec types through the application-owned [`crate::sample`]
+/// projects the codec types through the application-owned [`wz_session_core::sample`]
 /// mirrors ([`EncodingHint`] / [`TimestampHint`]) so a stored value carries
-/// the same `Clone` / `PartialEq` surface a [`crate::sample::Sample`] does.
+/// the same `Clone` / `PartialEq` surface a [`wz_session_core::sample::Sample`] does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredData {
     /// The stored payload bytes.
@@ -242,7 +242,7 @@ pub struct StoredData {
 /// exact-prefix-match slot — the value of a strip-configured storage whose
 /// incoming key equalled the `strip_prefix` exactly (it sits AT the mount
 /// point). The strip transform that yields the `None` lives in the service
-/// gate ([`crate::storage_state`] / [`crate::storage_strip_prefix`]); the
+/// gate ([`crate::storage_state`] / `storage_strip_prefix` under its feature); the
 /// backend just stores under whatever stripped key it is handed.
 pub trait StorageBackend {
     /// Store `payload` / `encoding` under `key`, versioned by `timestamp`.

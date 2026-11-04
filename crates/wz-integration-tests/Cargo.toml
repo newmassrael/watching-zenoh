@@ -147,6 +147,10 @@ wz-auth = { path = "../wz-auth" }
 # R311nx — `transport-link-serial` pinned so layer3_serial_framing.rs can
 # reach `wz_session_core::serial_link::{encode_frame, decode_frame,
 # SerialFrameReader}` (the wz serial framing logic under test).
+# The storage plane's types (`StoredData`, `HistoryStorage`, `StorageState`, the replication
+# digest), named by the storage tests; their features come from the runtime's storage-* below,
+# which turn the same-named wz-storage features on.
+wz-storage = { path = "../wz-storage" }
 wz-session-core = { path = "../wz-session-core", features = [
     "transport-link-serial",
     # R311y579 (G9) — tests/raweth_framing_pico_layout.rs compares wz's raweth
@@ -425,10 +429,10 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # `z_get` must receive ALL THREE; its twin leg seeds the identical three into
     # the `History::Latest` `MemoryStorage` and the SAME pico binary must receive
     # exactly ONE. `HistoryStorage` lives in the `storage_history` module, gated
-    # `storage-history` (wz-session-core lib.rs:999) and OPT-IN — never in any
+    # `storage-history` (the wz-storage crate's) and OPT-IN — never in any
     # default set — so without this pin the module is absent and the proof does
     # not compile. The wz-runtime-tokio feature forwards
-    # `wz-session-core/storage-history`, so this one pin reaches both crates. Same
+    # `wz-storage/storage-history`, so this one pin reaches both crates. Same
     # additive-unification note as the storage-* pins above; it adds no
     # third-party dep (a `BTreeMap<key, Vec<StoredData>>`).
     "storage-history",

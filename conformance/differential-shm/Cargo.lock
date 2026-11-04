@@ -3474,6 +3474,7 @@ dependencies = [
  "wz-routing-graph",
  "wz-runtime-core",
  "wz-session-core",
+ "wz-storage",
  "wz-tls-pem",
  "x509-parser",
  "zeroize",
@@ -3495,6 +3496,14 @@ dependencies = [
  "wz-codecs",
  "wz-runtime-core",
  "zeroize",
+]
+
+[[package]]
+name = "wz-storage"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "wz-session-core",
 ]
 
 [[package]]

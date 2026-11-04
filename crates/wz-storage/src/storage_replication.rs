@@ -95,8 +95,8 @@ use alloc::string::String;
 
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::sample::TimestampHint;
-use crate::zid_hex::zid_to_le_array;
+use wz_session_core::sample::TimestampHint;
+use wz_session_core::zid_hex::zid_to_le_array;
 
 /// A 64-bit fingerprint of the content it represents. zenoh
 /// `digest::Fingerprint` (digest.rs:27-57).
@@ -455,7 +455,7 @@ impl ReplicationConfig {
 ///
 /// It is therefore NOT unpredictable to an observer, and it must not be
 /// borrowed for anything that needs it to be: this crate's
-/// [`EntropySource`](crate::entropy::EntropySource) is the port with that
+/// [`EntropySource`](wz_session_core::entropy::EntropySource) is the port with that
 /// contract, and its own note says a source that satisfies the type while
 /// defeating the purpose is the failure to avoid. De-correlation and
 /// unpredictability are different requirements; only the first is claimed
@@ -496,14 +496,14 @@ impl JitterSequence {
 }
 
 /// Converts an NTP64 `time` to milliseconds since the UNIX epoch via the
-/// [`Ntp64`](crate::ntp64::Ntp64) SSOT, which reproduces uhlc's
+/// [`Ntp64`](wz_session_core::ntp64::Ntp64) SSOT, which reproduces uhlc's
 /// `NTP64::to_duration().as_millis()` bit-for-bit (the `div_ceil` fraction
 /// conversion lives there). Retained as a thin private wrapper, called at the
 /// `classify` site, because zenoh classifies on this exact value
 /// (configuration.rs:197-201), so a wz replica and a zenoh replica bucket the
 /// same event identically.
 fn ntp64_to_ms(time: u64) -> u128 {
-    crate::ntp64::Ntp64::from_word(time).to_millis()
+    wz_session_core::ntp64::Ntp64::from_word(time).to_millis()
 }
 
 /// The [`Fingerprint`] of a single stored event — a `(key, timestamp)` pair.
@@ -534,12 +534,12 @@ pub(crate) fn event_fingerprint(key: Option<&str>, timestamp: &TimestampHint) ->
 }
 
 /// The zid <-> zenoh `ZenohId` Display hex SSOT now lives in the foundational
-/// [`crate::zid_hex`] module (the admin space `@/<zid>/<whatami>`, §5.23, needs
+/// [`wz_session_core::zid_hex`] module (the admin space `@/<zid>/<whatami>`, §5.23, needs
 /// the identical recipe without the `storage-replication` gate). Re-exported
 /// here so every replication keyexpr builder + cross-impl test reads unchanged:
 /// the digest `@-digest/<zid-hex>/<fp>`, the aligner
 /// `@zid/<zid-hex>/<fp>/aligner`, and the `AlignmentReply::Discovery` body.
-pub use crate::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
+pub use wz_session_core::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 
 /// A concise, comparable summary of a replica's stored set — XOR-rolled
 /// [`Fingerprint`]s bucketed by event time, grouped into three eras of
@@ -1112,7 +1112,7 @@ pub mod wire {
 
     use super::{Digest, Fingerprint, IntervalIdx, SubIntervalIdx};
     // The bincode-1.3 cursor + length helpers are shared with the aligner codec.
-    use crate::wire_bincode::{check_len, push_u64, Reader, WireError};
+    use wz_session_core::wire_bincode::{check_len, push_u64, Reader, WireError};
 
     /// Failure decoding a [`Digest`] from bytes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1476,7 +1476,7 @@ mod tests {
 
     /// The anti-storm property [`JitterSequence`] actually claims: DISTINCT
     /// replicas draw distinct sequences. Unpredictability is explicitly not
-    /// claimed (that is what [`crate::entropy::EntropySource`] is for), so it
+    /// claimed (that is what [`wz_session_core::entropy::EntropySource`] is for), so it
     /// is not asserted here either.
     #[test]
     fn jitter_sequences_differ_per_replica_and_across_cycles() {

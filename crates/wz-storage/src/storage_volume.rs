@@ -42,9 +42,9 @@
 //! retains the config for its admin-status, which wz's runtime-agnostic seam does not.
 
 use crate::storage_backend::{History, MemoryStorage, StorageBackend};
-use crate::storage_config::StorageConfig;
 use alloc::boxed::Box;
 use alloc::string::String;
+use wz_session_core::storage_config::StorageConfig;
 
 /// The crash-persistence guarantee of a volume's storages — zenoh `Persistence`
 /// (`backend-traits/lib.rs:142`). [`Volatile`](Persistence::Volatile) (default)
@@ -250,9 +250,9 @@ impl Volume for MemoryVolume {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sample::TimestampHint;
     use crate::storage_backend::StorageInsertionResult;
     use alloc::vec;
+    use wz_session_core::sample::TimestampHint;
 
     fn ts(time: u64) -> TimestampHint {
         TimestampHint {

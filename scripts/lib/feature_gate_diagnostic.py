@@ -295,7 +295,6 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-reconnect",
             "session-unicast-accept",
             "session-unicast-open",
-            "storage-mgr-wildcard-updates",
             # R3243 — `transport-batching` LEFT this list, by the R2386 route:
             # the claim was true until the round that staged a batch window in
             # a lent slot made it false. `session_actions` (a `pub mod`) now
@@ -426,8 +425,16 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "transport-link-tls-keylog",
         )
     },
-    # Its one feature gates a module at the crate root, which is probed.
-    "wz-storage": {},
+    # The features that gate a crate-root module are probed off the root; this one
+    # moved here from the core's list with the module whose fields it gates
+    # (server-layer split, step 4).
+    "wz-storage": {
+        "storage-mgr-wildcard-updates": (
+            "no `#[cfg]` in this package attaches this feature to a publicly "
+            "visible item; it gates private items, expressions or struct "
+            "fields only, which the census re-derives every run"
+        ),
+    },
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public
@@ -752,7 +759,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "query-selector-parameters",
                 "query-source-info",
                 "query-value",
-                "storage-mgr-garbage-collection",
                 "switchboard",
             )
         },
@@ -765,8 +771,16 @@ DEFERRED: dict[str, dict[str, str]] = {
             "a path; there is no resolution error for rustc to annotate"
         ),
     },
-    # Nothing waits: the one feature is probed off the crate root.
-    "wz-storage": {},
+    # Moved here from the core's list with `StorageState::collect_garbage`, the method
+    # it gates (server-layer split, step 4).
+    "wz-storage": {
+        "storage-mgr-garbage-collection": (
+            "@defer impl-method -- it gates only METHODS inside `impl` "
+            "blocks, so there is no `module::name` path to import; "
+            "removing one is an E0599, not the E0432/E0433 this axis "
+            "adjudicates"
+        ),
+    },
 }
 
 # A crate-root item a `#[cfg(feature)]` is attached to, by the shape that names

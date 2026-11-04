@@ -192,6 +192,13 @@ LEGS=(
     # beside a secure channel (decision D2 of docs/session-lifecycle-intent.md),
     # and wz-session-core refuses the build without one.
     "wz-runtime-tokio|hook|session-close-ingress,switchboard,transport-link-tls|--test=session_close_ingress"
+    # The storage manager driven through its public path over a loopback TCP link
+    # (`tests/storage_manager_hosts_a_storage_e2e.rs`, its other gates default features):
+    # the one executing test outside
+    # the module that names `storage_manager_service`, which is what the catalog's A3
+    # reads as the `storage-mgr-multi-storage-host` atom's witness since the manager's
+    # kernel left the core. The target covers the file by construction.
+    "wz-runtime-tokio|hook|storage-mgr-multi-storage-host|--test=storage_manager_hosts_a_storage_e2e"
     # R2721 — the AP binding for the same grammar's `open` verb. A SECOND row
     # rather than a widening of the one above, because the two do not share a
     # build: `--test=` names an integration target and these are LIB unit tests,
@@ -632,13 +639,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         session-unicast,\
         session-unicast-accept,\
         session-unicast-open,\
-        storage-aligner,\
         storage-backend,\
-        storage-history,\
-        storage-mgr-garbage-collection,\
-        storage-mgr-strip-prefix,\
-        storage-mgr-wildcard-updates,\
-        storage-replication,\
         supervision,\
         switchboard,\
         transport-batching,\
@@ -1119,10 +1120,20 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # module later is claimed without touching the rows.
     "wz-session-core|hook|pool-monitor|pool_gauge::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
-    # The storage manager's `plugins` document reader moved from the core to wz-storage
-    # (server-layer split, step 3) with its fifteen tests, which only its feature builds; the
-    # core's wide leg ran them before. The filter is the module's path.
-    "wz-storage|hook|adminspace-config-hotreload|storage_plugin_config::"
+    # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
+    # gated tests went with it: the plugins document reader's (step 3) and the history,
+    # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),
+    # which the core's wide leg ran before under these same feature names. One leg with
+    # every feature on, as the core's was; no filter, so a test added there later is
+    # claimed without touching the row.
+    "wz-storage|hook|\
+adminspace-config-hotreload,\
+storage-aligner,\
+storage-history,\
+storage-mgr-garbage-collection,\
+storage-mgr-strip-prefix,\
+storage-mgr-wildcard-updates,\
+storage-replication|"
     # S9d, the end-to-end half: `wz-session-lwip`'s `tests/slot_control_records.rs`
     # drives a real session pair on the host lwIP loopback and counts one acceptor
     # iteration per control record. It names `codec-response-final` beside the slot

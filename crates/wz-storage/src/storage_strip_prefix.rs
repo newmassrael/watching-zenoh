@@ -22,8 +22,8 @@
 //! backend, the digest, and the aligner `EventMetadata` (R311y64). This module
 //! remains the pure strip/restore logic those paths call.
 
-use crate::keyexpr_prefix::{strip_nonwild_prefix, NonWildError, NonWildKeyExpr};
 use alloc::string::String;
+use wz_session_core::keyexpr_prefix::{strip_nonwild_prefix, NonWildError, NonWildKeyExpr};
 
 /// Why [`strip_prefix`] rejected a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl core::fmt::Display for StripError {
 /// `home2/x` is NOT under `home`.
 ///
 /// R311y105 — a thin adapter over the shared `keyexpr_prefix` SSOT
-/// ([`crate::keyexpr_prefix`]): the non-wild validation and the chunk-boundary
+/// ([`wz_session_core::keyexpr_prefix`]): the non-wild validation and the chunk-boundary
 /// strip both come from there (a concrete stored key is the wildcard-free
 /// special case of the namespace wild-target strip). This module keeps only the
 /// storage-specific Option semantics: the exact-mount-point `Ok(None)` and the

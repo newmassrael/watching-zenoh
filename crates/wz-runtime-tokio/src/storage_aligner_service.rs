@@ -9,8 +9,8 @@
 //! ([`spawn_digest_aligner`]) auto-triggers an ASK pull from the digest
 //! subscriber's `on_diff` when a divergence is detected.
 //!
-//! The no_std kernel ([`wz_session_core::storage_aligner`] +
-//! [`StorageState::answer_alignment_query`](wz_session_core::storage_state::StorageState::answer_alignment_query))
+//! The no_std kernel ([`wz_storage::storage_aligner`] +
+//! [`StorageState::answer_alignment_query`](wz_storage::storage_state::StorageState::answer_alignment_query))
 //! decodes nothing and emits nothing — it takes a typed
 //! [`AlignmentQuery`] and
 //! returns the full `Vec<AlignmentResponse>` to send back. This module is its
@@ -57,7 +57,7 @@
 //! - **No replication log.** zenoh reads `EventMetadata` and `Fingerprint`s out
 //!   of its `LogLatest` (aligner_query.rs:106-264). wz has no log; the kernel
 //!   recomputes interval / sub-interval buckets + `EventMetadata` from the
-//!   `StorageState.latest` snapshot (the [`wz_session_core::storage_aligner`]
+//!   `StorageState.latest` snapshot (the [`wz_storage::storage_aligner`]
 //!   divergence note). This module is unaffected — it consumes the kernel's
 //!   `Vec`, however the kernel produced it.
 //!
@@ -70,7 +70,7 @@
 //! consolidation (`consolidation_for`), decodes each reply
 //! (`decode_reply`) into an [`AlignmentReply`] (+ a Put `Retrieval`'s
 //! value), and feeds it to the kernel
-//! [`process_alignment_reply`](wz_session_core::storage_state::StorageState::process_alignment_reply),
+//! [`process_alignment_reply`](wz_storage::storage_state::StorageState::process_alignment_reply),
 //! which returns an [`AlignmentFollowup`] the driver follows
 //! (`next_query`) — issuing the next, finer query until convergence. zenoh
 //! `spawn_query_replica_aligner` + `process_alignment_reply`
@@ -99,15 +99,15 @@ use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
 use wz_session_core::sample::EncodingHint;
-use wz_session_core::storage_aligner::wire::{
+use wz_storage::storage_aligner::wire::{
     decode_alignment_query, decode_alignment_reply, encode_alignment_query, encode_alignment_reply,
 };
-use wz_session_core::storage_aligner::{
+use wz_storage::storage_aligner::{
     Action, AlignmentFollowup, AlignmentQuery, AlignmentReply, RetrievedValue,
 };
-use wz_session_core::storage_backend::StorageBackend;
-use wz_session_core::storage_replication::{zid_to_zenoh_hex, DigestDiff, ReplicationConfig};
-use wz_session_core::storage_state::StorageState;
+use wz_storage::storage_backend::StorageBackend;
+use wz_storage::storage_replication::{zid_to_zenoh_hex, DigestDiff, ReplicationConfig};
+use wz_storage::storage_state::StorageState;
 
 use crate::session::{
     QueryOptions, Queryable, QueryableError, QueryableOptions, Session, SubscribeError, Unicast,
@@ -166,7 +166,7 @@ const MAX_ALIGNMENT_QUERIES: usize = 100_000;
 
 /// One decoded aligner reply: the typed [`AlignmentReply`] plus the
 /// [`RetrievedValue`] a Put `Retrieval` carries (`None` for a metadata reply).
-/// The kernel [`process_alignment_reply`](wz_session_core::storage_state::StorageState::process_alignment_reply)
+/// The kernel [`process_alignment_reply`](wz_storage::storage_state::StorageState::process_alignment_reply)
 /// input. Factored to a `type` per `clippy::type_complexity`.
 type DecodedReply = (AlignmentReply, Option<RetrievedValue>);
 
@@ -204,7 +204,7 @@ pub fn aligner_keyexpr_for_hex(config: &ReplicationConfig, zid_hex: &str) -> Str
 
 /// Answer one inbound alignment query: decode the `AlignmentQuery` from the
 /// query attachment, run the kernel answer engine over the locked shared
-/// state, and emit every [`AlignmentResponse`](wz_session_core::storage_aligner::AlignmentResponse)
+/// state, and emit every [`AlignmentResponse`](wz_storage::storage_aligner::AlignmentResponse)
 /// on the reply seam. `now` is the wall-clock NTP64 the kernel uses for the
 /// Hot-era upper bound in a `Diff` answer (injected so the answer is
 /// deterministically testable). Pure over the shared state: no Session, no
@@ -650,7 +650,7 @@ mod tests {
     use wz_session_core::query_sink::BorrowedQuery;
     use wz_session_core::reply_sink::{BorrowedReply, ReplyKind};
     use wz_session_core::sample::TimestampHint;
-    use wz_session_core::storage_backend::MemoryStorage;
+    use wz_storage::storage_backend::MemoryStorage;
 
     fn cfg() -> ReplicationConfig {
         ReplicationConfig::new("demo/**", None, 20, 5, 6, 30, 250)
@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn decode_reply_delete_retrieval_has_no_value() {
-        use wz_session_core::storage_aligner::EventMetadata;
+        use wz_storage::storage_aligner::EventMetadata;
         // A Delete Retrieval is a Put-form reply (empty payload) carrying a
         // Retrieval(meta) whose action is Delete. The kernel applies the delete
         // from the metadata alone, so decode_reply must NOT manufacture a value
@@ -1022,7 +1022,7 @@ mod tests {
 
     #[test]
     fn decode_reply_wildcard_put_retrieval_carries_payload_and_encoding() {
-        use wz_session_core::storage_aligner::EventMetadata;
+        use wz_storage::storage_aligner::EventMetadata;
         // A WildcardPut Retrieval carries its value in the reply body (zenohd
         // reads it from the wildcard_puts registry, aligner_query.rs:320-324),
         // exactly like a plain Put. decode_reply MUST extract it, or the kernel's

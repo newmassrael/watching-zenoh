@@ -68,7 +68,7 @@ use wz_session_core::json5::Json5Value;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_volume::Volume;
+use wz_storage::storage_volume::Volume;
 
 const ITER_CAP: usize = 4096;
 /// The storage keyexpr the wz `StorageService` captures + answers on.

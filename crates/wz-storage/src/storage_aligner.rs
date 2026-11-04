@@ -72,10 +72,10 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::sample::{EncodingHint, TimestampHint};
 use crate::storage_replication::{
     event_fingerprint, DigestDiff, Fingerprint, IntervalIdx, ReplicationConfig, SubIntervalIdx,
 };
+use wz_session_core::sample::{EncodingHint, TimestampHint};
 
 /// The kind of a logged replication event. zenoh `log::Action` (log.rs:43-49),
 /// all four variants (R311wt slice-1 — the aligner ext for the
@@ -567,19 +567,19 @@ pub mod wire {
         Action, AlignmentQuery, AlignmentReply, DigestDiff, EventMetadata, Fingerprint,
         IntervalIdx, SubIntervalIdx,
     };
-    use crate::sample::TimestampHint;
-    // The zid <-> zenoh-hex SSOT lives in `crate::zid_hex` (relocated there
+    use wz_session_core::sample::TimestampHint;
+    // The zid <-> zenoh-hex SSOT lives in `wz_session_core::zid_hex` (relocated there
     // R311y34); `storage_replication` re-exports it for back-compat and this
     // import rides that re-export. The Discovery arm is one consumer.
     use crate::storage_replication::{zenoh_hex_to_zid, zid_to_zenoh_hex};
-    use crate::zid_hex::zid_to_le_array;
+    use wz_session_core::zid_hex::zid_to_le_array;
     // The shared bincode-1.3 cursor core + length guard + the multi-consumer
     // widths (`u32` tags, `String` / `Option<String>`, the length-guarded byte
     // read) live in `wire_bincode` as the one SSOT this codec and the group
     // codec build on; the aligner-only shapes (the zenoh `Timestamp`, the
     // domain enums) layer on top here. `read_u8` / `read_u32` are reached by
     // fully-qualified delegation in the thin inherent reads below.
-    use crate::wire_bincode::{
+    use wz_session_core::wire_bincode::{
         check_len, push_option_string, push_string, push_u32, push_u64, read_len_prefixed_bytes,
         Reader, WireError,
     };
@@ -685,7 +685,7 @@ pub mod wire {
     }
 
     /// The aligner's domain decoders, layered on the shared bincode cursor
-    /// ([`crate::wire_bincode::Reader`]): the cursor primitives it shares with
+    /// ([`wz_session_core::wire_bincode::Reader`]): the cursor primitives it shares with
     /// the digest codec are `read_u64` / `read_bytes` + the `check_len` guard,
     /// and the wider widths (`read_u8` / `read_u32` / the length-prefixed
     /// `String` read) are the shared `wire_bincode` widths (with the group
@@ -693,18 +693,18 @@ pub mod wire {
     /// delegations to those; the rest add the aligner's typed shapes. A shared
     /// [`WireError`] lifts into [`AlignmentDecodeError`] via `?` (the `From`
     /// impl above).
-    impl Reader<'_> {
+    impl EventReads for Reader<'_> {
         /// Read a single byte (a bincode `u8` / Option-or-bool tag) — a thin
         /// delegation to the shared width, lifting [`WireError`] into the
         /// aligner's typed error.
         fn read_u8(&mut self) -> Result<u8, AlignmentDecodeError> {
-            Ok(crate::wire_bincode::read_u8(self)?)
+            Ok(wz_session_core::wire_bincode::read_u8(self)?)
         }
 
         /// Read a `u32` as 4 little-endian bytes (a bincode enum-variant index)
         /// — a thin delegation to the shared width.
         fn read_u32(&mut self) -> Result<u32, AlignmentDecodeError> {
-            Ok(crate::wire_bincode::read_u32(self)?)
+            Ok(wz_session_core::wire_bincode::read_u32(self)?)
         }
 
         /// Read a bincode `String`: a u64 length then that many UTF-8 bytes. The
@@ -854,7 +854,7 @@ pub mod wire {
         }
     }
 
-    impl Reader<'_> {
+    impl ReplyReads for Reader<'_> {
         fn read_interval_set(&mut self) -> Result<BTreeSet<IntervalIdx>, AlignmentDecodeError> {
             let len = self.read_u64()?;
             check_len(len, U64_BYTES, self)?;
@@ -1037,6 +1037,39 @@ pub mod wire {
             return Err(AlignmentDecodeError::TrailingBytes);
         }
         Ok(reply)
+    }
+
+    // The aligner's typed reads on the shared cursor. `Reader` is the core's
+    // (`wire_bincode`), so this crate cannot give it inherent methods; these two
+    // traits, private to the module, carry the same methods by trait.
+
+    /// The event and the shared widths, lifted into [`AlignmentDecodeError`].
+    trait EventReads {
+        fn read_u8(&mut self) -> Result<u8, AlignmentDecodeError>;
+        fn read_u32(&mut self) -> Result<u32, AlignmentDecodeError>;
+        fn read_string(&mut self) -> Result<String, AlignmentDecodeError>;
+        fn read_timestamp(&mut self) -> Result<TimestampHint, AlignmentDecodeError>;
+        fn read_option_tag(&mut self) -> Result<bool, AlignmentDecodeError>;
+        fn read_event_metadata(&mut self) -> Result<EventMetadata, AlignmentDecodeError>;
+    }
+
+    /// The reply's interval sets, maps and event lists.
+    trait ReplyReads {
+        fn read_interval_set(&mut self) -> Result<BTreeSet<IntervalIdx>, AlignmentDecodeError>;
+        fn read_subinterval_map(
+            &mut self,
+        ) -> Result<BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>, AlignmentDecodeError>;
+        fn read_digest_diff(&mut self) -> Result<DigestDiff, AlignmentDecodeError>;
+        fn read_fingerprint_map(
+            &mut self,
+        ) -> Result<BTreeMap<IntervalIdx, Fingerprint>, AlignmentDecodeError>;
+        fn read_sub_fingerprint_map(
+            &mut self,
+        ) -> Result<
+            BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>>,
+            AlignmentDecodeError,
+        >;
+        fn read_events(&mut self) -> Result<Vec<EventMetadata>, AlignmentDecodeError>;
     }
 
     #[cfg(test)]

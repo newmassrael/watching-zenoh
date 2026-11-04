@@ -155,7 +155,7 @@ impl TimestampHint {
 /// The uhlc-faithful ordering key for a timestamp: `(time, zid-as-16-byte
 /// little-endian array)`. The SSOT every `alloc` consumer compares on —
 /// the storage newer-wins gate ([`timestamp_strictly_newer`]), the storage
-/// version-list sort ([`crate::storage_history`]), and (R311y73+) the
+/// version-list sort (the storage plane's `storage_history`), and (R311y73+) the
 /// ext-pubsub advanced-subscriber timestamped-dedup path — so one place
 /// encodes uhlc's `Timestamp` `Ord` contract. R311y73 lifted it here next
 /// to its subject [`TimestampHint`] out of the `storage-backend`-gated
@@ -177,7 +177,7 @@ impl TimestampHint {
 /// the zero high bytes uhlc compares against). A zid longer than 16 (a
 /// malformed input) is truncated to 16 — uhlc ids are exactly 16 bytes.
 #[cfg(feature = "alloc")]
-pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
+pub fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
     (ts.time, crate::zid_hex::zid_to_le_array(&ts.zid))
 }
 

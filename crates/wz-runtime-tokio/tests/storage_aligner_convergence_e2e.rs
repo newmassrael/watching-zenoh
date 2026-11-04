@@ -71,9 +71,9 @@ use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::storage_backend::MemoryStorage;
-use wz_session_core::storage_replication::ReplicationConfig;
-use wz_session_core::storage_state::StorageState;
+use wz_storage::storage_backend::MemoryStorage;
+use wz_storage::storage_replication::ReplicationConfig;
+use wz_storage::storage_state::StorageState;
 
 const ITER_CAP: usize = 64;
 /// The storage key space the replication configuration is scoped to (its

@@ -40,7 +40,7 @@
 //! its named residual: an `All` delete cleared the key's whole version list, so a
 //! put replayed underneath it became the key's live value and a real foreign
 //! querier was served a value that had been deleted. R2350 made a delete a
-//! VERSIONED TOMBSTONE (`wz_session_core::storage_history`), so `bravo` is stored
+//! VERSIONED TOMBSTONE (`wz_storage::storage_history`), so `bravo` is stored
 //! as history and is NOT served. The assertion inverted because the behaviour it
 //! described was wrong — the witness had encoded the defect as the capability.
 //!
@@ -104,9 +104,9 @@ use wz_runtime_tokio::storage_service::StorageService;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::storage_backend::{MemoryStorage, StorageBackend, StorageInsertionResult};
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_history::HistoryStorage;
+use wz_storage::storage_backend::{MemoryStorage, StorageBackend, StorageInsertionResult};
+use wz_storage::storage_history::HistoryStorage;
 
 const ITER_CAP: usize = 4096;
 /// The keyexpr the wz storage captures + answers on.
@@ -393,7 +393,7 @@ async fn wz_history_storage_accepts_a_post_delete_older_put_but_serves_pico_noth
          BELOW the t=4 delete, so the R2350 tombstone must shadow it: storing it as \
          history is right, serving it is not. Its presence means the delete dropped \
          the timeline instead of tombstoning it \
-         (wz_session_core::storage_history).\n--- captured stdout ---\n{}",
+         (wz_storage::storage_history).\n--- captured stdout ---\n{}",
         leg.pico_stdout
     );
     assert!(

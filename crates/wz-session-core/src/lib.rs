@@ -1669,46 +1669,6 @@ pub mod reply_stage;
 #[cfg(feature = "storage-profile")]
 pub mod peer_tables;
 
-// R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
-// `storage_backend::StorageBackend` seam + an in-memory backend
-// (`storage_backend::MemoryStorage`). A faithful mirror of zenoh's
-// `zenoh-backend-traits` `Storage` trait + the bundled `memory_backend`.
-// Gated on `storage-backend` (which implies `alloc`: the BTreeMap /
-// String / Vec backing + the `crate::sample` TimestampHint / EncodingHint
-// the `StoredData` embeds). Runtime-agnostic backend layer; the newer-wins
-// service decision + the wz-runtime-tokio StorageService driver are the
-// follow-up atoms.
-#[cfg(feature = "storage-backend")]
-pub mod storage_backend;
-
-// R311ux — the storage *service gate* (§5.11 storage, atom 2/4): the
-// newer-wins versioning decision + the query-match set
-// (`storage_state::StorageState`). The runtime-agnostic half of a
-// storage service — pure no_std, no Subscriber / Queryable / async — that
-// turns the dumb `storage_backend::StorageBackend` into a storage by
-// applying zenoh's `guard_cache_if_latest` newer-wins gate (older
-// Put/Delete -> Outdated; Delete leaves a tombstone timestamp) and
-// resolving a (wildcard) query into the matching stored entries via the
-// shared `keyexpr_match::keyexpr_intersects_target` scan. Same
-// `storage-backend` gate; the wz-runtime-tokio StorageService driver
-// (Subscriber + complete Queryable + select loop) wraps a `StorageState`
-// (atom 3).
-#[cfg(feature = "storage-backend")]
-pub mod storage_state;
-
-// R311y55 — the §5.24 storage *Volume* layer: the FACTORY
-// (`storage_volume::Volume`) above the §5.11 per-store
-// `storage_backend::StorageBackend`, plus the `storage_volume::Capability` /
-// `storage_volume::Persistence` guarantees and the base in-memory
-// `storage_volume::MemoryVolume`. The wz mirror of zenoh
-// `zenoh-backend-traits` `Volume` + `MemoryBackend` — the keystone a storage
-// MANAGER drives to host N named storages. FOUNDATIONAL: always compiled under
-// `storage-backend` (no own cfg toggle); the toggleable manager atoms
-// (multi-storage-host / strip-prefix / GC) compose ON it once
-// `storage-mgr-config` lands.
-#[cfg(feature = "storage-backend")]
-pub mod storage_volume;
-
 /// R311y56 — the §5.24 storage manager *config* data model
 /// ([`storage_config::StorageConfig`] + [`storage_config::GarbageCollectionConfig`]):
 /// the declarative description of one named storage (name / key_expr / volume_id /
@@ -1720,30 +1680,11 @@ pub mod storage_volume;
 #[cfg(feature = "storage-backend")]
 pub mod storage_config;
 
-// The storage manager that hosts N named storages over a registry of these volumes,
-// and the reader of its `plugins.storage_manager` document with the diff between two
-// of them, are the server layer's, in the wz-storage crate
-// (`storage-mgr-multi-storage-host` and `adminspace-config-hotreload` downstream);
-// they compose the three modules above.
-
-// R311y58 — the §5.24 `storage-mgr-strip-prefix` atom: the
-// `storage_strip_prefix::strip_prefix` / `storage_strip_prefix::restore_prefix`
-// key transforms a storage manager applies so a storage holds keys RELATIVE to a
-// mount point (the wz mirror of zenoh's `strip_prefix` / `prefix`). Closes the
-// R311wt aligner strip_prefix gap at the LOGIC level; the live manager/backend
-// application (which needs a §5.11 backend Option-key change for the exact-match
-// none-key) is a documented follow-up.
-#[cfg(feature = "storage-mgr-strip-prefix")]
-pub mod storage_strip_prefix;
-
-// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
-// `History::All` backend (`storage_history::HistoryStorage`) that keeps
-// every version per key, the multi-version counterpart of
-// `storage_backend::MemoryStorage`. The newer-wins gate skips an `All`
-// backend (every version retained); a query replies all versions. Gated
-// on `storage-history` (which implies `storage-backend`).
-#[cfg(feature = "storage-history")]
-pub mod storage_history;
+// The rest of the storage plane is the server layer's, in the wz-storage crate: the
+// backend seam, the service gate, the volume, the history backend, the strip-prefix
+// transforms, replication and the aligner, the storage manager, and the reader of its
+// `plugins.storage_manager` document with the diff between two of them. It is built on
+// the config above, which stays here while the admin space's storage-add arm reads it.
 
 // R311y104 — the NTP64 timestamp-word SSOT (`ntp64::Ntp64`): the
 // `(unix_secs << 32) | fraction` layout uhlc / zenoh `Timestamp` carry, with
@@ -1753,33 +1694,14 @@ pub mod storage_history;
 // magnitude is no longer stated four ways.
 pub mod ntp64;
 
-// Round 311vh — the storage-replication *primitives* atom (§5.11 storage,
-// replication 1/N): the `storage_replication::Fingerprint`, the
-// time-bucket classification (`storage_replication::IntervalIdx` /
-// `storage_replication::SubIntervalIdx`), the
-// `storage_replication::ReplicationConfig` + its compatibility
-// fingerprint, and the `storage_replication::event_fingerprint` a
-// replica's Digest is assembled from. Pure no_std xxh3 logic — a faithful,
-// byte-exact mirror of zenoh's `zenoh-plugin-storage-manager`
-// `replication::{digest,classification,configuration,log}`. The Digest
-// assembly + diff + wire codec + the publish/subscribe driver are the
-// follow-up atoms. Gated on `storage-replication` (implies
-// `storage-backend`).
-#[cfg(feature = "storage-replication")]
-pub mod storage_replication;
-
 /// Round 311wa — the shared no_std bincode-1.3 wire primitives (the single
 /// LE-fixint cursor + length helpers + the multi-consumer widths) the wire
 /// codecs build on, so the bincode-1.3 framing contract lives in one place.
-/// Gated on `storage-replication` (the aligner feature implies it) OR
-/// `ext-pubsub-group-membership` (R311y97 — the group-membership wire codec is
-/// the third consumer of the same bincode-1.3 cursor; it is independent of the
-/// storage codecs but reuses the framing SSOT).
-#[cfg(any(
-    feature = "storage-replication",
-    feature = "ext-pubsub-group-membership"
-))]
-pub(crate) mod wire_bincode;
+/// Public under `wire-bincode`: two of its three consumers, the storage plane's
+/// replication digest and aligner, are above the core since the server-layer
+/// split and turn it on; the third, `ext-pubsub-group-membership`, implies it.
+#[cfg(feature = "wire-bincode")]
+pub mod wire_bincode;
 
 // R311y97 — `ext-pubsub-group-membership` (§5.25): the no_std data model
 // (`group_membership::Member` / `group_membership::MemberLiveliness` /
@@ -1793,22 +1715,6 @@ pub(crate) mod wire_bincode;
 // advanced-pubsub `@adv` family (its own wire + KE namespace).
 #[cfg(feature = "ext-pubsub-group-membership")]
 pub mod group_membership;
-
-// Round 311vr — the storage-aligner *event metadata* atom (§5.11 storage,
-// aligner 1/N): the `storage_aligner::Action` + `storage_aligner::EventMetadata`
-// a replica exchanges to pull the entries a
-// `storage_replication::DigestDiff` localised. The metadata's
-// `fingerprint` (`storage_aligner::EventMetadata::fingerprint`) reuses the
-// `storage_replication::event_fingerprint` SSOT, so an event's identity
-// agrees between the digest and the aligner. Pure no_std logic — a faithful
-// mirror of zenoh's `zenoh-plugin-storage-manager` `replication::log`
-// metadata (all four `Action` variants round-trip on the wire as of R311wt
-// slice-1; wz does not yet PRODUCE or APPLY a wildcard event — slices 2/3). The
-// AlignmentQuery / AlignmentReply protocol + the answer / pull engines + the
-// aligner driver are the follow-up atoms. Gated on `storage-aligner`
-// (implies `storage-replication`).
-#[cfg(feature = "storage-aligner")]
-pub mod storage_aligner;
 
 // R311dy — application-layer reply registry (`ReplyRegistry` +
 // `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side

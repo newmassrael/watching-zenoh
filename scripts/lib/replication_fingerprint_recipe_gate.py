@@ -75,7 +75,7 @@ It DERIVES the recipe from source, on both sides, and compares the sequences:
     resolved against `plugins/zenoh-backend-traits/src/config.rs`
     @ `pub struct ReplicaConfig` for its Rust type;
   * wz: the same, in `ReplicationConfig::new`
-    (`crates/wz-session-core/src/storage_replication.rs`), resolved against
+    (`crates/wz-storage/src/storage_replication.rs`), resolved against
     that function's own signature and its struct.
 
 Three things must hold, element by element and IN ORDER: the same number of
@@ -150,7 +150,7 @@ UPSTREAM_CONFIG_PARTS = (
 UPSTREAM_TRAITS_PARTS = ("plugins", "zenoh-backend-traits", "src", "config.rs")
 UPSTREAM_CONFIG_REL = "/".join(UPSTREAM_CONFIG_PARTS)
 UPSTREAM_TRAITS_REL = "/".join(UPSTREAM_TRAITS_PARTS)
-WZ_REL = "crates/wz-session-core/src/storage_replication.rs"
+WZ_REL = "crates/wz-storage/src/storage_replication.rs"
 
 #: The `impl` block whose `new` IS the recipe, one per side. Anchored on the
 #: impl and not on `pub fn new(` alone: `storage_replication.rs` carries

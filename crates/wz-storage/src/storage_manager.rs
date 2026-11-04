@@ -4,7 +4,7 @@
 //! §5.24 storage MANAGER — hosting N named storages over a registry of named
 //! volumes. The wz mirror of zenoh's plugin-storage-manager (the `storages` map +
 //! `spawn_storage`, `plugins/zenoh-plugin-storage-manager/src/lib.rs:100,263): a
-//! [`StorageManager`] holds named [`Volume`](wz_session_core::storage_volume::Volume)s and,
+//! [`StorageManager`] holds named [`Volume`](crate::storage_volume::Volume)s and,
 //! per a [`StorageConfig`], resolves the config's `volume_id` to a volume, has it
 //! `create_storage` the backend, and holds the result by storage name for lookup.
 //!
@@ -20,12 +20,12 @@
 //! (`storage_backend`, `storage_volume`, `storage_config` under `storage-backend`);
 //! they join this crate in later steps of the server-layer split.
 
+use crate::storage_backend::StorageBackend;
+use crate::storage_volume::{Volume, VolumeError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use wz_session_core::storage_backend::StorageBackend;
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_volume::{Volume, VolumeError};
 
 /// Why [`VolumeRegistry::create_backend`] could not resolve a config to a
 /// backend — the resolve+create error of the shared volume registry. The
@@ -257,11 +257,11 @@ impl StorageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage_backend::{History, StorageInsertionResult};
+    use crate::storage_volume::{Capability, MemoryVolume, Persistence};
     use alloc::vec;
     use alloc::vec::Vec;
     use wz_session_core::sample::TimestampHint;
-    use wz_session_core::storage_backend::{History, StorageInsertionResult};
-    use wz_session_core::storage_volume::{Capability, MemoryVolume, Persistence};
 
     fn ts(time: u64) -> TimestampHint {
         TimestampHint {

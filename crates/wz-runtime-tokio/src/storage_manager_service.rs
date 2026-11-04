@@ -93,10 +93,10 @@ use std::collections::BTreeMap;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
-use wz_session_core::storage_backend::StorageBackend;
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_volume::Volume;
+use wz_storage::storage_backend::StorageBackend;
 use wz_storage::storage_manager::{VolumeRegistry, VolumeRegistryError};
+use wz_storage::storage_volume::Volume;
 
 use crate::session::{Session, Unicast};
 use crate::session_glue::SessionLinkActions;
@@ -116,7 +116,7 @@ const PLUGIN_MEMORY_VOLUME: &str = "memory";
 
 /// A storage hosted by [`RuntimeStorageManager`]: a live [`StorageService`]
 /// over a volume-created backend. The backend is `Box<dyn StorageBackend +
-/// Send>` (the [`Volume::create_storage`](wz_session_core::storage_volume::Volume::create_storage)
+/// Send>` (the [`Volume::create_storage`](wz_storage::storage_volume::Volume::create_storage)
 /// output) so one manager hosts heterogeneous backends behind one type.
 type HostedStorage<R, T> = StorageService<R, T, Box<dyn StorageBackend + Send>>;
 
@@ -259,7 +259,7 @@ pub fn build_volume(
                     keys: unknown,
                 });
             }
-            Ok(Box::new(wz_session_core::storage_volume::MemoryVolume))
+            Ok(Box::new(wz_storage::storage_volume::MemoryVolume))
         }
         #[cfg(feature = "storage-backend-filesystem")]
         "fs" => {
@@ -818,7 +818,7 @@ where
     {
         self.register_volume(
             PLUGIN_MEMORY_VOLUME,
-            Box::new(wz_session_core::storage_volume::MemoryVolume),
+            Box::new(wz_storage::storage_volume::MemoryVolume),
         );
         let mut failures = Vec::new();
         let steps = config
@@ -1026,7 +1026,7 @@ mod tests {
     use crate::observer::ApplicationLayerObserver;
     use crate::runtime_impl::TokioTime;
     use crate::session::TokioSession;
-    use wz_session_core::storage_volume::MemoryVolume;
+    use wz_storage::storage_volume::MemoryVolume;
 
     // The `_driver` Arc is kept alive inside the actions (which hold their own
     // clone), so the session is self-sufficient once built — these tests do not

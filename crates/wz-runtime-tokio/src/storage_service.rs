@@ -5,8 +5,8 @@
 //! the AP-side runtime binding that turns the runtime-agnostic storage
 //! kernel into a live service on a [`Session`].
 //!
-//! [`wz_session_core::storage_backend`] (atom 1) is the pluggable store and
-//! [`wz_session_core::storage_state::StorageState`] (atom 2) is the
+//! [`wz_storage::storage_backend`] (atom 1) is the pluggable store and
+//! [`wz_storage::storage_state::StorageState`] (atom 2) is the
 //! newer-wins gate + query-match logic — both pure no_std. This module is
 //! their tokio binding: a [`StorageService`] declares a [`Subscriber`] on
 //! the storage keyexpr (to capture inbound Put / Delete samples into the
@@ -67,7 +67,7 @@
 //! foreign `z_get` (a follow-up `wz-e2e-*` binary over the shared harness,
 //! the wz-e2e-queryable pattern), tombstone GC / wildcard-update
 //! overriding / `strip_prefix` (the deferred kernel follow-ups named in
-//! [`wz_session_core::storage_state`]).
+//! [`wz_storage::storage_state`]).
 
 use std::sync::{Arc, Mutex};
 
@@ -78,9 +78,9 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 #[cfg(test)]
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::sink::SampleView;
-use wz_session_core::storage_backend::{MemoryStorage, StorageBackend, StorageReadError};
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_state::StorageState;
+use wz_storage::storage_backend::{MemoryStorage, StorageBackend, StorageReadError};
+use wz_storage::storage_state::StorageState;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
@@ -453,7 +453,7 @@ mod tests {
     use super::*;
     use wz_session_core::query_sink::BorrowedQuery;
     use wz_session_core::sample::Sample;
-    use wz_session_core::storage_backend::StorageInsertionResult;
+    use wz_storage::storage_backend::StorageInsertionResult;
 
     fn ts(time: u64, zid: u8) -> TimestampHint {
         TimestampHint {
@@ -751,7 +751,7 @@ mod tests {
         use crate::runtime_impl::TokioTime;
         use crate::session::{PublishOptions, QueryOptions, TokioSession};
         use wz_session_core::locality::Locality;
-        use wz_session_core::storage_volume::{MemoryVolume, Volume};
+        use wz_storage::storage_volume::{MemoryVolume, Volume};
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
@@ -828,7 +828,7 @@ mod tests {
     #[cfg(feature = "storage-history")]
     mod history {
         use super::*;
-        use wz_session_core::storage_history::HistoryStorage;
+        use wz_storage::storage_history::HistoryStorage;
 
         #[test]
         fn answer_query_replies_every_version_of_a_history_all_key() {
