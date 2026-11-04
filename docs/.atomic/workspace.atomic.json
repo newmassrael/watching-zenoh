@@ -309904,6 +309904,34 @@
         "The consumer is told ABI 52, selector_term revision 1 and selector_fields revision 5, the commit, that the node object alone is the argument, and that a body of either encoding is now named z64 or zbuf (no selector could name it before). Open: the fuzz target's hosted time (fuzz-regress and the nightly matrix) is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use; a WebSocket unit kept whole keeps no bytes of its own (its bytes are the stream's), which no capture here reached."
       ]
     },
+    "Round 4235": {
+      "decision_summary": "A defect found reading the code for the board image, in the stream the earlier steps built: its blocking waits (a dial's handshake, a write's wait for send-buffer room, a read, an accept) poll lwIP's loopback queue and timers, and an Ethernet interface's frames reach lwIP only when its MAC is polled, which is the image's. The host tests ran over the loopback, which lwIP moves by itself, and passed; on a board the SYN-ACK of a dial arrives through the MAC, so every dial would have waited its five seconds and been refused. The image now says what else a poll does with a Service, a plain function so the dial, the listener adapter, the stream and the stack stay Copy, and each poll runs it first, as the node's own loop pumps its ports before lwIP's timers. A dial or listener given none polls as before. A test counts the service across a dial, a wait and a read.",
+      "changes_bullets": [
+        "wz-session-lwip stream: the type Service (Option of a fn), a service field on LwipTcpStream, LwipTcpDial and LwipTcpListen, with_service on the dial and the listener, pump taking the service and running it before the loopback poll and the timers; the test the_service_runs_on_every_poll_of_a_dial_and_of_its_stream."
+      ],
+      "verification_bullets": [
+        "On a build host: the six stream tests of wz-session-lwip pass with tcp (the new service test among them) and with tcp, session-slot and session-unicast-accept, and clippy with warnings denied is clean for both. No board or emulator ran a dial through a MAC: the defect was read from the code and the fix is held by a host test of the hook, not by a MAC."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "The image's service function and its use are the next step (the node's ports reachable from a function, the TCP variant of the lwIP node, its west build). A MAC that cannot be pumped from inside a wait without re-entering the loop's own pump has not been looked for: the node's loop pumps ports and the service pumps them again, and a port's poll takes frames to lwIP's callbacks, which only enqueue."
+      ],
+      "publishable_decision_summary": "A defect found reading the code for the board image, in the stream the earlier steps built: its blocking waits (a dial's handshake, a write's wait for send-buffer room, a read, an accept) poll lwIP's loopback queue and timers, and an Ethernet interface's frames reach lwIP only when its MAC is polled, which is the image's. The host tests ran over the loopback, which lwIP moves by itself, and passed; on a board the SYN-ACK of a dial arrives through the MAC, so every dial would have waited its five seconds and been refused. The image now says what else a poll does with a Service, a plain function so the dial, the listener adapter, the stream and the stack stay Copy, and each poll runs it first, as the node's own loop pumps its ports before lwIP's timers. A dial or listener given none polls as before. A test counts the service across a dial, a wait and a read.",
+      "publishable_changes_bullets": [
+        "wz-session-lwip stream: the type Service (Option of a fn), a service field on LwipTcpStream, LwipTcpDial and LwipTcpListen, with_service on the dial and the listener, pump taking the service and running it before the loopback poll and the timers; the test the_service_runs_on_every_poll_of_a_dial_and_of_its_stream."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the six stream tests of wz-session-lwip pass with tcp (the new service test among them) and with tcp, session-slot and session-unicast-accept, and clippy with warnings denied is clean for both. No board or emulator ran a dial through a MAC: the defect was read from the code and the fix is held by a host test of the hook, not by a MAC."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The image's service function and its use are the next step (the node's ports reachable from a function, the TCP variant of the lwIP node, its west build). A MAC that cannot be pumped from inside a wait without re-entering the loop's own pump has not been looked for: the node's loop pumps ports and the service pumps them again, and a port's poll takes frames to lwIP's callbacks, which only enqueue."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
