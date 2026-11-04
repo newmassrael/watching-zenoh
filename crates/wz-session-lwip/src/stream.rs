@@ -22,10 +22,10 @@ use core::ops::Deref;
 
 #[cfg(feature = "static-link-storage")]
 use wz_link_lwip::tcp::TcpSocketPool;
-use wz_link_lwip::tcp::{LwipTcpSocket, TcpError, TcpState};
+use wz_link_lwip::tcp::{LwipTcpListener, LwipTcpSocket, TcpError, TcpState};
 use wz_link_lwip::{ipv4_addr_from_octets, ipv4_octets, route_source, LwipLink};
 use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
+use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 
 /// How long a dial waits for the handshake before it gives the link up.
 pub const DIAL_TIMEOUT_MS: u32 = 5_000;
@@ -188,6 +188,56 @@ where
     }
 }
 
+/// How a node takes the `tcp/` connections that arrive on the port it listens on: the other half of
+/// [`LwipTcpDial`]. The connection it yields is the same [`LwipTcpStream`] a dial yields, so the
+/// stream link over it has nothing to tell which end opened it.
+///
+/// The listener is a `static` the image declares and starts
+/// ([`LwipTcpListener::listen`](wz_link_lwip::tcp::LwipTcpListener::listen)); this holds a
+/// reference to it and the handle to lwIP that each accept polls.
+pub struct LwipTcpListen<L, const RX: usize, const Q: usize, const S: usize = 0>
+where
+    L: Deref<Target = LwipLink> + Clone,
+{
+    link: L,
+    listener: &'static LwipTcpListener<RX, Q, S>,
+}
+
+impl<L, const RX: usize, const Q: usize, const S: usize> LwipTcpListen<L, RX, Q, S>
+where
+    L: Deref<Target = LwipLink> + Clone,
+{
+    /// Take the connections of `listener`, polling lwIP through `link`.
+    pub fn new(link: L, listener: &'static LwipTcpListener<RX, Q, S>) -> Self {
+        Self { link, listener }
+    }
+}
+
+impl<L, const RX: usize, const Q: usize, const S: usize> StreamListen for LwipTcpListen<L, RX, Q, S>
+where
+    L: Deref<Target = LwipLink> + Clone,
+{
+    type Stream = LwipTcpStream<L, RX>;
+
+    fn local(&self) -> ([u8; 4], u16) {
+        // Bound to every address: the port is what names it.
+        ([0; 4], self.listener.local_port())
+    }
+
+    fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError> {
+        // A connection arrives as its handshake is processed.
+        pump(&self.link);
+        Ok(self.listener.accept().map(|socket| {
+            let peer = socket.peer();
+            LwipTcpStream {
+                socket: RefCell::new(socket),
+                link: self.link.clone(),
+                peer,
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -346,5 +396,74 @@ mod tests {
             "the batch came back whole"
         );
         assert_eq!(driver.lost(), None);
+    }
+
+    static LISTENER: LwipTcpListener<RX, 2> = LwipTcpListener::new();
+
+    /// Both ends of a connection are the same stream: a dial and an accept yield streams that the
+    /// stream link frames alike, and a batch crosses each way, whole, with the accepted end
+    /// knowing its peer.
+    #[cfg(not(feature = "static-link-storage"))]
+    #[test]
+    fn a_dialled_and_an_accepted_stream_carry_batches_both_ways_through_the_stream_link() {
+        use wz_runtime_coop::link_storage::HeapTx;
+        use wz_runtime_coop::session_drive::SessionDatagramLink;
+        use wz_runtime_coop::stream_link::StreamDriver;
+        use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
+        use wz_session_core::reliability::Reliability;
+
+        let (_gate, link) = lwip_test_link();
+        let link: &'static LwipLink = std::boxed::Box::leak(std::boxed::Box::new(link));
+        LISTENER.listen(47_501).unwrap();
+        let listen = LwipTcpListen::new(link, &LISTENER);
+        assert_eq!(listen.local(), ([0; 4], 47_501));
+        assert!(matches!(listen.accept(), Ok(None)), "nothing has arrived");
+
+        let dialled = dial(link).dial([127, 0, 0, 1], 47_501).expect("dial");
+        let dialled_port = dialled.local().1;
+        let mut accepted = None;
+        for _ in 0..4_000 {
+            if let Some(stream) = listen.accept().expect("the listener is sound") {
+                accepted = Some(stream);
+                break;
+            }
+        }
+        let accepted = accepted.expect("the connection that arrived");
+        assert_eq!(accepted.peer(), ([127, 0, 0, 1], dialled_port));
+
+        let client = StreamDriver::with_buffers(dialled, 2_048, HeapTx::new(2, 2_048));
+        let server = StreamDriver::with_buffers(accepted, 2_048, HeapTx::new(2, 2_048));
+
+        fn carry(
+            from: &impl BoxedLinkDriver,
+            to: &impl SessionDatagramLink,
+            batch: &[u8],
+        ) -> Option<Vec<u8>> {
+            assert!(matches!(
+                from.send_blocking(batch, Reliability::Reliable),
+                LinkSendOutcome::Sent
+            ));
+            let mut got = None;
+            for _ in 0..4_000 {
+                to.service();
+                to.recv_with(&mut |bytes| got = Some(bytes.to_vec()));
+                if got.is_some() {
+                    break;
+                }
+            }
+            got
+        }
+        assert_eq!(
+            carry(&client, &server, &[1u8; 300]).as_deref(),
+            Some(&[1u8; 300][..]),
+            "client to server"
+        );
+        assert_eq!(
+            carry(&server, &client, &[9u8; 500]).as_deref(),
+            Some(&[9u8; 500][..]),
+            "server to client"
+        );
+        assert_eq!(client.lost(), None);
+        assert_eq!(server.lost(), None);
     }
 }
