@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "router-node")]
+use wz_capi_c::abi::z_owned_publisher_t;
 use wz_capi_c::abi::{
     z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_sample_t, z_moved_config_t,
     z_moved_session_t, z_owned_bytes_t, z_owned_closure_sample_t, z_owned_config_t,
@@ -25,7 +27,16 @@ use wz_capi_c::abi::{
 };
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
+#[cfg(feature = "router-node")]
+use wz_capi_c::keyexpr::z_keyexpr_equals;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
+#[cfg(feature = "router-node")]
+use wz_capi_c::matching::{z_matching_status_t, z_publisher_get_matching_status};
+#[cfg(feature = "router-node")]
+use wz_capi_c::publisher::{
+    z_declare_publisher, z_publisher_delete, z_publisher_id, z_publisher_keyexpr, z_publisher_loan,
+    z_publisher_put, z_undeclare_publisher,
+};
 use wz_capi_c::put::z_put;
 #[cfg(feature = "router-node")]
 use wz_capi_c::result::Z_EUNAVAILABLE;
@@ -356,6 +367,89 @@ fn a_node_opened_through_the_c_abi_puts_and_subscribes() {
         close_session(node);
         close_session(peer);
         drop(Box::from_raw(ctx_node));
+        drop(Box::from_raw(ctx_peer));
+    }
+}
+
+/// A publisher declared on a node publishes as the node does: a registry peer that dials it hears
+/// what the publisher puts, the publisher answers its key and an id of the node's session, a delete
+/// goes out, and the publisher is let go. The matching of a publisher is not carried by the node
+/// yet and says so.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_publisher_declared_on_a_node_publishes() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the context is freed after them.
+    let (hits_peer, ctx_peer) = unsafe { count_samples(&peer) };
+    // SAFETY: the node is live.
+    unsafe {
+        let key = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(&node),
+                &mut publisher,
+                z_view_keyexpr_loan(&view),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a publisher is declared on the node"
+        );
+        let loaned = z_publisher_loan(&publisher);
+        assert!(
+            z_keyexpr_equals(z_publisher_keyexpr(loaned), z_view_keyexpr_loan(&view)),
+            "the publisher answers its key"
+        );
+        let id = z_publisher_id(loaned);
+        assert_eq!(
+            id.zid.id,
+            z_info_zid(z_session_loan(&node)).id,
+            "the publisher is an entity of the node's session"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hits_peer.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            let text = CString::new("publisher").unwrap();
+            let mut payload: z_owned_bytes_t = std::mem::zeroed();
+            assert_eq!(z_bytes_copy_from_str(&mut payload, text.as_ptr()), Z_OK);
+            assert_eq!(
+                z_publisher_put(
+                    loaned,
+                    (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+                    std::ptr::null_mut(),
+                ),
+                Z_OK
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            hits_peer.load(Ordering::SeqCst) > 0,
+            "what the node's publisher put never reached the peer"
+        );
+        assert_eq!(z_publisher_delete(loaned, std::ptr::null_mut()), Z_OK);
+        let mut status: z_matching_status_t = std::mem::zeroed();
+        assert_eq!(
+            z_publisher_get_matching_status(loaned, &mut status),
+            Z_EUNAVAILABLE,
+            "the matching of a publisher is not carried by the node yet"
+        );
+        assert_eq!(
+            z_undeclare_publisher((&mut publisher as *mut z_owned_publisher_t).cast()),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
         drop(Box::from_raw(ctx_peer));
     }
 }

@@ -306,7 +306,7 @@ pub unsafe extern "C" fn z_publisher_declare_background_matching_listener(
 
         // SAFETY: the caller's contract.
         let Some(state) = (unsafe { crate::publisher::publisher_state(publisher) }) else {
-            return Z_ENULL;
+            return unsafe { crate::publisher::not_a_registry_publisher(publisher) };
         };
         let closure = Arc::new(cclosure);
         let id = state.shared.declare_matching_listener(
@@ -454,7 +454,7 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
         let closure = unsafe { adopt_matching_closure(callback) };
         // SAFETY: as above.
         let Some(state) = (unsafe { crate::publisher::publisher_state(publisher) }) else {
-            return Z_ENULL;
+            return unsafe { crate::publisher::not_a_registry_publisher(publisher) };
         };
         let id = state
             .shared
@@ -633,7 +633,7 @@ pub unsafe extern "C" fn z_publisher_get_matching_status(
         unsafe { (*matching_status).matching = false };
         // SAFETY: as above.
         let Some(state) = (unsafe { crate::publisher::publisher_state(this_) }) else {
-            return Z_ENULL;
+            return unsafe { crate::publisher::not_a_registry_publisher(this_) };
         };
         // SAFETY: as above.
         unsafe { (*matching_status).matching = state.shared.has_matching(&state.keyexpr.keyexpr) };

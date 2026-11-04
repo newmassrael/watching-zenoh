@@ -49,7 +49,7 @@ use crate::bytes::take_payload;
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::result::{publish_refusal, ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{session_handle, SessionHandle};
 
 /// zenoh-c's `z_congestion_control_t` — a plain C enum, so `c_int`-sized.
 pub type z_congestion_control_t = std::ffi::c_int;
@@ -565,14 +565,69 @@ impl PutOverrides {
     }
 }
 
-/// Read the state behind a loaned publisher.
+/// What the handle slot of a publisher holds: a publisher of the registry of faces, or, in a
+/// build with `router-node`, one declared on a node.
+pub(crate) enum PublisherHandle {
+    /// A publisher that fans out through the faces of the registry.
+    Registry(PublisherState),
+    /// A publisher that publishes as the session of a node.
+    #[cfg(feature = "router-node")]
+    Node(NodePublisher),
+}
+
+/// A publisher declared on a node: the key it publishes on and the options every put on it
+/// starts from, and the data plane it publishes through, held counted so that the publisher
+/// can be used and dropped after the session handle has been let go of.
+///
+/// A node names every key whole on the wire, so the publisher takes no declaration of its key.
+#[cfg(feature = "router-node")]
+pub(crate) struct NodePublisher {
+    forwarder: Arc<wz_runtime_tokio::router_forward::RouterForwarder>,
+    /// The identity of the session, which `z_publisher_id` answers.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    zid: [u8; 16],
+    keyexpr: KeyexprState,
+    loaned_keyexpr: z_loaned_keyexpr_t,
+    base: PublishOptions,
+}
+
+#[cfg(feature = "router-node")]
+impl NodePublisher {
+    /// Point the cached view at this state's own field, once it sits at its final address.
+    fn bind(&mut self) {
+        self.loaned_keyexpr =
+            z_loaned_keyexpr_t::from_handle(&self.keyexpr as *const KeyexprState as *mut c_void);
+    }
+}
+
+impl PublisherHandle {
+    /// The cached view of the key the publisher publishes on.
+    fn loaned_keyexpr(&self) -> *const z_loaned_keyexpr_t {
+        match self {
+            Self::Registry(state) => &state.loaned_keyexpr,
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => &node.loaned_keyexpr,
+        }
+    }
+
+    /// Point the cached view at the state's own field, once the handle sits at its final address.
+    fn bind(&mut self) {
+        match self {
+            Self::Registry(state) => state.bind(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.bind(),
+        }
+    }
+}
+
+/// Read the handle behind a loaned publisher.
 ///
 /// # Safety
 /// `this_` must be null, or a valid loaned publisher whose handle slot holds a
-/// live `PublisherState` pointer.
-pub(crate) unsafe fn publisher_state<'a>(
+/// live `PublisherHandle` pointer.
+pub(crate) unsafe fn publisher_handle<'a>(
     this_: *const z_loaned_publisher_t,
-) -> Option<&'a PublisherState> {
+) -> Option<&'a PublisherHandle> {
     if this_.is_null() {
         return None;
     }
@@ -581,8 +636,41 @@ pub(crate) unsafe fn publisher_state<'a>(
     if handle.is_null() {
         return None;
     }
-    // SAFETY: as above — a live `Box<PublisherState>` this crate leaked.
-    Some(unsafe { &*(handle as *const PublisherState) })
+    // SAFETY: as above — a live `Box<PublisherHandle>` this crate leaked.
+    Some(unsafe { &*(handle as *const PublisherHandle) })
+}
+
+/// Read the state of a publisher of the registry behind a loaned publisher: `None` for a handle
+/// that is not there and for a publisher of a node, which an operation written over the registry
+/// cannot be run on. What such an operation answers when it finds none is
+/// [`not_a_registry_publisher`].
+///
+/// # Safety
+/// As [`publisher_handle`].
+pub(crate) unsafe fn publisher_state<'a>(
+    this_: *const z_loaned_publisher_t,
+) -> Option<&'a PublisherState> {
+    // SAFETY: the caller's contract.
+    match unsafe { publisher_handle(this_) }? {
+        PublisherHandle::Registry(state) => Some(state),
+        #[cfg(feature = "router-node")]
+        PublisherHandle::Node(_) => None,
+    }
+}
+
+/// What an operation written over the registry answers when [`publisher_state`] found none:
+/// `Z_EUNAVAILABLE` for a publisher of a node, which is there but does not carry the operation
+/// yet, and `Z_ENULL` for a handle that is not there.
+///
+/// # Safety
+/// As [`publisher_handle`].
+pub(crate) unsafe fn not_a_registry_publisher(this_: *const z_loaned_publisher_t) -> ZResult {
+    // SAFETY: the caller's contract.
+    match unsafe { publisher_handle(this_) } {
+        #[cfg(feature = "router-node")]
+        Some(PublisherHandle::Node(_)) => crate::result::Z_EUNAVAILABLE,
+        _ => Z_ENULL,
+    }
 }
 
 /// Fill in the default publisher options (zenoh-c `z_publisher_options_default`).
@@ -662,10 +750,10 @@ pub unsafe extern "C" fn z_declare_publisher(
         unsafe { *publisher = z_owned_publisher_t::null_value() };
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { not_a_registry(session) };
+            return Z_ENULL;
         };
         let keyexpr = ke.to_owned();
         // The same outbound canonicity gate the session put applies, hoisted to
@@ -674,6 +762,39 @@ pub unsafe extern "C" fn z_declare_publisher(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&keyexpr).is_err() {
             return Z_EINVAL;
         }
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            SessionHandle::Registry(state) => state,
+            // A node names every key whole on the wire: the publisher keeps the options its
+            // puts start from, and the data plane it puts through.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => {
+                // SAFETY: the caller's contract for `options`.
+                let base = unsafe { resolve_publisher_options(options) };
+                let mut boxed = Box::new(PublisherHandle::Node(NodePublisher {
+                    forwarder: node.shared_forwarder(),
+                    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+                    zid: held.zid(),
+                    keyexpr: crate::keyexpr::KeyexprState {
+                        keyexpr,
+                        // SAFETY: the caller's contract for `key_expr`.
+                        mapping: unsafe { crate::keyexpr::keyexpr_mapping(key_expr) },
+                    },
+                    loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
+                    base,
+                }));
+                boxed.bind();
+                // SAFETY: the caller's contract; the slot was gravestoned above.
+                unsafe {
+                    *publisher = z_owned_publisher_t::from_handle(Box::into_raw(boxed) as Handle)
+                };
+                return Z_OK;
+            }
+        };
         // A publisher declared over a DECLARED keyexpr inherits its alias, so every put on
         // the handle rides it. One declared over a plain key declares the key itself, as
         // zenoh-pico does for every publisher: the peer then reads each put as an id, and
@@ -691,7 +812,7 @@ pub unsafe extern "C" fn z_declare_publisher(
         // SAFETY: the caller's contract for `options`.
         let base = unsafe { resolve_publisher_options(options) };
         let plain = base.plain_put_params();
-        let mut boxed = Box::new(PublisherState {
+        let mut boxed = Box::new(PublisherHandle::Registry(PublisherState {
             shared: state.shared.clone(),
             // The mapping travels with the keyexpr rather than with the session, which is
             // upstream's shape. Only a declaration the CALLER made rides in it: the view
@@ -707,7 +828,7 @@ pub unsafe extern "C" fn z_declare_publisher(
             matching: std::sync::Mutex::new(None),
             base,
             plain,
-        });
+        }));
         // Bind AFTER the box, never before: the cached view must point at the
         // state's final address.
         boxed.bind();
@@ -741,8 +862,28 @@ pub unsafe extern "C" fn z_publisher_put(
         // SAFETY: the caller's contract for the options struct.
         let overrides = unsafe { PutOverrides::take(options) };
         // SAFETY: the caller's contract.
-        let (Some(state), Some(payload)) = (unsafe { publisher_state(this_) }, payload) else {
+        let (Some(held), Some(payload)) = (unsafe { publisher_handle(this_) }, payload) else {
             return Z_ENULL;
+        };
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            PublisherHandle::Registry(state) => state,
+            // The put starts from the options the publisher was declared with, as the
+            // publisher of the registry does.
+            #[cfg(feature = "router-node")]
+            PublisherHandle::Node(node) => {
+                let publish = overrides.apply(node.base.clone());
+                return crate::put::node_publish(
+                    &node.forwarder,
+                    &node.keyexpr.keyexpr,
+                    payload.bytes(),
+                    &publish,
+                );
+            }
         };
         // A put on a declared key that brings nothing of its own, from a publisher whose
         // options are plain, is sent from the facts worked out at declare time: no clone of
@@ -796,8 +937,13 @@ pub unsafe extern "C" fn z_publisher_delete(
 ) -> ZResult {
     guarded(|| {
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { publisher_state(this_) }) else {
+        let Some(held) = (unsafe { publisher_handle(this_) }) else {
             return Z_ENULL;
+        };
+        let declared = match held {
+            PublisherHandle::Registry(state) => &state.base,
+            #[cfg(feature = "router-node")]
+            PublisherHandle::Node(node) => &node.base,
         };
         // R311y545 — the publisher's declare-time QoS applies to its Del as
         // well as its Put, which is upstream's shape (`z_publisher_delete`
@@ -805,8 +951,7 @@ pub unsafe extern "C" fn z_publisher_delete(
         // encoding is dropped because a Del body has no encoding slot
         // (`_z_msg_del_t`).
         let options = {
-            let base = state
-                .base
+            let base = declared
                 .clone()
                 .with_kind(wz_runtime_tokio::sample::SampleKind::Del);
             // R311y568 — the per-call TIMESTAMP, which is the struct's only
@@ -825,6 +970,23 @@ pub unsafe extern "C" fn z_publisher_delete(
                     Some(hint) => base.with_timestamp(hint),
                     None => base,
                 }
+            }
+        };
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            PublisherHandle::Registry(state) => state,
+            #[cfg(feature = "router-node")]
+            PublisherHandle::Node(node) => {
+                return crate::put::node_publish(
+                    &node.forwarder,
+                    &node.keyexpr.keyexpr,
+                    &[],
+                    &options,
+                );
             }
         };
         let sent = match state.wire_mapping() {
@@ -870,11 +1032,20 @@ pub unsafe extern "C" fn z_publisher_id(
     // convention is now stated once for all five entity-id accessors.
     guard_val(crate::entity::z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract.
-        match unsafe { publisher_state(publisher) } {
-            Some(state) => crate::entity::z_entity_global_id_t::for_entity(
-                &state.shared,
-                publisher as *const c_void,
-            ),
+        match unsafe { publisher_handle(publisher) } {
+            Some(PublisherHandle::Registry(state)) => {
+                crate::entity::z_entity_global_id_t::for_entity(
+                    &state.shared,
+                    publisher as *const c_void,
+                )
+            }
+            #[cfg(feature = "router-node")]
+            Some(PublisherHandle::Node(node)) => {
+                crate::entity::z_entity_global_id_t::for_entity_of(
+                    node.zid,
+                    publisher as *const c_void,
+                )
+            }
             None => crate::entity::z_entity_global_id_t::empty(),
         }
     })
@@ -891,10 +1062,10 @@ pub unsafe extern "C" fn z_publisher_keyexpr(
 ) -> *const z_loaned_keyexpr_t {
     guard_val(std::ptr::null(), || {
         // SAFETY: the caller's contract.
-        match unsafe { publisher_state(this_) } {
+        match unsafe { publisher_handle(this_) } {
             // The cached view, bound at declaration time — no second allocation
             // whose lifetime would then need managing.
-            Some(state) => &state.loaned_keyexpr as *const z_loaned_keyexpr_t,
+            Some(held) => held.loaned_keyexpr(),
             None => std::ptr::null(),
         }
     })
@@ -913,10 +1084,10 @@ pub unsafe extern "C" fn z_undeclare_publisher(this_: *mut z_moved_publisher_t) 
         // SAFETY: the caller's contract.
         let handle = unsafe { (*this_)._this.handle };
         if !handle.is_null() {
-            // SAFETY: a live `Box<PublisherState>` this crate leaked. Nothing goes
+            // SAFETY: a live `Box<PublisherHandle>` this crate leaked. Nothing goes
             // on the wire: wz declares no publisher entity, so there is no
             // UndeclPublisher to emit — see the module note.
-            drop(unsafe { Box::from_raw(handle as *mut PublisherState) });
+            drop(unsafe { Box::from_raw(handle as *mut PublisherHandle) });
             unsafe { (*this_)._this = z_owned_publisher_t::null_value() };
         }
         Z_OK

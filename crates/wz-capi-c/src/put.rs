@@ -338,7 +338,7 @@ pub unsafe extern "C" fn z_put(
             // the descriptor.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
-                return node_publish(node, keyexpr, payload.bytes(), &publish);
+                return node_publish(node.forwarder(), keyexpr, payload.bytes(), &publish);
             }
         };
         // R311y564 — a keyexpr that carries a DECLARATION publishes aliased, the
@@ -364,13 +364,13 @@ pub unsafe extern "C" fn z_put(
 /// the faces whose subscriptions match, as the partition of its south lets the message pass. The
 /// codec's refusal is the one the registry reports, a message too large to send.
 #[cfg(feature = "router-node")]
-fn node_publish(
-    node: &wz_capi_core::drive::RouterState,
+pub(crate) fn node_publish(
+    forwarder: &wz_runtime_tokio::router_forward::RouterForwarder,
     keyexpr: &str,
     payload: &[u8],
     options: &wz_runtime_tokio::session::PublishOptions,
 ) -> ZResult {
-    match node.forwarder().publish_with(keyexpr, payload, options) {
+    match forwarder.publish_with(keyexpr, payload, options) {
         Ok(()) => Z_OK,
         Err(_) => publish_refusal(wz_capi_core::faces::FanoutError::ExceedsCapacity),
     }
@@ -416,7 +416,9 @@ pub unsafe extern "C" fn z_delete(
             SessionHandle::Registry(state) => state,
             // A delete takes the route a put to its key would.
             #[cfg(feature = "router-node")]
-            SessionHandle::Node(node) => return node_publish(node, keyexpr, &[], &publish),
+            SessionHandle::Node(node) => {
+                return node_publish(node.forwarder(), keyexpr, &[], &publish)
+            }
         };
         // The DEL half of the same aliasing choice — see `z_put`.
         // SAFETY: the caller's contract for the handle.
