@@ -597,7 +597,7 @@ pub unsafe extern "C" fn z_querier_declare_matching_listener(
         let closure = unsafe { adopt_matching_closure(callback) };
         // SAFETY: as above.
         let Some(state) = (unsafe { crate::querier::querier_state(querier) }) else {
-            return Z_ENULL;
+            return unsafe { crate::querier::not_a_registry_querier(querier) };
         };
         let id = state.shared.declare_querier_matching_listener(
             state.keyexpr.literal().to_owned(),
@@ -660,7 +660,7 @@ pub unsafe extern "C" fn z_querier_get_matching_status(
         unsafe { (*matching_status).matching = false };
         // SAFETY: as above.
         let Some(state) = (unsafe { crate::querier::querier_state(this_) }) else {
-            return Z_ENULL;
+            return unsafe { crate::querier::not_a_registry_querier(this_) };
         };
         // SAFETY: as above.
         unsafe {

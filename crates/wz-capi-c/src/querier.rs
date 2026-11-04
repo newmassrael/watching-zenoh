@@ -36,7 +36,7 @@ use crate::matching::{
     CMatchClosure, MatchingHold,
 };
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{session_handle, SessionHandle};
 
 use wz_capi_core::faces::SharedSession;
 
@@ -233,13 +233,44 @@ impl QuerierState {
     }
 }
 
-/// Read the [`QuerierState`] behind a loaned querier.
+/// What the handle slot of a querier holds: a querier of the registry of faces, or, in a build
+/// with `router-node`, one declared on a node.
+pub(crate) enum QuerierHandle {
+    /// A querier that fans its gets out through the faces of the registry.
+    Registry(QuerierState),
+    /// A querier that asks as the session of a node.
+    #[cfg(feature = "router-node")]
+    Node(NodeQuerier),
+}
+
+/// A querier declared on a node: the key it asks on and the options every get on it starts from,
+/// and the node it asks through, held counted so that the querier can be used and dropped after
+/// the session handle has been let go of.
+#[cfg(feature = "router-node")]
+pub(crate) struct NodeQuerier {
+    node: Arc<wz_capi_core::drive::RouterState>,
+    keyexpr: crate::keyexpr::DeclaredKeyexpr,
+    base: QueryOptions,
+}
+
+impl QuerierHandle {
+    /// The key the querier asks on, as the cached view `z_querier_keyexpr` answers.
+    fn loaned_keyexpr(&self) -> *const crate::abi::z_loaned_keyexpr_t {
+        match self {
+            Self::Registry(state) => state.keyexpr.as_loaned(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.keyexpr.as_loaned(),
+        }
+    }
+}
+
+/// Read the handle behind a loaned querier.
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned querier whose handle is live.
-pub(crate) unsafe fn querier_state<'a>(
+pub(crate) unsafe fn querier_handle<'a>(
     this_: *const z_loaned_querier_t,
-) -> Option<&'a QuerierState> {
+) -> Option<&'a QuerierHandle> {
     if this_.is_null() {
         return None;
     }
@@ -248,8 +279,41 @@ pub(crate) unsafe fn querier_state<'a>(
     if handle.is_null() {
         return None;
     }
-    // SAFETY: a live `Box<QuerierState>` this crate leaked.
-    Some(unsafe { &*(handle as *const QuerierState) })
+    // SAFETY: a live `Box<QuerierHandle>` this crate leaked.
+    Some(unsafe { &*(handle as *const QuerierHandle) })
+}
+
+/// Read the [`QuerierState`] of a querier of the registry behind a loaned querier: `None` for a
+/// handle that is not there and for a querier of a node, which an operation written over the
+/// registry cannot be run on. What such an operation answers when it finds none is
+/// [`not_a_registry_querier`].
+///
+/// # Safety
+/// As [`querier_handle`].
+pub(crate) unsafe fn querier_state<'a>(
+    this_: *const z_loaned_querier_t,
+) -> Option<&'a QuerierState> {
+    // SAFETY: the caller's contract.
+    match unsafe { querier_handle(this_) }? {
+        QuerierHandle::Registry(state) => Some(state),
+        #[cfg(feature = "router-node")]
+        QuerierHandle::Node(_) => None,
+    }
+}
+
+/// What an operation written over the registry answers when [`querier_state`] found none:
+/// `Z_EUNAVAILABLE` for a querier of a node, which is there but does not carry the operation
+/// yet, and `Z_ENULL` for a handle that is not there.
+///
+/// # Safety
+/// As [`querier_handle`].
+pub(crate) unsafe fn not_a_registry_querier(this_: *const z_loaned_querier_t) -> ZResult {
+    // SAFETY: the caller's contract.
+    match unsafe { querier_handle(this_) } {
+        #[cfg(feature = "router-node")]
+        Some(QuerierHandle::Node(_)) => crate::result::Z_EUNAVAILABLE,
+        _ => Z_ENULL,
+    }
 }
 
 /// Declare a querier (zenoh-c `z_declare_querier`).
@@ -274,10 +338,10 @@ pub unsafe extern "C" fn z_declare_querier(
         unsafe { *querier = z_owned_querier_t::null_value() };
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { not_a_registry(session) };
+            return Z_ENULL;
         };
         let ke = ke.to_owned();
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
@@ -291,14 +355,33 @@ pub unsafe extern "C" fn z_declare_querier(
             querier_base(unsafe { &*options })
         };
 
-        let mut boxed = Box::new(QuerierState {
-            shared: state.shared.clone(),
-            keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
-            base,
-            matching: Mutex::new(None),
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let mut boxed = Box::new(match held {
+            SessionHandle::Registry(state) => QuerierHandle::Registry(QuerierState {
+                shared: state.shared.clone(),
+                keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
+                base,
+                matching: Mutex::new(None),
+            }),
+            // A node asks as its own face: the querier keeps the node and the options its gets
+            // start from.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => QuerierHandle::Node(NodeQuerier {
+                node: Arc::clone(node),
+                keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
+                base,
+            }),
         });
         // Bind AFTER boxing — the state is at its final address only here.
-        boxed.keyexpr.bind();
+        match &mut *boxed {
+            QuerierHandle::Registry(state) => state.keyexpr.bind(),
+            #[cfg(feature = "router-node")]
+            QuerierHandle::Node(node) => node.keyexpr.bind(),
+        }
         let handle = Box::into_raw(boxed) as Handle;
         // SAFETY: the caller's contract.
         unsafe { *querier = z_owned_querier_t::from_handle(handle) };
@@ -379,9 +462,16 @@ pub unsafe extern "C" fn z_querier_id(
 ) -> crate::entity::z_entity_global_id_t {
     guard_val(crate::entity::z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract, delegated.
-        match unsafe { querier_state(querier) } {
-            Some(state) => crate::entity::z_entity_global_id_t::for_entity(
-                &state.shared,
+        match unsafe { querier_handle(querier) } {
+            Some(QuerierHandle::Registry(state)) => {
+                crate::entity::z_entity_global_id_t::for_entity(
+                    &state.shared,
+                    querier as *const std::ffi::c_void,
+                )
+            }
+            #[cfg(feature = "router-node")]
+            Some(QuerierHandle::Node(node)) => crate::entity::z_entity_global_id_t::for_entity_of(
+                crate::zid::z_id_t::from_wire(node.node.zid()).id,
                 querier as *const std::ffi::c_void,
             ),
             None => crate::entity::z_entity_global_id_t::empty(),
@@ -403,8 +493,8 @@ pub unsafe extern "C" fn z_querier_keyexpr(
 ) -> *const crate::abi::z_loaned_keyexpr_t {
     guard_val(std::ptr::null(), || {
         // SAFETY: the caller's contract, delegated.
-        match unsafe { querier_state(querier) } {
-            Some(state) => state.keyexpr.as_loaned(),
+        match unsafe { querier_handle(querier) } {
+            Some(held) => held.loaned_keyexpr(),
             None => std::ptr::null(),
         }
     })
@@ -503,10 +593,15 @@ unsafe fn querier_get_with_selector(
         };
 
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { querier_state(querier) }) else {
+        let Some(held) = (unsafe { querier_handle(querier) }) else {
             return Z_ENULL;
         };
-        let mut opts = state.base.clone();
+        let base = match held {
+            QuerierHandle::Registry(state) => &state.base,
+            #[cfg(feature = "router-node")]
+            QuerierHandle::Node(node) => &node.base,
+        };
+        let mut opts = base.clone();
         if let Some(payload) = payload {
             opts = opts.with_payload(payload);
         }
@@ -519,6 +614,31 @@ unsafe fn querier_get_with_selector(
         if let Some(info) = source_info {
             opts = opts.with_source_info(info);
         }
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            QuerierHandle::Registry(state) => state,
+            #[cfg(feature = "router-node")]
+            QuerierHandle::Node(node) => {
+                // The node was closed with its session: a get on it is not asked and not left
+                // waiting for an answer that cannot come.
+                if node.node.is_closed() {
+                    return crate::result::Z_ESESSION_CLOSED;
+                }
+                return crate::get::issue_get_on_node(
+                    &node.node,
+                    node.keyexpr.literal().to_owned(),
+                    params,
+                    opts,
+                    value,
+                    closure,
+                    token,
+                );
+            }
+        };
         issue_get(
             &state.shared,
             state.keyexpr.literal().to_owned(),
@@ -559,7 +679,7 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
 
         // SAFETY: the caller's contract.
         let Some(state) = (unsafe { querier_state(querier) }) else {
-            return Z_ENULL;
+            return unsafe { not_a_registry_querier(querier) };
         };
         let closure = Arc::new(cclosure);
         let complete_required = state.matching_needs_complete();
@@ -624,9 +744,9 @@ pub unsafe extern "C" fn z_undeclare_querier(this_: *mut z_moved_querier_t) -> Z
         // SAFETY: the caller's contract.
         let handle = unsafe { (*this_)._this.handle };
         if !handle.is_null() {
-            // SAFETY: a live `Box<QuerierState>` this crate leaked; dropping it
+            // SAFETY: a live `Box<QuerierHandle>` this crate leaked; dropping it
             // drops the `MatchingHold`, which undeclares the listener.
-            drop(unsafe { Box::from_raw(handle as *mut QuerierState) });
+            drop(unsafe { Box::from_raw(handle as *mut QuerierHandle) });
             unsafe { (*this_)._this = z_owned_querier_t::null_value() };
         }
         Z_OK

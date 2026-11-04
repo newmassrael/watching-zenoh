@@ -43,7 +43,7 @@ pub(crate) enum SessionHandle {
     Registry(SessionState),
     /// A node that forwards between the faces it holds.
     #[cfg(feature = "router-node")]
-    Node(RouterState),
+    Node(std::sync::Arc<RouterState>),
 }
 
 impl SessionHandle {
@@ -388,7 +388,8 @@ unsafe fn open_node(
     }
     match arguments.run_node(role) {
         Ok(node) => {
-            let h = Box::into_raw(Box::new(SessionHandle::Node(node))) as Handle;
+            let h =
+                Box::into_raw(Box::new(SessionHandle::Node(std::sync::Arc::new(node)))) as Handle;
             // SAFETY: the caller's contract.
             unsafe { *this_ = z_owned_session_t::from_handle(h) };
             Z_OK

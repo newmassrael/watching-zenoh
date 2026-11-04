@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "router-node")]
 use wz_capi_c::abi::{
-    z_loaned_query_t, z_loaned_reply_t, z_moved_closure_query_t, z_moved_closure_reply_t,
-    z_owned_closure_query_t, z_owned_closure_reply_t, z_owned_publisher_t, z_owned_queryable_t,
+    z_loaned_querier_t, z_loaned_query_t, z_loaned_reply_t, z_moved_closure_query_t,
+    z_moved_closure_reply_t, z_owned_closure_query_t, z_owned_closure_reply_t, z_owned_publisher_t,
+    z_owned_querier_t, z_owned_queryable_t,
 };
 use wz_capi_c::abi::{
     z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_sample_t, z_moved_config_t,
@@ -36,7 +37,9 @@ use wz_capi_c::get::{z_closure_reply, z_get};
 use wz_capi_c::keyexpr::z_keyexpr_equals;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 #[cfg(feature = "router-node")]
-use wz_capi_c::matching::{z_matching_status_t, z_publisher_get_matching_status};
+use wz_capi_c::matching::{
+    z_matching_status_t, z_publisher_get_matching_status, z_querier_get_matching_status,
+};
 #[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
 use wz_capi_c::publisher::z_publisher_id;
 #[cfg(feature = "router-node")]
@@ -45,6 +48,12 @@ use wz_capi_c::publisher::{
     z_publisher_put, z_undeclare_publisher,
 };
 use wz_capi_c::put::z_put;
+#[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
+use wz_capi_c::querier::z_querier_id;
+#[cfg(feature = "router-node")]
+use wz_capi_c::querier::{
+    z_declare_querier, z_querier_get, z_querier_keyexpr, z_querier_loan, z_undeclare_querier,
+};
 #[cfg(feature = "router-node")]
 use wz_capi_c::query::{
     z_closure_query, z_declare_queryable, z_query_reply, z_undeclare_queryable,
@@ -559,6 +568,104 @@ unsafe fn get_until_replied(asker: &z_owned_session_t) -> bool {
     // The closure of the last get may still be held by a query under way; its context is
     // leaked rather than freed under it.
     replied
+}
+
+/// Ask [`KEYEXPR`] through `querier` until a reply has been counted (up to ten seconds), and say
+/// whether one was.
+#[cfg(feature = "router-node")]
+unsafe fn querier_get_until_replied(querier: *const z_loaned_querier_t) -> bool {
+    let replies = Arc::new(AtomicUsize::new(0));
+    // Leaked rather than freed under a get that may still be under way.
+    let ctx = Box::into_raw(Box::new(CountCtx {
+        hits: replies.clone(),
+    }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while replies.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+        z_closure_reply(&mut closure, Some(on_reply_hit), None, ctx.cast());
+        assert_eq!(
+            z_querier_get(
+                querier,
+                std::ptr::null(),
+                (&mut closure as *mut z_owned_closure_reply_t).cast::<z_moved_closure_reply_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    replies.load(Ordering::SeqCst) > 0
+}
+
+/// A querier declared on a node asks as the node does: the queryable of a registry peer that dials
+/// the node answers its gets, the querier answers its key and an id of the node's session, and its
+/// matching, which the node does not carry yet, says so.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_querier_declared_on_a_node_asks() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the context is freed after them.
+    unsafe {
+        let (mut peer_queryable, peer_handled, peer_ctx) = declare_answering(&peer);
+        let key = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        let mut querier: z_owned_querier_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_querier(
+                z_session_loan(&node),
+                &mut querier,
+                z_view_keyexpr_loan(&view),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a querier is declared on the node"
+        );
+        let loaned = z_querier_loan(&querier);
+        assert!(
+            z_keyexpr_equals(z_querier_keyexpr(loaned), z_view_keyexpr_loan(&view)),
+            "the querier answers its key"
+        );
+        // `z_querier_id` is unstable API, which a build may leave out.
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        assert_eq!(
+            z_querier_id(loaned).zid.id,
+            z_info_zid(z_session_loan(&node)).id,
+            "the querier is an entity of the node's session"
+        );
+        assert!(
+            querier_get_until_replied(loaned),
+            "what the node's querier asked was never answered by the peer's queryable"
+        );
+        assert!(peer_handled.load(Ordering::SeqCst) > 0);
+        let mut status: z_matching_status_t = std::mem::zeroed();
+        assert_eq!(
+            z_querier_get_matching_status(loaned, &mut status),
+            Z_EUNAVAILABLE,
+            "the matching of a querier is not carried by the node yet"
+        );
+        assert_eq!(
+            z_undeclare_querier((&mut querier as *mut z_owned_querier_t).cast()),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_queryable((&mut peer_queryable as *mut z_owned_queryable_t).cast()),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
+        drop(Box::from_raw(peer_ctx));
+    }
 }
 
 /// A node opened through the C ABI answers and asks: a registry peer that dials it gets a reply

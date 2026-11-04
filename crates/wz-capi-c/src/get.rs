@@ -1438,7 +1438,7 @@ unsafe fn get_with_selector(
 /// The token that cancels a get stops the legs a registry fans out, and a node has none to stop
 /// yet, so a get that brings one is refused by name and not run uncancellable.
 #[cfg(feature = "router-node")]
-fn issue_get_on_node(
+pub(crate) fn issue_get_on_node(
     node: &wz_capi_core::drive::RouterState,
     keyexpr: String,
     parameters: Option<Vec<u8>>,
