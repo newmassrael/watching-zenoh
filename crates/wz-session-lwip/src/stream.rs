@@ -56,7 +56,7 @@ fn pump(link: &LwipLink, service: Service) {
 }
 
 /// One connected IPv4 stream over lwIP, with a receive buffer of `RX` bytes (at least the port's
-/// receive window: [`LwipTcpSocket::connect`] refuses less).
+/// receive window: `LwipTcpSocket::connect` refuses less).
 pub struct LwipTcpStream<L, const RX: usize>
 where
     L: Deref<Target = LwipLink> + Clone,
@@ -133,7 +133,7 @@ where
 /// How a node opens its `tcp/` links over lwIP: a value the stack holds, so the stack and the
 /// stream link stay written once.
 ///
-/// `Copy` when its link handle is (a `&'static LwipLink` is), and so is the [`LwipTcpStack`] built
+/// `Copy` when its link handle is (a `&'static LwipLink` is), and so is the `LwipTcpStack` built
 /// on it: the admin node of the engine holds a stack as its host's and as its binder, which are
 /// two copies of one value.
 #[derive(Clone, Copy)]
@@ -243,7 +243,7 @@ pub type LwipTcpStack<L, const RX: usize, const S: usize = 0> = wz_runtime_coop:
 /// stream link over it has nothing to tell which end opened it.
 ///
 /// The listener is a `static` the image declares and starts
-/// ([`LwipTcpListener::listen`](wz_link_lwip::tcp::LwipTcpListener::listen)); this holds a
+/// (`LwipTcpListener::listen`, or `listen_in` on `static-link-storage`); this holds a
 /// reference to it and the handle to lwIP that each accept polls.
 pub struct LwipTcpListen<L, const RX: usize, const Q: usize, const S: usize = 0>
 where

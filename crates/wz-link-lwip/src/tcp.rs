@@ -16,7 +16,7 @@
 //! READS it ([`LwipTcpSocket::try_read`]) and not when lwIP delivers it. The buffer is therefore
 //! the flow control: the peer can have in flight to this socket no more than the window lwIP
 //! advertises, so a buffer at least that large always has room for what arrives, and nothing is
-//! refused or held in a pbuf. [`LwipTcpSocket::connect`] refuses a buffer smaller than the port's
+//! refused or held in a pbuf. `LwipTcpSocket::connect` refuses a buffer smaller than the port's
 //! window ([`TcpError::RxBelowWindow`]) rather than letting a segment find it full later.
 //!
 //! ## What is written is whole or the connection ends
@@ -347,7 +347,7 @@ impl<const RX: usize> LwipTcpSocket<RX> {
         }
     }
 
-    /// `static-link-storage`: [`connect`](Self::connect) over a cell of `pool`.
+    /// `static-link-storage`: `connect` over a cell of `pool`.
     ///
     /// # Errors
     ///
@@ -633,7 +633,7 @@ impl<const RX: usize, const Q: usize, const S: usize> LwipTcpListener<RX, Q, S> 
         self.start(port)
     }
 
-    /// `static-link-storage`: [`listen`](Self::listen) with each connection made in a cell of
+    /// `static-link-storage`: `listen` with each connection made in a cell of
     /// `pool`.
     ///
     /// # Errors

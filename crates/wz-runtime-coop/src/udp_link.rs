@@ -138,15 +138,15 @@ pub trait DatagramSocket: Sized {
     }
 
     /// Whether the platform opens datagram sockets at all. A stack asks before it claims any
-    /// buffer, so a `udp/` locator on a stack with none is [`LinkOpenError::Unsupported`]
-    /// (permanent) and never [`LinkOpenError::Exhausted`] (retried): the stream twin is
+    /// buffer, so a `udp/` locator on a stack with none is `LinkOpenError::Unsupported`
+    /// (permanent) and never `LinkOpenError::Exhausted` (retried): the stream twin is
     /// `StreamDial::CARRIED`.
     const CARRIED: bool = true;
 }
 
 /// The datagram socket of a stack that carries none: an image whose links are all streams names it
-/// for [`IpStack`](crate::ip_stack::IpStack)'s `U`, and every `udp/` dial is
-/// [`LinkOpenError::Unsupported`]. There is no value of it, as there is none of `NoStream`.
+/// for the `U` of `IpStack`, and every `udp/` dial is `LinkOpenError::Unsupported`. There is no
+/// value of it, as there is none of `NoStream`.
 #[derive(Debug, Clone, Copy)]
 pub enum NoDatagram {}
 

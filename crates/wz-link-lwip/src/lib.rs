@@ -261,8 +261,10 @@ pub mod ethernet;
 /// `static` the image declares, so the link owns no heap.
 pub mod static_slots;
 
-/// One TCP connection over lwIP's raw API as a non-blocking byte stream ([`tcp::LwipTcpSocket`]),
-/// the stream counterpart of [`LwipUdpSocket`]. Off by default (`tcp`).
+// One TCP connection over lwIP's raw API as a non-blocking byte stream (`tcp::LwipTcpSocket`), the
+// stream counterpart of `LwipUdpSocket`. Off by default (`tcp`). NO `///` HERE, DELIBERATELY: rustdoc
+// resolves a module's own `//!` links in the PARENT scope when the `pub mod` also has `///` docs, and
+// the module's docs name items of the module.
 #[cfg(feature = "tcp")]
 pub mod tcp;
 
