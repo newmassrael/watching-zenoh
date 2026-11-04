@@ -2754,11 +2754,8 @@ impl<B> Default for ReadState<B> {
 /// endianness rule.
 #[cfg(feature = "transport-link-tcp")]
 pub(crate) fn prefix_width(lowlatency: bool) -> usize {
-    if lowlatency {
-        4
-    } else {
-        2
-    }
+    // The rule is `wz_session_core::stream_window`'s, which a node's reader of a stream keeps too.
+    wz_session_core::stream_window::prefix_width(lowlatency)
 }
 
 #[cfg(feature = "transport-link-tcp")]

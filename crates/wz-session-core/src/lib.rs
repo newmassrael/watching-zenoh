@@ -244,6 +244,11 @@ pub mod id_map;
 /// like [`bounded`], so every pool names one type.
 pub mod pool_gauge;
 
+/// Frame boundaries over bytes that already arrived, for every length-prefixed stream link
+/// ([`stream_window::RxWindow`]): the host's reader and a node's reader run the same machine.
+/// Unconditional, no_std and no_alloc; the `Vec` carry exists with the `alloc` feature.
+pub mod stream_window;
+
 /// W3 bounded owned-mirror adapters (`owned_bytes` / `owned_string`) for
 /// the builders that copy caller data into SCE's no-alloc bounded codec
 /// owned fields (SCE pin 7a94d084a). Public so the AP runtime
