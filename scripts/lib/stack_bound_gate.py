@@ -71,6 +71,7 @@ BUDGET = ROOT / "deploy" / "resource_budget.json"
 MARGIN_NUM, MARGIN_DEN = 3, 4
 
 SITE = re.compile(r"^\s*([0-9a-f]+):\s+blx\s+(?:r\d+|ip)\s*$")
+INSN = re.compile(r"^\s*([0-9a-f]+):\s+\S")
 MOVW = re.compile(r"^\s*([0-9a-f]+):\s+movw\s+(r\d+|ip),\s*#(\d+)")
 MOVT = re.compile(r"^\s*([0-9a-f]+):\s+movt\s+(r\d+|ip),\s*#(\d+)")
 ADR = re.compile(
@@ -90,6 +91,7 @@ class Func:
     frame: int
     calls: set[int] = field(default_factory=set)  # direct calls, to other functions
     sites: list[int] = field(default_factory=list)  # addresses of its calls by register
+    insns: list[int] = field(default_factory=list)  # address of each of its instructions, in order
 
 
 #: The source of a line the line table names: `text(path, line)`, or None when this machine does not hold it.
@@ -200,6 +202,9 @@ def load(elf: str, entry: str) -> Model:
         found = g.frames("\n".join(lines))
         fn = Func(start, name, norm(name), found[0][0] if found else 0)
         for line in lines[1:]:
+            insn = INSN.match(line)
+            if insn:
+                fn.insns.append(int(insn.group(1), 16))
             call = g._CALL.search(line)
             if call:
                 at = _owner(starts, int(call.group(1), 16))
@@ -246,7 +251,14 @@ def load(elf: str, entry: str) -> Model:
                             waker.add(v - 1)
 
     sites = [a for fn in funcs.values() if "::" in fn.name for a in fn.sites]
-    return Model(funcs, taken, waker, _locate(elf, sites), entry, Sources(ROOT).text)
+    before = {a: _preceding(fn.insns, a) for fn in funcs.values() if "::" in fn.name for a in fn.sites}
+    return Model(funcs, taken, waker, _locate(elf, sites, before), entry, Sources(ROOT).text)
+
+
+def _preceding(insns: list[int], at: int) -> list[int]:
+    """The instructions of a function before `at`, the nearest first."""
+    k = bisect.bisect_left(insns, at)
+    return insns[:k][::-1]
 
 
 def _owner(starts: list[int], addr: int) -> int | None:
@@ -273,8 +285,49 @@ def _alloc_words(elf: str) -> dict[int, int]:
     return words
 
 
-def _locate(elf: str, addrs: list[int]) -> dict[int, tuple[str, int | None]]:
-    """The innermost source file and line of each address, from the line table."""
+def _locate(
+    elf: str, addrs: list[int], before: dict[int, list[int]] | None = None
+) -> dict[int, tuple[str, int | None]]:
+    """The innermost source file and line of each address, from the line table.
+
+    A row of line 0 is code the compiler made that belongs to no line of the source, and the file such
+    a row names is whichever the compiler left on it: the same image built in another directory named
+    the file of the code around one such call on a workstation and the codegen unit on a hosted runner
+    (`wz_zephyr_admin_node.<hash>-cgu.0`), so a rule that claims by file claimed it on one machine and
+    not on the other. A call on such a row is placed where a debugger places it, at the nearest
+    instruction before it in the same function that the table gives a line (`before`, nearest first),
+    and keeps line 0 only when no instruction before it has one.
+    """
+    out = _addr2line(elf, addrs)
+    if before is None:
+        return out
+    unplaced = [a for a in addrs if a in out and out[a][1] is None and before.get(a)]
+    if not unplaced:
+        return out
+    earlier = _addr2line(elf, sorted({b for a in unplaced for b in before[a]}))
+    return _place_line_zero(out, before, earlier)
+
+
+def _place_line_zero(
+    out: dict[int, tuple[str, int | None]],
+    before: dict[int, list[int]],
+    earlier: dict[int, tuple[str, int | None]],
+) -> dict[int, tuple[str, int | None]]:
+    """Each call on a row of line 0, at the first of the instructions before it with a line (see `_locate`)."""
+    placed = dict(out)
+    for a, (_, line) in out.items():
+        if line is not None:
+            continue
+        for b in before.get(a, []):
+            found = earlier.get(b)
+            if found is not None and found[1] is not None:
+                placed[a] = found
+                break
+    return placed
+
+
+def _addr2line(elf: str, addrs: list[int]) -> dict[int, tuple[str, int | None]]:
+    """The innermost source file and line the line table gives each address; line None for line 0."""
     out: dict[int, tuple[str, int | None]] = {}
     if not addrs:
         return out
@@ -807,6 +860,15 @@ def selftest() -> int:
     eq("and lead the chain", [name for _, name in entered.chain][:2], ["worker", "(the thread-local storage and the alignment at the top of the stack)"])
     missing = analyse(_model(), {**base, "thread_entry": {"frames": ["no_such_function"], "why": "t"}})
     eq("a thread-entry function the image lacks is reported", len(missing.unclaimed), 1)
+    # a call on a row of line 0 is placed at the nearest instruction before it that has a line, so the
+    # file the compiler left on the row (a workstation's source file, a hosted runner's codegen unit)
+    # decides nothing; with no such instruction it keeps line 0
+    rows = {0x210: ("app.abc-cgu.0", None), 0x220: ("crates/x/src/lib.rs", None), 0x230: ("crates/x/src/lib.rs", 9)}
+    earlier = {0x20c: ("crates/x/src/json.rs", None), 0x208: ("crates/x/src/json.rs", 53)}
+    placed = _place_line_zero(rows, {0x210: [0x20c, 0x208], 0x220: []}, earlier)
+    eq("a line-0 call takes the nearest earlier line, past another line-0 row", placed[0x210], ("crates/x/src/json.rs", 53))
+    eq("a line-0 call with no earlier line keeps line 0", placed[0x220], ("crates/x/src/lib.rs", None))
+    eq("a call with a line keeps it", placed[0x230], ("crates/x/src/lib.rs", 9))
     # a rule names the site by line: another line is unclaimed
     other = {"rules": [{**rule, "where": {"file": "lib.rs", "line": 8}}]}
     eq("a site no rule claims is reported", len(analyse(_model(), other).unclaimed), 1)
