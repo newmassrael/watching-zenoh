@@ -488,13 +488,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `rx-hold` the sockets that hold lent frames (`pub mod rx_hold`).
         # Round 3277 -- `static-link-storage` joins: a SELECTOR for the MCU final
         # binary (it takes the allocating constructors out and puts the pool-taking
-        # ones in), gating `pub mod static_slots` and the `*_in` binders.
+        # ones in), gating `pub mod static_slots` and the `*_in` binders. `tcp` gates
+        # `pub mod tcp` (the stream socket over lwIP's raw TCP API) at the crate root,
+        # a firmware's to use; it also builds lwIP's TCP sources (`lwip-sys/tcp`).
         frozenset(
             {
                 "buffer-pool-session-rx-slim",
                 "mac-rx-pool",
                 "rx-hold",
                 "static-link-storage",
+                "tcp",
                 "test-support",
                 "tx-pool",
             }
@@ -1188,13 +1191,15 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # at all. None is a simple crate-root item, so none is a shape the
     # derivation could have named. `tx-pool` gates two crate-root `pub mod`s,
     # the simple shape the derivation names, and so do `mac-rx-pool` (the
-    # receive pool's emit and `mac_rx_pool`) and `rx-hold` (`rx_hold`).
+    # receive pool's emit and `mac_rx_pool`) and `rx-hold` (`rx_hold`). `tcp` gates one
+    # crate-root `pub mod tcp`, the same simple shape.
     "wz-link-lwip": frozenset(
         {
             "buffer-pool-session-rx-slim",
             "mac-rx-pool",
             "rx-hold",
             "static-link-storage",
+            "tcp",
             "test-support",
             "tx-pool",
         }

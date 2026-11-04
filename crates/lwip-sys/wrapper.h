@@ -25,6 +25,12 @@
 #include "lwip/igmp.h"
 #include "lwip/err.h"
 
+#if LWIP_TCP
+/* The `tcp` feature (`shim.c`): the send buffer left on a pcb and the port's receive window. */
+unsigned int wz_lwip_tcp_sndbuf(const struct tcp_pcb *pcb);
+unsigned int wz_lwip_tcp_window(void);
+#endif
+
 /* R2390 — the netif carrier seam, defined in `shim.c` beside the lwIP sources.
  * Declared here so bindgen emits it; both halves are C macros in lwIP, so
  * neither can be reached from Rust (see shim.c for what measured that).

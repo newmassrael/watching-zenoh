@@ -23,6 +23,26 @@
 
 #include "lwip/netif.h"
 
+#if LWIP_TCP
+#include "lwip/tcp.h"
+
+/* The `tcp` feature: two readings of the TCP configuration that are macros in lwIP and so cannot
+ * be reached from Rust. `tcp_sndbuf` is a macro over a field of the pcb, and TCP_WND is an option
+ * of the port; reading them here is what makes the port's own lwipopts.h the definition.
+ */
+
+/* The bytes `tcp_write` can still queue on `pcb` now. */
+unsigned int wz_lwip_tcp_sndbuf(const struct tcp_pcb *pcb) {
+    return (unsigned int)tcp_sndbuf(pcb);
+}
+
+/* The receive window the port advertises with every byte of it free (TCP_WND): the most a peer
+ * may have in flight to us, and so the most a receive buffer must hold to refuse nothing. */
+unsigned int wz_lwip_tcp_window(void) {
+    return (unsigned int)TCP_WND;
+}
+#endif
+
 /* Non-zero when ANY interface has its carrier up.
  *
  * Zero means every interface is down, which is what a multicast group member

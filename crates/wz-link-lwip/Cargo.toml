@@ -158,6 +158,12 @@ rx-hold = []
 # It implies nothing else, and `alloc` keeps its meaning.
 static-link-storage = []
 
+# The TCP stream (`tcp::LwipTcpSocket`): one connection of lwIP's raw TCP API as a non-blocking byte
+# stream, for a node whose session runs over `tcp/` (the stream link of the cooperative engine).
+# Builds lwIP with its TCP sources (`lwip-sys/tcp`); off by default, and the library an image links
+# without it is the UDP-only one.
+tcp = ["lwip-sys/tcp"]
+
 # Round 3277 -- what opening, using and closing the link costs the heap, counted:
 # sockets, the session socket, an Ethernet interface, and on `static-link-storage`
 # the refusals of a full pool. `test-support` is the lwIP init-once harness.

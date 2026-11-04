@@ -261,6 +261,11 @@ pub mod ethernet;
 /// `static` the image declares, so the link owns no heap.
 pub mod static_slots;
 
+/// One TCP connection over lwIP's raw API as a non-blocking byte stream ([`tcp::LwipTcpSocket`]),
+/// the stream counterpart of [`LwipUdpSocket`]. Off by default (`tcp`).
+#[cfg(feature = "tcp")]
+pub mod tcp;
+
 // The SMSC LAN9118 MAC (R2836) is no longer a module here: a chip's driver is a
 // crate of its own, `wz-eth-mac-lan9118`, that implements the `EthernetMac`
 // seam from the dependency-free trait tier. A firmware that drives that chip
