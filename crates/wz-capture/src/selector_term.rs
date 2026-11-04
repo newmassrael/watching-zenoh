@@ -41,8 +41,10 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::fmt::Write as _;
 
-/// The soundness property of the sentences, as one oracle every population is
-/// held to (the library's tests, and the fuzz target over the C doors).
+// The soundness property of the sentences, as one oracle every population is
+// held to (the library's tests, and the fuzz target over the C doors). Its
+// documentation is the module's own `//!`, which rustdoc resolves in the
+// module's scope only while this line is not a doc comment too.
 #[cfg(all(feature = "dissect", feature = "network-codecs"))]
 pub mod soundness;
 

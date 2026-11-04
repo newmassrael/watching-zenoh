@@ -184,7 +184,7 @@ fn run_upstream_test(name: &str, needs: Needs, leak: bool) {
 fn valgrind_present() -> bool {
     Command::new("valgrind")
         .arg("--version")
-        .output()
+        .output_bounded()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }

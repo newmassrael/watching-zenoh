@@ -25,8 +25,8 @@
 //!
 //! 1. THE RECORD LEVEL ([`hold_records`]) decides S1 for EVERY node of EVERY
 //!    record of a capture. The record's tree is built by the functions the
-//!    selector's planes build it with ([`crate::field_path::FrameEnvelope::of`]
-//!    and [`crate::field_path::record_tree`] over the bytes
+//!    selector's planes build it with (`field_path`'s `FrameEnvelope::of`
+//!    and `record_tree`, which are the crate's own, over the bytes
 //!    `CaptureOrder::held_message_bytes` holds), so the verdict is the one a
 //!    plane reaches. What it proves is kept ([`Proven`]): per row ([`RowAt`],
 //!    the row's flow, direction and anchor as the document writes them), the
@@ -831,8 +831,9 @@ pub fn hold_records(d: &crate::Dissection) -> (Soundness, Proven) {
 
 /// The trees of the records of `batch`, which `row` carried, and of the part
 /// past where its walk stopped, read as the planes read them from `held`, the
-/// bytes of the row's transport message. A record whose tree is not built is
-/// no record the oracle read, and is reported with why rather than passed over.
+/// bytes of the row's transport message. A record whose tree fails to build
+/// is no record the oracle read, and is reported with why rather than passed
+/// over.
 fn batch_trees(
     report: &mut Soundness,
     row: &wz_session_core::passive::PassiveFrame,

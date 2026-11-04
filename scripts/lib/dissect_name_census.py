@@ -58,6 +58,7 @@ import rust_comments  # noqa: E402  -- after the path insert that finds it
 
 ROOT = Path(__file__).resolve().parents[2]
 DISSECT = ROOT / "crates" / "wz-session-core" / "src" / "dissect.rs"
+SCHEMA = ROOT / "crates" / "wz-session-core" / "src" / "dissect_schema.rs"
 EXT_NAME = ROOT / "crates" / "wz-session-core" / "src" / "ext_name.rs"
 CODECS = ROOT / "out" / "wz-codecs"
 
@@ -355,8 +356,21 @@ REASON_NON_NAMES = {
 }
 
 
-def walker_sites(src: str) -> dict[str, list[int]]:
+SCHEMA_NAME = re.compile(r"\bname:\s*(?:crate::)?dissect_schema::([A-Z][A-Z0-9_]*)\b")
+"""R4239 -- the FIFTH producing form: a name the walker spells as one of the
+declared shape's constants (`name: crate::dissect_schema::BATCH_REMAINDER.into()`)
+rather than as a literal. Round 4234 moved `unparsed` there so that the shape
+and the walker share one spelling, and the name left this census with it: the
+gate then read `unparsed` as own vocabulary no walker emits. The constant is
+resolved to its value in `dissect_schema.rs`, and a constant that resolves to
+no `const _: &str` there is a failure rather than a name skipped."""
+
+
+def walker_sites(src: str, schema_consts: dict[str, str] | None = None) -> dict[str, list[int]]:
     """Every field name the walkers emit, and the LINES it was read from.
+
+    `schema_consts` maps the declared shape's name constants to their values
+    ([`SCHEMA_NAME`]); `None` reads none, for a fixture that spells none.
 
     Three producing forms, and MISSING ONE IS HOW THIS GOES WRONG: the first
     version of this census matched only a fixed list of cursor methods, missed
@@ -426,7 +440,24 @@ def walker_sites(src: str) -> dict[str, list[int]]:
     # readable straight off the source rather than remembered.
     claim(constructor_pattern(src), src)
     claim(r'name:\s*"([a-z0-9_]+)"', src)
+    for m in SCHEMA_NAME.finditer(src):
+        const = m.group(1)
+        value = (schema_consts or {}).get(const)
+        if value is None:
+            raise SystemExit(
+                f"dissect-name-census: `dissect_schema::{const}` names a field and "
+                "resolves to no `const _: &str` in dissect_schema.rs -- the name it "
+                "emits cannot be read, and skipping it is a census over less than "
+                "the walker emits"
+            )
+        line = src.count("\n", 0, m.start()) + 1
+        names.setdefault(value, []).append(line)
     return names
+
+
+def schema_name_consts(text: str) -> dict[str, str]:
+    """The `const NAME: &str = "value"` declarations of `dissect_schema.rs`."""
+    return dict(ROW_NAME_CONST.findall(text))
 
 
 FIELD_CONSTRUCTOR = re.compile(r"\bfn\s+([a-z_0-9]+)\(\s*name:\s*&'static str")
@@ -771,6 +802,27 @@ def selftest() -> int:
     if "wz_absent" in sites:
         bad.append("a name in no call at all was claimed")
 
+    # THE FIFTH FORM (R4239): a name spelled as the declared shape's constant
+    # is claimed under its VALUE, and a constant that resolves to nothing is
+    # refused rather than skipped.
+    consts = schema_name_consts('pub const WZ_REST: &str = "wz_rest";\n')
+    shaped = walker_sites(
+        fixture + "fn tail() -> Field {\n"
+        "    Field { name: crate::dissect_schema::WZ_REST.into() }\n"
+        "}\n",
+        consts,
+    )
+    if "wz_rest" not in shaped or "WZ_REST" in shaped:
+        bad.append(
+            f"a `dissect_schema` constant was not claimed under its value: got {sorted(shaped)}"
+        )
+    try:
+        walker_sites(fixture + "    name: dissect_schema::WZ_UNDECLARED.into(),\n", consts)
+        bad.append("a `dissect_schema` constant that resolves to nothing was ACCEPTED")
+    except SystemExit as exc:
+        if "WZ_UNDECLARED" not in str(exc):
+            bad.append(f"an unresolved `dissect_schema` constant was refused, but said: {exc}")
+
     # ── invariant 4's two derivations (R2132, open-debt item 405) ────────
     #
     # Fixture-driven because NEITHER can be exercised against this tree.
@@ -880,9 +932,13 @@ def main() -> int:
         print(f"dissect-name-census: cannot read {EXT_NAME}", file=sys.stderr)
         return 1
 
+    if not SCHEMA.is_file():
+        print(f"dissect-name-census: cannot read {SCHEMA}", file=sys.stderr)
+        return 1
+
     src = dissect.read_text(encoding="utf-8")
     where = dissect.name
-    sites = walker_sites(src)
+    sites = walker_sites(src, schema_name_consts(SCHEMA.read_text(encoding="utf-8")))
     walkers = set(sites)
 
     def at(name: str) -> str:

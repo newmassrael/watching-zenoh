@@ -187,6 +187,9 @@ _add("strace", "Layer C1st's facility oracle reads each packaged artifact's runs
 _add("bubblewrap", "Layer C1st's facility oracle runs a raw Ethernet group on a network of its own "
      "(a user and network namespace), given CAP_NET_RAW over it or not "
      "(scripts/lib/facility_trace.py own_network).", ["capi-c-arms"])
+_add("valgrind", "Layer C1cc runs zenoh-c's two leak programs as upstream's CMake does, through "
+     "its `run_leak_check.sh` under valgrind (`z_leak_pub_sub_test`, "
+     "`z_leak_queryable_get_test`); the job sets WZ_C1CC_REQUIRE.", ["capi-c-arms"])
 
 
 # bindgen, which is where libclang is consumed. 25.2 MB of a 32.3 MB job, and

@@ -2444,19 +2444,24 @@ jobs:
   # the clock each. The table's order is the partition: a leg inserted mid-table moves the legs
   # after it to the other shard, which costs nothing but the cache of that run.
   #
+  # THREE SHARDS (hosted run 41884918361). Shard 1 of two read 25 min at round 4232 and was
+  # cancelled at `elapsed 1812s of 1800s` once round 4233 added the lwIP tcp legs on both
+  # storage profiles, its last finished leg `wz-session-core` (2943 tests); shard 0 read 25 min.
+  # A third shard puts each near two thirds of that.
+  #
   # DROP-PROOF INVARIANT (the census's, co-located on purpose): `shard` MUST list exactly
   # [0 .. WZ_LEGS_SHARDS-1]. A missing shard is legs no job runs while everything stays green;
   # `scripts/lib/shard_matrix_binding.py` holds the list to the count.
   nondefault-legs:
-    name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/2)
+    name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2]
     env:
-      WZ_LEGS_SHARDS: "2"
+      WZ_LEGS_SHARDS: "3"
       WZ_LEGS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Budget stamp — start this job's own clock
@@ -6366,6 +6371,13 @@ jobs:
         # tables out of four, because the moving-type population is derived from
         # all of them and a partial derivation under-reports it.
         run: python3 scripts/lib/capi_c_abi_provenance.py
+
+      - name: Install valgrind for zenoh-c's leak programs
+        # Layer C1cc runs zenoh-c's own tests against wz, two of them
+        # (`z_leak_pub_sub_test`, `z_leak_queryable_get_test`) through upstream's
+        # `run_leak_check.sh`, as upstream's CMake runs them: under valgrind. With
+        # WZ_C1CC_REQUIRE set the lane fails rather than skips without it.
+        run: bash scripts/lib/apt-install.sh valgrind
 
       - name: Layer C1cc — §5.27 api-compat-c, the zenoh-c drop-in
         # R311y498, and R311y865 MOVED IT HERE from the `ci` job. It cost 202s of

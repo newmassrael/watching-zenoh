@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""The registry of every fact the dissection's declared shape has published to a
-selector (`crates/wz-session-core/src/published_selector_paths.txt`), kept as
+"""R4234 (no register item) -- the registry of every fact the dissection's
+declared shape has published to a selector (`crates/wz-session-core/src/published_selector_paths.txt`), kept as
 the append-only ledger it is.
 
     publish_selector_paths.py --append <log>    append the facts a test log names

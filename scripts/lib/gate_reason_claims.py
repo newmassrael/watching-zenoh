@@ -481,6 +481,13 @@ class Corpus:
             if token.split("/", 1)[0] in self.tops:
                 if token in self.paths:
                     return "tracked path"
+                # R4239 -- a DIRECTORY, spelled with its trailing slash
+                # (`captures/`): the claim is that git tracks something under
+                # it, which the tracked paths answer exactly. Without this arm
+                # a true citation of a directory could only be "fixed" by
+                # unquoting it, which takes it out of the gate's sight.
+                if token.endswith("/") and any(p.startswith(token) for p in self.paths):
+                    return "tracked path"
                 if any(c in token for c in "*?[") and any(
                     fnmatch.fnmatch(p, token) for p in self.paths
                 ):

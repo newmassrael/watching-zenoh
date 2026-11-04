@@ -2209,8 +2209,9 @@ impl<'a> Messages<'a> {
 
     /// The bytes of the framing unit the message at `index` was read out of,
     /// as they crossed the wire past any length prefix: what the list reads the
-    /// message again from (open-debt item 924, D8), or the bytes kept beside
-    /// a datagram unit the list keeps whole ([`MessageList::whole_units`]).
+    /// message again from (open-debt item 924, D8), or the bytes the list
+    /// keeps beside a datagram unit it keeps whole, whose rows are decoded
+    /// frames that do not carry the bytes they were read from.
     /// `None` for any other message the list keeps whole, for one whose source
     /// no longer holds them, and past the end.
     pub fn unit_bytes(&self, index: usize) -> Option<Cow<'a, [u8]>> {
