@@ -308944,6 +308944,56 @@
         "Stage four of the C ABI node: get, the queryable and the querier, then liveliness and the matching of publishers and queriers, then shared memory, the advanced pair, the group, the info peers and routers, the transport and link events, the declared key expressions and the timestamp. Read the hosted run of the nondefault-features leg for the C1cn arm after this change. The rest of the carry of Round 4206 stands: a put of shared memory goes out as bytes on a node, a C ABI router that keeps no south is the registry of faces, router-node has no Kconfig switch or footprint budget, a client told no router that keeps a south is refused, and the dialled-subregion cases have no stock zenohd witness."
       ]
     },
+    "Round 4209": {
+      "decision_summary": "The hosted Platform run of round 4205 was red on two jobs (C ABI on\nmacOS and on Windows): c_close_completes_an_in_flight_get in\nwz-capi-pico/tests/get_roundtrip.rs asserted that a get issued after\nz_close answers Z_OK. Round 4205 made a closed session refuse a\ndeclaration or query with -73, and the pinned zenoh-pico does the same:\n_z_query with no targets runs the dropper and returns\n_Z_ERR_SESSION_CLOSED when the session is closed. The test had\nrecorded the older wz answer, not pico's. It now expects -73 and\nthat the closure is dropped at once. The break was mine: the earlier\nround ran the library tests of the crate but not its integration tests.",
+      "changes_bullets": [
+        "crates/wz-capi-pico/tests/get_roundtrip.rs: a get on a closed session",
+        "is expected to answer -73 with its closure dropped; issue_get keeps",
+        "asserting Z_OK for every other caller and issue_get_returning hands",
+        "back the code."
+      ],
+      "verification_bullets": [
+        "On a bench host: every test target of wz-capi-pico passes, the library",
+        "(113) and all integration targets, among them get_roundtrip 7 of 7;",
+        "clippy of the crate with all targets and warnings denied is clean.",
+        "The hosted result of this push is not yet read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A change to the behavior of a C entry point is checked against all",
+        "test targets of its crate before the push, not the library tests",
+        "alone.",
+        "Open from round 4205 is unchanged: the same-style lane for zenoh-c",
+        "tests/z_*.c, and the census label correction round."
+      ],
+      "publishable_decision_summary": "The hosted Platform run of round 4205 was red on two jobs (C ABI on\nmacOS and on Windows): c_close_completes_an_in_flight_get in\nwz-capi-pico/tests/get_roundtrip.rs asserted that a get issued after\nz_close answers Z_OK. Round 4205 made a closed session refuse a\ndeclaration or query with -73, and the pinned zenoh-pico does the same:\n_z_query with no targets runs the dropper and returns\n_Z_ERR_SESSION_CLOSED when the session is closed. The test had\nrecorded the older wz answer, not pico's. It now expects -73 and\nthat the closure is dropped at once. The break was mine: the earlier\nround ran the library tests of the crate but not its integration tests.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-pico/tests/get_roundtrip.rs: a get on a closed session",
+        "is expected to answer -73 with its closure dropped; issue_get keeps",
+        "asserting Z_OK for every other caller and issue_get_returning hands",
+        "back the code."
+      ],
+      "publishable_verification_bullets": [
+        "On a bench host: every test target of wz-capi-pico passes, the library",
+        "(113) and all integration targets, among them get_roundtrip 7 of 7;",
+        "clippy of the crate with all targets and warnings denied is clean.",
+        "The hosted result of this push is not yet read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A change to the behavior of a C entry point is checked against all",
+        "test targets of its crate before the push, not the library tests",
+        "alone.",
+        "Open from round 4205 is unchanged: the same-style lane for zenoh-c",
+        "tests/z_*.c, and the census label correction round."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
