@@ -239,13 +239,51 @@ def libtest_selection(toks: list[str], start: int) -> tuple[bool, list[str], boo
     return exact_mode, filters, has_skip
 
 
-def test_fn_census(path: Path) -> tuple[int, int, bool]:
-    """`(plain, ignored, statically_countable)` for one test file.
+def macro_rules_line_spans(lines: list[str]) -> list[tuple[int, int]]:
+    """The `(first, last)` line indexes of every `macro_rules!` body in `lines`.
 
-    `statically_countable` is False when ANY `#[cfg(...)]` appears on a test
-    attribute block or on a top-level `mod`, because then the test set is a
-    function of the feature flags and this file cannot say what it is without
-    resolving them.
+    Brace-matched over comment-stripped text; a body that never closes runs to
+    the end of the file, which keeps a test inside it uncounted rather than
+    counted once.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(lines):
+        if not re.search(r"\bmacro_rules!\s*\w+", lines[i]):
+            i += 1
+            continue
+        depth = 0
+        opened = False
+        j = i
+        while j < len(lines):
+            for ch in lines[j]:
+                if ch in "{([":
+                    depth += 1
+                    opened = True
+                elif ch in "})]":
+                    depth -= 1
+            if opened and depth <= 0:
+                break
+            j += 1
+        spans.append((i, min(j, len(lines) - 1)))
+        i = j + 1
+    return spans
+
+
+def test_fn_census(path: Path) -> tuple[int, int, str | None]:
+    """`(plain, ignored, why_not_countable)` for one test file.
+
+    `why_not_countable` is None when the file's `#[test]` attributes ARE its
+    tests. It names the reason otherwise:
+
+    * ANY `#[cfg(...)]` on a test attribute block or on a top-level `mod` makes
+      the test set a function of the feature flags, which this file cannot
+      resolve;
+    * a `#[test]` inside a `macro_rules!` body is a TEMPLATE: the tests are its
+      expansions, one per invocation row, and a count of attributes counts the
+      template once. Measured on `pico_upstream_api_tests_on_wz.rs`: one
+      template and three written tests read as 4 where libtest runs 16, and the
+      lint called a right guard stale.
     """
     # R2131 (unregistered open-debt item 402) — COMMENTS ARE NOT ATTRIBUTES.
     # `TEST_ATTR_RE` searches anywhere in a line, so a doc comment carrying
@@ -258,8 +296,13 @@ def test_fn_census(path: Path) -> tuple[int, int, bool]:
     lines = rust_comments.strip_comments(path.read_text()).split("\n")
     plain = ignored = 0
     conditional = any(re.match(r"\s*#\[cfg\(.*\)\]\s*$", ln) for ln in lines)
+    templates = macro_rules_line_spans(lines)
+    templated = False
     for i, line in enumerate(lines):
         if not TEST_ATTR_RE.search(line):
+            continue
+        if any(first <= i <= last for first, last in templates):
+            templated = True
             continue
         # The attribute block is the run of `#[...]` lines around this one; an
         # `#[ignore]` may sit on either side of `#[test]`.
@@ -274,7 +317,11 @@ def test_fn_census(path: Path) -> tuple[int, int, bool]:
             ignored += 1
         else:
             plain += 1
-    return plain, ignored, not conditional
+    if conditional:
+        return plain, ignored, "`#[cfg(...)]` makes the set feature-dependent"
+    if templated:
+        return plain, ignored, "a `#[test]` in a `macro_rules!` body is counted by its invocations"
+    return plain, ignored, None
 
 
 _BARE_FIXTURE = (
@@ -469,12 +516,9 @@ def main() -> int:
                 f"{where}: {binary} — {why} narrows the set by substring match",
             )
             continue
-        plain, ignored, countable = test_fn_census(path)
-        if not countable:
-            note(
-                out_of_scope,
-                f"{where}: {binary} — `#[cfg(...)]` makes the set feature-dependent",
-            )
+        plain, ignored, why_not = test_fn_census(path)
+        if why_not is not None:
+            note(out_of_scope, f"{where}: {binary} — {why_not}")
             continue
         got = ignored if "--ignored" in toks else plain
         kind = "#[ignore]d" if "--ignored" in toks else "plain"
