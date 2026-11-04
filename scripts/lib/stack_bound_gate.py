@@ -49,9 +49,11 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -588,10 +590,31 @@ def verdicts(
     return bad
 
 
+#: Directories that hold a build, not a source of the repository.
+_NOT_SOURCE = {"target", ".git", "node_modules"}
+
+
 def _tracked_sources() -> list[str]:
-    """The Rust sources of the repository and of its submodules, as paths from the root."""
-    out = _run("git", "-C", str(ROOT), "ls-files", "--recurse-submodules", "--", "*.rs")
-    return [p for p in out.splitlines() if p]
+    """The Rust sources of the repository and of its submodules, as paths from the root.
+
+    A copy of a tree with no git (the kit host's: `scripts/kit-lane.sh` runs from a tree sent by rsync,
+    and says in its record "not a git checkout (a copy of a tree)") has no repository to ask, and holds
+    what was sent; it is read by walking, leaving out the directories of a build.
+    """
+    try:
+        out = _run("git", "-C", str(ROOT), "ls-files", "--recurse-submodules", "--", "*.rs")
+    except (subprocess.CalledProcessError, OSError):
+        out = ""
+    listed = [p for p in out.splitlines() if p]
+    if listed:
+        return listed
+    walked: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in _NOT_SOURCE]
+        walked.extend(
+            (Path(dirpath) / name).relative_to(ROOT).as_posix() for name in filenames if name.endswith(".rs")
+        )
+    return sorted(walked)
 
 
 def contract_problems(contract: dict, tracked: list[str] | None = None) -> list[str]:
@@ -870,6 +893,21 @@ def selftest() -> int:
     eq("an anchor a line holds is fine", problems({"file": "stack_bound_gate.py", "anchor": "def selftest"}), [])
     twice = {"rules": [{"id": "r", "where": {"file": "f.rs"}, "callees": "x", "why": "t"}] * 2}
     eq("a rule id used twice is refused", len(contract_problems(twice, tracked)), 1)
+    # a copy of a tree with no git is read by walking, a build's directory left out
+    global ROOT
+    real_root = ROOT
+    with tempfile.TemporaryDirectory() as copy:
+        base = Path(copy)
+        (base / "crates" / "a" / "src").mkdir(parents=True)
+        (base / "crates" / "a" / "src" / "lib.rs").write_text("fn f() {}\n")
+        (base / "crates" / "a" / "target" / "debug").mkdir(parents=True)
+        (base / "crates" / "a" / "target" / "debug" / "gen.rs").write_text("fn g() {}\n")
+        ROOT = base
+        try:
+            walked = _tracked_sources()
+        finally:
+            ROOT = real_root
+    eq("a tree with no git is walked, a build's directory left out", walked, ["crates/a/src/lib.rs"])
     # norm drops generic arguments and keeps a qualified path
     eq("norm: generics", norm("a::b::<T>::c"), "a::b::c")
     eq("norm: qualified path", norm("<X<Y> as T>::m"), "<X as T>::m")
