@@ -11,10 +11,20 @@
 # Until that lands, this script does what we CAN validate today:
 #
 #   1. YAML parses as well-formed (no syntax errors).
-#   2. Required top-level keys are present (`machines`).
-#   3. Each machine block declares the schema fields needed by the
-#      future `build` subcommand (platform/class/os, pool_defaults,
-#      qos, security, scouting, links).
+#   2. The document is one of the two kinds deploy/ holds, named by its
+#      top-level key:
+#      - `machines`: a deployment of nodes. Each machine block declares
+#        the schema fields needed by the future `build` subcommand
+#        (platform/class/os, pool_defaults, qos, security, scouting,
+#        links).
+#      - `codecs`: a codec deployment, the capacity a storage profile
+#        holds of each field the protocol bounds by nothing (SCE Forge,
+#        the `codecs:` block of a deployment; ADR 0077 section 7). Only
+#        its shape is checked here: each entry a `capacity` mapping of
+#        field names to positive integers. Whether each codec and field
+#        exists is the generator's judgement, which `verify-codegen.sh`
+#        asks with `--deploy`; this script does not keep a second list.
+#      A document with both keys, or neither, is refused.
 #
 # This is a holding-pattern gate. Once SCE ships `build`, this
 # script either upgrades to invoke that subcommand or is retired in
@@ -65,9 +75,38 @@ with open(path, "r", encoding="utf-8") as f:
 if not isinstance(doc, dict):
     print("  expected top-level mapping")
     sys.exit(1)
-if "machines" not in doc:
-    print("  missing required key: machines")
+kinds = [key for key in ("machines", "codecs") if key in doc]
+if len(kinds) != 1:
+    print(
+        "  a deployment names exactly one kind by its top-level key, "
+        f"`machines` or `codecs`; this one names {kinds or 'neither'}"
+    )
     sys.exit(1)
+
+if kinds == ["codecs"]:
+    codecs = doc["codecs"]
+    if not isinstance(codecs, dict) or not codecs:
+        print("  codecs must be a non-empty mapping")
+        sys.exit(1)
+    for codec_name, codec in codecs.items():
+        if not isinstance(codec, dict) or set(codec) != {"capacity"}:
+            print(f"  codec {codec_name!r}: expected a mapping holding only `capacity`")
+            sys.exit(1)
+        capacity = codec["capacity"]
+        if not isinstance(capacity, dict) or not capacity:
+            print(f"  codec {codec_name!r}: capacity must be a non-empty mapping")
+            sys.exit(1)
+        for field, held in capacity.items():
+            # bool is an int in Python; a capacity of `true` is not a count.
+            if isinstance(held, bool) or not isinstance(held, int) or held < 1:
+                print(
+                    f"  codec {codec_name!r}: capacity of {field!r} must be a "
+                    f"positive integer, not {held!r}"
+                )
+                sys.exit(1)
+    print("  OK")
+    sys.exit(0)
+
 if not isinstance(doc["machines"], dict) or not doc["machines"]:
     print("  machines must be a non-empty mapping")
     sys.exit(1)
