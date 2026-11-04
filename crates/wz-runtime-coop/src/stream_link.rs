@@ -740,6 +740,58 @@ mod tests {
         assert_eq!(received(&link).as_deref(), Some(&b"x"[..]));
     }
 
+    /// The driver cuts a stream into batches in its own buffer, in place, and the shared window
+    /// (`wz_session_core::stream_window`) cuts the bytes a reader was handed: two designs for two
+    /// kinds of reader, and one rule. This holds them to it: however the stream is cut into
+    /// reads, the batches they hand over are the same, the empty one passed over by both. The
+    /// population is every pair `0 <= i <= j <= L` of cuts (at most three reads), its size asserted
+    /// so an enumerator that produced nothing would not leave the test green.
+    #[test]
+    fn every_chunking_of_a_wire_frames_the_way_the_shared_window_does() {
+        use wz_session_core::stream_window::{FixedCarry, RxWindow};
+
+        let mut wire = Vec::new();
+        for payload in [&b"abc"[..], b"", b"z", b"hello"] {
+            wire.extend(batch(payload));
+        }
+        let len = wire.len();
+        let mut chunkings = 0usize;
+        for i in 0..=len {
+            for j in i..=len {
+                let cuts = [i, j, len];
+
+                let mut window = RxWindow::<FixedCarry<32>>::new();
+                let mut expected: Vec<Vec<u8>> = Vec::new();
+                let mut prev = 0usize;
+                for &cut in &cuts {
+                    window
+                        .push(&wire[prev..cut], 2, &mut |f: &[u8]| {
+                            expected.push(f.to_vec())
+                        })
+                        .expect("no oversize prefix");
+                    prev = cut;
+                }
+
+                let link = link();
+                let mut got: Vec<Vec<u8>> = Vec::new();
+                let mut prev = 0usize;
+                for &cut in &cuts {
+                    if cut > prev {
+                        queue(&link, &wire[prev..cut]);
+                    }
+                    prev = cut;
+                    while let Some(frame) = received(&link) {
+                        got.push(frame);
+                    }
+                }
+                assert_eq!(got, expected, "delivered as [0..{i}, {i}..{j}, {j}..{len}]");
+                assert_eq!(got.len(), 3, "the empty batch is passed over by both");
+                chunkings += 1;
+            }
+        }
+        assert_eq!(chunkings, (len + 1) * (len + 2) / 2);
+    }
+
     #[test]
     fn the_end_of_the_stream_ends_the_link_after_what_came_before_it() {
         let link = link();
