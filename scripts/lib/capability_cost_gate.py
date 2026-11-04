@@ -575,7 +575,9 @@ CASES: tuple[Case, ...] = (
     # hundred. The first build of this case did not compile: the node used the interceptors'
     # `install_on` and the gossip policy's autoconnect fields without their features.
     Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_739_400,
-         require=(ROUTER_NODE, ACCEPT, RESPONDER),
+         # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
+         # role and the scouting and UDP link under it, and the multicast transport.
+         require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
          note="router-node: the C ABI that opens a router, and a peer or client that keeps its "
               "south apart, as the router data plane"),
     # 2026-11-03, the SCE pins -- 9,456,022 on hosted run 41589047498 and 9,458,478 on hkl001 at

@@ -1009,6 +1009,23 @@ abis = ["core", "pico", "c"]
 implies = ["peer"]
 help = "A session told of a node by one it holds a link to dials it."
 
+# The router data plane behind a session of the C ABI (`router-node`): a `mode: "router"` that
+# forwards between the clients that dial it, and a peer or client that keeps `gateway/south` apart.
+# zenoh and zenoh-c open a router as that in their default builds. The C ABI's default build opens
+# the registry of faces, which joins none of the faces it holds, so a router opened there forwards
+# nothing: the capability is off by default here, and that gap is stated by `upstream_on` set
+# against `default = "off"`. It implies what the node and the doors of the ABI read: the peer role,
+# the multicast group the node joins, the query and liveliness planes.
+[[capability]]
+id = "router-node"
+kconfig = "WZ_CAP_ROUTER_NODE"
+os_needs = []
+upstream_on = ["zenoh", "zenoh-c"]
+default = "off"
+abis = ["core", "c"]
+implies = ["peer", "multicast-transport", "query", "queryable", "liveliness", "liveliness-get"]
+help = "A router that forwards between its clients, and the node a gateway/south partition needs."
+
 # pico's unstable API (`Z_FEATURE_UNSTABLE_API`, a bare `#define`): the entity ids, the sample's
 # reliability and source info, the cancellation token, and the option fields that carry them
 # (`reliability`, `source_info`, `cancellation_token`). Off, those fields are not in the option

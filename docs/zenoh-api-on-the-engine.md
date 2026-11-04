@@ -1129,7 +1129,13 @@ Each lands whole with its surface lines, tests and faults in one round.
       router data plane whatever it holds (`OpenPlan::node_role`), as the Rust API's is, and
       forwards between the clients that dial it; a peer or a client is a node there only where
       it keeps a south apart, and a build without `router-node` opens the registry of faces,
-      which forwards nothing, for every role.
+      which forwards nothing, for every role. `router-node` is a capability of
+      `deploy/wz-config.toml` (the C ABI and the core export it): on in zenoh's and zenoh-c's
+      own default builds (`configs/zenoh_defconfig`, `configs/zenoh-c_defconfig`) and off in
+      the C ABI's default build, so a drop-in built by default is a router that forwards
+      nothing, which `upstream_on` set against `default = "off"` states as the gap. A profile
+      that is a client states it off (`host-client-tcp-query`), since it implies the peer role
+      and the query and liveliness planes.
     - **Open:** `routing` (the two above) and `open_time` (its tests are ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
       to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome

@@ -182,6 +182,19 @@ config WZ_CAP_GOSSIP
 	  A session told of a node by one it holds a link to dials it.
 	  Exported by: pico, c.
 
+config WZ_CAP_ROUTER_NODE
+	bool "router-node"
+	default n
+	select WZ_CAP_PEER
+	select WZ_CAP_MULTICAST_TRANSPORT
+	select WZ_CAP_QUERY
+	select WZ_CAP_QUERYABLE
+	select WZ_CAP_LIVELINESS
+	select WZ_CAP_LIVELINESS_GET
+	help
+	  A router that forwards between its clients, and the node a gateway/south partition needs.
+	  Exported by: c.
+
 config WZ_CAP_UNSTABLE_API
 	bool "unstable-api"
 	default y
