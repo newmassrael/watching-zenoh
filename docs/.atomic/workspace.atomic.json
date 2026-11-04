@@ -309456,6 +309456,34 @@
         "The test does not carry data: a Put over the session, and the router that a node reaches over tcp/ in practice, are the next measures; the probe against a stock router for 2000 requests with a reconnect is the done condition of the stream link and is not run. The admin node of the slot profile is typed to the UDP driver, so a node that listens, dials by a configured endpoint and reports is not yet buildable over tcp/ from that node; it is built from the generic host and the connect manager. The link-tcp capability with its Kconfig, a listener close, the mix of udp/ and tcp/ in one host and the MCU cross build remain."
       ]
     },
+    "Round 4226": {
+      "decision_summary": "The stack bound gate checks the contract against the source on every image check, since the round that named a rule's site by an anchor, and it asked git for the list of sources. The kit lane runs from a tree sent by rsync that is not a git checkout (its record says so, and its header describes the way), so on the kit host the check of every image with a bound died with a traceback before a rule was read, and the build step reported the bound as refused. With no repository to ask, the tree is now walked for its Rust sources, leaving out the directories of a build, and the selftest holds the case. The admin image's check on the kit host's copy reads the bound it reads here: 11,068 bytes, all claimed.",
+      "changes_bullets": [
+        "scripts/lib/stack_bound_gate.py: _tracked_sources falls back to walking the tree (directories named target, .git and node_modules left out) when git cannot list it; the selftest drives a copy with no git and a build directory."
+      ],
+      "verification_bullets": [
+        "stack_bound_gate.py --selftest passes (43 controls, one new). On the kit host the admin image built from a copy of the tree with no git was refused with a traceback at _tracked_sources before the change; after it, --check on that copy reads OK for the admin image, bound 11068 bytes over 61 frames, 263 calls through a register in 1365 functions, all claimed. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the admin image on the kit at the stack of 14784 and the first reading of the TLS client image (a verify image, whose rows the first kit day sets), both under way on the kit host; the lent reply decodes (1,432 and 1,416 bytes); a hosted reading of Layers Qzk and Qzb."
+      ],
+      "publishable_decision_summary": "The stack bound gate checks the contract against the source on every image check, since the round that named a rule's site by an anchor, and it asked git for the list of sources. The kit lane runs from a tree sent by rsync that is not a git checkout (its record says so, and its header describes the way), so on the kit host the check of every image with a bound died with a traceback before a rule was read, and the build step reported the bound as refused. With no repository to ask, the tree is now walked for its Rust sources, leaving out the directories of a build, and the selftest holds the case. The admin image's check on the kit host's copy reads the bound it reads here: 11,068 bytes, all claimed.",
+      "publishable_changes_bullets": [
+        "scripts/lib/stack_bound_gate.py: _tracked_sources falls back to walking the tree (directories named target, .git and node_modules left out) when git cannot list it; the selftest drives a copy with no git and a build directory."
+      ],
+      "publishable_verification_bullets": [
+        "stack_bound_gate.py --selftest passes (43 controls, one new). On the kit host the admin image built from a copy of the tree with no git was refused with a traceback at _tracked_sources before the change; after it, --check on that copy reads OK for the admin image, bound 11068 bytes over 61 frames, 263 calls through a register in 1365 functions, all claimed. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the admin image on the kit at the stack of 14784 and the first reading of the TLS client image (a verify image, whose rows the first kit day sets), both under way on the kit host; the lent reply decodes (1,432 and 1,416 bytes); a hosted reading of Layers Qzk and Qzb."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
