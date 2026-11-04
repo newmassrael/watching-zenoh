@@ -671,8 +671,9 @@ pub unsafe extern "C" fn z_liveliness_get(
 /// The snapshot is complete when this returns, and the C closure's `drop(context)` runs as the
 /// last reference to it is let go.
 ///
-/// A token that cancels a get stops the faces of a registry the get was fanned over, and a node
-/// has none, so a get that brings one is refused by name and not run uncancellable.
+/// The snapshot is taken on the face's thread and handed over before this returns, so there is no
+/// leg a token could stop; one whose cancel has already started fails the get with `Z_EGENERIC`,
+/// as it does a registry's, and one that is live is registered for the snapshot's length.
 #[cfg(all(feature = "router-node", feature = "liveliness-get"))]
 fn liveliness_get_on_node(
     node: &wz_capi_core::drive::RouterState,
@@ -680,9 +681,15 @@ fn liveliness_get_on_node(
     closure: Arc<crate::get::CReplyClosure>,
     token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
 ) -> ZResult {
-    if token.is_some() {
-        return Z_EUNAVAILABLE;
-    }
+    let _registration = match &token {
+        None => None,
+        Some(token) => {
+            let Some((_fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
+                return crate::result::Z_EGENERIC;
+            };
+            Some(registration)
+        }
+    };
     let gate = crate::get::ReplyGate {
         query_keyexpr: keyexpr.to_owned(),
         anyke: false,

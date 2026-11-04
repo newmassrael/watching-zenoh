@@ -30,9 +30,17 @@ use wz_capi_c::abi::{
     z_owned_session_t, z_owned_subscriber_t, z_view_keyexpr_t,
 };
 use wz_capi_c::bytes::z_bytes_copy_from_str;
+#[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
+use wz_capi_c::cancellation::{
+    z_cancellation_token_cancel, z_cancellation_token_clone, z_cancellation_token_drop,
+    z_cancellation_token_loan, z_cancellation_token_loan_mut, z_cancellation_token_new,
+    z_moved_cancellation_token_t, z_owned_cancellation_token_t,
+};
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 #[cfg(feature = "router-node")]
 use wz_capi_c::get::{z_closure_reply, z_get};
+#[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
+use wz_capi_c::get::{z_get_options_default, z_get_options_t};
 #[cfg(feature = "router-node")]
 use wz_capi_c::keyexpr::z_keyexpr_equals;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
@@ -649,6 +657,161 @@ unsafe fn declare_token(session: &z_owned_session_t) -> z_owned_liveliness_token
         "a token is declared"
     );
     token
+}
+
+/// A queryable handler that holds the query for a few seconds before it answers, so that a get on
+/// it stays under way long enough to be cancelled.
+#[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
+unsafe extern "C" fn on_query_slowly(query: *mut z_loaned_query_t, ctx: *mut c_void) {
+    (*(ctx as *const CountCtx))
+        .hits
+        .fetch_add(1, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_secs(4));
+    let _ = query;
+}
+
+/// The drop handler of a get's closure: the get is over.
+#[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
+unsafe extern "C" fn on_get_over(ctx: *mut c_void) {
+    (*(ctx as *const CountCtx))
+        .hits
+        .fetch_add(1, Ordering::SeqCst);
+}
+
+/// A get on a node is ended by the token it was made with: a registry peer's queryable holds the
+/// query for four seconds, and the cancel of the token ends the get at once, with the closure's
+/// `drop(context)` run before the cancel returns.
+#[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
+#[test]
+fn a_get_on_a_node_is_ended_by_its_cancellation_token() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the contexts are leaked or freed after them.
+    unsafe {
+        // The peer's queryable holds each query for four seconds.
+        let handled = Arc::new(AtomicUsize::new(0));
+        let handled_ctx = Box::into_raw(Box::new(CountCtx {
+            hits: handled.clone(),
+        }));
+        let key = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        let mut closure: z_owned_closure_query_t = std::mem::zeroed();
+        z_closure_query(
+            &mut closure,
+            Some(on_query_slowly),
+            None,
+            handled_ctx.cast(),
+        );
+        let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_queryable(
+                z_session_loan(&peer),
+                &mut queryable,
+                z_view_keyexpr_loan(&view),
+                (&mut closure as *mut z_owned_closure_query_t).cast::<z_moved_closure_query_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        // The node asks only once it knows the queryable, or the query would end at once for
+        // want of one.
+        let mut querier: z_owned_querier_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_querier(
+                z_session_loan(&node),
+                &mut querier,
+                z_view_keyexpr_loan(&view),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        assert!(
+            eventually(|| {
+                let mut status: z_matching_status_t = std::mem::zeroed();
+                assert_eq!(
+                    z_querier_get_matching_status(z_querier_loan(&querier), &mut status),
+                    Z_OK
+                );
+                status.matching
+            }),
+            "the node never learned of the peer's queryable"
+        );
+
+        // The get takes the token it is handed; the program keeps a clone, which shares the flag,
+        // to cancel by.
+        let mut token: z_owned_cancellation_token_t = std::mem::zeroed();
+        assert_eq!(z_cancellation_token_new(&mut token), Z_OK);
+        let mut kept: z_owned_cancellation_token_t = std::mem::zeroed();
+        z_cancellation_token_clone(&mut kept, z_cancellation_token_loan(&token));
+        let over = Arc::new(AtomicUsize::new(0));
+        let over_ctx = Box::into_raw(Box::new(CountCtx { hits: over.clone() }));
+        let mut reply_closure: z_owned_closure_reply_t = std::mem::zeroed();
+        z_closure_reply(
+            &mut reply_closure,
+            Some(on_reply_hit),
+            Some(on_get_over),
+            over_ctx.cast(),
+        );
+        let mut options: z_get_options_t = std::mem::zeroed();
+        z_get_options_default(&mut options);
+        options.cancellation_token = (&mut token as *mut z_owned_cancellation_token_t)
+            .cast::<z_moved_cancellation_token_t>();
+        assert_eq!(
+            z_get(
+                z_session_loan(&node),
+                z_view_keyexpr_loan(&view),
+                std::ptr::null(),
+                (&mut reply_closure as *mut z_owned_closure_reply_t)
+                    .cast::<z_moved_closure_reply_t>(),
+                &mut options,
+            ),
+            Z_OK
+        );
+        assert!(
+            eventually(|| handled.load(Ordering::SeqCst) > 0),
+            "the peer's queryable never held the query"
+        );
+        assert_eq!(over.load(Ordering::SeqCst), 0, "the get is still under way");
+
+        let started = Instant::now();
+        assert_eq!(
+            z_cancellation_token_cancel(z_cancellation_token_loan_mut(&mut kept)),
+            Z_OK
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the cancel waited for the query to run out ({:?})",
+            started.elapsed()
+        );
+        assert_eq!(
+            over.load(Ordering::SeqCst),
+            1,
+            "the get's closure was not let go of by the cancel"
+        );
+
+        z_cancellation_token_drop((&mut kept as *mut z_owned_cancellation_token_t).cast());
+        assert_eq!(
+            z_undeclare_querier((&mut querier as *mut z_owned_querier_t).cast()),
+            Z_OK
+        );
+        assert_eq!(
+            z_undeclare_queryable((&mut queryable as *mut z_owned_queryable_t).cast()),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
+        drop(Box::from_raw(over_ctx));
+    }
 }
 
 /// A node opened through the C ABI takes part in liveliness: its liveliness get finds the token

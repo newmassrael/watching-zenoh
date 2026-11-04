@@ -1434,12 +1434,13 @@ unsafe fn get_with_selector(
 /// that holds one on the key and to its own, and hands each reply to the callback of the leg.
 ///
 /// The get is over, and the C closure's `drop(context)` runs, when the node lets go of the
-/// callback it was handed: at the end of the query, at its timeout, or when the node closes.
-/// The token that cancels a get stops the legs a registry fans out, and a node has none to stop
-/// yet, so a get that brings one is refused by name and not run uncancellable.
+/// callback it was handed: at the end of the query, at its timeout, when the node closes, or when
+/// the token the get was made with is cancelled, which ends the one query the node holds for it
+/// (`RouterState::cancel_get`). The token is registered before the query is asked, as a
+/// registry's is, and a token whose cancel has started fails the get with `Z_EGENERIC`.
 #[cfg(feature = "router-node")]
 pub(crate) fn issue_get_on_node(
-    node: &wz_capi_core::drive::RouterState,
+    node: &Arc<wz_capi_core::drive::RouterState>,
     keyexpr: String,
     parameters: Option<Vec<u8>>,
     opts: QueryOptions,
@@ -1447,9 +1448,19 @@ pub(crate) fn issue_get_on_node(
     closure: Arc<CReplyClosure>,
     token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
 ) -> ZResult {
-    if token.is_some() {
-        return crate::result::Z_EUNAVAILABLE;
-    }
+    let fan = match &token {
+        None => None,
+        Some(token) => {
+            let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
+                return crate::result::Z_EGENERIC;
+            };
+            Some((fan, Arc::new(registration)))
+        }
+    };
+    let registration = fan
+        .as_ref()
+        .map(|(_, registration)| Arc::clone(registration));
+    let fan = fan.map(|(fan, _)| fan);
     let anyke = parameters
         .as_deref()
         .is_some_and(crate::reply_keyexpr::parameters_has_anyke);
@@ -1478,18 +1489,26 @@ pub(crate) fn issue_get_on_node(
     let leg = LegReply {
         closure,
         gate,
-        _registration: None,
+        _registration: registration.clone(),
     };
-    match node.get(
+    let asked = node.get_numbered(
         &keyexpr,
         &opts,
         None,
         Box::new(move |view: &dyn ReplyView| leg.fire(view)),
         Box::new(|| {}),
-    ) {
-        Ok(()) => Z_OK,
-        Err(_) => Z_EINVAL,
+    );
+    let Ok(id) = asked else {
+        return Z_EINVAL;
+    };
+    // The cancellation names the query by the id it was asked under. A token cancelled while
+    // the query was being asked ends it here.
+    if let Some(fan) = &fan {
+        let node = Arc::clone(node);
+        fan.record(move || node.cancel_get(id));
     }
+    drop(registration);
+    Z_OK
 }
 
 #[cfg(test)]

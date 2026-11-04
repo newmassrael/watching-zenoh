@@ -174,6 +174,27 @@ impl RouterState {
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     ) -> Result<(), String> {
+        self.get_numbered(keyexpr, options, ingress, on_reply, on_final)
+            .map(|_| ())
+    }
+
+    /// End the query [`Self::get_numbered`] answered `id` for, now: its handlers are let go and
+    /// it is told its end, without the replies that have not come. A query that has already
+    /// ended is not found, and nothing happens.
+    pub fn cancel_get(&self, id: u64) {
+        self.liveliness.cancel_query(id);
+    }
+
+    /// [`Self::get`], answering the id the query was asked under, which [`Self::cancel_get`]
+    /// names it by.
+    pub fn get_numbered(
+        &self,
+        keyexpr: &str,
+        options: &QueryOptions,
+        ingress: Option<ReplyIngress>,
+        on_reply: ReplyHandler,
+        on_final: FinalHandler,
+    ) -> Result<u64, String> {
         use wz_session_core::request_build::{build_request_query, build_request_query_with_meta};
 
         let rid = self.next_request.fetch_add(1, Ordering::Relaxed);
@@ -196,7 +217,7 @@ impl RouterState {
             on_final,
         });
         self.forwarder.local_get(&request);
-        Ok(())
+        Ok(rid)
     }
 
     /// Publish a chunk of shared memory as the node's own session: see

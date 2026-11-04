@@ -107,6 +107,9 @@ enum Command {
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     },
+    /// The program cancelled the query it asked under `rid`: it ends there and then, without the
+    /// replies that have not come, as a query of a session ends when its token is cancelled.
+    CancelQuery(u64),
     /// The program watches whether anything of `plane` matches `key` among the declarations
     /// `origin` admits.
     Watch {
@@ -312,6 +315,9 @@ impl State {
             Command::Told(LocalFaceEvent::ReplyFinal { request_id }) => {
                 self.queries.deliver_local_final(request_id);
             }
+            // The one final the query waits for: the query ends, and the handlers it was
+            // held with are let go.
+            Command::CancelQuery(rid) => self.queries.deliver_local_final(rid),
             Command::Get {
                 rid,
                 keyexpr,
@@ -693,6 +699,12 @@ impl LocalLiveliness {
             on_reply,
             on_final,
         });
+    }
+
+    /// End the query held under the request id `rid` now. A query that has already ended is not
+    /// found, and nothing happens.
+    pub(super) fn cancel_query(&self, rid: u64) {
+        let _ = self.commands.send(Command::CancelQuery(rid));
     }
 
     /// Stop the face's thread and wait for it.
