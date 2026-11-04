@@ -55,6 +55,8 @@ use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::session::Queryable;
 #[cfg(feature = "queryable")]
 use wz_runtime_tokio::session::TokioQueryHolder;
+#[cfg(feature = "liveliness")]
+use wz_runtime_tokio::session::{GroupLivelinessSubscriber, LivelinessSubscriberOptions};
 use wz_runtime_tokio::session::{
     LocalDeliveryDrain, SubscribeOptions, Subscriber, TokioMulticastSession,
 };
@@ -63,6 +65,8 @@ use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
 use wz_runtime_tokio::session_glue::LinkKind;
 
+#[cfg(feature = "liveliness")]
+use super::LivelinessSink;
 use super::TokenId;
 #[cfg(feature = "queryable")]
 use super::{queryable_options, QblEntry, QblId};
@@ -147,6 +151,12 @@ pub(super) struct McastFaceEntry {
     pub(super) subs: BTreeMap<SubId, Subscriber>,
     #[cfg(feature = "queryable")]
     pub(super) qbls: BTreeMap<QblId, Queryable>,
+    /// The liveliness subscriptions, keyed by the C id they share with the ordinary ones. Each
+    /// hears the tokens the group's members announce, and was asked of them by the interest it
+    /// is keyed by when the group's declarations say so
+    /// ([`GroupDeclarations::asks_for_liveliness`]).
+    #[cfg(feature = "liveliness")]
+    pub(super) live_subs: BTreeMap<SubId, GroupLivelinessSubscriber>,
     /// The group's re-arm signal, the twin of a unicast face's: a get that
     /// registers a pending query on the group wakes [`sweep_mcast_face`], so the
     /// sweep arms on the new deadline instead of the one it was parked on.
@@ -323,6 +333,12 @@ fn announce_on(session: &TokioMulticastSession, declarations: GroupDeclarations,
     if let Some(announced) =
         announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
     {
+        // The token is held before it is announced, so that a member that asks right after it
+        // hears the announcement finds it held.
+        #[cfg(feature = "liveliness")]
+        if entity.what == GroupDeclaration::Token {
+            session.hold_token(announced, entity.keyexpr);
+        }
         let key = group_key(declarations, entity.keyexpr, entity.wire);
         let _ = session.announce(entity.what, announced, key);
     }
@@ -340,6 +356,10 @@ fn retract_on(session: &TokioMulticastSession, declarations: GroupDeclarations, 
     if let Some(announced) =
         announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
     {
+        #[cfg(feature = "liveliness")]
+        if entity.what == GroupDeclaration::Token {
+            session.release_token(announced);
+        }
         let key = retraction_key(declarations, entity.keyexpr, entity.wire, entity.retraction);
         let _ = session.retract(entity.what, announced, key);
     }
@@ -407,6 +427,37 @@ fn answer_on(
         queryable_options(entry.complete, entry.allowed_origin),
         (entry.sink)(&TokioQueryHolder::Group(session.clone())),
     )
+}
+
+/// Declare a liveliness subscription on a group's session, under its C id, and ask the group
+/// for its members' tokens as `declarations` says: the current ones when `history` is set, and
+/// the ones declared later in any case, as zenoh-pico's `Interest` asks.
+#[cfg(feature = "liveliness")]
+fn listen_on(
+    session: &TokioMulticastSession,
+    id: SubId,
+    keyexpr: &str,
+    history: bool,
+    wire: &WireKey,
+    sink: &LivelinessSink,
+    declarations: GroupDeclarations,
+) -> GroupLivelinessSubscriber {
+    let subscriber = session.declare_group_liveliness_subscriber(
+        id,
+        keyexpr,
+        LivelinessSubscriberOptions::default().with_history(history),
+        sink(),
+    );
+    if declarations.asks_for_liveliness() {
+        let _ = session.ask(
+            id,
+            InterestKinds::TOKENS,
+            history,
+            /*future=*/ true,
+            Some(group_key(declarations, keyexpr, wire)),
+        );
+    }
+    subscriber
 }
 
 impl SharedSession {
@@ -483,6 +534,28 @@ impl SharedSession {
             .iter()
             .map(|entry| (entry.id, answer_on(session, entry, GroupDeclarations::None)))
             .collect();
+        // The liveliness subscriptions ask the group as they would have had the group been
+        // there when they were declared: zenoh-pico's session holds its transport from its
+        // open, so the subscriber's `Interest` has always gone to it.
+        #[cfg(feature = "liveliness")]
+        let live_subs = guard
+            .live_subs
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id,
+                    listen_on(
+                        session,
+                        entry.id,
+                        &entry.keyexpr,
+                        entry.history,
+                        &entry.wire,
+                        &entry.sink,
+                        declarations,
+                    ),
+                )
+            })
+            .collect();
         // A group told the session's keyexprs is asked for its members' at once, with the
         // session's next entity id, as zenoh-pico asks when it opens its multicast transport
         // (`vendor/zenoh-pico/src/session/interest.c` @
@@ -505,6 +578,8 @@ impl SharedSession {
                 subs,
                 #[cfg(feature = "queryable")]
                 qbls,
+                #[cfg(feature = "liveliness")]
+                live_subs,
                 revised: revised.clone(),
                 membership: membership.clone(),
                 producer: producer.clone(),
@@ -677,6 +752,64 @@ impl SharedSession {
                 let sub = face.subs.remove(&id)?;
                 if let Some(entry) = entry {
                     retract_on(&face.session, face.declarations, &entry.told());
+                }
+                Some(sub)
+            })
+            .collect()
+    }
+
+    /// Declare liveliness subscription `id` on every group face, and ask each group for its
+    /// members' tokens as its declarations say ([`listen_on`]).
+    ///
+    /// With `history`, the tokens a group's members declared before are replayed to the
+    /// subscription as it is declared, staged on the group's session; the sessions that hold such
+    /// a replay are returned, for the caller to drain once the lock is let go
+    /// ([`TokioMulticastSession::drain_deferred_fires`]). A group's loop drains its session only
+    /// when it hears something, which a quiet group does not.
+    #[cfg(feature = "liveliness")]
+    #[must_use]
+    pub(super) fn listen_on_groups(
+        guard: &mut Inner,
+        id: SubId,
+        keyexpr: &str,
+        history: bool,
+        wire: &WireKey,
+        sink: &LivelinessSink,
+    ) -> Vec<TokioMulticastSession> {
+        let mut staged = Vec::new();
+        for face in guard.mcast_faces.values_mut() {
+            let sub = listen_on(
+                &face.session,
+                id,
+                keyexpr,
+                history,
+                wire,
+                sink,
+                face.declarations,
+            );
+            face.live_subs.insert(id, sub);
+            if history {
+                staged.push(face.session.clone());
+            }
+        }
+        staged
+    }
+
+    /// Take liveliness subscription `id` off every group face, for the caller to drop outside
+    /// the lock, ending on each group the interest that asked it, as zenoh-pico does when it
+    /// undeclares the subscriber.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn unlisten_on_groups(
+        guard: &mut Inner,
+        id: SubId,
+    ) -> Vec<GroupLivelinessSubscriber> {
+        guard
+            .mcast_faces
+            .values_mut()
+            .filter_map(|face| {
+                let sub = face.live_subs.remove(&id)?;
+                if face.declarations.asks_for_liveliness() {
+                    let _ = face.session.ask_final(id);
                 }
                 Some(sub)
             })

@@ -315,6 +315,10 @@ impl SessionEngine for SharedSession {
         SharedSession::put_plain_filtered(self, filter, keyexpr, mapping_id, payload, params)
     }
 
+    fn has_transport(&self) -> bool {
+        !self.face_set().is_empty() || !SharedSession::listen_locators(self).is_empty()
+    }
+
     fn batch_start_all(&self) -> usize {
         SharedSession::batch_start_all(self)
     }

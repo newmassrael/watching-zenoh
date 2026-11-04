@@ -261,6 +261,15 @@ pub trait SessionEngine: Send + Sync + 'static {
         params: &PlainPutParams,
     ) -> FilteredPut;
 
+    /// Whether the session has a transport to carry a batch window: a face, or a listener that
+    /// takes one. This is zenoh-pico's `_z_transport_get_common` being non-NULL, which its three
+    /// `zp_batch_*` answer `_Z_ERR_TRANSPORT_NOT_AVAILABLE` for when it is not (a client whose
+    /// link is gone, until it reconnects). The provided answer is `true`, for an engine with no
+    /// notion of a session without a transport.
+    fn has_transport(&self) -> bool {
+        true
+    }
+
     /// Open a batch window on the session's links (zenoh-pico `zp_batch_start`): how many opened.
     fn batch_start_all(&self) -> usize;
 

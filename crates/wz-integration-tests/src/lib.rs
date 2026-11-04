@@ -996,6 +996,11 @@ pub mod common {
         /// and wz's build with `raweth-transport` (open-debt items 911 and 913). Built as well
         /// as configured, for the reference programs ([`zenoh_pico_reth_cli_binary`]).
         RawEth,
+        /// The configuration upstream's integration workflow builds its `tests/z_api_*_test.c`
+        /// under (`-integration`): the reference arm with both session-local switches and the
+        /// admin space on. Built as well as configured, for the control that links the real
+        /// library ([`zenoh_pico_integration_library_dir`]).
+        Integration,
     }
 
     impl PicoHeaderArm {
@@ -1008,6 +1013,7 @@ pub mod common {
                 Self::Local => "-local",
                 Self::McastDeclarations => "-mcdecl",
                 Self::RawEth => "-reth",
+                Self::Integration => "-integration",
             }
         }
 
@@ -1022,6 +1028,7 @@ pub mod common {
                 Self::Local => "target/wz-capi-pico-local",
                 Self::McastDeclarations => "target/wz-capi-pico-mcdecl",
                 Self::RawEth => "target/wz-capi-pico-reth",
+                Self::Integration => "target/wz-capi-pico-integration",
             };
             if !pico_engine_is_coop() {
                 return tokio.to_owned();
@@ -1037,7 +1044,11 @@ pub mod common {
             match self {
                 Self::MultiThreaded => zenoh_pico_include_dirs(),
                 Self::SingleThreaded => zenoh_pico_include_dirs_single_threaded(),
-                Self::UpstreamDefault | Self::Local | Self::McastDeclarations | Self::RawEth => {
+                Self::UpstreamDefault
+                | Self::Local
+                | Self::McastDeclarations
+                | Self::RawEth
+                | Self::Integration => {
                     let root = project_root();
                     let generated = root.join(format!(
                         "target/zenoh-pico-build{}/zenohpico/include",
@@ -1054,12 +1065,14 @@ pub mod common {
                     // TLS headers; upstream's default has TLS off, and its third slot
                     // repeats the vendored headers rather than naming a directory the
                     // arm does not use.
-                    let third =
-                        if matches!(self, Self::Local | Self::McastDeclarations | Self::RawEth) {
-                            mbedtls_include_dir()
-                        } else {
-                            vendored.clone()
-                        };
+                    let third = if matches!(
+                        self,
+                        Self::Local | Self::McastDeclarations | Self::RawEth | Self::Integration
+                    ) {
+                        mbedtls_include_dir()
+                    } else {
+                        vendored.clone()
+                    };
                     [generated, vendored, third]
                 }
             }
@@ -1787,6 +1800,21 @@ pub mod common {
         libdir: &Path,
         link: &str,
     ) -> Result<PathBuf, String> {
+        compile_pico_program(src, &[], &[], out_dir, includes, libdir, link)
+    }
+
+    /// [`compile_pico_source`] for a program upstream builds from more than its own file:
+    /// `extra_sources` are compiled in beside it (zenoh-pico's `tests/utils/tcp_proxy.c`) and
+    /// `defines` are the `-D` words upstream's CMake gives that target.
+    pub fn compile_pico_program(
+        src: &Path,
+        extra_sources: &[PathBuf],
+        defines: &[&str],
+        out_dir: &Path,
+        includes: &[PathBuf],
+        libdir: &Path,
+        link: &str,
+    ) -> Result<PathBuf, String> {
         let stem = src
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1794,7 +1822,10 @@ pub mod common {
         let exe = out_dir.join(format!("{stem}_on_{link}"));
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
         let mut cmd = Command::new(&cc);
-        cmd.arg(src).arg("-DZENOH_LINUX");
+        cmd.arg(src).args(extra_sources).arg("-DZENOH_LINUX");
+        for define in defines {
+            cmd.arg(format!("-D{define}"));
+        }
         for inc in includes {
             cmd.arg(format!("-I{}", inc.display()));
         }
@@ -1875,6 +1906,21 @@ pub mod common {
         assert!(
             dir.is_dir(),
             "zenoh-pico mcdecl lib dir missing at {}; run scripts/build-zenoh-pico-cli.sh first",
+            dir.display()
+        );
+        assert_zenoh_pico_oracle_fresh(&root);
+        dir
+    }
+
+    /// The INTEGRATION arm's `libzenohpico` directory (`target/zenoh-pico-build-integration/lib`),
+    /// checked fresh: the library upstream's `tests/z_api_*_test.c` are built against in its own
+    /// integration workflow, the control for a red of wz's build of the same arm.
+    pub fn zenoh_pico_integration_library_dir() -> PathBuf {
+        let root = project_root().join("target/zenoh-pico-build-integration");
+        let dir = root.join("lib");
+        assert!(
+            dir.is_dir(),
+            "zenoh-pico integration lib dir missing at {}; run scripts/build-zenoh-pico-cli.sh first",
             dir.display()
         );
         assert_zenoh_pico_oracle_fresh(&root);

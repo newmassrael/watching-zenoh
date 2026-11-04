@@ -2887,6 +2887,39 @@ impl SharedSession {
         }
     }
 
+    /// Let go of every declaration that holds a C closure: the registry's entries and the copy
+    /// each face and the local plane keeps. A closed session replays them to no face, and this is
+    /// what runs the closures' `drop(context)` at the close, as zenoh-pico's close does, and not
+    /// at the session's drop.
+    ///
+    /// Like [`Self::clear_faces`] it is called with the driver thread joined, so no callback is in
+    /// flight on a dispatch thread; what is taken is dropped outside the lock, the standing
+    /// discipline for a drop that runs C.
+    pub fn clear_declarations(&self) {
+        let dropped = {
+            let mut guard = self.lock();
+            let entries = (
+                std::mem::take(&mut guard.subs),
+                std::mem::take(&mut guard.qbls),
+                std::mem::take(&mut guard.live_subs),
+                std::mem::take(&mut guard.matches),
+            );
+            let copies: Vec<_> = guard
+                .declaration_targets()
+                .map(|face| {
+                    (
+                        std::mem::take(&mut face.subs),
+                        std::mem::take(&mut face.qbls),
+                        std::mem::take(&mut face.live_subs),
+                        std::mem::take(&mut face.matches),
+                    )
+                })
+                .collect();
+            (entries, copies)
+        };
+        drop(dropped);
+    }
+
     /// One inbound iteration event for `id` — dispatched into that face's own
     /// session (and so its own observer, keeping the peer's keyexpr alias id
     /// space private to it), then that face's expired `z_get`s are swept.
@@ -3785,6 +3818,10 @@ impl SharedSession {
                 face.live_subs.insert(id, sub);
             }
         }
+        // The groups hear the tokens of their members, which no face of a unicast peer carries.
+        #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
+        let replayed_on_groups =
+            Self::listen_on_groups(&mut guard, id, &keyexpr, options.history, &wire, &sink);
         // A history lists the tokens the session itself holds as it lists those of its peers.
         let history: Vec<(TokenId, String)> = if options.history && self.liveliness_to_self {
             guard
@@ -3805,6 +3842,12 @@ impl SharedSession {
             sink,
         });
         drop(guard);
+        // What the groups already held is told to the subscription now, on this thread and
+        // outside the lock, as the session's own tokens are below.
+        #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
+        for session in &replayed_on_groups {
+            session.drain_deferred_fires();
+        }
         if let Some(mut leg) = leg {
             for (token_id, key) in &history {
                 leg(LivelinessSample {
@@ -4058,10 +4101,10 @@ impl SharedSession {
     ///
     /// pico has ONE transport, so its batch control is a single call; wz holds N
     /// faces, so the window is opened on each. Returns the number of faces that
-    /// accepted it — a session with no peer batches nothing and reports 0, which
-    /// is not an error (pico's own `zp_batch_start` on a closed session is the
-    /// error case, and that maps to the handle being invalid, not to zero
-    /// faces).
+    /// accepted it — a session with no peer batches nothing and reports 0. Whether
+    /// that is an error is the C ABI's to say, from `has_transport`: a listening
+    /// peer with no peer yet has a transport and answers `Z_OK`, a client whose
+    /// link is gone has none and answers `_Z_ERR_TRANSPORT_NOT_AVAILABLE`.
     pub fn batch_start_all(&self) -> usize {
         self.face_sessions()
             .into_iter()
@@ -5091,6 +5134,8 @@ impl SharedSession {
         let mut dropped_live_entry = None;
         #[cfg(feature = "multicast-transport")]
         let dropped_groups;
+        #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
+        let dropped_group_live;
         {
             let mut guard = self.lock();
             // Open-debt item 913 — the group faces' copies, into the same out-of-lock
@@ -5098,6 +5143,10 @@ impl SharedSession {
             #[cfg(feature = "multicast-transport")]
             {
                 dropped_groups = Self::unsubscribe_on_groups(&mut guard, id);
+            }
+            #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
+            {
+                dropped_group_live = Self::unlisten_on_groups(&mut guard, id);
             }
             // Remove the SSOT entry into a binding rather than `retain`-dropping
             // it in place: with no live face (a listener that never had a peer,
@@ -5142,6 +5191,8 @@ impl SharedSession {
         drop(dropped);
         #[cfg(feature = "multicast-transport")]
         drop(dropped_groups);
+        #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
+        drop(dropped_group_live);
         drop(dropped_entry);
         drop(dropped_live);
         drop(dropped_live_entry);

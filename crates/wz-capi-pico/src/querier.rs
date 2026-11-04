@@ -245,6 +245,21 @@ pub(crate) struct QuerierState {
     /// and a get without one of its own sends with it (`vendor/zenoh-pico/src/api/api.c` @
     /// `&querier->_encoding);  // it is safe to use alias`).
     encoding: Option<wz_session_core::sample::EncodingHint>,
+    /// The release latches of the gets issued through this querier. Undeclaring it waits for
+    /// their reply callbacks to finish and their closures to be dropped, as pico's
+    /// `_z_sync_group_wait` does.
+    gets: crate::ffi::LatchList,
+    /// Cancels the gets this querier still has pending when it is undeclared, as pico's
+    /// `_z_unregister_pending_queries_from_querier` does. Every get takes it, unless the program
+    /// gave that get a token of its own.
+    cancel: Arc<wz_capi_port::cancellation::CancellationToken>,
+}
+
+impl Drop for QuerierState {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.gets.wait_all();
+    }
 }
 
 impl QuerierState {
@@ -422,6 +437,8 @@ pub unsafe extern "C" fn z_declare_querier(
             accept_replies,
             qos,
             encoding,
+            gets: crate::ffi::LatchList::default(),
+            cancel: wz_capi_port::cancellation::CancellationToken::new(),
         });
         boxed.bind();
         *querier = z_owned_querier_t {
@@ -511,6 +528,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             // `closure` drops here, running the caller's `drop(context)`.
             None => return Z_ERR_NULL,
         };
+        state.gets.keep(closure.release_latch());
         // R2962 — a write filter that says no queryable matches SENDS NOTHING and
         // runs the closure's `drop`, which is how this get completes without a
         // reply; the call still answers `Z_OK`
@@ -539,6 +557,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         if value_meta.encoding.is_none() {
             value_meta.encoding = state.encoding.clone();
         }
+        let token = token.or_else(|| Some(state.cancel.clone()));
         issue_get(
             &*state.shared,
             state.key.literal().to_owned(),

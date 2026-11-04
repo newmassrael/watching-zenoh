@@ -530,6 +530,7 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     // OUT of the C callback across this `extern "C"` boundary is UB and would
     // tear down the drive thread, so it is caught here.
     let ctx = closure.context.0;
+    let _in_callback = crate::ffi::InCallback::enter();
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         call(reply_ptr, ctx);
     }));
@@ -1157,6 +1158,12 @@ unsafe fn get_inner(
     let Some(handle) = session_handle(zs) else {
         return Z_ERR_NULL;
     };
+    // A closed session issues no get; the closure adopted above runs its drop.
+    if handle.is_closed() {
+        return crate::result::Z_ERR_SESSION_CLOSED;
+    }
+    // The session's close waits for this get's closure to finish and be dropped.
+    handle.keep_background(cclosure.release_latch());
     let ke = match keyexpr_str(keyexpr) {
         Some(k) => k.to_owned(),
         None => return Z_ERR_INVALID,

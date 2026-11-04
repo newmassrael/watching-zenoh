@@ -645,9 +645,11 @@ pub(crate) fn make_queryable_callback(
         // down the drive thread, so it is caught here — the drive loop survives
         // a misbehaving callback.
         let ctx = closure.context.0;
+        let in_callback = crate::ffi::InCallback::enter();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             call(query_ptr, ctx);
         }));
+        drop(in_callback);
         marshal.flush(out);
     }
 }
@@ -1027,11 +1029,15 @@ struct QueryableState {
     /// Cached loan of `key`, so `z_queryable_keyexpr` hands back a borrow of
     /// stable storage rather than of a temporary.
     loaned_keyexpr: z_loaned_keyexpr_t,
+    /// Opens when the queryable's closure has run its `drop(context)`; the undeclare waits on it
+    /// so it returns only when no query is still being answered (pico's `_z_sync_group_wait`).
+    released: Arc<crate::ffi::ReleaseLatch>,
 }
 
 impl Drop for QueryableState {
     fn drop(&mut self) {
         self.engine.undeclare_queryable(self.id);
+        self.released.wait();
     }
 }
 
@@ -1099,17 +1105,30 @@ unsafe fn declare_queryable_inner(
     keyexpr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_query_t,
     options: *const z_queryable_options_t,
-) -> Result<(Arc<Engine>, QblId, DeclaredKeyexpr), ZResult> {
+) -> Result<
+    (
+        Arc<Engine>,
+        QblId,
+        DeclaredKeyexpr,
+        Arc<crate::ffi::ReleaseLatch>,
+    ),
+    ZResult,
+> {
     if callback.is_null() {
         return Err(Z_ERR_NULL);
     }
     let owned = &mut (*callback)._this;
     let cclosure = CQueryClosure::new(owned.context, owned.call, owned.drop);
     *owned = z_owned_closure_query_t::null_value();
+    let released = cclosure.release_latch();
 
     let Some(handle) = session_handle(zs) else {
         return Err(Z_ERR_NULL);
     };
+    // A closed session takes no declaration; the closure consumed above runs its drop.
+    if handle.is_closed() {
+        return Err(Z_ERR_SESSION_CLOSED);
+    }
     let ke = match keyexpr_str(keyexpr) {
         Some(k) => k.to_owned(),
         None => return Err(Z_ERR_INVALID),
@@ -1142,7 +1161,7 @@ unsafe fn declare_queryable_inner(
             })
         },
     )?;
-    Ok((session.engine, id, key))
+    Ok((session.engine, id, key, released))
 }
 
 /// Declare a queryable the way pico's `z_declare_queryable` does, for whatever
@@ -1252,12 +1271,13 @@ pub unsafe extern "C" fn z_declare_queryable(
             return Z_ERR_NULL;
         }
         match declare_queryable_inner(zs, keyexpr, callback, options) {
-            Ok((engine, id, key)) => {
+            Ok((engine, id, key, released)) => {
                 let mut boxed = Box::new(QueryableState {
                     engine,
                     id,
                     key,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+                    released,
                 });
                 // Point the cached view at the boxed keyexpr's final address.
                 boxed.loaned_keyexpr = boxed.key.loaned();
@@ -1289,7 +1309,13 @@ pub unsafe extern "C" fn z_declare_background_queryable(
 ) -> ZResult {
     guarded(
         || match declare_queryable_inner(zs, keyexpr, callback, options) {
-            Ok(_) => Z_OK,
+            Ok((_, _, _, released)) => {
+                // No handle will undeclare it, so the session's close waits for it.
+                if let Some(handle) = session_handle(zs) {
+                    handle.keep_background(released);
+                }
+                Z_OK
+            }
             Err(code) => code,
         },
     )

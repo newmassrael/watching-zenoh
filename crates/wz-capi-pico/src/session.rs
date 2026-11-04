@@ -74,7 +74,9 @@ use crate::ffi::{guard_val, guarded};
 use crate::result::Z_EINVAL;
 #[cfg(feature = "engine-tokio")]
 use crate::result::Z_ERR_GENERIC;
-use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
+use crate::result::{
+    ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_TRANSPORT_NOT_AVAILABLE, Z_OK,
+};
 #[cfg(feature = "engine-tokio")]
 use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, SessionState};
 #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
@@ -388,6 +390,39 @@ pub(crate) struct PicoSessionHandle {
     pub(crate) drive: Box<dyn wz_capi_port::SessionDrive>,
     /// The session's role, clock, connectivity listeners and admin space.
     pub(crate) ext: crate::session_ext::PicoSessionExt,
+    /// The release latches of the closures the program declared with no handle to undeclare them
+    /// by (`z_declare_background_*`), and of the gets it issued. A close waits on them, as an
+    /// undeclare waits on its own.
+    background: crate::ffi::LatchList,
+}
+
+impl PicoSessionHandle {
+    pub(crate) fn new(
+        drive: Box<dyn wz_capi_port::SessionDrive>,
+        ext: crate::session_ext::PicoSessionExt,
+    ) -> Self {
+        Self {
+            drive,
+            ext,
+            background: crate::ffi::LatchList::default(),
+        }
+    }
+
+    /// Whether the session has been closed. A declaration or a get made after it is refused with
+    /// `_Z_ERR_SESSION_CLOSED`, and the closure the call consumed runs its `drop(context)`.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.drive.is_closed()
+    }
+
+    /// Keep the latch of a closure with no handle to undeclare it by, for the close to wait on.
+    pub(crate) fn keep_background(&self, latch: std::sync::Arc<crate::ffi::ReleaseLatch>) {
+        self.background.keep(latch);
+    }
+
+    /// Block until every such closure has run its `drop(context)`.
+    fn wait_background(&self) {
+        self.background.wait_all();
+    }
 }
 
 #[cfg(feature = "engine-tokio")]
@@ -927,7 +962,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid);
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
-            let handle = PicoSessionHandle { drive, ext };
+            let handle = PicoSessionHandle::new(drive, ext);
             *zs = z_owned_session_t {
                 _val: Box::into_raw(Box::new(handle)) as *mut c_void,
                 _cnt: std::ptr::null_mut(),
@@ -1062,7 +1097,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid);
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
-    let handle = PicoSessionHandle { drive, ext };
+    let handle = PicoSessionHandle::new(drive, ext);
     // The multi-threaded arm's read task starts with the open unless the options say not to.
     #[cfg(feature = "multi-thread")]
     if request.start_read_task {
@@ -1093,6 +1128,10 @@ pub unsafe extern "C" fn z_close(zs: *mut z_loaned_session_t, _options: *const c
         }
         let handle = &*((*zs)._val as *const PicoSessionHandle);
         handle.drive.close();
+        handle.ext.close_listeners();
+        // The close let go of every closure the session held; a callback still running on a
+        // dispatch thread finishes before this returns, and then the drops have run.
+        handle.wait_background();
         Z_OK
     })
 }
@@ -1448,7 +1487,11 @@ unsafe fn live_session_result(zs: *const z_loaned_session_t) -> ZResult {
 pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResult {
     guarded(|| match session_handle(zs) {
         Some(handle) => {
-            engine_ref(handle).batch_start_all();
+            let engine = engine_ref(handle);
+            if !engine.has_transport() {
+                return Z_ERR_TRANSPORT_NOT_AVAILABLE;
+            }
+            engine.batch_start_all();
             Z_OK
         }
         // pico: `if (_Z_RC_IS_NULL(zs)) _Z_ERROR_RETURN(_Z_ERR_SESSION_CLOSED);` -- a null
@@ -1467,7 +1510,11 @@ pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResul
 pub unsafe extern "C" fn zp_batch_flush(zs: *const z_loaned_session_t) -> ZResult {
     guarded(|| match session_handle(zs) {
         Some(handle) => {
-            engine_ref(handle).batch_flush_all();
+            let engine = engine_ref(handle);
+            if !engine.has_transport() {
+                return Z_ERR_TRANSPORT_NOT_AVAILABLE;
+            }
+            engine.batch_flush_all();
             Z_OK
         }
         None => Z_ERR_SESSION_CLOSED,
@@ -1479,7 +1526,11 @@ pub unsafe extern "C" fn zp_batch_flush(zs: *const z_loaned_session_t) -> ZResul
 pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult {
     guarded(|| match session_handle(zs) {
         Some(handle) => {
-            engine_ref(handle).batch_stop_all();
+            let engine = engine_ref(handle);
+            if !engine.has_transport() {
+                return Z_ERR_TRANSPORT_NOT_AVAILABLE;
+            }
+            engine.batch_stop_all();
             Z_OK
         }
         None => Z_ERR_SESSION_CLOSED,

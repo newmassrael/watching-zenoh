@@ -206,8 +206,10 @@ use crate::runtime_impl::TokioTime;
 // `BoxedLivelinessSampleSink` seam adapter is only referenced inside the
 // cfg-gated body of those methods (it wraps the `impl FnMut(LivelinessSample)`
 // closure before the registry `register` call), so it follows the body
-// gate; the split prevents an `unused import` lint on the feature-OFF build.
-#[cfg(feature = "liveliness-subscriber")]
+// gate; the split prevents an `unused import` lint on the feature-OFF build. Those bodies, and
+// the `liveliness` submodule that holds the deferred sink, are `transport-unicast`'s: a
+// multicast-only build with the subscriber plane on reads it nowhere.
+#[cfg(all(feature = "liveliness-subscriber", feature = "transport-unicast"))]
 use crate::declare::BoxedLivelinessSampleSink;
 // R311mn (B2) — `LivelinessSample` is the callback parameter type of the
 // `transport-unicast`-gated `declare_liveliness_subscriber{_aliased}`
@@ -3248,6 +3250,29 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 crate::interceptor::InterceptorChain::new(),
             )),
         })
+    }
+
+    /// Hold liveliness token `id` on `keyexpr`, the literal it is declared on, so that a member's
+    /// `Interest` for the tokens that stand is answered with it, as zenoh-pico answers one from
+    /// its `_local_tokens` (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_declare_liveliness_token`).
+    /// What the session announces to the group ([`Self::announce`]) reaches the members that
+    /// listen when it is declared; this is what reaches the ones that listen later. Holding an id
+    /// held already changes nothing.
+    #[cfg(feature = "liveliness-token")]
+    pub fn hold_token(&self, id: u64, keyexpr: &str) {
+        R::with_mutex_mut(&self.observer, |observer| {
+            // On the growable backing the registry has room for every token.
+            let _ = observer.local_tokens.register(id, keyexpr);
+        });
+    }
+
+    /// Stop answering for liveliness token `id` ([`Self::hold_token`]). Releasing an id that is
+    /// not held changes nothing.
+    #[cfg(feature = "liveliness-token")]
+    pub fn release_token(&self, id: u64) {
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.local_tokens.unregister(id);
+        });
     }
 
     /// Tell this session the link its group runs over, for the interceptors' `link_protocols` and

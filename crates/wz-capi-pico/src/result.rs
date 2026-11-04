@@ -96,6 +96,13 @@ pub const Z_ERR_SCOUT_NO_RESULTS: ZResult = -87;
 /// in a build without its raweth transport, `reth/...`).
 pub const Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN: ZResult = -92;
 
+/// The session has no transport to do this on: a client whose link is gone and has not come
+/// back. Matches pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` (`utils/result.h`), which its three
+/// `zp_batch_*` answer when `_z_transport_get_common` finds the transport cleared
+/// (`vendor/zenoh-pico/src/transport/transport.c` @ `_Z_ERROR_RETURN(_Z_ERR_TRANSPORT_NOT_AVAILABLE);`;
+/// MEASURED on the real library by `tests/z_api_batching_test.c`).
+pub const Z_ERR_TRANSPORT_NOT_AVAILABLE: ZResult = -103;
+
 /// Open-debt item 911 (found on the way) — a `z_open` whose listen or connect link could not be
 /// opened. Matches pico `_Z_ERR_TRANSPORT_OPEN_FAILED` (`utils/result.h`), which its link
 /// answers when the link it took does not open (`vendor/zenoh-pico/src/link/link.c` @

@@ -20008,6 +20008,15 @@ layer_z_zenohd_interop() {
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-pico $local_features \
         --target-dir target/wz-capi-pico-local --quiet) || return 1
+    # And wz's build of the INTEGRATION arm, the configuration upstream's integration workflow
+    # builds its `tests/z_api_*_test.c` under: the sixteen programs of
+    # `pico_upstream_api_tests_on_wz` link it below.
+    local integration_features
+    integration_features="$(python3 scripts/lib/wz_config.py --features pico \
+        target/zenoh-pico-build-integration/zenohpico/include/zenoh-pico/config.h)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico $integration_features \
+        --target-dir target/wz-capi-pico-integration --quiet) || return 1
     # And the reference arm's build for the cooperative engine, which Layer E builds too: the
     # drop-in legs below that need a router run against it as well
     # (`docs/capi-pico-on-coop-engine.md`, step L4). It carries `tls-mbedtls`, the cooperative
@@ -20871,6 +20880,11 @@ layer_z_zenohd_interop() {
     # above do. Their own `assert`s over the 27 locality combinations are the oracle.
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test pico_local_delivery_upstream_tests_on_wz -- --ignored --quiet --test-threads=1 \
+        || return 1
+    # The other sixteen of zenoh-pico's eighteen `tests/z_api_*_test.c`, built and run as its
+    # CMake and `tests/api.sh` do, under the arm its integration workflow builds them with.
+    _runci_guarded_test Z 16 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_upstream_api_tests_on_wz -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
     # its old topology was one the REFERENCE cannot serve. Measured: the real

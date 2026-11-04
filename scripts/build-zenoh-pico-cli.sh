@@ -49,6 +49,9 @@ INSTALL_DIR_MCDECL="$ROOT/target/zenoh-pico-cli-mcdecl"
 # The arm built with Z_FEATURE_RAWETH_TRANSPORT (below), named for the same reason.
 BUILD_DIR_RETH="$ROOT/target/zenoh-pico-build-reth"
 INSTALL_DIR_RETH="$ROOT/target/zenoh-pico-cli-reth"
+# The arm upstream's integration workflow builds its API tests with (below), named for the same
+# reason. Only its library is used, so it has a build root and no install root.
+BUILD_DIR_INTEG="$ROOT/target/zenoh-pico-build-integration"
 
 # Curated CLI binary set: the four that the AP MVP demo round-trip
 # matrix needs (R121c+ integration tests). Adding more here costs
@@ -744,6 +747,41 @@ fi
 # The programs upstream's raweth scenario runs, and the one that lists a member's link.
 RETH_TARGETS=(z_pub z_sub z_info)
 
+# --- the INTEGRATION arm -----------------------------------------------------
+#
+# The configuration upstream's own integration workflow builds and runs its API tests under
+# (`vendor/zenoh-pico/.github/workflows/integration.yaml` @ the `Compile debug` step's `env`):
+# TLS, the unstable API, both session-local switches, advanced publication and subscription, and
+# the admin space. `tests/z_api_*_test.c` have a body only under the switches they test, so they
+# are held to this arm and not to the reference one, which leaves the admin space and the local
+# switches off. It is BUILT, because the control that says whether a red is wz's or the
+# program's links the library of this arm. wz builds the drop-in for it from its config.h, as
+# for the other arms.
+cmake -B "${BUILD_DIR_INTEG}" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=1 \
+    -DZ_FEATURE_LOCAL_SUBSCRIBER=1 \
+    -DZ_FEATURE_LOCAL_QUERYABLE=1 \
+    -DZ_FEATURE_ADMIN_SPACE=1 >&2
+
+GENERATED_CONFIG_INTEG="${BUILD_DIR_INTEG}/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG_INTEG" ]]; then
+    echo "build-zenoh-pico-cli: integration-arm config.h missing: $GENERATED_CONFIG_INTEG" >&2
+    exit 1
+fi
+for switch in Z_FEATURE_LOCAL_SUBSCRIBER Z_FEATURE_LOCAL_QUERYABLE Z_FEATURE_ADMIN_SPACE; do
+    if ! grep -qx "#define $switch 1" "$GENERATED_CONFIG_INTEG"; then
+        echo "build-zenoh-pico-cli: the integration arm did NOT take $switch" >&2
+        exit 1
+    fi
+done
+
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).
 cmake --build "$BUILD_DIR" --target "${TARGETS[@]}" -j"$(nproc)" >&2
@@ -771,6 +809,10 @@ for bin in "${MCDECL_TARGETS[@]}"; do
     fi
     install -m 0755 "$src" "${INSTALL_DIR_MCDECL}/$bin"
 done
+
+# The integration arm's library, which `z_info` pulls in (an example is the only target that
+# builds it from this source directory).
+cmake --build "${BUILD_DIR_INTEG}" --target z_info -j"$(nproc)" >&2
 
 # The raw Ethernet arm's two library patches, the only patches here to the library rather than
 # to an example. Both make pico's raweth transport do what pico already does for its UDP group,
@@ -869,6 +911,7 @@ vendored_oracle_stamp_root "${INSTALL_DIR_MCDECL}" "$_wzpico_token"
 vendored_oracle_stamp_root "${BUILD_DIR_MCDECL}" "$_wzpico_token"
 vendored_oracle_stamp_root "${INSTALL_DIR_RETH}" "$_wzpico_token"
 vendored_oracle_stamp_root "${BUILD_DIR_RETH}" "$_wzpico_token"
+vendored_oracle_stamp_root "${BUILD_DIR_INTEG}" "$_wzpico_token"
 
 # R2327b — verify the contract this script has just asserted, HERE, rather than
 # leaving a hosted lane to discover it. R2326 shipped a stamp that could never
@@ -893,6 +936,8 @@ vendored_oracle_assert_fresh "${BUILD_DIR_MCDECL}" build-zenoh-pico-cli \
 vendored_oracle_assert_fresh "${INSTALL_DIR_RETH}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "${BUILD_DIR_RETH}" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "${BUILD_DIR_INTEG}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 
 echo "build-zenoh-pico-cli: installed ${#TARGETS[@]} binaries to $INSTALL_DIR" >&2

@@ -1130,6 +1130,10 @@ impl SessionState {
         // this runs. Idempotent — a second `close` (or the `Drop` impl) finds
         // the registry already empty.
         self.shared.clear_faces();
+        // And the declarations, whose closures the faces' copies no longer hold alone: a close
+        // runs the `drop(context)` of every closure the session holds, the background ones
+        // included, as pico's does.
+        self.shared.clear_declarations();
     }
 }
 
@@ -4201,6 +4205,16 @@ impl GroupDeclarations {
     /// on a multicast transport at its default.
     pub fn declares_keyexprs(self) -> bool {
         self == Self::Mapped
+    }
+
+    /// Whether a liveliness subscriber asks the group for its members' tokens: with
+    /// [`Self::Entities`] and [`Self::Mapped`], the groups whose session is told its entities.
+    /// zenoh-pico sends the subscriber's `Interest` over whatever transport it holds, a group
+    /// included (`vendor/zenoh-pico/src/net/liveliness.c` @
+    /// `z_result_t _z_declare_liveliness_subscriber(`, which sends through `_z_send_declare`).
+    /// Without it the subscriber still hears every token a member announces.
+    pub fn asks_for_liveliness(self) -> bool {
+        matches!(self, Self::Entities | Self::Mapped)
     }
 }
 

@@ -507,6 +507,7 @@ pub(crate) fn make_liveliness_callback(
         // its duration, and an unwind out of the C callback would tear down the
         // drive thread, so it is caught here.
         let ctx = closure.context.0;
+        let _in_callback = crate::ffi::InCallback::enter();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             call(sample_ptr, ctx);
         }));
@@ -538,6 +539,7 @@ pub(crate) fn make_subscriber_callback(
         // down the drive thread, so it is caught here — the drive loop survives
         // a misbehaving callback.
         let ctx = closure.context.0;
+        let _in_callback = crate::ffi::InCallback::enter();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             call(sample_ptr, ctx);
         }));
@@ -1146,6 +1148,10 @@ pub(crate) struct SubscriberState {
     pub(crate) key: DeclaredKeyexpr,
     /// R311y559 — cached loan of `key`; see [`PublisherState::bind`].
     pub(crate) loaned_keyexpr: z_loaned_keyexpr_t,
+    /// Opens when the subscriber's closure has run its `drop(context)`. An undeclare waits on it
+    /// after the engine let go, so it returns only when no callback is still running (pico's
+    /// `_z_sync_group_wait`), and the program may free what the callback reads.
+    pub(crate) released: Arc<crate::ffi::ReleaseLatch>,
 }
 
 impl SubscriberState {
@@ -1158,6 +1164,7 @@ impl SubscriberState {
 impl Drop for SubscriberState {
     fn drop(&mut self) {
         self.shared.undeclare_subscriber(self.id);
+        self.released.wait();
     }
 }
 
@@ -2087,6 +2094,10 @@ pub unsafe extern "C" fn z_declare_subscriber(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
+        // A closed session takes no declaration; the closure this call consumed runs its drop.
+        if state.is_closed() {
+            return Z_ERR_SESSION_CLOSED;
+        }
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
@@ -2140,6 +2151,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // (`_z_undeclare_subscriber`), which is the prefix declaration above and
         // not the caller's key the announce went out on.
         let retraction = key.retraction_naming(&PicoSession::of(state));
+        let released = cclosure.release_latch();
         let id =
             engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
@@ -2150,6 +2162,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
             id,
             key,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            released,
         });
         boxed.bind();
         *subscriber = z_owned_subscriber_t {
@@ -2193,6 +2206,10 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
+        // A closed session takes no declaration; the closure this call consumed runs its drop.
+        if state.is_closed() {
+            return Z_ERR_SESSION_CLOSED;
+        }
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
@@ -2220,6 +2237,8 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // declared for as long as the entry can retract.
         let retraction = key.retraction_naming(&PicoSession::of(state));
         drop(key);
+        // No handle will undeclare this one, so the session's close waits for it.
+        state.keep_background(cclosure.release_latch());
         let _ =
             engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);

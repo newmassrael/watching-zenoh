@@ -879,6 +879,44 @@ pub(crate) struct AdvSubState {
     /// The miss listeners the C side declares AFTER declaring this. See the
     /// module doc.
     miss: MissSlot,
+    /// The background miss listeners, which leave the set when this state does. Before
+    /// `released` on purpose: the wait below needs their closures let go of first, and an owned
+    /// listener that outlives the subscriber keeps the set alive.
+    background_miss: BackgroundMiss,
+    /// Waits for the sample closure's release once everything above has let go, so an undeclare
+    /// returns when no callback is still running. LAST on purpose: see [`AwaitRelease`].
+    released: crate::ffi::AwaitRelease,
+}
+
+/// The entries of one subscriber's miss set that have no handle to retract them with. Dropping
+/// this removes them, so the closures are released and run their `drop(context)` here, outside
+/// the set's lock, whoever else still holds the set.
+struct BackgroundMiss {
+    set: MissSlot,
+    ids: std::sync::Mutex<Vec<u64>>,
+}
+
+impl BackgroundMiss {
+    fn new(set: MissSlot) -> Self {
+        Self {
+            set,
+            ids: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn insert(&self, listener: Arc<CMissClosure>) {
+        let id = self.set.insert(listener);
+        self.ids.lock().unwrap_or_else(|e| e.into_inner()).push(id);
+    }
+}
+
+impl Drop for BackgroundMiss {
+    fn drop(&mut self) {
+        let ids = std::mem::take(self.ids.get_mut().unwrap_or_else(|e| e.into_inner()));
+        for id in ids {
+            drop(self.set.remove(id));
+        }
+    }
 }
 
 impl AdvSubState {
@@ -981,10 +1019,15 @@ unsafe fn declare_subscriber_state(
     let owned = &mut (*callback)._this;
     let cclosure = Arc::new(CClosure::new(owned.context, owned.call, owned.drop));
     *owned = z_owned_closure_sample_t::null_value();
+    let released = cclosure.release_latch();
 
     let Some(handle) = session_handle(zs) else {
         return Err(Z_ERR_NULL);
     };
+    // A closed session takes no declaration; the closure consumed above runs its drop.
+    if handle.is_closed() {
+        return Err(crate::result::Z_ERR_SESSION_CLOSED);
+    }
     let ke = match keyexpr_str(keyexpr) {
         Some(k) => k.to_owned(),
         None => return Err(Z_ERR_INVALID),
@@ -1029,7 +1072,9 @@ unsafe fn declare_subscriber_state(
         // R311y559 — kept for `ze_advanced_subscriber_keyexpr`.
         keyexpr: ke,
         loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+        background_miss: BackgroundMiss::new(miss.clone()),
         miss,
+        released: crate::ffi::AwaitRelease::new(released),
     });
     boxed.bind();
     Ok(boxed)
@@ -1058,6 +1103,7 @@ fn fire_miss(slot: &MissSlot, miss: &Miss) {
             continue;
         };
         let ctx = closure.context.0;
+        let _in_callback = crate::ffi::InCallback::enter();
         // A panic unwinding out of the C callback across this `extern "C"`
         // boundary is UB and would tear down the drive thread.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -1193,6 +1239,10 @@ impl ze_owned_sample_miss_listener_t {
 pub(crate) struct MissListenerState {
     slot: MissSlot,
     id: u64,
+    /// Waits for the listener's closure to be released once its entry is gone, so an undeclare
+    /// returns when no callback is still running. LAST on purpose: see [`AwaitRelease`]. Held for
+    /// its drop alone.
+    _released: crate::ffi::AwaitRelease,
 }
 
 impl Drop for MissListenerState {
@@ -1229,10 +1279,12 @@ pub unsafe extern "C" fn ze_advanced_subscriber_declare_sample_miss_listener(
         else {
             return Z_ERR_NULL;
         };
+        let released = cclosure.release_latch();
         let id = state.miss.insert(cclosure);
         let boxed = Box::new(MissListenerState {
             slot: state.miss.clone(),
             id,
+            _released: crate::ffi::AwaitRelease::new(released),
         });
         (*listener).handle = Box::into_raw(boxed).cast::<c_void>();
         Z_OK
@@ -1389,6 +1441,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
             Err(rc) => return rc,
         };
         let wire = key.wire(&*engine);
+        let released = cclosure.release_latch();
         let Some(id) = engine.declare_liveliness_subscriber_on_wire(
             ke,
             wire,
@@ -1402,6 +1455,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
             id,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            released,
         });
         boxed.bind();
         *liveliness_subscriber = z_owned_subscriber_t {
@@ -1590,9 +1644,12 @@ pub unsafe extern "C" fn ze_advanced_subscriber_declare_background_sample_miss_l
         else {
             return Z_ERR_NULL;
         };
-        // The id is not kept: no handle exists to remove it, which is what
-        // "background" means.
-        let _ = state.miss.insert(cclosure);
+        // The subscriber's undeclare (or the session's close, for a background subscriber)
+        // waits for this closure too.
+        state.released.add(cclosure.release_latch());
+        // No handle exists to remove it, which is what "background" means: the state removes it
+        // when it is dropped.
+        state.background_miss.insert(cclosure);
         Z_OK
     })
 }
@@ -1673,9 +1730,15 @@ pub unsafe extern "C" fn ze_declare_background_advanced_subscriber(
             return Z_ERR_NULL;
         }
         match declare_subscriber_state(zs, keyexpr, callback, options) {
-            Ok(state) => {
+            Ok(mut state) => {
                 // No handle is left, so nothing will retract what the subscriber declared: it
-                // runs in the background, its entities standing until the session ends.
+                // runs in the background, its entities standing until the session ends, and the
+                // session's close waits for its closure.
+                if let Some(handle) = session_handle(zs) {
+                    for latch in state.released.disarm() {
+                        handle.keep_background(latch);
+                    }
+                }
                 state.subscriber.background();
                 Z_OK
             }
@@ -1725,6 +1788,11 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
             None,
             callback,
             options,
+            // An advanced subscriber's state keeps the engine and not the session handle the
+            // close waits through; the wait for this form comes with the advanced plane's turn of
+            // `z_api_callback_drop_on_undeclare_test`, which this program reaches last of the
+            // planes it covers.
+            &|_| {},
         )
     })
 }
@@ -1786,6 +1854,123 @@ mod tests {
         }
     }
 
+    /// An advanced subscriber on the port of a face-less tokio session, and the set its miss
+    /// listeners join. The subscriber's callback is a Rust closure, which holds no C context, so
+    /// its state waits for nothing of its own.
+    #[cfg(feature = "engine-tokio")]
+    fn face_less_subscriber(
+        shared: &Arc<wz_capi_core::faces::SharedSession>,
+    ) -> (ze_owned_advanced_subscriber_t, MissSlot) {
+        let engine = shared.as_engine();
+        let subscriber = EngineSubscriber::declare(
+            &engine,
+            "demo/data",
+            AdvancedSubscriberOptions::new(),
+            |_| {},
+        )
+        .expect("a plain subscriber declares on a session with no face");
+        let set: MissSlot = Arc::new(ListenerSet::new());
+        let state = Box::new(AdvSubState {
+            engine,
+            subscriber,
+            keyexpr: "demo/data".to_owned(),
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            background_miss: BackgroundMiss::new(set.clone()),
+            miss: set.clone(),
+            released: crate::ffi::AwaitRelease::default(),
+        });
+        let owned = ze_owned_advanced_subscriber_t {
+            handle: Box::into_raw(state).cast::<c_void>(),
+            _pad: [0u8; 144],
+        };
+        (owned, set)
+    }
+
+    #[cfg(feature = "engine-tokio")]
+    unsafe extern "C" fn count_miss_drop(context: *mut c_void) {
+        // SAFETY: the context is the `AtomicUsize` the test keeps alive past every drop.
+        let count = unsafe { &*(context as *const std::sync::atomic::AtomicUsize) };
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// An undeclare returns when the closures its callbacks run through have been released, and a
+    /// background miss listener is one of them. The set outlives the subscriber here (an owned
+    /// listener and the test both hold it), so the closure is released only because the state
+    /// removes its background entries itself; a state that left them to the set's last holder
+    /// waited for a release that never came.
+    ///
+    /// Control: dropping `background_miss` from `AdvSubState` hangs the undeclare, which the
+    /// bench run ends at its time limit.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn a_background_miss_listener_is_released_when_its_subscriber_is_undeclared() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let shared = Arc::new(
+            wz_capi_core::faces::SharedSession::new(
+                wz_capi_core::runtime::runtime_impl::TokioTime::new(),
+                vec![0x11; 16],
+            )
+            .expect("test host entropy"),
+        );
+        let (owned, miss) = face_less_subscriber(&shared);
+        let loaned = &owned as *const ze_owned_advanced_subscriber_t
+            as *const ze_loaned_advanced_subscriber_t;
+        let dropped = AtomicUsize::new(0);
+        let mut background = ze_moved_closure_miss_t {
+            _this: ze_owned_closure_miss_t {
+                context: &dropped as *const AtomicUsize as *mut c_void,
+                call: Some(ignore_miss),
+                drop: Some(count_miss_drop),
+            },
+        };
+        let mut listener = ze_owned_sample_miss_listener_t::null_value();
+        let mut owned_closure = moved_miss_closure();
+        // SAFETY: `loaned` points at a live subscriber on this frame; the closures are valid
+        // moved closures and `listener` is a writable local.
+        unsafe {
+            assert_eq!(
+                ze_advanced_subscriber_declare_background_sample_miss_listener(
+                    loaned,
+                    &mut background
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                ze_advanced_subscriber_declare_sample_miss_listener(
+                    loaned,
+                    &mut listener,
+                    &mut owned_closure
+                ),
+                Z_OK
+            );
+        }
+        assert_eq!(dropped.load(Ordering::SeqCst), 0, "held while declared");
+
+        // SAFETY: the subscriber handle is live and consumed here.
+        unsafe {
+            let mut moved = ze_moved_advanced_subscriber_t { _this: owned };
+            ze_undeclare_advanced_subscriber(&mut moved);
+        }
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the background closure is released by the time the undeclare returns"
+        );
+        assert_eq!(
+            miss.snapshot().len(),
+            1,
+            "the owned listener, which has a handle of its own, is still declared"
+        );
+        // SAFETY: `listener` still holds its live handle.
+        unsafe {
+            ze_undeclare_sample_miss_listener(
+                &mut listener as *mut ze_owned_sample_miss_listener_t
+                    as *mut ze_moved_sample_miss_listener_t,
+            );
+        }
+        assert!(miss.snapshot().is_empty());
+    }
+
     /// R2814 — both listener forms land in the subscriber's set, and a
     /// retracted owned listener removes only itself.
     ///
@@ -1813,26 +1998,7 @@ mod tests {
             )
             .expect("test host entropy"),
         );
-        let engine = shared.as_engine();
-        let subscriber = EngineSubscriber::declare(
-            &engine,
-            "demo/data",
-            AdvancedSubscriberOptions::new(),
-            |_| {},
-        )
-        .expect("a plain subscriber declares on a session with no face");
-        let state = Box::new(AdvSubState {
-            engine,
-            subscriber,
-            keyexpr: "demo/data".to_owned(),
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
-            miss: Arc::new(ListenerSet::new()),
-        });
-        let miss = state.miss.clone();
-        let owned = ze_owned_advanced_subscriber_t {
-            handle: Box::into_raw(state).cast::<c_void>(),
-            _pad: [0u8; 144],
-        };
+        let (owned, miss) = face_less_subscriber(&shared);
         let loaned = &owned as *const ze_owned_advanced_subscriber_t
             as *const ze_loaned_advanced_subscriber_t;
 

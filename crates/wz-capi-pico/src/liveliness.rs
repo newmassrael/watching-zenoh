@@ -203,6 +203,10 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
+        // A closed session takes no declaration.
+        if handle.is_closed() {
+            return crate::result::Z_ERR_SESSION_CLOSED;
+        }
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
@@ -335,6 +339,10 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
+        // A closed session takes no declaration; the closure consumed above runs its drop.
+        if handle.is_closed() {
+            return crate::result::Z_ERR_SESSION_CLOSED;
+        }
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
@@ -352,6 +360,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
             Err(rc) => return rc,
         };
         let wire = key.wire(&*engine);
+        let released = cclosure.release_latch();
         let Some(id) =
             engine.declare_liveliness_subscriber_on_wire(ke, wire, history, sample_sink(cclosure))
         else {
@@ -362,6 +371,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
             id,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            released,
         });
         boxed.bind();
         *sub = z_owned_subscriber_t {
@@ -517,6 +527,12 @@ pub unsafe extern "C" fn z_liveliness_get(
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
+        // A closed session issues no get; the closure adopted above runs its drop.
+        if handle.is_closed() {
+            return crate::result::Z_ERR_SESSION_CLOSED;
+        }
+        // The session's close waits for this get's closure to finish and be dropped.
+        handle.keep_background(closure.release_latch());
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
@@ -610,6 +626,7 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
     existing: Option<&DeclaredKeyexpr>,
     callback: *mut z_moved_closure_sample_t,
     options: *const z_liveliness_subscriber_options_t,
+    keep_for_close: &dyn Fn(Arc<crate::ffi::ReleaseLatch>),
 ) -> ZResult {
     guarded(|| {
         if callback.is_null() {
@@ -627,6 +644,7 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
         };
         let anchor: Arc<dyn Send + Sync> = Arc::new(key.share());
         let wire = key.wire(&**engine).keeping(anchor);
+        keep_for_close(cclosure.release_latch());
         match engine.declare_liveliness_subscriber_on_wire(
             keyexpr.to_owned(),
             wire,
@@ -672,6 +690,7 @@ pub unsafe extern "C" fn z_liveliness_declare_background_subscriber(
             declared_of(keyexpr),
             callback,
             options,
+            &|latch| handle.keep_background(latch),
         )
     })
 }

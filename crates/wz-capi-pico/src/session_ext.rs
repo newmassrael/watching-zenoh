@@ -98,6 +98,14 @@ impl PicoSessionExt {
         }
     }
 
+    /// The session was closed: let go of its connectivity listeners, which runs their closures'
+    /// `drop(context)` now and not when the session handle is dropped. A closed session
+    /// delivers nothing, and pico clears its listener maps in `z_close`.
+    pub(crate) fn close_listeners(&self) {
+        #[cfg(feature = "connectivity")]
+        self.connectivity.shutdown();
+    }
+
     /// The same session, whose admin space reports `transport_endpoint` (the
     /// locator the session was opened on) as its transport's link.
     #[cfg(feature = "admin-space")]

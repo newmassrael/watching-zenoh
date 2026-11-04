@@ -814,7 +814,7 @@ pub(super) type BoxedLivelinessSampleCallback =
 pub(super) type LivelinessSampleCell<R> =
     wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedLivelinessSampleCallback>;
 
-impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
     /// R311lg — build the deferred cell + the staging sink one
     /// `declare_liveliness_subscriber{_aliased}` call installs in the
     /// registry: the sink copies the borrowed [`LivelinessSample`] out
@@ -1024,6 +1024,107 @@ impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
         // `undeclare`, so this frees the owned fields without emitting a
         // duplicate Interest(Final).
         self.teardown();
+    }
+}
+
+/// A liveliness subscriber on a MULTICAST session: the registry slot that hears the tokens the
+/// group's members declare, and nothing on the wire.
+///
+/// What the group is told, and asked, is the caller's: a group carries no handshake and no
+/// router, so whether this subscriber's `Interest` goes out (and its `Interest(Final)` when it
+/// is retracted) depends on the ABI that declares it, as the other group declarations do
+/// ([`Session::ask`] and [`Session::ask_final`]). The handle therefore depends on the observer
+/// alone, as [`Subscriber`] does, and not on a typed session.
+///
+/// The slot hears a member's token whether or not the member was asked: a member announces a
+/// token to the group when it declares it, and the registry keeps the tokens of its peers, so a
+/// subscriber declared with `history` is replayed the ones announced before it.
+#[cfg(feature = "liveliness-subscriber")]
+pub struct GroupLivelinessSubscriber<R: SessionRuntime = TokioRuntime> {
+    observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+    interest_id: u64,
+    keyexpr: String,
+    /// The deferred-fire cell holding the user callback, as [`LivelinessSubscriber`]'s.
+    cell: LivelinessSampleCell<R>,
+    /// Cleared by [`Self::undeclare`] so the natural [`Drop`] does not retract twice.
+    armed: bool,
+}
+
+#[cfg(feature = "liveliness-subscriber")]
+impl<R: SessionRuntime> GroupLivelinessSubscriber<R> {
+    /// The id the registry holds the slot by, which is the id of the `Interest` that asks the
+    /// group for the tokens (the answer's `DeclFinal` names it).
+    pub fn interest_id(&self) -> u64 {
+        self.interest_id
+    }
+
+    /// The pattern the subscriber was declared on.
+    pub fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// Retract the subscriber: the slot is killed first, so a sample staged and not yet drained
+    /// is suppressed, and then unregistered. Idempotent.
+    pub fn undeclare(mut self) {
+        self.teardown();
+    }
+
+    fn teardown(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        self.cell.kill();
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.liveliness_subscribers.unregister(self.interest_id);
+        });
+    }
+}
+
+#[cfg(feature = "liveliness-subscriber")]
+impl<R: SessionRuntime> Drop for GroupLivelinessSubscriber<R> {
+    fn drop(&mut self) {
+        self.teardown();
+    }
+}
+
+#[cfg(all(feature = "transport-multicast", feature = "liveliness-subscriber"))]
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
+    /// Declare a liveliness subscriber on a MULTICAST session, under `interest_id`: registered
+    /// in this session's registry, which hears the tokens the group's members declare and
+    /// retract ([`Self::dispatch_multicast_iteration_event`]), and with `history` replayed
+    /// the ones it already holds. It emits NO wire message, as [`Self::declare_subscriber`]
+    /// emits none; asking the group is [`Self::ask`], and the caller's.
+    ///
+    /// zenoh-pico does the same in this order: the replay of the tokens it holds, then the
+    /// `Interest` (`vendor/zenoh-pico/src/net/liveliness.c` @
+    /// `_z_liveliness_subscription_trigger_history(`).
+    ///
+    /// `interest_id` is the caller's for the reason `ask`'s is: the group's interests share one
+    /// id space with the caller's other entities, which only the caller sees.
+    pub fn declare_group_liveliness_subscriber(
+        &self,
+        interest_id: u64,
+        keyexpr: impl Into<String>,
+        options: LivelinessSubscriberOptions,
+        callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
+    ) -> GroupLivelinessSubscriber<R> {
+        let keyexpr = keyexpr.into();
+        let history = options.effective_history();
+        let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer
+                .liveliness_subscribers
+                .register(interest_id, &keyexpr, history, sink)
+                .expect("register on the alloc backing never exceeds declared capacity");
+        });
+        GroupLivelinessSubscriber {
+            observer: self.observer.clone(),
+            interest_id,
+            keyexpr,
+            cell,
+            armed: true,
+        }
     }
 }
 
