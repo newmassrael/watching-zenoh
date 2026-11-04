@@ -450,6 +450,22 @@ required-features = [
     "session-slot",
 ]
 
+# The engine's admin node over `tcp/` on lwIP: two nodes, one told by a config write to hold a
+# session with the other, which listens. The node is `wz_session_mcu::slot_admin::AcceptingAdminNode`
+# over the stack of lwIP's streams; it needs the admin surface on both halves beside the selector.
+[[test]]
+name = "admin_node_over_tcp"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "codec-close",
+    "session-slot",
+    "adminspace-core",
+    "adminspace-write",
+    "tcp",
+]
+
 # A session over `tcp/` on the slot profile -- one node dials, one accepts, and the handshake runs
 # through lwIP's TCP and the engine's stream link, then the dialler closes. The selector `session-slot`
 # is the profile; `tcp` the stream.
