@@ -15,6 +15,15 @@
 //! acknowledgements, retransmission) until the thing it waits for has happened or the time is out.
 //! Time is the port's own millisecond clock, the one lwIP's timers run on
 //! ([`LwipLink::now_ms`]), so a stalled peer ends a wait on the target as it does on the host.
+//!
+//! ## What a poll takes in
+//!
+//! lwIP's own input path moves the loopback interface's queue (`LwipLink::poll_loopback`). The
+//! frames of an Ethernet interface arrive only when its MAC is polled, which is the image's: a
+//! dial's SYN-ACK comes in through the MAC, so a wait that polled lwIP alone would never see it.
+//! The image says what else a poll does with a [`Service`] (a plain function, so the stream, the
+//! dial and the stack stay `Copy`), and each poll runs it first, as the node's own loop pumps its
+//! ports before lwIP's timers. A host test over the loopback needs none.
 
 use core::cell::RefCell;
 use core::ffi::c_int;
@@ -33,8 +42,15 @@ pub const DIAL_TIMEOUT_MS: u32 = 5_000;
 /// How long a write waits for send-buffer room before it reports the stall.
 pub const SEND_TIMEOUT_MS: u32 = 5_000;
 
-/// Poll lwIP once: the input path, then the timers.
-fn pump(link: &LwipLink) {
+/// What an image runs on every poll beyond lwIP's own: pump its MACs, so the frames they hold reach
+/// lwIP. `None` where the only interface is the loopback.
+pub type Service = Option<fn()>;
+
+/// Poll lwIP once: what the image takes in, the loopback's queue, then the timers.
+fn pump(link: &LwipLink, service: Service) {
+    if let Some(service) = service {
+        service();
+    }
     link.poll_loopback();
     link.check_timeouts();
 }
@@ -47,6 +63,7 @@ where
 {
     socket: RefCell<LwipTcpSocket<RX>>,
     link: L,
+    service: Service,
     peer: ([u8; 4], u16),
 }
 
@@ -73,7 +90,7 @@ where
                     if self.link.now_ms().wrapping_sub(started) < SEND_TIMEOUT_MS =>
                 {
                     // The send buffer drains as the peer acknowledges: poll lwIP and ask again.
-                    pump(&self.link);
+                    pump(&self.link, self.service);
                 }
                 other => return other,
             }
@@ -97,19 +114,19 @@ where
             {
                 return;
             }
-            pump(&self.link);
+            pump(&self.link, self.service);
         }
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, TcpError> {
-        pump(&self.link);
+        pump(&self.link, self.service);
         self.socket.borrow_mut().try_read(buf)
     }
 
     fn shutdown(&self) {
         self.socket.borrow_mut().shutdown();
         // The FIN goes out with the next poll.
-        pump(&self.link);
+        pump(&self.link, self.service);
     }
 }
 
@@ -125,6 +142,7 @@ where
     L: Deref<Target = LwipLink> + Clone,
 {
     link: L,
+    service: Service,
     /// `static-link-storage`: the cells a connection is made in.
     #[cfg(feature = "static-link-storage")]
     pool: &'static TcpSocketPool<RX, S>,
@@ -137,13 +155,28 @@ where
     /// A dial over `link`, making each connection on the heap.
     #[cfg(not(feature = "static-link-storage"))]
     pub fn new(link: L) -> Self {
-        Self { link }
+        Self {
+            link,
+            service: None,
+        }
     }
 
     /// A dial over `link`, making each connection in a cell of `pool`.
     #[cfg(feature = "static-link-storage")]
     pub fn new(link: L, pool: &'static TcpSocketPool<RX, S>) -> Self {
-        Self { link, pool }
+        Self {
+            link,
+            service: None,
+            pool,
+        }
+    }
+
+    /// The same dial, whose polls (and those of the streams it yields) run `service` first: how an
+    /// image's MACs are pumped while a connect or a write waits.
+    #[must_use]
+    pub const fn with_service(mut self, service: fn()) -> Self {
+        self.service = Some(service);
+        self
     }
 }
 
@@ -183,11 +216,12 @@ where
             if self.link.now_ms().wrapping_sub(started) >= DIAL_TIMEOUT_MS {
                 return Err(LinkOpenError::Refused);
             }
-            pump(&self.link);
+            pump(&self.link, self.service);
         }
         Ok(LwipTcpStream {
             socket: RefCell::new(socket),
             link: self.link.clone(),
+            service: self.service,
             peer: (addr, port),
         })
     }
@@ -216,6 +250,7 @@ where
     L: Deref<Target = LwipLink> + Clone,
 {
     link: L,
+    service: Service,
     listener: &'static LwipTcpListener<RX, Q, S>,
 }
 
@@ -225,7 +260,18 @@ where
 {
     /// Take the connections of `listener`, polling lwIP through `link`.
     pub fn new(link: L, listener: &'static LwipTcpListener<RX, Q, S>) -> Self {
-        Self { link, listener }
+        Self {
+            link,
+            service: None,
+            listener,
+        }
+    }
+
+    /// The same listener, whose polls (and those of the streams it yields) run `service` first.
+    #[must_use]
+    pub const fn with_service(mut self, service: fn()) -> Self {
+        self.service = Some(service);
+        self
     }
 }
 
@@ -242,12 +288,13 @@ where
 
     fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError> {
         // A connection arrives as its handshake is processed.
-        pump(&self.link);
+        pump(&self.link, self.service);
         Ok(self.listener.accept().map(|socket| {
             let peer = socket.peer();
             LwipTcpStream {
                 socket: RefCell::new(socket),
                 link: self.link.clone(),
+                service: self.service,
                 peer,
             }
         }))
@@ -366,6 +413,34 @@ mod tests {
         stream.wait_readable(120);
         let waited = link.now_ms().wrapping_sub(before);
         assert!((100..2_000).contains(&waited), "waited {waited} ms");
+    }
+
+    /// The image's service runs on every poll a connect, a wait and a read make, which is how a
+    /// node's MACs are pumped while it waits (a SYN-ACK comes in through a MAC): the dial and the
+    /// stream it yields count it, and a dial given none runs nothing of the kind.
+    #[cfg(not(feature = "static-link-storage"))]
+    #[test]
+    fn the_service_runs_on_every_poll_of_a_dial_and_of_its_stream() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RAN: AtomicUsize = AtomicUsize::new(0);
+        fn count() {
+            RAN.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let (_gate, link) = lwip_test_link();
+        server(47_304);
+        let stream = dial(&link)
+            .with_service(count)
+            .dial([127, 0, 0, 1], 47_304)
+            .expect("dial");
+        let after_dial = RAN.load(Ordering::SeqCst);
+        assert!(after_dial > 0, "the handshake polled through the service");
+
+        stream.wait_readable(100);
+        let after_wait = RAN.load(Ordering::SeqCst);
+        assert!(after_wait > after_dial, "a wait polls through it too");
+        let _ = stream.try_read(&mut [0; 4]);
+        assert!(RAN.load(Ordering::SeqCst) > after_wait, "and a read");
     }
 
     #[test]
