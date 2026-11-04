@@ -32,9 +32,11 @@ use wz_capi_c::keyexpr::z_keyexpr_equals;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 #[cfg(feature = "router-node")]
 use wz_capi_c::matching::{z_matching_status_t, z_publisher_get_matching_status};
+#[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
+use wz_capi_c::publisher::z_publisher_id;
 #[cfg(feature = "router-node")]
 use wz_capi_c::publisher::{
-    z_declare_publisher, z_publisher_delete, z_publisher_id, z_publisher_keyexpr, z_publisher_loan,
+    z_declare_publisher, z_publisher_delete, z_publisher_keyexpr, z_publisher_loan,
     z_publisher_put, z_undeclare_publisher,
 };
 use wz_capi_c::put::z_put;
@@ -412,12 +414,16 @@ fn a_publisher_declared_on_a_node_publishes() {
             z_keyexpr_equals(z_publisher_keyexpr(loaned), z_view_keyexpr_loan(&view)),
             "the publisher answers its key"
         );
-        let id = z_publisher_id(loaned);
-        assert_eq!(
-            id.zid.id,
-            z_info_zid(z_session_loan(&node)).id,
-            "the publisher is an entity of the node's session"
-        );
+        // `z_publisher_id` is unstable API, which a build may leave out.
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        {
+            let id = z_publisher_id(loaned);
+            assert_eq!(
+                id.zid.id,
+                z_info_zid(z_session_loan(&node)).id,
+                "the publisher is an entity of the node's session"
+            );
+        }
         let deadline = Instant::now() + Duration::from_secs(10);
         while hits_peer.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
             let text = CString::new("publisher").unwrap();
