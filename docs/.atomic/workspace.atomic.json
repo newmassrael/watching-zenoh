@@ -309542,6 +309542,38 @@
         "The path to the switch, in order: build AcceptingAdminNode over LwipTcpStack in a host test (the factory, control, peer store and status are the fixed admin node's, as the Zephyr admin loopback test builds them); add the TCP variant of the lwIP-backed node to the zephyr-admin-node image (statics, entry points, a listener on its port) and build it with west on a build host; then declare the axis and the cargo rule that select it, and the capability link-tcp whose Kconfig a deployer sets. The host switch is separate: the tcp/ link is in every capi-core build (Z_FEATURE_LINK_TCP is class always), so a build without it needs the tcp code behind a feature and every combination built. The cross build with tcp for thumbv7m and thumbv7em, Layer Q, a listener close and the probe against a stock router remain."
       ]
     },
+    "Round 4229": {
+      "decision_summary": "The TLS client image was a verify image, and the kit lane's build step ran neither the stack gate nor the stack bound on a verify image (\"its first runs on the kit set it\"), so its row stood at the chain of 2026-10-24 (7,432 bytes) while the frames under it fell, and its stack stood at 12,288 bytes, set by hand until its own reading set it. The first reading on the kit is today's, 4,304 bytes in the run at the stack below, the same as the eight of 2026-10-24. The rules of the admin image's bound claim every call through a register of this image too, so its bound is 5,692 bytes over 61 frames, and its chain 4,688. The lane now runs both gates on it, the row holds the chain, the bound and the reading, and the stack is 7,616 bytes (a quarter free over the bound), 4,672 bytes of RAM returned.",
+      "changes_bullets": [
+        "scripts/kit-lane.sh: a verify image is held by the stack gate and, when its row commits one, by the stack bound (the two exceptions for the kind are gone). scripts/lib/stack_frame_gate.py: the chain of zephyr-client-fixed-tls, 4,688. deploy/stack_call_contracts.json: the pins of the file and function rules for the image.",
+        "deploy/resource_budget.json: the TLS client row holds chain 4,688 and static_bound_bytes 5,692, with what was found. deploy/zephyr-admin-node/overlays/t2g_client_tls.conf: the stack is 7,616."
+      ],
+      "verification_bullets": [
+        "The image built from a copy of the tree on the kit host: the stack gate and the stack bound hold it (chain 4,688 over 25 frames, bound 5,692 over 61 frames, 211 calls through a register in 1,126 functions, all claimed), .bss 160,367 (165,039 before). On the T2G kit with zenohd 1.10.2 at the stack of 7,616 bytes: the image and the router verify each other, the host asked the two documents 2,000 times each with none wrong, the stack peak is 4,304 of 7,616 bytes, the arena peaked at 24,968 of 36,864, and the run is inside its row. Layer Qzk builds all six images under their gates. The selftests of the bound gate, the frame gate, the kit lane and the budget check pass. The admin image on the kit at its stack of 14,784 also ran inside its row (peak 7,744) in the same session. The hosted run has not been read."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Open: the lent reply decodes (lend_response 1,432 and MsgPutIn::decode_into 1,416 bytes), the next largest frames of the asking client, which come from the deployment's list capacities and the codec's generated decode; the dial path's frame on the host build of the node (10,568 bytes) was not looked at; the images' bounds rest on rules read from the code of Mbed TLS and Zephyr at the workspace's revisions, so a change of either revision is a moment to read them again; a hosted reading of Layers Qzk and Qzb."
+      ],
+      "publishable_decision_summary": "The TLS client image was a verify image, and the kit lane's build step ran neither the stack gate nor the stack bound on a verify image (\"its first runs on the kit set it\"), so its row stood at the chain of 2026-10-24 (7,432 bytes) while the frames under it fell, and its stack stood at 12,288 bytes, set by hand until its own reading set it. The first reading on the kit is today's, 4,304 bytes in the run at the stack below, the same as the eight of 2026-10-24. The rules of the admin image's bound claim every call through a register of this image too, so its bound is 5,692 bytes over 61 frames, and its chain 4,688. The lane now runs both gates on it, the row holds the chain, the bound and the reading, and the stack is 7,616 bytes (a quarter free over the bound), 4,672 bytes of RAM returned.",
+      "publishable_changes_bullets": [
+        "scripts/kit-lane.sh: a verify image is held by the stack gate and, when its row commits one, by the stack bound (the two exceptions for the kind are gone). scripts/lib/stack_frame_gate.py: the chain of zephyr-client-fixed-tls, 4,688. deploy/stack_call_contracts.json: the pins of the file and function rules for the image.",
+        "deploy/resource_budget.json: the TLS client row holds chain 4,688 and static_bound_bytes 5,692, with what was found. deploy/zephyr-admin-node/overlays/t2g_client_tls.conf: the stack is 7,616."
+      ],
+      "publishable_verification_bullets": [
+        "The image built from a copy of the tree on the kit host: the stack gate and the stack bound hold it (chain 4,688 over 25 frames, bound 5,692 over 61 frames, 211 calls through a register in 1,126 functions, all claimed), .bss 160,367 (165,039 before). On the T2G kit with zenohd 1.10.2 at the stack of 7,616 bytes: the image and the router verify each other, the host asked the two documents 2,000 times each with none wrong, the stack peak is 4,304 of 7,616 bytes, the arena peaked at 24,968 of 36,864, and the run is inside its row. Layer Qzk builds all six images under their gates. The selftests of the bound gate, the frame gate, the kit lane and the budget check pass. The admin image on the kit at its stack of 14,784 also ran inside its row (peak 7,744) in the same session. The hosted run has not been read."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the lent reply decodes (lend_response 1,432 and MsgPutIn::decode_into 1,416 bytes), the next largest frames of the asking client, which come from the deployment's list capacities and the codec's generated decode; the dial path's frame on the host build of the node (10,568 bytes) was not looked at; the images' bounds rest on rules read from the code of Mbed TLS and Zephyr at the workspace's revisions, so a change of either revision is a moment to read them again; a hosted reading of Layers Qzk and Qzb."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
