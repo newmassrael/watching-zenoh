@@ -309022,6 +309022,36 @@
         "Only the framing is moved. The node's TCP link still needs the lwIP TCP sources in the build (the stack is built without TCP), a peer address that carries the protocol in place of the UDP peer, a driver for a stream that holds a send slot until a partial write completes, the closed driver enum that lets one host mix UDP and TCP, the capability link-tcp with its Kconfig, and the probe of a node keeping a session with a stock router over tcp/ for 2000 requests and reconnecting. The window is not yet fed by the stream reader of the standalone engine on the host; the wide legs with the ring reader were not run."
       ]
     },
+    "Round 4211": {
+      "decision_summary": "Layer D (scripts/validate-deploy.sh) judges each deploy document by the kind its top-level key names. deploy/ has held two kinds since 85f794fa03 put the codec capacity deployment there: a deployment of nodes (`machines`) and a codec deployment (`codecs`, the capacity a storage profile holds of each field the protocol bounds by nothing, ADR 0077 section 7). Layer D still asked every document for `machines`, so hosted run 41732702195 failed it on deploy/codec_node.yaml and main reproduced the failure locally. A codec deployment is checked for its shape only: each entry is a mapping holding only `capacity`, a non-empty mapping of field names to positive integers. Whether each codec and field exists is the generator's judgement, which verify-codegen.sh asks with `--deploy`; the validator keeps no second list of names. A document naming both kinds, or neither, is refused. The run's other reds were read job by job: the reduced-configuration doc links, the discard-site walk, the capic-default size budget and the zephyr client stack bounds are repaid by commits already on main.",
+      "changes_bullets": [
+        "scripts/validate-deploy.sh: the header names the two kinds of deploy document; the check dispatches on the top-level key (`machines` keeps its machine and session checks; `codecs` gets the capacity shape check) and refuses a document naming both or neither."
+      ],
+      "verification_bullets": [
+        "Locally on main 2c6fcf6781 before the change, scripts/validate-deploy.sh failed on deploy/codec_node.yaml with the hosted sentence (\"missing required key: machines\"); after it, every deploy/*.yaml passes. A copy of the script over a scratch deploy/ refused each malformed document with its own sentence (a zero capacity, a `true` capacity, a misspelt `capacity`, an empty `codecs`, a document naming neither kind, one naming both) and passed codec_node.yaml and mcu_minimal.yaml beside them. The static gate array (128 gates) and the citation gate pass. The run's Qzk red was checked against main by building the four zephyr client images locally with the kit lane (zephyr-client-fixed, -heap, -fixed-batching, -fixed-get): each holds its stack gate, stack bound and text gate at the committed rows (bounds 3472, 3472, 3472 and 4816), so it is repaid on main. Not run: the hosted jobs."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The CI run on the round 4201 job split (feature-gates and feature-gates-peel-2 budgets) has not reported yet: every run since was replaced while queued. The next completed run reads both jobs' elapsed time against their budgets."
+      ],
+      "publishable_decision_summary": "Layer D (scripts/validate-deploy.sh) judges each deploy document by the kind its top-level key names. deploy/ has held two kinds since 85f794fa03 put the codec capacity deployment there: a deployment of nodes (`machines`) and a codec deployment (`codecs`, the capacity a storage profile holds of each field the protocol bounds by nothing, ADR 0077 section 7). Layer D still asked every document for `machines`, so hosted run 41732702195 failed it on deploy/codec_node.yaml and main reproduced the failure locally. A codec deployment is checked for its shape only: each entry is a mapping holding only `capacity`, a non-empty mapping of field names to positive integers. Whether each codec and field exists is the generator's judgement, which verify-codegen.sh asks with `--deploy`; the validator keeps no second list of names. A document naming both kinds, or neither, is refused. The run's other reds were read job by job: the reduced-configuration doc links, the discard-site walk, the capic-default size budget and the zephyr client stack bounds are repaid by commits already on main.",
+      "publishable_changes_bullets": [
+        "scripts/validate-deploy.sh: the header names the two kinds of deploy document; the check dispatches on the top-level key (`machines` keeps its machine and session checks; `codecs` gets the capacity shape check) and refuses a document naming both or neither."
+      ],
+      "publishable_verification_bullets": [
+        "Locally on main 2c6fcf6781 before the change, scripts/validate-deploy.sh failed on deploy/codec_node.yaml with the hosted sentence (\"missing required key: machines\"); after it, every deploy/*.yaml passes. A copy of the script over a scratch deploy/ refused each malformed document with its own sentence (a zero capacity, a `true` capacity, a misspelt `capacity`, an empty `codecs`, a document naming neither kind, one naming both) and passed codec_node.yaml and mcu_minimal.yaml beside them. The static gate array (128 gates) and the citation gate pass. The run's Qzk red was checked against main by building the four zephyr client images locally with the kit lane (zephyr-client-fixed, -heap, -fixed-batching, -fixed-get): each holds its stack gate, stack bound and text gate at the committed rows (bounds 3472, 3472, 3472 and 4816), so it is repaid on main. Not run: the hosted jobs."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The CI run on the round 4201 job split (feature-gates and feature-gates-peel-2 budgets) has not reported yet: every run since was replaced while queued. The next completed run reads both jobs' elapsed time against their budgets."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
