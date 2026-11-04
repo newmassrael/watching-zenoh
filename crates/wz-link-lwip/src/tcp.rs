@@ -638,6 +638,10 @@ impl<const RX: usize, const Q: usize, const S: usize> LwipTcpListener<RX, Q, S> 
         port: u16,
         pool: &'static TcpSocketPool<RX, S>,
     ) -> Result<(), TcpError> {
+        // A refused call changes nothing: a listener already listening keeps the pool it has.
+        if !self.pcb.get().is_null() {
+            return Err(TcpError::AlreadyListening);
+        }
         self.pool.set(Some(pool));
         self.start(port)
     }
@@ -759,6 +763,7 @@ unsafe extern "C" fn accept_thunk<const RX: usize, const Q: usize, const S: usiz
 mod tests {
     use super::*;
     use crate::lwip_test_link;
+    use crate::test_bind::{tcp_connect, tcp_listen};
     use lwip_sys::{tcp_accept, tcp_bind, tcp_listen_with_backlog};
 
     /// 4096 is above the window of the host port (`TCP_WND` is four segments of 536).
@@ -841,7 +846,7 @@ mod tests {
     fn a_connection_carries_a_frame_in_two_parts_and_reads_it_back() {
         let (_gate, link) = lwip_test_link();
         server(47_201);
-        let mut socket = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_201).unwrap();
+        let mut socket = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_201).unwrap();
         assert_eq!(socket.state(), TcpState::Connecting);
         assert_eq!(socket.try_read(&mut [0; 8]), Err(TcpError::NotOpen));
         until(&link, || socket.state() == TcpState::Open);
@@ -860,7 +865,7 @@ mod tests {
     fn the_receive_buffer_wraps_and_a_short_read_leaves_the_rest() {
         let (_gate, link) = lwip_test_link();
         server(47_202);
-        let mut socket = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_202).unwrap();
+        let mut socket = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_202).unwrap();
         until(&link, || socket.state() == TcpState::Open);
 
         // In lockstep: a chunk goes out and is read back before the next, so the echo server's
@@ -898,7 +903,7 @@ mod tests {
     fn a_peer_that_closes_is_read_as_the_end_after_what_it_sent() {
         let (_gate, link) = lwip_test_link();
         server(47_203);
-        let mut socket = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_203).unwrap();
+        let mut socket = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_203).unwrap();
         until(&link, || socket.state() == TcpState::Open);
         socket.send_parts(&[b"bye"]).unwrap();
         until(&link, || socket.state() == TcpState::PeerClosed);
@@ -912,7 +917,7 @@ mod tests {
     #[test]
     fn a_connect_to_a_port_nobody_listens_on_fails_with_the_error() {
         let (_gate, link) = lwip_test_link();
-        let mut socket = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_299).unwrap();
+        let mut socket = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_299).unwrap();
         until(&link, || matches!(socket.state(), TcpState::Failed(_)));
         assert!(matches!(
             socket.try_read(&mut [0; 8]),
@@ -927,7 +932,7 @@ mod tests {
     #[test]
     fn a_buffer_below_the_window_is_refused_before_anything_is_made() {
         let (_gate, link) = lwip_test_link();
-        let refused = LwipTcpSocket::<512>::connect(&link, [127, 0, 0, 1], 47_201);
+        let refused = tcp_connect::<512>(&link, [127, 0, 0, 1], 47_201);
         assert!(matches!(
             refused,
             Err(TcpError::RxBelowWindow { rx: 512, window }) if window > 512
@@ -938,7 +943,7 @@ mod tests {
     fn a_write_larger_than_the_send_buffer_writes_nothing() {
         let (_gate, link) = lwip_test_link();
         server(47_204);
-        let mut socket = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_204).unwrap();
+        let mut socket = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_204).unwrap();
         until(&link, || socket.state() == TcpState::Open);
         let big = [7u8; 60_000];
         assert_eq!(
@@ -952,20 +957,25 @@ mod tests {
         assert_eq!(socket.readable(), 0);
     }
 
-    static LISTENER: LwipTcpListener<RX, 2> = LwipTcpListener::new();
-    static NARROW: LwipTcpListener<RX, 1> = LwipTcpListener::new();
+    // `S` is room for every connection a test holds, so that with `static-link-storage` a
+    // refusal is the queue's (`Q`) and never the pool's; without it `S` is unused.
+    static LISTENER: LwipTcpListener<RX, 2, 2> = LwipTcpListener::new();
+    static NARROW: LwipTcpListener<RX, 1, 2> = LwipTcpListener::new();
 
     /// A connection that arrives is handed out as a socket that reads and writes like a dialled
     /// one, with the dialler's address as its peer; and the listener's second `listen` is refused.
     #[test]
     fn a_listener_hands_out_the_connection_that_arrived() {
         let (_gate, link) = lwip_test_link();
-        LISTENER.listen(47_410).unwrap();
+        tcp_listen(&LISTENER, 47_410).unwrap();
         assert_eq!(LISTENER.local_port(), 47_410);
-        assert_eq!(LISTENER.listen(47_411), Err(TcpError::AlreadyListening));
+        assert_eq!(
+            tcp_listen(&LISTENER, 47_411),
+            Err(TcpError::AlreadyListening)
+        );
         assert!(LISTENER.accept().is_none(), "nothing has arrived");
 
-        let mut client = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_410).unwrap();
+        let mut client = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_410).unwrap();
         until(&link, || LISTENER.waiting() == 1);
         let mut accepted = LISTENER.accept().expect("the connection that arrived");
         assert!(LISTENER.accept().is_none());
@@ -990,10 +1000,10 @@ mod tests {
     #[test]
     fn a_full_queue_refuses_the_next_connection_and_counts_it() {
         let (_gate, link) = lwip_test_link();
-        NARROW.listen(47_420).unwrap();
-        let first = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_420).unwrap();
+        tcp_listen(&NARROW, 47_420).unwrap();
+        let first = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_420).unwrap();
         until(&link, || NARROW.waiting() == 1);
-        let mut second = LwipTcpSocket::<RX>::connect(&link, [127, 0, 0, 1], 47_420).unwrap();
+        let mut second = tcp_connect::<RX>(&link, [127, 0, 0, 1], 47_420).unwrap();
         until(&link, || NARROW.refused() == 1);
         // How soon the dialler learns of the refusal is lwIP's: it abandons a connection the accept
         // callback refuses, and the dialler reads the reset at once or when it first sends. So it

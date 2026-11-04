@@ -420,6 +420,10 @@ transport-link-unixpipe,transport-link-ws|"
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
     # `locator-iface`. MEASURED: 32 passed with default features, 41 with it, under 1 s.
     "wz-host-net|hook|locator-iface|"
+    # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
+    # own smoke test, a loopback connection that carries bytes both ways and closes. The census
+    # found it claimed by nothing when the feature arrived; the filter is its module.
+    "lwip-sys|hook|tcp|tcp_smoke::"
     # The rules of the advanced plane that no runtime owns (the `@adv` grammar, the `_time` selector,
     # the cache ring and its answer, the publisher's composite). `transport-shm` makes a cached
     # sample hold a buffer of shared memory and a recovery reply send its descriptor again, and
@@ -855,6 +859,18 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # sees it), and `static-link-storage` is the subject (it must not).
     "wz-link-lwip|hook|test-support|--test=link_storage_allocations"
     "wz-link-lwip|hook|static-link-storage,test-support|--test=link_storage_allocations"
+    # The TCP stream over lwIP's raw API (`tcp`): its connections, its listener's queue and
+    # refusals, a buffer below the window. Once on each profile, as the row above: the default
+    # makes a connection's state on the heap, `static-link-storage` in a cell of a pool, and
+    # the tests reach both through the crate's `test_bind` binders.
+    "wz-link-lwip|hook|tcp,test-support|tcp::"
+    "wz-link-lwip|hook|tcp,static-link-storage,test-support|tcp::"
+    # The stream link a node opens over that socket (`wz-session-lwip`'s `tcp`): a dial, a
+    # refused dial, a peer that closes, and on the default profile the stream link framing a
+    # batch over a dialled and an accepted end (those two hold a heap transmit buffer and are
+    # compiled on that profile only). Once on each profile, as the link's rows above.
+    "wz-session-lwip|hook|tcp|stream::"
+    "wz-session-lwip|hook|tcp,static-link-storage|stream::"
     # Fixed-memory step S5 — the same crate under the PER-SESSION SLOT profile, a
     # separate row because `session-slot` is a selector that CHANGES the types of
     # the session (its handle, its sink, its parameters, its extension chains) and

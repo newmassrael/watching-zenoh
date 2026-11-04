@@ -423,6 +423,46 @@ pub mod test_bind {
             )
         }
     }
+
+    /// A TCP connection to `addr:port`, as `LwipTcpSocket::connect` starts one.
+    #[cfg(feature = "tcp")]
+    pub fn tcp_connect<const RX: usize>(
+        link: &LwipLink,
+        addr: [u8; 4],
+        port: u16,
+    ) -> Result<crate::tcp::LwipTcpSocket<RX>, crate::tcp::TcpError> {
+        #[cfg(not(feature = "static-link-storage"))]
+        {
+            crate::tcp::LwipTcpSocket::connect(link, addr, port)
+        }
+        #[cfg(feature = "static-link-storage")]
+        {
+            crate::tcp::LwipTcpSocket::connect_in(
+                link,
+                addr,
+                port,
+                leaked(crate::tcp::TcpSocketPool::<RX, 1>::new()),
+            )
+        }
+    }
+
+    /// `listener` listening on `port`, as `LwipTcpListener::listen` starts it. With
+    /// `static-link-storage` its connections are made in a leaked pool of the `S` cells
+    /// its type names, so a test listener names an `S` above the connections it holds.
+    #[cfg(feature = "tcp")]
+    pub fn tcp_listen<const RX: usize, const Q: usize, const S: usize>(
+        listener: &'static crate::tcp::LwipTcpListener<RX, Q, S>,
+        port: u16,
+    ) -> Result<(), crate::tcp::TcpError> {
+        #[cfg(not(feature = "static-link-storage"))]
+        {
+            listener.listen(port)
+        }
+        #[cfg(feature = "static-link-storage")]
+        {
+            listener.listen_in(port, leaked(crate::tcp::TcpSocketPool::<RX, S>::new()))
+        }
+    }
 }
 
 /// R2390 (transport-multicast) — drive every interface's CARRIER, the injector

@@ -325,9 +325,21 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "static-link-storage"))]
-    fn dial(link: &LwipLink) -> LwipTcpDial<&LwipLink, RX> {
-        LwipTcpDial::new(link)
+    /// A dial over `link`, on either profile: with `static-link-storage` its connections are made
+    /// in a leaked pool of two cells, more than a test holds at once (a test is host code, free to
+    /// leak; a firmware declares the pool as a `static`).
+    fn dial(link: &LwipLink) -> LwipTcpDial<&LwipLink, RX, 2> {
+        #[cfg(not(feature = "static-link-storage"))]
+        {
+            LwipTcpDial::new(link)
+        }
+        #[cfg(feature = "static-link-storage")]
+        {
+            LwipTcpDial::new(
+                link,
+                std::boxed::Box::leak(std::boxed::Box::new(TcpSocketPool::new())),
+            )
+        }
     }
 
     #[test]
