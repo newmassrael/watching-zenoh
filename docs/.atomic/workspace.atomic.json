@@ -308854,6 +308854,66 @@
         "Stage four of the C ABI node: get, the queryable and the querier, then liveliness and the matching of publishers and queriers (the publisher declares no interest on a node yet, which the matching needs), then shared memory, the advanced pair, the group, the info peers and routers, the transport and link events, the declared key expressions and the timestamp. A node opened through the C ABI answers Z_EUNAVAILABLE to those. The build with router-node and without the unstable API has to be shown clean once the subscriber's dead field is landed by the peer session. A put of a payload in shared memory goes out as bytes on a node. A C ABI router that keeps no south is still the registry of faces, which forwards nothing; opening every router as the node is a parity decision of its own. Whether router-node belongs in a Kconfig switch and a footprint budget is not decided. A client that is told no router and keeps a south is refused even when it scouts nothing. The dialled-subregion cases are witnessed in process only; no stock zenohd witness. Open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 4207": {
+      "decision_summary": "Step 3 of the server-layer split: storage_plugin_config, the reader of the storage manager's plugins document and the diff between two of them, leaves wz-session-core for wz-storage. Nothing in the core used it; wz-runtime-tokio's storage manager service and plugin plane did, both under adminspace-config-hotreload, which already pulls wz-storage. The module keeps its name and its gate: wz-storage gains a feature of that same name that compiles it alone, and the runtime's turns it on, so one switch still means one thing. The core keeps its feature of that name for the admin space's storage-add and storage-del arms. A consumer now types wz_storage::storage_plugin_config, so the feature-gate diagnostic probes it there, off the crate root as the core's are. The file is the core's text with only its imports, the one call they shorten and the tests' import changed.",
+      "changes_bullets": [
+        "crates/wz-storage/src/storage_plugin_config.rs is crates/wz-session-core/src/storage_plugin_config.rs moved: its json5, keyexpr_canon and storage_config paths name wz_session_core, the canon test imports what it calls. wz-storage/src/lib.rs declares it under the new adminspace-config-hotreload feature (Cargo.toml).",
+        "crates/wz-session-core/src/lib.rs: the storage_plugin_config module removed; the comment where the manager went names both modules.",
+        "crates/wz-runtime-tokio: storage_manager_service and plugin_plane use wz_storage::storage_plugin_config; zenoh_config's two doc mentions follow; Cargo.toml's adminspace-config-hotreload adds wz-storage/adminspace-config-hotreload.",
+        "scripts/run-ci.sh: C1z gains the wz-storage plugin-config leg of 15 and a wz-storage clippy with the feature. scripts/lib/nondefault-tests-gate.sh: a wz-storage row for the feature and the module. scripts/lib/layer_direction_gate.py: IN_CORE loses storage_plugin_config.",
+        "scripts/lib/feature_gate_diagnostic.py: wz-storage joins the axis, its probes read off its crate root as the core's are (an empty entry in each table).",
+        "crates/wz-capi-c/src/sub.rs (a peer's red, the owner told first): the node subscriber's zid field, the block that fills it and SubscriberHolder::zid are behind not(zenoh-c-no-unstable-api), the gate of z_subscriber_id, their one reader.",
+        "scripts/lib/count_guard_lint.py (a red found by the extended sweep, the guard right and the lint wrong): a test file whose #[test] sits in a macro_rules! body is out of static scope, because its tests are the invocations; the pico upstream API file read as 4 where its guard and libtest say 16.",
+        "store: the reason of adminspace-config-hotreload cites the diff engine at its new path and names wz-storage among its cfg sites."
+      ],
+      "verification_bullets": [
+        "Layer C1z pass on hkl001 (the wz-storage plugin-config leg ran its 15, the manager leg its 8, the core storage leg its 45); Layers C1am and C1bp pass on hkl001.",
+        "Layer C1cn pass on hkl001 with the wz-storage row and the capi-c fix; before the fix its nondefault-features leg refused wz-capi-c's all-features build on the dead zid field and method. clippy -D warnings of wz-capi-c at default features and with router-node rc 0.",
+        "feature_gate_diagnostic --check and --selftest: 4 packages on the axis, 126 probes read off a crate root, 127 built and each told by rustc which feature was missing; feature_public_surface_census --check rc 0.",
+        "layer_direction_gate --check OK (12 server modules still in the core); reason_citation_gate, store_reason_citation_gate and store_reasons_resolve rc 0; sce_feature_model --check OK; Layer 0 pass with shellcheck 0.11.0.",
+        "count_guard_lint rc 0 with exactly one guard moved out of static scope (256 to 255 checked), the pico upstream API one; python_floor_lint, hook_default_region_gate and gate_provenance_lint rc 0. The hook's 127 round-fed gates and the extended-range gates rc 0 on the rebased tree; guarded_count_gate over the range 21 of 21 OK on hkl001.",
+        "validate-workspace: T1 orphans 14 (new 0), T3 warn 4, T4 info 15, unchanged by the reason edit."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend"
+      ],
+      "carry_forward_bullets": [
+        "Step 4 of the server-layer split: the storage modules the core's other modules still use (storage_history from sample, storage_strip_prefix from keyexpr_prefix, storage_aligner and storage_replication from wire_bincode, storage_config from adminspace) need their seams first; storage_state is used by those modules only.",
+        "SCE main e248007a34 states the protocol's bound in its zenoh forge resources: move the SCE pin past it, then remove the eight stems from Layer B's LAYER2_KNOWN_DIVERGENCE, re-measure the four older entries, and follow the generator's alias change.",
+        "Measure whether moving the borrowed-to-owned conversions out of decode_one_record takes back any of the coop text.",
+        "A hosted reading of Layers C1z, C1AM, C1bp, C1cn and C1bzr at this round's head."
+      ],
+      "publishable_decision_summary": "Step 3 of the server-layer split: storage_plugin_config, the reader of the storage manager's plugins document and the diff between two of them, leaves wz-session-core for wz-storage. Nothing in the core used it; wz-runtime-tokio's storage manager service and plugin plane did, both under adminspace-config-hotreload, which already pulls wz-storage. The module keeps its name and its gate: wz-storage gains a feature of that same name that compiles it alone, and the runtime's turns it on, so one switch still means one thing. The core keeps its feature of that name for the admin space's storage-add and storage-del arms. A consumer now types wz_storage::storage_plugin_config, so the feature-gate diagnostic probes it there, off the crate root as the core's are. The file is the core's text with only its imports, the one call they shorten and the tests' import changed.",
+      "publishable_changes_bullets": [
+        "crates/wz-storage/src/storage_plugin_config.rs is crates/wz-session-core/src/storage_plugin_config.rs moved: its json5, keyexpr_canon and storage_config paths name wz_session_core, the canon test imports what it calls. wz-storage/src/lib.rs declares it under the new adminspace-config-hotreload feature (Cargo.toml).",
+        "crates/wz-session-core/src/lib.rs: the storage_plugin_config module removed; the comment where the manager went names both modules.",
+        "crates/wz-runtime-tokio: storage_manager_service and plugin_plane use wz_storage::storage_plugin_config; zenoh_config's two doc mentions follow; Cargo.toml's adminspace-config-hotreload adds wz-storage/adminspace-config-hotreload.",
+        "scripts/run-ci.sh: C1z gains the wz-storage plugin-config leg of 15 and a wz-storage clippy with the feature. scripts/lib/nondefault-tests-gate.sh: a wz-storage row for the feature and the module. scripts/lib/layer_direction_gate.py: IN_CORE loses storage_plugin_config.",
+        "scripts/lib/feature_gate_diagnostic.py: wz-storage joins the axis, its probes read off its crate root as the core's are (an empty entry in each table).",
+        "crates/wz-capi-c/src/sub.rs (a peer's red, the owner told first): the node subscriber's zid field, the block that fills it and SubscriberHolder::zid are behind not(zenoh-c-no-unstable-api), the gate of z_subscriber_id, their one reader.",
+        "scripts/lib/count_guard_lint.py (a red found by the extended sweep, the guard right and the lint wrong): a test file whose #[test] sits in a macro_rules! body is out of static scope, because its tests are the invocations; the pico upstream API file read as 4 where its guard and libtest say 16.",
+        "store: the reason of adminspace-config-hotreload cites the diff engine at its new path and names wz-storage among its cfg sites."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1z pass on hkl001 (the wz-storage plugin-config leg ran its 15, the manager leg its 8, the core storage leg its 45); Layers C1am and C1bp pass on hkl001.",
+        "Layer C1cn pass on hkl001 with the wz-storage row and the capi-c fix; before the fix its nondefault-features leg refused wz-capi-c's all-features build on the dead zid field and method. clippy -D warnings of wz-capi-c at default features and with router-node rc 0.",
+        "feature_gate_diagnostic --check and --selftest: 4 packages on the axis, 126 probes read off a crate root, 127 built and each told by rustc which feature was missing; feature_public_surface_census --check rc 0.",
+        "layer_direction_gate --check OK (12 server modules still in the core); reason_citation_gate, store_reason_citation_gate and store_reasons_resolve rc 0; sce_feature_model --check OK; Layer 0 pass with shellcheck 0.11.0.",
+        "count_guard_lint rc 0 with exactly one guard moved out of static scope (256 to 255 checked), the pico upstream API one; python_floor_lint, hook_default_region_gate and gate_provenance_lint rc 0. The hook's 127 round-fed gates and the extended-range gates rc 0 on the rebased tree; guarded_count_gate over the range 21 of 21 OK on hkl001.",
+        "validate-workspace: T1 orphans 14 (new 0), T3 warn 4, T4 info 15, unchanged by the reason edit."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4 of the server-layer split: the storage modules the core's other modules still use (storage_history from sample, storage_strip_prefix from keyexpr_prefix, storage_aligner and storage_replication from wire_bincode, storage_config from adminspace) need their seams first; storage_state is used by those modules only.",
+        "SCE main e248007a34 states the protocol's bound in its zenoh forge resources: move the SCE pin past it, then remove the eight stems from Layer B's LAYER2_KNOWN_DIVERGENCE, re-measure the four older entries, and follow the generator's alias change.",
+        "Measure whether moving the borrowed-to-owned conversions out of decode_one_record takes back any of the coop text.",
+        "A hosted reading of Layers C1z, C1AM, C1bp, C1cn and C1bzr at this round's head."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
