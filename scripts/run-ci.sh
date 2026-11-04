@@ -9766,6 +9766,10 @@ layer_c1z_cargo_test_storage_driver() {
     # (step 2): the core leg that turned on its feature read the 45 above and these 8 (53).
     _runci_guarded_test "C1z storage manager" 8 \
         cargo test -p wz-storage --lib --quiet || return 1
+    # The reader of the manager's `plugins` document and its diff followed it (step 3), with
+    # its fifteen, which only `adminspace-config-hotreload` builds.
+    _runci_guarded_test "C1z storage plugin config" 15 \
+        cargo test -p wz-storage --features adminspace-config-hotreload --lib storage_plugin_config --quiet || return 1
     # R2696 — 5 -> 8: the volume lifecycle's manager half reaches this leg too,
     # because none of the three (cascade, refusal, `build_volume`'s backend
     # resolution) is gated on an adminspace feature. It moves by THREE where the
@@ -9908,6 +9912,7 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-storage --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-storage --features adminspace-config-hotreload --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-multi-storage-host --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \

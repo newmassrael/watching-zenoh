@@ -55,7 +55,7 @@ use std::path::PathBuf;
 
 use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
 use wz_session_core::json5::Json5Value;
-use wz_session_core::storage_plugin_config::STORAGE_MANAGER_PLUGIN;
+use wz_storage::storage_plugin_config::STORAGE_MANAGER_PLUGIN;
 
 use crate::plugin::PluginRegistry;
 use crate::plugins_config::{PluginLoadRequest, PluginsConfig, PluginsSink};

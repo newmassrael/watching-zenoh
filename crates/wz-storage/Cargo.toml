@@ -24,6 +24,15 @@ description = "The storage plane of a wz node: storages hosted on the session, t
 name = "wz_storage"
 path = "src/lib.rs"
 
+[features]
+# §5.23 adminspace-config-hotreload — the storage manager's `plugins.storage_manager` document,
+# read as upstream's `PluginConfig` reader reads it, and upstream's `ConfigDiff` between two of
+# them (the `storage_plugin_config` module). The same name as the core's and the runtime's
+# feature, which is the one switch: wz-runtime-tokio's turns this one on. It needs nothing of the
+# core beyond what the crate already takes (`json5` under `alloc`, `keyexpr_canon`,
+# `storage_config`).
+adminspace-config-hotreload = []
+
 [dependencies]
 # `StorageBackend`, `Volume` and `StorageConfig`, which the manager composes.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["storage-backend"] }

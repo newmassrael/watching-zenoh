@@ -79,8 +79,9 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 
-use crate::json5::Json5Value;
-use crate::storage_config::{GarbageCollectionConfig, StorageConfig};
+use wz_session_core::json5::Json5Value;
+use wz_session_core::keyexpr_canon::{canonize_keyexpr_in, KeyexprDialect};
+use wz_session_core::storage_config::{GarbageCollectionConfig, StorageConfig};
 
 /// The plugin name upstream's storage manager declares itself under, and so
 /// the key its document lives at below `plugins`.
@@ -762,8 +763,7 @@ fn object_map(value: &Json5Value) -> Option<BTreeMap<&str, &Json5Value>> {
 /// is a fixed point, so "canonicalises to itself" is exactly that test. Upstream
 /// core is zenoh-c's lineage, hence that dialect.
 fn is_canon_keyexpr(text: &str) -> bool {
-    crate::keyexpr_canon::canonize_keyexpr_in(text, crate::keyexpr_canon::KeyexprDialect::ZenohC)
-        .is_ok_and(|canon| canon.as_str() == text)
+    canonize_keyexpr_in(text, KeyexprDialect::ZenohC).is_ok_and(|canon| canon.as_str() == text)
 }
 
 /// A JSON number, as the value upstream's JSON5 reader hands `serde_json`:
@@ -859,8 +859,8 @@ fn json_eq(a: &Json5Value, b: &Json5Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::json5::parse;
     use alloc::vec;
+    use wz_session_core::json5::parse;
 
     fn read(doc: &str) -> Result<StoragePluginConfig, PluginConfigError> {
         StoragePluginConfig::from_json5(STORAGE_MANAGER_PLUGIN, &parse(doc).expect("json5"))

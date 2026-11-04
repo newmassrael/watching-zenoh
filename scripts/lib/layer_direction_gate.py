@@ -84,7 +84,6 @@ IN_CORE = frozenset(
         "storage_backend",
         "storage_config",
         "storage_history",
-        "storage_plugin_config",
         "storage_replication",
         "storage_state",
         "storage_strip_prefix",

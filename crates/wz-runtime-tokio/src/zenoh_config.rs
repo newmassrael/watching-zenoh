@@ -1472,7 +1472,7 @@ pub struct ZenohNodeConfig {
     /// Kept as a DOCUMENT because upstream keeps it as one
     /// (`commons/zenoh-config/src/lib.rs` @ `pub struct PluginsConfig {`) and
     /// because only a plugin knows what its document means: the storage
-    /// manager's is read by `wz_session_core::storage_plugin_config`, applied by
+    /// manager's is read by `wz_storage::storage_plugin_config`, applied by
     /// the storage host, and nothing here needs a second reading of it. The
     /// reader checks the one shape upstream's loader demands — an object whose
     /// members are objects — and refuses anything else, as a zenohd does.
@@ -4046,7 +4046,7 @@ const HONOURED_SECTIONS: &[&str] = &["plugins"];
 /// operator gets.
 ///
 /// wz runs ONE plugin from this section, the storage manager (the plugin name
-/// is `wz_session_core::storage_plugin_config`'s `STORAGE_MANAGER_PLUGIN`,
+/// is `wz_storage::storage_plugin_config`'s `STORAGE_MANAGER_PLUGIN`,
 /// spelled here because this reader does not depend on that feature). Of its
 /// document wz acts on:
 ///

@@ -104,7 +104,7 @@ use crate::storage_service::{StorageService, StorageServiceError};
 #[cfg(feature = "adminspace-config-hotreload")]
 use wz_session_core::json5::Json5Value;
 #[cfg(feature = "adminspace-config-hotreload")]
-use wz_session_core::storage_plugin_config::{
+use wz_storage::storage_plugin_config::{
     diffs, ConfigDiff, StoragePluginConfig, VolumeDecl, STORAGE_MANAGER_PLUGIN,
 };
 

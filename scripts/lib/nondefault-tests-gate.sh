@@ -1029,6 +1029,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # module later is claimed without touching the rows.
     "wz-session-core|hook|pool-monitor|pool_gauge::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
+    # The storage manager's `plugins` document reader moved from the core to wz-storage
+    # (server-layer split, step 3) with its fifteen tests, which only its feature builds; the
+    # core's wide leg ran them before. The filter is the module's path.
+    "wz-storage|hook|adminspace-config-hotreload|storage_plugin_config::"
     # S9d, the end-to-end half: `wz-session-lwip`'s `tests/slot_control_records.rs`
     # drives a real session pair on the host lwIP loopback and counts one acceptor
     # iteration per control record. It names `codec-response-final` beside the slot

@@ -4,7 +4,9 @@
 //! The storage plane of a node (§5.11, §5.24), the wz mirror of zenoh's
 //! `zenoh-plugin-storage-manager`: the server layer that hosts named storages on the session.
 //!
-//! [`storage_manager`] hosts N named storages over a registry of named volumes. The backend,
+//! [`storage_manager`] hosts N named storages over a registry of named volumes, and
+//! `storage_plugin_config` (under `adminspace-config-hotreload`) reads the manager's
+//! `plugins.storage_manager` document and the difference between two of them. The backend,
 //! volume and config types it composes are still in `wz-session-core`, under `storage-backend`,
 //! and join this crate in later steps of the server-layer split. A module keeps the name it had
 //! in the core, so a downstream path changes only its crate and a citation of the file still
@@ -19,3 +21,11 @@ extern crate alloc;
 extern crate std;
 
 pub mod storage_manager;
+
+/// R2785 — the §5.23 `adminspace-config-hotreload` DECLARATIVE input: the
+/// storage manager's `plugins.storage_manager` document read the way upstream's
+/// `PluginConfig` reader reads it, and upstream's `ConfigDiff` between two of
+/// them. The base a startup config and a runtime config write share; the host
+/// holding the storage manager applies the diffs.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub mod storage_plugin_config;

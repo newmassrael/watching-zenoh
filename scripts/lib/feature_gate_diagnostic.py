@@ -106,6 +106,12 @@ AXIS: dict[str, str] = {
     # consumer who types `wz_session_core::…`. The probe is owned by the crate
     # whose path the consumer spells, and both layers own their own.
     "wz-session-core": "wz_session_core",
+    # The storage plane, above the core since the server-layer split. Its
+    # `adminspace-config-hotreload` gates `storage_plugin_config` at the crate
+    # root, which the core's crate root gated (and this axis probed) until step 3
+    # moved it: a consumer now types `wz_storage::storage_plugin_config`, so the
+    # probe is this crate's, read off its root as the core's are.
+    "wz-storage": "wz_storage",
 }
 
 # package -> feature -> the probes that prove a consumer is told about it.
@@ -146,6 +152,8 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
     # table-agreement check requires of a package on the axis, and it says
     # "every probe here is read off the crate root", not "nobody wrote one".
     "wz-session-core": {},
+    # Derived, as the core's: an empty entry says every probe is read off the root.
+    "wz-storage": {},
 }
 
 # package -> feature -> why it gates no public path. A reason is what the next
@@ -418,6 +426,8 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "transport-link-tls-keylog",
         )
     },
+    # Its one feature gates a module at the crate root, which is probed.
+    "wz-storage": {},
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public
@@ -755,6 +765,8 @@ DEFERRED: dict[str, dict[str, str]] = {
             "a path; there is no resolution error for rustc to annotate"
         ),
     },
+    # Nothing waits: the one feature is probed off the crate root.
+    "wz-storage": {},
 }
 
 # A crate-root item a `#[cfg(feature)]` is attached to, by the shape that names

@@ -304,6 +304,10 @@ adminspace-config-hotreload = [
     "storage-mgr-multi-storage-host",
     "declare-subscriber",
     "wz-session-core/adminspace-config-hotreload",
+    # The reader of the storage manager's `plugins` document and its diff
+    # (`wz_storage::storage_plugin_config`); `storage-mgr-multi-storage-host`
+    # above already pulls the crate.
+    "wz-storage/adminspace-config-hotreload",
 ]
 # adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
 # (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`),

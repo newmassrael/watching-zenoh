@@ -1710,17 +1710,11 @@ pub mod storage_volume;
 #[cfg(feature = "storage-backend")]
 pub mod storage_config;
 
-/// R2785 — the §5.23 `adminspace-config-hotreload` DECLARATIVE input: the
-/// storage manager's `plugins.storage_manager` document read the way upstream's
-/// `PluginConfig` reader reads it, and upstream's `ConfigDiff` between two of
-/// them. The base a startup config and a runtime config write share; the host
-/// holding the storage manager applies the diffs.
-#[cfg(feature = "adminspace-config-hotreload")]
-pub mod storage_plugin_config;
-
-// The storage manager that hosts N named storages over a registry of these volumes
-// is the server layer's, in the wz-storage crate (`storage-mgr-multi-storage-host`
-// downstream); it composes the three modules above.
+// The storage manager that hosts N named storages over a registry of these volumes,
+// and the reader of its `plugins.storage_manager` document with the diff between two
+// of them, are the server layer's, in the wz-storage crate
+// (`storage-mgr-multi-storage-host` and `adminspace-config-hotreload` downstream);
+// they compose the three modules above.
 
 // R311y58 — the §5.24 `storage-mgr-strip-prefix` atom: the
 // `storage_strip_prefix::strip_prefix` / `storage_strip_prefix::restore_prefix`
