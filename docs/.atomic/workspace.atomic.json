@@ -309226,6 +309226,34 @@
         "The stream runs over the engine's StreamDriver with its own framing, a third copy of the frame cut beside the host's window and the node's new one in wz-session-core (stream_window); the driver should take the window in its place, with a fixed carry. Nothing hosts a TCP session yet: the slot host takes one driver type per table, so a node that dials tcp/ and udp/ needs the closed driver enum, and the dialer's locator parse and the links trait must accept tcp/ where they say Unsupported; there is no capability link-tcp for the node with its Kconfig, no listener (a node dials only), and no probe of a node holding a session with a stock router over tcp/ for 2000 requests and reconnecting. The receive window is lwIP's default, about 2 KB per round trip. The MCU cross build with tcp and the static-link-storage run of the stream tests are not done, nor Layer Q."
       ]
     },
+    "Round 4218": {
+      "decision_summary": "The stream link of the cooperative engine cuts a stream into batches in its own buffer, in place, while wz-session-core now holds a window that cuts the bytes a reader was handed. The first carry of the stream link said the driver should take the window in its place. That was wrong: the driver reads into the tail of one linear buffer and lends each batch where it lies, with no second buffer and no copy, which is the design a node with little memory wants, and the window would add a carry and a copy. So the two stay two designs for two kinds of reader, and the rule they share is held by a test instead: however the stream is cut into reads (every pair of cuts of a wire carrying a plain batch, an empty one, a one-byte one and a longer one), the driver and the window hand over the same batches, and both pass the empty batch over.",
+      "changes_bullets": [
+        "wz-runtime-coop stream_link tests: every_chunking_of_a_wire_frames_the_way_the_shared_window_does feeds the same wire to a StreamDriver over a scripted stream and to a window over a fixed carry in all 171 ways of three reads, asserts the batches equal and that the population is the full count."
+      ],
+      "verification_bullets": [
+        "On a build host: the twelve stream_link tests of wz-runtime-coop pass with session-unicast and alloc (the new one among them) and clippy with warnings denied is clean for the crate with those features. The fixed-memory form of the driver was not run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "This corrects the carry of the stream link round that put LwipTcpStream over the engine's driver: the driver should NOT take the window in its place, the two designs stay and the test holds them to one rule. The rest of that carry stands: the closed driver enum for a host mixing UDP and TCP, the dialer's tcp/ locator and the links trait where they answer Unsupported, the link-tcp capability with its Kconfig, a listener, the probe against a stock router, and the MCU cross build with tcp."
+      ],
+      "publishable_decision_summary": "The stream link of the cooperative engine cuts a stream into batches in its own buffer, in place, while wz-session-core now holds a window that cuts the bytes a reader was handed. The first carry of the stream link said the driver should take the window in its place. That was wrong: the driver reads into the tail of one linear buffer and lends each batch where it lies, with no second buffer and no copy, which is the design a node with little memory wants, and the window would add a carry and a copy. So the two stay two designs for two kinds of reader, and the rule they share is held by a test instead: however the stream is cut into reads (every pair of cuts of a wire carrying a plain batch, an empty one, a one-byte one and a longer one), the driver and the window hand over the same batches, and both pass the empty batch over.",
+      "publishable_changes_bullets": [
+        "wz-runtime-coop stream_link tests: every_chunking_of_a_wire_frames_the_way_the_shared_window_does feeds the same wire to a StreamDriver over a scripted stream and to a window over a fixed carry in all 171 ways of three reads, asserts the batches equal and that the population is the full count."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the twelve stream_link tests of wz-runtime-coop pass with session-unicast and alloc (the new one among them) and clippy with warnings denied is clean for the crate with those features. The fixed-memory form of the driver was not run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "This corrects the carry of the stream link round that put LwipTcpStream over the engine's driver: the driver should NOT take the window in its place, the two designs stay and the test holds them to one rule. The rest of that carry stands: the closed driver enum for a host mixing UDP and TCP, the dialer's tcp/ locator and the links trait where they answer Unsupported, the link-tcp capability with its Kconfig, a listener, the probe against a stock router, and the MCU cross build with tcp."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
