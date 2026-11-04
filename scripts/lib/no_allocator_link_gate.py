@@ -509,6 +509,18 @@ IMAGES: dict[str, Image] = {
                 label="cyt4bf-lwip-fixed-declared",
                 no_default_features=True,
             ),
+            # The node whose links are on tcp/ (`CONFIG_WZ_LINK_TCP`, `fixed_tcp.rs`): lwIP is
+            # built with its TCP sources and the connections' receive rings, accept queue and
+            # sockets are statics of the staticlib. The same proof on the other value of the
+            # `link-protocol` axis: the stream's sockets are where a heap would be easiest to take.
+            Build(
+                V7EMHF,
+                "@deploy/zephyr-admin-node/lwip-port",
+                ("net-lwip-mac", "mac-cyt4bf", "fixed-memory", "fixed-tcp"),
+                env=ZEPHYR_BUILD_VALUES,
+                label="cyt4bf-lwip-fixed-tcp",
+                no_default_features=True,
+            ),
         ),
         ci=False,
     ),
