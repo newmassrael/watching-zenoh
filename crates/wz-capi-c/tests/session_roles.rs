@@ -19,7 +19,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "router-node")]
-use wz_capi_c::abi::z_owned_publisher_t;
+use wz_capi_c::abi::{
+    z_loaned_query_t, z_loaned_reply_t, z_moved_closure_query_t, z_moved_closure_reply_t,
+    z_owned_closure_query_t, z_owned_closure_reply_t, z_owned_publisher_t, z_owned_queryable_t,
+};
 use wz_capi_c::abi::{
     z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_sample_t, z_moved_config_t,
     z_moved_session_t, z_owned_bytes_t, z_owned_closure_sample_t, z_owned_config_t,
@@ -27,6 +30,8 @@ use wz_capi_c::abi::{
 };
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
+#[cfg(feature = "router-node")]
+use wz_capi_c::get::{z_closure_reply, z_get};
 #[cfg(feature = "router-node")]
 use wz_capi_c::keyexpr::z_keyexpr_equals;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
@@ -40,6 +45,10 @@ use wz_capi_c::publisher::{
     z_publisher_put, z_undeclare_publisher,
 };
 use wz_capi_c::put::z_put;
+#[cfg(feature = "router-node")]
+use wz_capi_c::query::{
+    z_closure_query, z_declare_queryable, z_query_reply, z_undeclare_queryable,
+};
 #[cfg(feature = "router-node")]
 use wz_capi_c::result::Z_EUNAVAILABLE;
 use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
@@ -457,6 +466,146 @@ fn a_publisher_declared_on_a_node_publishes() {
         close_session(node);
         close_session(peer);
         drop(Box::from_raw(ctx_peer));
+    }
+}
+
+/// The queryable handler of the node tests: count the query and answer it once.
+#[cfg(feature = "router-node")]
+unsafe extern "C" fn on_query_answer(query: *mut z_loaned_query_t, ctx: *mut c_void) {
+    (*(ctx as *const CountCtx))
+        .hits
+        .fetch_add(1, Ordering::SeqCst);
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    if z_view_keyexpr_from_str(&mut view, ke.as_ptr()) != Z_OK {
+        return;
+    }
+    let body = CString::new("answer").unwrap();
+    let mut payload: z_owned_bytes_t = std::mem::zeroed();
+    if z_bytes_copy_from_str(&mut payload, body.as_ptr()) != Z_OK {
+        return;
+    }
+    let _ = z_query_reply(
+        query,
+        z_view_keyexpr_loan(&view),
+        (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+        std::ptr::null_mut(),
+    );
+}
+
+/// The reply handler of the node tests: count the reply.
+#[cfg(feature = "router-node")]
+unsafe extern "C" fn on_reply_hit(_reply: *mut z_loaned_reply_t, ctx: *mut c_void) {
+    (*(ctx as *const CountCtx))
+        .hits
+        .fetch_add(1, Ordering::SeqCst);
+}
+
+/// Declare a queryable on [`KEYEXPR`] that counts the queries it is handed and answers each.
+#[cfg(feature = "router-node")]
+unsafe fn declare_answering(
+    session: &z_owned_session_t,
+) -> (z_owned_queryable_t, Arc<AtomicUsize>, *mut CountCtx) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(CountCtx { hits: hits.clone() }));
+    let mut closure: z_owned_closure_query_t = std::mem::zeroed();
+    z_closure_query(&mut closure, Some(on_query_answer), None, ctx.cast());
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+    let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+    assert_eq!(
+        z_declare_queryable(
+            z_session_loan(session),
+            &mut queryable,
+            z_view_keyexpr_loan(&view),
+            (&mut closure as *mut z_owned_closure_query_t).cast::<z_moved_closure_query_t>(),
+            std::ptr::null_mut(),
+        ),
+        Z_OK,
+        "a queryable is declared"
+    );
+    (queryable, hits, ctx)
+}
+
+/// Ask [`KEYEXPR`] from `asker` until a reply has been counted (up to ten seconds), and say
+/// whether one was. The context the replies are counted through is freed by the caller.
+#[cfg(feature = "router-node")]
+unsafe fn get_until_replied(asker: &z_owned_session_t) -> bool {
+    let replies = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(CountCtx {
+        hits: replies.clone(),
+    }));
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while replies.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+        z_closure_reply(&mut closure, Some(on_reply_hit), None, ctx.cast());
+        assert_eq!(
+            z_get(
+                z_session_loan(asker),
+                z_view_keyexpr_loan(&view),
+                std::ptr::null(),
+                (&mut closure as *mut z_owned_closure_reply_t).cast::<z_moved_closure_reply_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let replied = replies.load(Ordering::SeqCst) > 0;
+    // The closure of the last get may still be held by a query under way; its context is
+    // leaked rather than freed under it.
+    replied
+}
+
+/// A node opened through the C ABI answers and asks: a registry peer that dials it gets a reply
+/// to a `z_get` from the node's queryable, and the node's `z_get` is answered by the queryable
+/// of that peer.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_node_opened_through_the_c_abi_answers_and_asks() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the contexts are freed after them.
+    unsafe {
+        let (mut node_queryable, node_handled, node_ctx) = declare_answering(&node);
+        assert!(
+            get_until_replied(&peer),
+            "the peer's get was never answered by the node's queryable"
+        );
+        assert!(node_handled.load(Ordering::SeqCst) > 0);
+        // The node's own queryable is let go before the node asks, so that what answers the
+        // node's get is the queryable of the peer and not its own.
+        assert_eq!(
+            z_undeclare_queryable((&mut node_queryable as *mut z_owned_queryable_t).cast()),
+            Z_OK
+        );
+        let (mut peer_queryable, peer_handled, peer_ctx) = declare_answering(&peer);
+        assert!(
+            get_until_replied(&node),
+            "the node's get was never answered by the peer's queryable"
+        );
+        assert!(peer_handled.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            z_undeclare_queryable((&mut peer_queryable as *mut z_owned_queryable_t).cast()),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
+        drop(Box::from_raw(node_ctx));
+        drop(Box::from_raw(peer_ctx));
     }
 }
 

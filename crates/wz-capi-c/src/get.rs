@@ -46,7 +46,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::sample::{sample_kind_of, SampleMarshal};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{session_handle, SessionHandle};
 
 use wz_capi_core::faces::SharedSession;
 
@@ -1405,17 +1405,91 @@ unsafe fn get_with_selector(
         let token = unsafe { take_get_token(options) };
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { not_a_registry(session) };
+            return Z_ENULL;
         };
         let ke = ke.to_owned();
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_EINVAL;
         }
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            SessionHandle::Registry(state) => state,
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => {
+                return issue_get_on_node(node, ke, params, opts, value, closure, token);
+            }
+        };
         issue_get(&state.shared, ke, params, opts, value, closure, token)
     })
+}
+
+/// Issue one get as the session of a node: the node routes it to the queryables of every face
+/// that holds one on the key and to its own, and hands each reply to the callback of the leg.
+///
+/// The get is over, and the C closure's `drop(context)` runs, when the node lets go of the
+/// callback it was handed: at the end of the query, at its timeout, or when the node closes.
+/// The token that cancels a get stops the legs a registry fans out, and a node has none to stop
+/// yet, so a get that brings one is refused by name and not run uncancellable.
+#[cfg(feature = "router-node")]
+fn issue_get_on_node(
+    node: &wz_capi_core::drive::RouterState,
+    keyexpr: String,
+    parameters: Option<Vec<u8>>,
+    opts: QueryOptions,
+    value: crate::bytes::ValueChunk,
+    closure: Arc<CReplyClosure>,
+    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
+) -> ZResult {
+    if token.is_some() {
+        return crate::result::Z_EUNAVAILABLE;
+    }
+    let anyke = parameters
+        .as_deref()
+        .is_some_and(crate::reply_keyexpr::parameters_has_anyke);
+    let gate = Arc::new(ReplyGate {
+        query_keyexpr: keyexpr.clone(),
+        anyke,
+    });
+    let opts = match parameters {
+        Some(params) if !params.is_empty() => opts.with_parameters(params),
+        _ => opts,
+    };
+    // A value in shared memory goes out as its bytes: the node carries no descriptor yet.
+    let opts = match &value {
+        None => opts,
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        Some(chunk) => opts.with_payload(chunk.bytes().to_vec()),
+        #[cfg(not(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        )))]
+        Some(never) => match *never {},
+    };
+    let leg = LegReply {
+        closure,
+        gate,
+        _registration: None,
+    };
+    match node.get(
+        &keyexpr,
+        &opts,
+        None,
+        Box::new(move |view: &dyn ReplyView| leg.fire(view)),
+        Box::new(|| {}),
+    ) {
+        Ok(()) => Z_OK,
+        Err(_) => Z_EINVAL,
+    }
 }
 
 #[cfg(test)]

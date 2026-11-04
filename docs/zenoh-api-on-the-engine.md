@@ -1116,12 +1116,13 @@ Each lands whole with its surface lines, tests and faults in one round.
       default, as zenoh-c's is): the handle of a session is a `SessionHandle`, the registry of
       faces or the node, and the open takes the node where `OpenPlan::node_for_south` says so.
       The operations of that ABI are written over the registry, and a node answers the ones it
-      carries (its id, closing, put, delete, the subscriber and the publisher) and
-      `Z_EUNAVAILABLE` to the rest, which a handle that is not there (`Z_ENULL`) is not
-      mistaken for. The operations come over to the node one family at a time: put, delete,
-      the subscriber and the publisher are carried (a payload in shared memory goes out as its
-      bytes), then get and the queryable, liveliness and matching, then what is left (shared
-      memory, the advanced pair, the group).
+      carries (its id, closing, put, delete, the subscriber, the publisher, get and the
+      queryable) and `Z_EUNAVAILABLE` to the rest, which a handle that is not there
+      (`Z_ENULL`) is not mistaken for. The operations come over to the node one family at a
+      time: put, delete, the subscriber, the publisher, get and the queryable are carried (a
+      payload in shared memory goes out as its bytes, and a get with a cancellation token is
+      refused), then the querier, liveliness and matching, then what is left (shared memory,
+      the advanced pair, the group).
     - **Open:** `routing` (the two above) and `open_time` (its tests are ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
       to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome

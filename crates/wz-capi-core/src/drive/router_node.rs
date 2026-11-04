@@ -143,10 +143,16 @@ impl RouterState {
     /// the query it is handed and answers it after it has returned. It holds the node weakly, as
     /// the node holds the handler.
     pub fn query_holder(&self) -> Arc<dyn wz_capi_port::QueryHolder> {
-        Arc::new(RouterQueryHolder {
+        Arc::new(self.node_query_holder())
+    }
+
+    /// [`Self::query_holder`] as the concrete holder, for a caller that answers through it
+    /// without naming the port's traits.
+    pub fn node_query_holder(&self) -> RouterQueryHolder {
+        RouterQueryHolder {
             forwarder: Arc::downgrade(&self.forwarder),
             closed: self.stop.clone(),
-        })
+        }
     }
 
     /// The node's own face, for liveliness: subscribers, and the keys alive.
@@ -252,9 +258,27 @@ impl RouterState {
 }
 
 /// The queries of the queryables a router node hosts, kept through the node's forwarder.
-struct RouterQueryHolder {
+#[derive(Clone)]
+pub struct RouterQueryHolder {
     forwarder: std::sync::Weak<RouterForwarder>,
     closed: Arc<AtomicBool>,
+}
+
+impl RouterQueryHolder {
+    /// Keep the query the handler this thread is inside of was handed. Outside a handler, or for
+    /// a node that has gone, there is nothing to keep and the query is answered with nothing.
+    pub fn hold_current(&self) -> RouterHeld {
+        RouterHeld(
+            self.forwarder
+                .upgrade()
+                .and_then(|forwarder| forwarder.hold_current_query()),
+        )
+    }
+
+    /// Whether the node has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
 }
 
 impl wz_capi_port::QueryHolder for RouterQueryHolder {
@@ -262,28 +286,30 @@ impl wz_capi_port::QueryHolder for RouterQueryHolder {
         &self,
         _view: &dyn wz_session_core::query_sink::QueryView,
     ) -> Box<dyn wz_capi_port::HeldQuery> {
-        // The query is the one the handler this thread is inside of was handed; outside one, or
-        // for a node that has gone, there is nothing to keep and the query is answered with nothing.
-        let held = self
-            .forwarder
-            .upgrade()
-            .and_then(|forwarder| forwarder.hold_current_query());
-        Box::new(RouterHeld(held))
+        Box::new(self.hold_current())
     }
 
     fn session_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+        self.is_closed()
     }
 }
 
 /// A query kept through the forwarder of a router node.
-struct RouterHeld(Option<wz_runtime_tokio::router_forward::HeldRouterQuery>);
+pub struct RouterHeld(Option<wz_runtime_tokio::router_forward::HeldRouterQuery>);
 
-impl wz_capi_port::HeldQuery for RouterHeld {
-    fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
+impl RouterHeld {
+    /// Answer the query now with what `answer` writes into a responder built as the handler's
+    /// was. A query of a node that has gone is answered with nothing.
+    pub fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
         if let Some(held) = &self.0 {
             held.reply(answer);
         }
+    }
+}
+
+impl wz_capi_port::HeldQuery for RouterHeld {
+    fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
+        Self::reply(self, answer);
     }
 }
 

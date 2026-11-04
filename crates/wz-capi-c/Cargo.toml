@@ -270,7 +270,7 @@ multicast-transport = ["link-udp", "peer", "wz-capi-core/multicast-transport"]
 # subregions) opens as one, since only a node places a remote by a subregion. Not in a default
 # build, which is zenoh-c's own; without it that config is refused by the key. The handle of a
 # session holds either, and an operation the node does not carry yet answers `Z_EUNAVAILABLE`.
-router-node = ["peer", "wz-capi-core/router-node"]
+router-node = ["peer", "query", "queryable", "wz-capi-core/router-node"]
 # The `tls/` link, dial and accept. A session reads the certificate material of
 # `transport/link/tls` (`root_ca_certificate`, `listen_certificate`, `listen_private_key`, each a
 # path) when it opens, and a path it cannot read fails the open; a `tls/` dial verifies the name

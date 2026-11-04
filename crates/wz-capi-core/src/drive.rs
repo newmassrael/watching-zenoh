@@ -4653,7 +4653,7 @@ pub(crate) use router_node::{open_router_blocking, refused_ask as router_refused
 #[cfg(feature = "router-node")]
 pub use router_node::{
     FinalHandler, LivelinessHandler, LocalLiveliness, MatchHandler, NodeRole, ReplyHandler,
-    ReplyIngress, RouterState,
+    ReplyIngress, RouterHeld, RouterQueryHolder, RouterState,
 };
 
 #[cfg(test)]

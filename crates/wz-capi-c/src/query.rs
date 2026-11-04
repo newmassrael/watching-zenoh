@@ -51,7 +51,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::reply_keyexpr::{parameters_has_anyke, reply_keyexpr_is_covered};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{session_handle, SessionHandle};
 use crate::string::view_string_over;
 
 use wz_capi_core::faces::{QblId, SharedSession};
@@ -143,12 +143,65 @@ enum PendingReply {
 /// uses, so the deferred and immediate legs cannot drift. Until R2953 this
 /// crate carried its own wire-only responder, so a query the session asked of
 /// ITSELF could be escaped but not answered or waited for.
-fn emit_held(held: &TokioHeldQuery, reply: PendingReply) {
-    let qos = held.qos();
-    held.reply(|out| {
-        let mut out = out;
-        flush_one(&mut out, reply, qos);
-    });
+fn emit_held(
+    held: &HeldRoute,
+    // Read by a node's held query alone, which carries no QoS of its own.
+    #[cfg_attr(not(feature = "router-node"), allow(unused_variables))]
+    query_qos: wz_runtime_tokio::sample::QosLevel,
+    reply: PendingReply,
+) {
+    match held {
+        HeldRoute::Face(held) => {
+            let qos = held.qos();
+            held.reply(|out| {
+                let mut out = out;
+                flush_one(&mut out, reply, qos);
+            });
+        }
+        // A node's held query carries the QoS of the query it was handed, which the marshal
+        // kept when it was built.
+        #[cfg(feature = "router-node")]
+        HeldRoute::Node(held) => {
+            let mut reply = Some(reply);
+            held.reply(&mut |out| {
+                if let Some(reply) = reply.take() {
+                    let mut out = out;
+                    flush_one(&mut out, reply, query_qos);
+                }
+            });
+        }
+    }
+}
+
+/// What the queries of a queryable are held through: the face of the registry they arrive on, or
+/// the node whose session hosts the queryable.
+#[derive(Clone)]
+enum QueryRoute {
+    /// One face of the registry of faces.
+    Face(TokioQueryHolder),
+    /// A node.
+    #[cfg(feature = "router-node")]
+    Node(wz_capi_core::drive::RouterQueryHolder),
+}
+
+impl QueryRoute {
+    /// Keep the query `view` describes past its callback: called from inside it.
+    fn hold_query(&self, view: &dyn QueryView) -> HeldRoute {
+        match self {
+            Self::Face(face) => HeldRoute::Face(face.hold_query(view)),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => HeldRoute::Node(node.hold_current()),
+        }
+    }
+}
+
+/// A query kept past its callback, answered on the route it arrived on.
+enum HeldRoute {
+    /// Held through a face of the registry.
+    Face(TokioHeldQuery),
+    /// Held through a node.
+    #[cfg(feature = "router-node")]
+    Node(wz_capi_core::drive::RouterHeld),
 }
 
 /// R311y563 — TAKE `z_query_reply_options_t::source_info`, on the arm that has
@@ -360,9 +413,9 @@ pub(crate) struct QueryMarshal {
     is_local: bool,
     /// The FACE's session, on a marshal the dispatch built. `None` on one built
     /// outside a dispatch, which is exactly the case that cannot be escaped.
-    session: Option<TokioQueryHolder>,
+    session: Option<QueryRoute>,
     /// Present only on an ESCAPED marshal: the query held past its dispatch.
-    deferred: Option<TokioHeldQuery>,
+    deferred: Option<HeldRoute>,
     /// Reply accumulator.
     ///
     /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
@@ -448,7 +501,7 @@ impl QueryMarshal {
 
     /// Bind the FACE's session, so this marshal can be escaped. Called only by
     /// the dispatch; a marshal without it is un-escapable by construction.
-    fn with_session(mut self, session: TokioQueryHolder) -> Self {
+    fn with_session(mut self, session: QueryRoute) -> Self {
         self.session = Some(session);
         self
     }
@@ -457,7 +510,7 @@ impl QueryMarshal {
     /// back. The reply accumulator starts EMPTY rather than copied: replies the
     /// callback already asked for belong to the borrowed marshal's flush, and
     /// duplicating them here would send each one twice.
-    fn deep_copy_deferred(&self, held: TokioHeldQuery) -> Self {
+    fn deep_copy_deferred(&self, held: HeldRoute) -> Self {
         Self {
             keyexpr: self.keyexpr.clone(),
             parameters: self.parameters.clone(),
@@ -508,7 +561,7 @@ impl QueryMarshal {
     /// an escaped one.
     fn push_reply(&self, reply: PendingReply) {
         match self.deferred.as_ref() {
-            Some(held) => emit_held(held, reply),
+            Some(held) => emit_held(held, self.qos, reply),
             // SAFETY: see the `replies` field docs — the accumulator is touched
             // only from the callback's own thread.
             None => unsafe { (*self.replies.get()).push(reply) },
@@ -563,7 +616,7 @@ unsafe fn query_marshal<'a>(query: *const z_loaned_query_t) -> Option<&'a QueryM
 /// Build the wz-side queryable callback for ONE face from a shared C closure.
 fn make_queryable_callback(
     closure: Arc<CQueryClosure>,
-    session: TokioQueryHolder,
+    session: QueryRoute,
 ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
     move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
         let Some(call) = closure.call else {
@@ -735,16 +788,40 @@ pub(crate) unsafe fn queryable_declare_params(
 /// Behind a `z_owned_queryable_t` handle: the C queryable's id in the session's
 /// SSOT. Dropping it retracts the declaration on every live face.
 struct QueryableState {
-    shared: Arc<SharedSession>,
-    id: QblId,
+    holder: QueryableHolder,
     /// R311y568 — the keyexpr this queryable was declared under, so
     /// [`z_queryable_keyexpr`] can answer.
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
 }
 
+/// What a queryable is declared on, and so what retracts it.
+enum QueryableHolder {
+    /// The registry of faces: the queryable is a [`QblId`] of its SSOT.
+    Registry {
+        shared: Arc<SharedSession>,
+        id: QblId,
+    },
+    /// A node: the queryable is hosted on its data plane, which it holds counted so that it can
+    /// be withdrawn after the session handle has been let go of.
+    #[cfg(feature = "router-node")]
+    Node {
+        forwarder: Arc<wz_runtime_tokio::router_forward::RouterForwarder>,
+        /// The identity of the session, which `z_queryable_id` answers.
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        zid: [u8; 16],
+        id: u64,
+    },
+}
+
 impl Drop for QueryableState {
     fn drop(&mut self) {
-        self.shared.undeclare_queryable(self.id);
+        match &self.holder {
+            QueryableHolder::Registry { shared, id } => shared.undeclare_queryable(*id),
+            #[cfg(feature = "router-node")]
+            QueryableHolder::Node { forwarder, id, .. } => {
+                forwarder.unhost_queryable(*id);
+            }
+        }
     }
 }
 
@@ -778,10 +855,10 @@ pub unsafe extern "C" fn z_declare_queryable(
         *owned = z_owned_closure_query_t::null_value();
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
-            return unsafe { not_a_registry(session) };
+            return Z_ENULL;
         };
         let ke = ke.to_owned();
         // The same outbound gate the subscriber path applies, hoisted so the
@@ -793,17 +870,54 @@ pub unsafe extern "C" fn z_declare_queryable(
         let (complete, allowed_origin) = unsafe { queryable_declare_params(options) };
 
         let declared = ke.clone();
-        let id = state
-            .shared
-            .declare_queryable(ke, complete, allowed_origin, {
-                let closure = Arc::new(cclosure);
-                Arc::new(move |face: &TokioQueryHolder| {
-                    Box::new(make_queryable_callback(closure.clone(), face.clone())) as Box<_>
-                })
-            });
+        let closure = Arc::new(cclosure);
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let holder = match held {
+            SessionHandle::Registry(state) => {
+                let id = state.shared.declare_queryable(
+                    ke,
+                    complete,
+                    allowed_origin,
+                    Arc::new(move |face: &TokioQueryHolder| {
+                        Box::new(make_queryable_callback(
+                            closure.clone(),
+                            QueryRoute::Face(face.clone()),
+                        )) as Box<_>
+                    }),
+                );
+                QueryableHolder::Registry {
+                    shared: state.shared.clone(),
+                    id,
+                }
+            }
+            // A node hosts the queryable on its data plane, which hands it the queries of its
+            // own session and of its faces, as `allowed_origin` admits; the query is answered
+            // through the holder the node mints.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => {
+                let id = node.forwarder().host_queryable_from(
+                    &ke,
+                    complete,
+                    allowed_origin,
+                    Box::new(make_queryable_callback(
+                        closure,
+                        QueryRoute::Node(node.node_query_holder()),
+                    )),
+                );
+                QueryableHolder::Node {
+                    forwarder: node.shared_forwarder(),
+                    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+                    zid: held.zid(),
+                    id,
+                }
+            }
+        };
         let mut boxed = Box::new(QueryableState {
-            shared: state.shared.clone(),
-            id,
+            holder,
             keyexpr: crate::keyexpr::DeclaredKeyexpr::new(declared),
         });
         // Bind AFTER boxing — the state is at its final address only here.
@@ -869,7 +983,15 @@ pub unsafe extern "C" fn z_queryable_id(
         }
         // SAFETY: as above.
         let state = unsafe { &*(handle as *const QueryableState) };
-        crate::entity::z_entity_global_id_t::for_entity(&state.shared, queryable as *const c_void)
+        match &state.holder {
+            QueryableHolder::Registry { shared, .. } => {
+                crate::entity::z_entity_global_id_t::for_entity(shared, queryable as *const c_void)
+            }
+            #[cfg(feature = "router-node")]
+            QueryableHolder::Node { zid, .. } => {
+                crate::entity::z_entity_global_id_t::for_entity_of(*zid, queryable as *const c_void)
+            }
+        }
     })
 }
 
@@ -1985,9 +2107,9 @@ mod tests {
             source_info: Some(wz_runtime_tokio::sample::SourceInfo::new(&[4u8; 16], 1, 2)),
         };
         let borrowed = QueryMarshal::new(&view);
-        let mut escaped = borrowed.deep_copy_deferred(TokioHeldQuery::Unicast(
+        let mut escaped = borrowed.deep_copy_deferred(HeldRoute::Face(TokioHeldQuery::Unicast(
             shared.local_session().hold_query(&borrowed),
-        ));
+        )));
         escaped.bind();
         let loaned = &escaped as *const QueryMarshal as *const z_loaned_query_t;
         // SAFETY: `loaned` aims at a live, bound marshal on this frame.
