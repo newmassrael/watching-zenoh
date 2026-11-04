@@ -43,7 +43,10 @@
 /* --- Protocols: UDP only at R311az --- */
 #define LWIP_RAW                        0
 #define LWIP_UDP                        1
+/* The `tcp` feature of lwip-sys defines LWIP_TCP=1 on the command line; off, TCP is off. */
+#ifndef LWIP_TCP
 #define LWIP_TCP                        0
+#endif
 #define LWIP_ICMP                       1
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       0

@@ -36,7 +36,11 @@
 /* --- Protocols: UDP only at R311az-1 --- */
 #define LWIP_RAW                        0
 #define LWIP_UDP                        1
+/* TCP is the `tcp` feature of lwip-sys: build.rs defines LWIP_TCP=1 on the command line when the
+ * feature is on, and this port leaves it off otherwise. */
+#ifndef LWIP_TCP
 #define LWIP_TCP                        0
+#endif
 #define LWIP_ICMP                       1
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       0

@@ -16,6 +16,7 @@
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/udp.h"
+#include "lwip/tcp.h" /* empty unless the port enables LWIP_TCP (the `tcp` feature) */
 #include "lwip/pbuf.h"
 #include "lwip/timeouts.h"
 #include "lwip/ip_addr.h"

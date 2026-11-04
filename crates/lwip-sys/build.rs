@@ -136,7 +136,7 @@ fn main() {
     //
     // Source set enumeration follows lwIP's own FILES manifest for
     // the NO_SYS=1 + IPv4 + UDP + ARP/ethernet configuration. TCP
-    // sources are intentionally excluded (LWIP_TCP=0 in lwipopts.h);
+    // sources are excluded unless the `tcp` feature is on (see below);
     // including them would link but inflate the static lib. IPv6 and
     // DHCP/AUTOIP/DNS sources are excluded for the same reason.
     //
@@ -145,7 +145,16 @@ fn main() {
     // tool lookup. If the cross toolchain is not installed the build
     // surfaces a clear cc-crate-level error rather than silently
     // falling back to the host compiler.
+    // The `tcp` feature: the TCP sources are compiled and every translation unit, the sources, the
+    // shim and bindgen alike, sees `LWIP_TCP=1`. The port headers leave TCP off unless it is
+    // defined (`#ifndef LWIP_TCP`), so the feature is the one place that decides, for a host port
+    // and a deploy-supplied one.
+    let tcp = env::var_os("CARGO_FEATURE_TCP").is_some();
+
     let mut build = cc::Build::new();
+    if tcp {
+        build.define("LWIP_TCP", "1");
+    }
     build
         .include(&port_inc)
         .include(&lwip_inc)
@@ -187,6 +196,13 @@ fn main() {
     ];
     for f in core_files {
         build.file(lwip_src.join(f));
+    }
+    // core/ — TCP: the protocol control block, input and output. Compiled only with the `tcp`
+    // feature; without it they would link but inflate the static library.
+    if tcp {
+        for f in ["core/tcp.c", "core/tcp_in.c", "core/tcp_out.c"] {
+            build.file(lwip_src.join(f));
+        }
     }
 
     // R2390 — the netif carrier seam. Compiled HERE rather than bound, because
@@ -230,6 +246,9 @@ fn main() {
         // std on hosted targets — no host regression.
         .use_core()
         .ctypes_prefix("::core::ffi");
+    if tcp {
+        bindgen_builder = bindgen_builder.clang_arg("-DLWIP_TCP=1");
+    }
 
     // R311az-3b — cross-target bindings.
     //
@@ -274,6 +293,25 @@ fn main() {
         .allowlist_function("udp_recv")
         .allowlist_function("udp_send")
         .allowlist_function("udp_sendto")
+        // TCP raw API (`tcp` feature; absent from the headers without it, so these name
+        // nothing then). `tcp_listen` is a macro over `tcp_listen_with_backlog`.
+        .allowlist_function("tcp_new")
+        .allowlist_function("tcp_bind")
+        .allowlist_function("tcp_listen_with_backlog")
+        .allowlist_function("tcp_accept")
+        .allowlist_function("tcp_connect")
+        .allowlist_function("tcp_arg")
+        .allowlist_function("tcp_recv")
+        .allowlist_function("tcp_sent")
+        .allowlist_function("tcp_err")
+        .allowlist_function("tcp_write")
+        .allowlist_function("tcp_output")
+        .allowlist_function("tcp_recved")
+        .allowlist_function("tcp_close")
+        .allowlist_function("tcp_abort")
+        .allowlist_type("tcp_pcb")
+        .allowlist_type("tcp_pcb_listen")
+        .allowlist_type("tcp_state")
         // IGMP multicast membership (R311ir scout RX). join/leave on
         // IP4_ADDR_ANY apply to every IGMP-capable netif; the udp_pcb
         // bound to the scout port then receives the joined group.

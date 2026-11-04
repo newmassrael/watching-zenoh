@@ -47,6 +47,12 @@ links = "lwip"
 name = "lwip_sys"
 path = "src/lib.rs"
 
+[features]
+# The TCP raw API (`tcp_*`) of the vendored lwIP: compiles lwIP's TCP sources, defines LWIP_TCP=1 for
+# every translation unit (the port's lwipopts.h leaves TCP off unless it is defined) and binds the
+# functions the stream link uses. Off, the library and the bindings are the UDP-only ones.
+tcp = []
+
 [build-dependencies]
 # cc 1.x compiles the vendored lwIP NO_SYS source set into a static
 # liblwip.a inside $OUT_DIR. Same crate the rest of the ecosystem uses
