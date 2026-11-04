@@ -175,6 +175,9 @@ pub struct SessionListener<const LANES: usize> {
     socket: OnceCell<RefCell<SessionRxSocket>>,
     peers: [Cell<Option<Peer>>; LANES],
     counts: Cell<ListenerCounts>,
+    /// The most lanes that have belonged to a session at once: zero-sized unless the build keeps
+    /// the mark (`pool-monitor`), so the listener is the size it was.
+    high: Cell<wz_session_core::pool_gauge::HighWater>,
 }
 
 // SAFETY: the profile's rule, stated in the module's last paragraph. The listener is
@@ -202,6 +205,7 @@ impl<const LANES: usize> SessionListener<LANES> {
                 refused_no_task_cell: 0,
                 strays: 0,
             }),
+            high: Cell::new(wz_session_core::pool_gauge::HighWater::new()),
         }
     }
 
@@ -258,6 +262,12 @@ impl<const LANES: usize> SessionListener<LANES> {
     fn reserve(&'static self, peer: Peer) -> Option<LaneGuard> {
         let index = self.peers.iter().position(|lane| lane.get().is_none())?;
         self.peers[index].set(Some(peer));
+        #[cfg(feature = "pool-monitor")]
+        {
+            let mut mark = self.high.get();
+            mark.note(self.in_use());
+            self.high.set(mark);
+        }
         Some(LaneGuard {
             table: self,
             index,
@@ -346,6 +356,32 @@ impl<const LANES: usize> SessionListener<LANES> {
                 }
             }
         }
+    }
+}
+
+/// The lanes say their state as a pool (`pool-monitor`, `docs/pool-monitor.md`): the lanes, those
+/// that belong to a session, the most that did at once where the build keeps the mark, and the
+/// `InitSyn`s dropped for want of a lane. The `InitSyn`s another table refused are those tables'.
+impl<const LANES: usize> wz_session_core::pool_gauge::PoolGauge for SessionListener<LANES> {
+    fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
+        wz_session_core::pool_gauge::PoolStat {
+            name,
+            capacity: u32::try_from(LANES).unwrap_or(u32::MAX),
+            in_use: u32::try_from(self.in_use()).unwrap_or(u32::MAX),
+            high_water: self.high.get().get(),
+            refused: u64::from(self.counts.get().refused_no_lane),
+        }
+    }
+}
+
+/// The listener lists its lanes as `listener-lanes`; a node lists it with its session host as
+/// `(&host, &listener)`.
+impl<const LANES: usize> wz_session_core::pool_gauge::PoolList for SessionListener<LANES> {
+    fn visit_pools(&self, visit: &mut dyn FnMut(wz_session_core::pool_gauge::PoolStat)) {
+        visit(wz_session_core::pool_gauge::PoolGauge::pool_stat(
+            self,
+            "listener-lanes",
+        ));
     }
 }
 

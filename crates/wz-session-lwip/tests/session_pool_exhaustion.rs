@@ -522,6 +522,41 @@ fn fill_then_refuse<
             "{why:?}: the pump cells' mark {mark}"
         );
     }
+    // The listener's lanes are a pool of their own, listed beside the host's: they hold the
+    // sessions it accepted, refuse for want of a lane only, and keep a mark between what is held
+    // and the capacity (a refused attempt of another table took a lane before it was refused).
+    let lanes = wz_session_core::pool_gauge::PoolGauge::pool_stat(rig.listener, "listener-lanes");
+    assert_eq!(
+        (lanes.capacity as usize, lanes.in_use as usize),
+        (rig.listener.capacity(), fill),
+        "{why:?}: the lanes held"
+    );
+    assert_eq!(
+        lanes.refused,
+        u64::from(lane),
+        "{why:?}: the lanes' refusals"
+    );
+    assert_eq!(
+        lanes.high_water.is_some(),
+        cfg!(feature = "pool-monitor"),
+        "{why:?}: the lanes' mark is kept exactly when the build asks"
+    );
+    if let Some(mark) = lanes.high_water {
+        assert!(
+            (fill..=rig.listener.capacity()).contains(&(mark as usize)),
+            "{why:?}: the lanes' mark {mark}"
+        );
+    }
+    let mut together = Vec::new();
+    wz_session_core::pool_gauge::PoolList::visit_pools(
+        &(&rig.acceptor, rig.listener),
+        &mut |pool| together.push(pool),
+    );
+    assert_eq!(
+        together,
+        [slots, cells, tasks, lanes],
+        "{why:?}: the host's pools, then the listener's"
+    );
     let mut document = String::new();
     wz_session_core::pool_gauge::write_pool_document(&rig.acceptor, &mut document)
         .expect("the document is written");

@@ -65,6 +65,23 @@ pub trait PoolList {
     fn visit_pools(&self, visit: &mut dyn FnMut(PoolStat));
 }
 
+/// A borrowed owner lists what it owns, so a program can hand a list a reference.
+impl<T: PoolList + ?Sized> PoolList for &T {
+    fn visit_pools(&self, visit: &mut dyn FnMut(PoolStat)) {
+        (**self).visit_pools(visit);
+    }
+}
+
+/// Two owners listed as one, the first's pools and then the second's: a node whose pools live in
+/// more than one owner (its session host and its listener) lists them as `(&host, &listener)`
+/// and writes one document.
+impl<A: PoolList, B: PoolList> PoolList for (A, B) {
+    fn visit_pools(&self, visit: &mut dyn FnMut(PoolStat)) {
+        self.0.visit_pools(visit);
+        self.1.visit_pools(visit);
+    }
+}
+
 /// The version of the document [`write_pool_document`] writes. A reader that does not know a
 /// version reads none of it.
 pub const POOL_DOCUMENT_VERSION: u32 = 1;
@@ -240,6 +257,22 @@ mod tests {
         let mut none = std::string::String::new();
         write_pool_document(&Owner(std::vec![]), &mut none).unwrap();
         assert_eq!(none, "{\"version\":1,\"pools\":[]}");
+    }
+
+    /// Two owners listed as a pair give the first's pools and then the second's, and a reference to
+    /// an owner lists as the owner does.
+    #[test]
+    fn a_pair_of_owners_lists_the_first_then_the_second() {
+        let first = Owner(std::vec![stat("sessions", Some(3))]);
+        let second = Owner(std::vec![stat("lanes", None), stat("cells", None)]);
+        let mut names = std::vec::Vec::new();
+        (&first, &second).visit_pools(&mut |pool| names.push(pool.name));
+        assert_eq!(names, ["sessions", "lanes", "cells"]);
+
+        let mut text = std::string::String::new();
+        write_pool_document(&(&first, &second), &mut text).unwrap();
+        assert!(text.starts_with("{\"version\":1,\"pools\":[{\"name\":\"sessions\","));
+        assert!(text.ends_with("\"refused\":2}]}"));
     }
 
     /// A name the document cannot carry is an error, not a quotation mark let through.
