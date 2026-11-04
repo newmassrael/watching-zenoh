@@ -184,9 +184,14 @@ impl ReleaseLatch {
 /// callbacks run through declares this LAST: fields drop in declaration order, so the wait comes
 /// after everything before it has let go, which a `Drop::drop` body cannot say. The default waits
 /// for nothing, which is what an owner whose callbacks are not the program's holds.
+///
+/// Its holders are the advanced publisher's and subscriber's states, so it exists where they do;
+/// a build without `advanced` (the client-only and reduced builds) would carry it unused.
+#[cfg(feature = "advanced")]
 #[derive(Default)]
 pub(crate) struct AwaitRelease(LatchList);
 
+#[cfg(feature = "advanced")]
 impl AwaitRelease {
     pub(crate) fn new(latch: Arc<ReleaseLatch>) -> Self {
         let list = LatchList::default();
@@ -206,6 +211,7 @@ impl AwaitRelease {
     }
 }
 
+#[cfg(feature = "advanced")]
 impl Drop for AwaitRelease {
     fn drop(&mut self) {
         self.0.wait_all();
