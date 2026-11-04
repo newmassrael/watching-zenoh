@@ -216,6 +216,20 @@ impl GetProbe {
 /// # Safety
 /// `zs` must be a live loaned session.
 unsafe fn issue_get(zs: *const wz_capi_pico::z_loaned_session_t, timeout_ms: u64) -> GetProbe {
+    let (rc, probe) = issue_get_returning(zs, timeout_ms);
+    assert_eq!(rc, Z_OK);
+    probe
+}
+
+/// [`issue_get`] that hands back the return code of `z_get` instead of asserting it, for the one
+/// caller that asks a session that no longer takes queries.
+///
+/// # Safety
+/// `zs` must be a live loaned session.
+unsafe fn issue_get_returning(
+    zs: *const wz_capi_pico::z_loaned_session_t,
+    timeout_ms: u64,
+) -> (i8, GetProbe) {
     let probe = GetProbe::new();
     let ctx = Box::into_raw(Box::new(RCtx {
         replies: probe.replies.clone(),
@@ -241,18 +255,18 @@ unsafe fn issue_get(zs: *const wz_capi_pico::z_loaned_session_t, timeout_ms: u64
     z_get_options_default(&mut opts);
     opts.timeout_ms = timeout_ms;
 
-    assert_eq!(
-        z_get(
-            zs,
-            wz_capi_pico::z_view_keyexpr_loan(&ke),
-            std::ptr::null(),
-            z_closure_reply_move(&mut closure),
-            &mut opts
-        ),
-        Z_OK
+    let rc = z_get(
+        zs,
+        wz_capi_pico::z_view_keyexpr_loan(&ke),
+        std::ptr::null(),
+        z_closure_reply_move(&mut closure),
+        &mut opts,
     );
-    probe
+    (rc, probe)
 }
+
+/// pico `_Z_ERR_SESSION_CLOSED` (`utils/result.h`), what `z_get` answers on a closed session.
+const Z_ERR_SESSION_CLOSED: i8 = -73;
 
 // --- the wz-native far end -------------------------------------------------
 
@@ -988,10 +1002,15 @@ fn c_close_completes_an_in_flight_get() {
         );
         assert_eq!(probe.completions.load(Ordering::SeqCst), 1);
 
-        // A get issued AFTER close sees an empty peer set and completes at once
-        // — pico's behaviour for a closed session. Before clear_faces this
-        // found the orphaned faces and hung forever.
-        let after = issue_get(z_session_loan(&zs), 30_000);
+        // A get issued AFTER close sees an empty peer set: its closure is dropped at once and the
+        // call answers `_Z_ERR_SESSION_CLOSED` (pico `_z_query`, `net/primitives.c`: no targets
+        // runs the dropper, then `_z_session_is_closed ? _Z_ERR_SESSION_CLOSED : _Z_RES_OK`).
+        // Before clear_faces this found the orphaned faces and hung forever.
+        let (rc, after) = issue_get_returning(z_session_loan(&zs), 30_000);
+        assert_eq!(
+            rc, Z_ERR_SESSION_CLOSED,
+            "a get on a closed session says so, as pico's _z_query does"
+        );
         assert!(
             after.is_complete(),
             "a get after z_close must complete immediately (empty peer set), not hang"
