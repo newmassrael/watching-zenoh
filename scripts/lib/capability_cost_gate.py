@@ -107,6 +107,11 @@ COOP_LISTEN = r"wz_capi_coop::engine::Listening<"
 # The cooperative engine's scouting window (`wz_capi_coop::scout`) and the session's window it
 # pumps: what a cooperative build that scouts has and the tokio engine's `SCOUTING` is not.
 COOP_SCOUT = r"wz_capi_coop::scout|scouting_host"
+# The node a session of the C ABI can hold behind its handle (`router-node`): the router data
+# plane run as a session, which a build without the feature opens none of. The pattern is the
+# module only the feature compiles and not `RouterForwarder`, whose accept loop a default build
+# instantiates too (capic-default's note).
+ROUTER_NODE = r"drive::router_node::"
 
 
 @dataclass(frozen=True)
@@ -505,11 +510,13 @@ CASES: tuple[Case, ...] = (
               "under the hosted ones (capic-default's note), so the budget is the build "
               "machine's reading and 3,500, to the hundred"),
     Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
+                 ROUTER_NODE)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_978_300,
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_982_700,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
+                 ROUTER_NODE),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
               "capic-client's 2,172,515 (-17.2%). 1,839,572 on hosted CI on 2026-10-27 (head "
@@ -546,16 +553,36 @@ CASES: tuple[Case, ...] = (
               "of the round that ends the queries pending on a face with it (1,277 over): "
               "the head under it was not measured here, so what is that round's and what the "
               "earlier rounds' is not separated, and the budget is that reading and 3,500, "
-              "rounded up to the hundred."),
+              "rounded up to the hundred. 1,979,119 measured on a build machine (hkl002) on "
+              "2026-11-04 at `b01d6bc9dd` (819 over 1,978,300, +4,340 over the hosted reading "
+              "of 1,974,779 the budget was set from): the session handle of the C ABI, which "
+              "holds the registry of faces or a node and which every operation of this ABI "
+              "reads through, is in every build that holds a session, and is the likely "
+              "growth; it was not bisected, and a symbol diff would be needed to say so. The "
+              "budget is that reading and 3,500, rounded up to the hundred."),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
-         forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
+         forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST, ROUTER_NODE),
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
-         forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
+         forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST, ROUTER_NODE),
+         require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
+    # The C ABI as a node (`router-node`, which implies `peer` and the query and liveliness
+    # planes): the router data plane behind a session handle, which no build without the feature
+    # links (the forbid of the cases above and of capic-default). 5,735,886 text and 743 exports
+    # measured on a build machine (hkl002) on 2026-11-04 at `b01d6bc9dd`, the first reading of
+    # it: against capic-peer's 3,425,868 and 591, the node, the query and liveliness planes the
+    # feature implies, and their doors. The budget is that reading and 3,500, rounded up to the
+    # hundred. The first build of this case did not compile: the node used the interceptors'
+    # `install_on` and the gossip policy's autoconnect fields without their features.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_739_400,
+         require=(ROUTER_NODE, ACCEPT, RESPONDER),
+         note="router-node: the C ABI that opens a router, and a peer or client that keeps its "
+              "south apart, as the router data plane"),
     # 2026-11-03, the SCE pins -- 9,456,022 on hosted run 41589047498 and 9,458,478 on hkl001 at
     # the head (the larger), the growth pico-client-coop's note of this day attributes; that and
     # 3,500.
     Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_467_100,
+         forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "

@@ -510,7 +510,12 @@ pub(crate) fn open_router_blocking(
         forwarder.set_gossip_multihop(gossip.multihop);
     }
     let forwarder = Arc::new(forwarder);
+    // The traffic policy the config states, which a build without the interceptors never holds:
+    // the plan refuses a document that states one there.
+    #[cfg(feature = "interceptors")]
     policy.install_on(&*forwarder);
+    #[cfg(not(feature = "interceptors"))]
+    let _ = policy;
     // The program's own reader of shared memory, for the subscribers of the node's session: a
     // descriptor is read into the buffer the program works with.
     #[cfg(feature = "transport-shm")]
@@ -532,6 +537,7 @@ pub(crate) fn open_router_blocking(
     let (dial_intents, scout_intents) = match (role, gossip) {
         (NodeRole::Peer, gossip) if gossip.is_some() || scouts => {
             let (intents_tx, intents_rx) = tokio::sync::mpsc::unbounded_channel();
+            #[cfg(feature = "gossip")]
             if let Some(policy) = gossip {
                 forwarder.enable_autoconnect_into(
                     wz_runtime_tokio::linkstate_forward::AutoConnect::with_strategies(
