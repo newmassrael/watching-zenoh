@@ -450,6 +450,21 @@ required-features = [
     "session-slot",
 ]
 
+# A session over `tcp/` on the slot profile -- one node dials, one accepts, and the handshake runs
+# through lwIP's TCP and the engine's stream link, then the dialler closes. The selector `session-slot`
+# is the profile; `tcp` the stream.
+[[test]]
+name = "session_over_tcp"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "transport-keepalive",
+    "codec-close",
+    "session-slot",
+    "tcp",
+]
+
 # Fixed-memory step S6 (exhaustion case R2) -- the dialling side: a node dials
 # `MAX_SESSIONS` sessions and is asked for one more, by each table that can be the
 # full one (the socket pool, the session table, the pump table, the task table). On
