@@ -57,6 +57,17 @@ pub const Z_WHATAMI_PEER: c_int = 2;
 /// `Z_WHATAMI_CLIENT` = 4.
 pub const Z_WHATAMI_CLIENT: c_int = 4;
 
+/// The three roles as DATA symbols, which zenoh-c exports beside the `z_whatami_t` enum
+/// (`zenoh_commons.h`: `extern const unsigned int Z_ROUTER`, `Z_PEER`, `Z_CLIENT`). A program
+/// that names them without the enum links against these, and a shared library that lacks them
+/// leaves it with an undefined reference; the values are the bits of the role mask above.
+#[no_mangle]
+pub static Z_ROUTER: std::ffi::c_uint = Z_WHATAMI_ROUTER as std::ffi::c_uint;
+#[no_mangle]
+pub static Z_PEER: std::ffi::c_uint = Z_WHATAMI_PEER as std::ffi::c_uint;
+#[no_mangle]
+pub static Z_CLIENT: std::ffi::c_uint = Z_WHATAMI_CLIENT as std::ffi::c_uint;
+
 /// zenoh-c `z_scout_options_t` (`zenoh_commons.h:1115-1125`) — 16 bytes.
 #[repr(C)]
 pub struct z_scout_options_t {
@@ -129,10 +140,31 @@ pub unsafe extern "C" fn z_whatami_to_view_string(
 }
 
 /// Behind a hello handle: one discovered peer.
+#[repr(C)]
 pub(crate) struct HelloState {
+    /// This state's own address, set once it sits where it stays: the first word a loaned
+    /// pointer names (`crate::loan_at`), so a pointer to the state and a pointer to an owned
+    /// hello that holds it both read back as this state.
+    me: usize,
     zid: z_id_t,
     whatami: c_int,
     locators: Vec<String>,
+}
+
+impl HelloState {
+    fn new(zid: z_id_t, whatami: c_int, locators: Vec<String>) -> Self {
+        Self {
+            me: 0,
+            zid,
+            whatami,
+            locators,
+        }
+    }
+
+    /// Record the address this state is at. Call it once the state is where it stays.
+    fn bind(&mut self) {
+        self.me = self as *const HelloState as usize;
+    }
 }
 
 /// Read the [`HelloState`] behind a loaned hello.
@@ -140,16 +172,14 @@ pub(crate) struct HelloState {
 /// # Safety
 /// `this_` must be null or a valid loaned hello whose handle is live.
 unsafe fn hello_state<'a>(this_: *const z_loaned_hello_t) -> Option<&'a HelloState> {
-    if this_.is_null() {
+    // SAFETY: the caller's contract — the first word at `this_` is the state's address, whether
+    // `this_` is the state or the owned hello that holds it (`crate::loan_at`).
+    let at = unsafe { crate::loan_at::state_addr(this_ as *const c_void) };
+    if at == 0 {
         return None;
     }
-    // SAFETY: the caller's contract.
-    let handle = unsafe { (*this_).handle };
-    if handle.is_null() {
-        return None;
-    }
-    // SAFETY: a live `HelloState` this crate owns for the callback's duration.
-    Some(unsafe { &*(handle as *const HelloState) })
+    // SAFETY: a live `HelloState` this crate owns.
+    Some(unsafe { &*(at as *const HelloState) })
 }
 
 /// The discovered peer's zid (zenoh-c `z_hello_zid`).
@@ -281,11 +311,13 @@ pub unsafe extern "C" fn z_hello_clone(dst: *mut z_owned_hello_t, this_: *const 
         let Some(state) = (unsafe { hello_state(this_) }) else {
             return;
         };
-        let handle = Box::into_raw(Box::new(HelloState {
-            zid: state.zid,
-            whatami: state.whatami,
-            locators: state.locators.clone(),
-        })) as Handle;
+        let mut copy = Box::new(HelloState::new(
+            state.zid,
+            state.whatami,
+            state.locators.clone(),
+        ));
+        copy.bind();
+        let handle = Box::into_raw(copy) as Handle;
         // SAFETY: the caller's contract.
         unsafe { *dst = z_owned_hello_t::from_handle(handle) };
     });
@@ -294,21 +326,30 @@ pub unsafe extern "C" fn z_hello_clone(dst: *mut z_owned_hello_t, this_: *const 
 /// Take ownership of a mutably borrowed hello (zenoh-c
 /// `z_hello_take_from_loaned`).
 ///
-/// A COPY rather than a move, for the reason spelled out at
-/// [`crate::sample::z_sample_take_from_loaned`]: the loaned pointer's storage
-/// belongs to a callback frame or to a live owned value, and nothing in the
-/// pointer says which.
+/// A MOVE out of an owned hello, a COPY out of a callback's argument, for the reason spelled out
+/// at [`crate::sample::z_sample_take_from_loaned`]: the loaned pointer names either a live owned
+/// value, which is emptied, or a callback frame's state, which is copied (`crate::loan_at`).
 ///
 /// # Safety
-/// `dst` must be null or valid and writable; `src` must be null or a live loaned
-/// hello.
+/// `dst` must be null or valid and writable; `src` must be null, a live owned hello or a live
+/// loaned hello.
 #[no_mangle]
 pub unsafe extern "C" fn z_hello_take_from_loaned(
     dst: *mut z_owned_hello_t,
     src: *mut z_loaned_hello_t,
 ) {
-    // SAFETY: the caller's contract, delegated.
-    unsafe { z_hello_clone(dst, src as *const z_loaned_hello_t) };
+    if dst.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    match unsafe { crate::loan_at::take_slot(src as *mut c_void, z_owned_hello_t::null_value()) } {
+        Some(handle) => {
+            // SAFETY: the caller's contract — `dst` is writable. The word moved is not followed.
+            unsafe { *dst = z_owned_hello_t::from_handle(handle as Handle) }
+        }
+        // SAFETY: the caller's contract, delegated.
+        None => unsafe { z_hello_clone(dst, src as *const z_loaned_hello_t) },
+    }
 }
 
 /// Free an owned hello (zenoh-c `z_hello_drop`).
@@ -484,20 +525,22 @@ pub unsafe extern "C" fn z_scout(
             let Some(call) = user_call else {
                 return;
             };
-            let state = HelloState {
-                zid: z_id_t::from_wire(&hello.zid),
-                whatami: hello
+            let mut state = HelloState::new(
+                z_id_t::from_wire(&hello.zid),
+                hello
                     .whatami
                     .map_or(Z_WHATAMI_PEER, |w| c_int::from(w.to_api())),
-                locators: hello.locators.clone(),
-            };
-            let mut loaned =
-                z_loaned_hello_t::from_handle(&state as *const HelloState as *mut c_void);
+                hello.locators.clone(),
+            );
+            // Bound where it stays: the callback's argument is the state itself, the first word
+            // of which is its address (`crate::loan_at`).
+            state.bind();
+            let loaned = &state as *const HelloState as *mut z_loaned_hello_t;
             // SAFETY: `call` is the C callback and `state` outlives it; the
             // borrowed hello is valid only for its duration. An unwind across
             // the C boundary is UB, so it is caught.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                call(&mut loaned as *mut z_loaned_hello_t, user_ctx);
+                call(loaned, user_ctx);
             }));
         });
 

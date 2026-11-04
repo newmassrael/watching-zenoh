@@ -3208,6 +3208,26 @@ impl SharedSession {
         R: Fn(&TokioSession, PublishOptions, &P) -> Leg,
         L: FnOnce(&TokioSession, PublishOptions, P) -> Leg,
     {
+        // ONE timestamp for the publish, minted here before any leg reads `opts`: every leg
+        // (each face's session and the local plane) would otherwise take the next one off the
+        // node's clock for itself, and a subscriber over the wire and one in this session would
+        // be handed two different times for one put. zenoh resolves it once, at the head of
+        // `resolve_put` (`timestamp.or_else(|| self.runtime.new_timestamp())`), and hands the
+        // same value to the wire and to the session-local delivery. A caller's own wins.
+        // Measured: a publication cache stores the local copy and a querying subscriber hears
+        // the wire one, and with two times they were two samples, so the value was delivered
+        // twice (`z_int_pub_cache_query_sub_test` under load).
+        let stamped;
+        let opts = match opts.timestamp {
+            None => match self.node_timestamp() {
+                Some(timestamp) => {
+                    stamped = opts.clone().with_timestamp(timestamp);
+                    &stamped
+                }
+                None => opts,
+            },
+            Some(_) => opts,
+        };
         let targets = self.fan_targets();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {

@@ -427,6 +427,37 @@ fn each_subsystem_runs_on_threads_named_for_it() {
     }
 }
 
+/// A pool can be stopped through a shared reference, which is what the process-wide pool needs
+/// (`WzRuntime::stop_all`, behind `zc_stop_z_runtime`): its threads end and the call returns,
+/// work spawned before it has run, and work spawned after it is dropped unrun rather than
+/// panicking or hanging the spawner.
+#[test]
+fn a_stopped_pool_ends_its_threads_and_runs_nothing_more() {
+    let pool = RuntimePool::new(RuntimeParams::defaults()).expect("defaults are a valid partition");
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let before = pool.spawn(WzRuntime::Net, record_thread_name(Arc::clone(&slot)));
+    pool.handle(WzRuntime::Net)
+        .block_on(before)
+        .expect("a task spawned before the stop runs");
+    assert!(slot.lock().expect("slot").is_some());
+
+    let stopped = std::time::Instant::now();
+    pool.shutdown();
+    assert!(
+        stopped.elapsed() < Duration::from_secs(10),
+        "the stop returns once the runtimes have ended"
+    );
+
+    let after = pool.spawn(WzRuntime::Net, async { 1 });
+    let ambient = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime to wait on the join handle from");
+    assert!(
+        ambient.block_on(after).is_err(),
+        "work spawned onto a stopped pool is dropped, not run"
+    );
+}
+
 /// `PartitionedRuntime` is the `Runtime` trait bound to one subsystem, and it
 /// routes there rather than to the ambient runtime — asserted from inside an
 /// ambient runtime, which is the case that could hide the difference.

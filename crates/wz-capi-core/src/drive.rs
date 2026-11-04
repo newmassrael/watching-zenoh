@@ -18,6 +18,9 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+// Only the tests build a channel of their own: the open's hand-off to its caller is
+// `crate::handoff`, which parks the caller without a std `Thread` handle.
+#[cfg(test)]
 use std::sync::mpsc;
 use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, Condvar};
@@ -63,6 +66,7 @@ use wz_runtime_tokio::startup_phase::{
 use crate::faces::{CApiForwarder, GossipSetup};
 use crate::faces::{OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
 use crate::gossip::GossipPolicy;
+use crate::handoff::{handoff, Reporter};
 #[cfg(feature = "scout")]
 use crate::scouting_node::{ScoutLink, ScoutingPlan};
 #[cfg(feature = "peer")]
@@ -363,7 +367,7 @@ impl OpenError {
 }
 
 /// Where the drive role reports whether the session opened, and why not.
-type OpenReport = mpsc::Sender<Result<(), OpenError>>;
+type OpenReport = Reporter<Result<(), OpenError>>;
 
 // --- the read task ---------------------------------------------------------
 
@@ -1603,14 +1607,24 @@ async fn drive_dial(
     //
     // R3076 -- every endpoint the config states, in its order, under `listen/exit_on_failure`.
     // R3089 -- and under the budget and the retry of `listen/timeout_ms` and `listen/retry`.
-    let BoundListeners { legs: listen, late } =
-        match bind_listeners(&listen, listen_phase, &tls, &zid, link_conf, offer, clock).await {
-            Ok(bound) => bound,
-            Err(cause) => {
-                let _ = tx.send(Err(cause));
-                return;
-            }
-        };
+    let BoundListeners { legs: listen, late } = match bind_listeners(
+        &listen,
+        listen_phase,
+        &tls,
+        &zid,
+        link_conf,
+        offer,
+        clock,
+        whatami,
+    )
+    .await
+    {
+        Ok(bound) => bound,
+        Err(cause) => {
+            let _ = tx.send(Err(cause));
+            return;
+        }
+    };
     // R3074 -- where gossip tells a neighbour this node can be dialled: the locators the
     // listeners ACTUALLY got, without the loopback ones, as upstream's `get_locators_noloopback`
     // lists them. Set before the first face can come up, so the first list a neighbour is sent
@@ -3030,6 +3044,8 @@ struct LateBinds {
     bound_before: Vec<String>,
     /// Whether the session gossips, so that the locators of a late listener are told to it too.
     gossiping: bool,
+    /// The role the session was opened as, which a late listener answers a dial-in with.
+    whatami: WhatAmI,
 }
 
 #[cfg(feature = "peer")]
@@ -3088,6 +3104,7 @@ impl LateBinds {
             locators,
             bound_before,
             gossiping,
+            whatami,
         } = self;
         pending
             .into_iter()
@@ -3098,7 +3115,7 @@ impl LateBinds {
                 let mut closing = closing.clone();
                 tokio::task::spawn_local(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
-                        bind_one(&pending.endpoint, &tls, &zid, link_conf)
+                        bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
                     });
                     let listening = tokio::select! {
                         listening = bound => listening,
@@ -3140,6 +3157,7 @@ impl LateBinds {
             locators,
             bound_before,
             gossiping,
+            whatami,
             ..
         } = self;
         let local = tokio::task::LocalSet::new();
@@ -3153,7 +3171,7 @@ impl LateBinds {
                         let (shared, bound_before) = (shared.clone(), bound_before.clone());
                         tokio::task::spawn_local(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
-                                bind_one(&pending.endpoint, &tls, &zid, link_conf)
+                                bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
                             })
                             .await;
                             // A client that answers a Scout names its listener as it binds, and
@@ -3205,8 +3223,9 @@ async fn bind_one(
     tls: &CapiTlsConfig,
     zid: &[u8],
     link_conf: LinkConf,
+    whatami: WhatAmI,
 ) -> Result<Listening, OpenError> {
-    bind_listener(endpoint, tls, zid, link_conf).await
+    bind_listener(endpoint, tls, zid, link_conf, whatami).await
 }
 
 /// Bind the endpoints a session's `listen` states, in the order the config states them, under the
@@ -3232,6 +3251,7 @@ async fn bind_one(
 /// they were bound; each carries the place its endpoint was stated at, and that is what names its
 /// face ids.
 #[cfg(feature = "peer")]
+#[allow(clippy::too_many_arguments)]
 async fn bind_listeners(
     endpoints: &[String],
     phase: ListenPhase,
@@ -3240,11 +3260,12 @@ async fn bind_listeners(
     link_conf: LinkConf,
     offer: SessionOffer,
     clock: TokioTime,
+    whatami: WhatAmI,
 ) -> Result<BoundListeners, OpenError> {
     // A phase that fails names why its last attempt did; one cut off before any answered is a
     // link that did not open.
     let outcome = drive_bind_phase(phase.policy, phase.schedule, endpoints, |position, _| {
-        bind_one(&endpoints[position], tls, zid, link_conf)
+        bind_one(&endpoints[position], tls, zid, link_conf, whatami)
     })
     .await
     .map_err(|e| {
@@ -3282,6 +3303,7 @@ async fn bind_listeners(
             locators: LateLocators::default(),
             bound_before: Vec::new(),
             gossiping: false,
+            whatami,
         },
     })
 }
@@ -3299,6 +3321,7 @@ async fn bind_listener(
     tls: &CapiTlsConfig,
     zid: &[u8],
     link_conf: LinkConf,
+    whatami: WhatAmI,
 ) -> Result<Listening, OpenError> {
     // Everything that can fail the open runs BEFORE the success signal the
     // caller sends, so a failure is reported to the C caller rather than
@@ -3344,7 +3367,10 @@ async fn bind_listener(
     // the open succeeded, so an entropy failure could only be reported as "no
     // peer ever connects". Built before the bind is announced, it is an ordinary
     // open failure like the two above.
-    let params = init_params(WhatAmI::Peer, zid.to_vec(), link_conf).map_err(|e| {
+    // The role the session was opened as, which is what the INIT answer tells a node that
+    // dials in: a `mode: router` session says Router, so the dialler lists it among its
+    // routers (`z_info_routers_zid`) and not among its peers. It was always Peer here.
+    let params = init_params(whatami, zid.to_vec(), link_conf).map_err(|e| {
         log_open_failure(&format!("session parameters for {endpoint}"), &e);
         OpenError::DriveFailed
     })?;
@@ -3498,6 +3524,7 @@ async fn drive_listen(
         link_conf,
         offer,
         clock,
+        whatami,
     )
     .await
     {
@@ -4493,7 +4520,7 @@ pub fn open_blocking(
     let shutdown = Arc::new(Notify::new());
     // The node's own closed latch, not a new one: every entity holding `shared` reads it.
     let stop = shared.closed_latch();
-    let (tx, rx) = mpsc::channel::<Result<(), OpenError>>();
+    let (tx, rx) = handoff::<Result<(), OpenError>>();
 
     let drive_shared = shared.clone();
     let drive_shutdown = shutdown.clone();
@@ -5240,7 +5267,7 @@ mod tests {
             "the open was held by a stopped gate"
         );
 
-        let (tx, rx) = mpsc::channel::<Result<(), OpenError>>();
+        let (tx, rx) = handoff::<Result<(), OpenError>>();
         assert!(!gate.announce_open(&tx), "the receiver is alive");
         assert_eq!(rx.recv(), Ok(Ok(())));
         assert!(

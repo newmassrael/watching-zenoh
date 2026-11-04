@@ -570,7 +570,7 @@ pub(crate) fn open_router_blocking(
     forwarder.attach_local_face(face_sink);
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<Result<Vec<String>, OpenError>>();
+    let (tx, rx) = handoff::<Result<Vec<String>, OpenError>>();
     let node_zid = wire_zid.clone();
     let node_forwarder = forwarder.clone();
     let node_shutdown = shutdown.clone();
@@ -724,17 +724,27 @@ async fn run_router(
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
-    tx: mpsc::Sender<Result<Vec<String>, OpenError>>,
+    tx: Reporter<Result<Vec<String>, OpenError>>,
 ) {
     let clock = TokioTime::new();
-    let BoundListeners { legs, late } =
-        match bind_listeners(&listen, listen_phase, &tls, &zid, link_conf, offer, clock).await {
-            Ok(bound) => bound,
-            Err(cause) => {
-                let _ = tx.send(Err(cause));
-                return;
-            }
-        };
+    let BoundListeners { legs, late } = match bind_listeners(
+        &listen,
+        listen_phase,
+        &tls,
+        &zid,
+        link_conf,
+        offer,
+        clock,
+        role.whatami(),
+    )
+    .await
+    {
+        Ok(bound) => bound,
+        Err(cause) => {
+            let _ = tx.send(Err(cause));
+            return;
+        }
+    };
     // A listener that binds later (`listen/exit_on_failure` false) would be served by the other
     // roles from the moment it binds. This node serves the ones bound at the open, and a node
     // that was told to wait for another is not opened as one that does not.

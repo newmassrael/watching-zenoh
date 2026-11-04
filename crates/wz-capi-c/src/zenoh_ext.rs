@@ -1144,6 +1144,11 @@ unsafe fn querying_get_options(
         crate::get::z_get_options_default(slot.as_mut_ptr());
         slot.assume_init()
     };
+    // The querying subscriber's query is not an ordinary get's: its builder defaults to NO
+    // consolidation (`subscriber_ext.rs`, `.querying()`, `ConsolidationMode::None`), so that a
+    // publication cache answers with its whole history and not the latest value per key. A
+    // program that passes no options at all (`z_int_pub_cache_query_sub_test`) is owed that.
+    out.consolidation = crate::get::z_query_consolidation_none();
     if options.is_null() {
         return out;
     }

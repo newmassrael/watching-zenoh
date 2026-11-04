@@ -240,7 +240,10 @@ impl WzRuntime {
     /// Being `'static`, this pool is never dropped, so its runtimes are torn
     /// down by process exit rather than by [`RuntimePool`]'s `Drop` — which is
     /// upstream's shape too, and is why that `Drop` is written for the
-    /// caller-owned pools rather than for this one.
+    /// caller-owned pools rather than for this one. A program that wants them
+    /// gone before it exits (a memory checker reports threads that are still
+    /// running as lost blocks) says so with [`Self::stop_all`], as a C program
+    /// does with `zc_stop_z_runtime`.
     pub fn pool() -> &'static RuntimePool {
         static POOL: OnceLock<RuntimePool> = OnceLock::new();
         POOL.get_or_init(|| {
@@ -259,6 +262,14 @@ impl WzRuntime {
     /// one it was handed over to.
     pub fn handle(self) -> &'static Handle {
         WzRuntime::pool().handle(self)
+    }
+
+    /// Stop the process-wide pool: every runtime it has started ends its threads and frees what
+    /// it held ([`RuntimePool::shutdown`]). zenoh's `ZRuntimePoolGuard` is the same act, and a C
+    /// program asks for it as `zc_stop_z_runtime` once everything it opened is closed. Nothing
+    /// that needs the pool can be used afterwards.
+    pub fn stop_all() {
+        WzRuntime::pool().shutdown();
     }
 
     /// Spawn onto this subsystem's runtime.
@@ -590,6 +601,18 @@ impl fmt::Display for RuntimeConfigError {
 
 impl std::error::Error for RuntimeConfigError {}
 
+/// One runtime of the pool, and the handle to it that callers hold.
+///
+/// The handle is kept beside the runtime and not taken from it on each ask, so that the runtime
+/// can be moved out and shut down through a shared reference ([`RuntimePool::shutdown`]) while
+/// the pool, which is `'static` for the process-wide one, goes on lending the handle. A task
+/// spawned onto a handle whose runtime is gone is dropped unrun, which is the end state of
+/// "none of this can be used after the stop".
+struct RuntimeSlot {
+    handle: Handle,
+    runtime: std::sync::Mutex<Option<TokioRt>>,
+}
+
 /// Five runtimes, each built on first use.
 ///
 /// The process-wide instance is [`WzRuntime::pool`]. This type is public and
@@ -598,7 +621,7 @@ impl std::error::Error for RuntimeConfigError {}
 /// through the environment.
 pub struct RuntimePool {
     params: RuntimeParams,
-    runtimes: [OnceLock<TokioRt>; 6],
+    runtimes: [OnceLock<RuntimeSlot>; 6],
     /// Per-subsystem thread numbering. Shared rather than owned because
     /// tokio's `thread_name_fn` must be `'static`, so the counter cannot be
     /// borrowed out of the pool.
@@ -635,12 +658,47 @@ impl RuntimePool {
     pub fn handle(&self, rt: WzRuntime) -> &Handle {
         let target = self.resolve(rt);
         let idx = target.index();
-        self.runtimes[idx]
+        &self.runtimes[idx]
             .get_or_init(|| {
-                self.build(target)
-                    .unwrap_or_else(|e| panic!("cannot start the wz runtime partition: {e}"))
+                let runtime = self
+                    .build(target)
+                    .unwrap_or_else(|e| panic!("cannot start the wz runtime partition: {e}"));
+                RuntimeSlot {
+                    handle: runtime.handle().clone(),
+                    runtime: std::sync::Mutex::new(Some(runtime)),
+                }
             })
-            .handle()
+            .handle
+    }
+
+    /// Stop every runtime of the pool that has started: their threads end, and what they held
+    /// is freed.
+    ///
+    /// The process-wide pool is `'static` and so is never dropped; its threads would be there at
+    /// process exit, which a memory checker reports as lost blocks. This is the teardown for
+    /// that pool, what a C program asks for at the end (`zc_stop_z_runtime`), and what
+    /// [`Drop`] does for a pool that is dropped. Each runtime is shut down on a plain thread
+    /// (tokio refuses to block from inside a runtime), and the call returns when they have, each
+    /// within a second.
+    ///
+    /// Everything that spawned onto the pool must be done with it: a task spawned afterwards is
+    /// dropped, and blocking on a future that needs a stopped runtime does not return.
+    pub fn shutdown(&self) {
+        let joins: Vec<_> = self
+            .runtimes
+            .iter()
+            .filter_map(|slot| slot.get())
+            .filter_map(|slot| {
+                slot.runtime
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+            })
+            .map(|rt| std::thread::spawn(move || rt.shutdown_timeout(Duration::from_secs(1))))
+            .collect();
+        for join in joins {
+            let _ = join.join();
+        }
     }
 
     /// Spawn onto the runtime serving `rt`.
@@ -700,15 +758,7 @@ impl fmt::Debug for RuntimePool {
 /// test-local pool always has.
 impl Drop for RuntimePool {
     fn drop(&mut self) {
-        let joins: Vec<_> = self
-            .runtimes
-            .iter_mut()
-            .filter_map(|slot| slot.take())
-            .map(|rt| std::thread::spawn(move || rt.shutdown_timeout(Duration::from_secs(1))))
-            .collect();
-        for join in joins {
-            let _ = join.join();
-        }
+        self.shutdown();
     }
 }
 

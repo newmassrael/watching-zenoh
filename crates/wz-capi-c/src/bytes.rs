@@ -69,6 +69,11 @@ pub(crate) enum Payload {
     /// built; the last holder frees it.
     Counted(std::sync::Arc<Vec<u8>>),
     Shared(wz_runtime_tokio::RxBytes),
+    /// A buffer the CALLER owns, left where they put it: the payload `z_bytes_from_buf` and
+    /// `z_bytes_from_str` build. The caller's deleter runs when the last holder lets go of
+    /// it, not when the payload is made, which is what zenoh-c does and what a program that
+    /// counts its deleter's calls (`z_api_payload_test`) reads.
+    External(std::sync::Arc<ExternalBuf>),
     /// A chunk of a provider of THIS process, kept as the chunk (R3059): the payload a
     /// program builds from a buffer with `z_bytes_from_shm`. It reads as its bytes like
     /// any other, and a put of it sends the chunk's descriptor to a peer that negotiated
@@ -80,6 +85,68 @@ pub(crate) enum Payload {
     Issued(std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>),
 }
 
+/// A buffer a C program handed over with its deleter (`z_bytes_from_buf`, `z_bytes_from_str`).
+///
+/// The bytes stay where the caller put them and are read in place; the deleter is called once,
+/// with the buffer and the context, when the last [`Payload::External`] that names this lets
+/// go. The caller promises the buffer stays readable until then, which is upstream's contract
+/// for these two constructors and is why they take a deleter at all.
+pub(crate) struct ExternalBuf {
+    data: *const u8,
+    len: usize,
+    deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    context: *mut c_void,
+}
+
+// SAFETY: the buffer is read-only here and its owner promised it stays valid until the deleter
+// has run; the deleter and its context are the owner's, and zenoh-c calls them from whichever
+// thread drops the last holder, so a program that hands over a deleter already accepts that.
+unsafe impl Send for ExternalBuf {}
+// SAFETY: as above; nothing here mutates the buffer.
+unsafe impl Sync for ExternalBuf {}
+
+impl ExternalBuf {
+    /// `len` bytes at `data`, to be freed by `deleter(data, context)` when the last holder
+    /// lets go.
+    ///
+    /// # Safety
+    /// `data` must point at `len` readable bytes that stay readable until the deleter has
+    /// run; `deleter` must be null or a valid function that owns `data` from then on.
+    pub(crate) unsafe fn new(
+        data: *const u8,
+        len: usize,
+        deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+        context: *mut c_void,
+    ) -> Self {
+        Self {
+            data,
+            len,
+            deleter,
+            context,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `new`'s contract — `len` readable bytes at `data`, kept until the deleter ran.
+        unsafe { std::slice::from_raw_parts(self.data, self.len) }
+    }
+}
+
+impl Drop for ExternalBuf {
+    fn drop(&mut self) {
+        if let Some(free) = self.deleter {
+            // SAFETY: upstream's contract — the deleter owns `data` from here, and an unwind
+            // across the C boundary is UB, so it is caught.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                free(self.data as *mut c_void, self.context);
+            }));
+        }
+    }
+}
+
 impl core::ops::Deref for Payload {
     type Target = [u8];
 
@@ -88,6 +155,7 @@ impl core::ops::Deref for Payload {
             Payload::Owned(bytes) => bytes,
             Payload::Counted(bytes) => bytes,
             Payload::Shared(bytes) => bytes.as_slice(),
+            Payload::External(buf) => buf.as_slice(),
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
                 not(feature = "zenoh-c-no-unstable-api")
@@ -113,6 +181,8 @@ impl Payload {
                 std::sync::Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone())
             }
             Payload::Shared(bytes) => bytes.into_vec(),
+            // Copied out; the buffer's deleter runs when this value (the last holder) drops.
+            Payload::External(buf) => buf.as_slice().to_vec(),
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
                 not(feature = "zenoh-c-no-unstable-api")
@@ -659,16 +729,18 @@ pub unsafe extern "C" fn z_bytes_copy_from_str(
 /// Build a payload by TAKING OWNERSHIP of a caller buffer (zenoh-c
 /// `z_bytes_from_buf`).
 ///
-/// wz copies the bytes and then invokes the caller's `deleter` IMMEDIATELY, on
-/// every path including the failure ones. That is not a shortcut: upstream's
-/// ownership transfer is unconditional, so a path that skipped the deleter would
-/// LEAK the caller's buffer — a divergence visible only in their code. The
-/// sibling `wz-capi-pico` records the same decision for the same reason.
+/// The payload IS the caller's buffer, read in place, and the caller's `deleter` runs when the
+/// last holder of the payload lets go of it (the payload dropped, or a put that consumed it
+/// finished): zenoh-c's contract, which a program that counts its deleter's calls reads
+/// (`z_api_payload_test`: none before the drop, one after). Ownership transfer is still
+/// unconditional: on a path that builds no payload over the buffer (a null out-param, a null
+/// buffer) the deleter runs at once, so the caller's buffer is never leaked. The sibling
+/// `wz-capi-pico` copies and runs its deleter at once; its own contract differs.
 ///
 /// # Safety
 /// `this_` must be valid and writable; `data` must be null or point at `len`
-/// readable bytes; `deleter` must be null or a valid C function pointer, and owns
-/// `data` after this call.
+/// readable bytes that stay readable until the deleter has run; `deleter` must be null or a
+/// valid C function pointer, and owns `data` after this call.
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_from_buf(
     this_: *mut z_owned_bytes_t,
@@ -677,6 +749,9 @@ pub unsafe extern "C" fn z_bytes_from_buf(
     deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
     context: *mut c_void,
 ) -> ZResult {
+    // Kept apart from the payload's own handling of the deleter: the one path that builds the
+    // payload hands the deleter to it, every other path releases the buffer here.
+    let mut deleter_owned_by_payload = false;
     let rc = guarded(|| {
         if this_.is_null() {
             return Z_ENULL;
@@ -684,27 +759,23 @@ pub unsafe extern "C" fn z_bytes_from_buf(
         unsafe { *this_ = z_owned_bytes_t::null_value() };
         // A null buffer with a non-zero length is the caller's error; a null
         // buffer with length 0 is the legitimate empty payload.
-        let payload = if data.is_null() {
+        if data.is_null() {
             if len != 0 {
                 return Z_ENULL;
             }
-            Vec::new()
-        } else {
-            // SAFETY: the caller's contract — `len` readable bytes at `data`.
-            unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
-        };
-        let handle = BytesState::whole(payload).into_handle();
-        unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
+            unsafe { install_payload(this_, Vec::new()) };
+            return Z_OK;
+        }
+        // SAFETY: the caller's contract — `len` readable bytes at `data`, kept until the
+        // deleter has run, which the payload now does.
+        let buf = unsafe { ExternalBuf::new(data as *const u8, len, deleter, context) };
+        deleter_owned_by_payload = true;
+        unsafe { install_external(this_, buf) };
         Z_OK
     });
-    // UNCONDITIONAL, and outside the `guarded` body so it runs even on the error
-    // returns above.
-    if let Some(free) = deleter {
-        // SAFETY: upstream's contract — the deleter owns `data` from here, and an
-        // unwind across the C boundary is UB, so it is caught.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            free(data as *mut c_void, context);
-        }));
+    if !deleter_owned_by_payload {
+        // SAFETY: the caller's contract — the deleter owns `data`.
+        unsafe { release_unused(data as *mut c_void, deleter, context) };
     }
     rc
 }
@@ -925,6 +996,34 @@ unsafe fn install_payload(this_: *mut z_owned_bytes_t, payload: Vec<u8>) {
     unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
 }
 
+/// [`install_payload`] for a payload that is the caller's own buffer, kept where it is.
+///
+/// # Safety
+/// `this_` must be non-null, valid and writable.
+unsafe fn install_external(this_: *mut z_owned_bytes_t, buf: ExternalBuf) {
+    let handle = BytesState::of(Payload::External(std::sync::Arc::new(buf))).into_handle();
+    // SAFETY: the caller's contract.
+    unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
+}
+
+/// Hand a buffer back to the deleter its owner gave, on a path that built no payload over it.
+///
+/// # Safety
+/// `deleter` must be null or a valid C function pointer that owns `data`.
+unsafe fn release_unused(
+    data: *mut c_void,
+    deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    context: *mut c_void,
+) {
+    if let Some(free) = deleter {
+        // SAFETY: upstream's contract — the deleter owns `data` from here, and an unwind across
+        // the C boundary is UB, so it is caught.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            free(data, context);
+        }));
+    }
+}
+
 /// Build a payload by COPYING a loaned SLICE (zenoh-c
 /// `z_bytes_copy_from_slice`).
 ///
@@ -1061,15 +1160,15 @@ pub unsafe extern "C" fn z_bytes_from_static_buf(
 /// Build a payload by TAKING OWNERSHIP of a caller STRING (zenoh-c
 /// `z_bytes_from_str`).
 ///
-/// The string sibling of [`z_bytes_from_buf`], with the same unconditional
-/// deleter discipline: wz copies the text and runs the caller's `deleter` on
-/// every path, because upstream's ownership transfer is unconditional and a
-/// skipped deleter would leak the caller's buffer.
+/// The string sibling of [`z_bytes_from_buf`], with the same discipline: the payload is the
+/// caller's text, read in place, and the caller's `deleter` runs when the last holder of the
+/// payload lets go of it; on a path that builds no payload it runs at once, so the buffer is
+/// never leaked.
 ///
 /// # Safety
-/// `this_` must be valid and writable; `str_` must be null or NUL-terminated;
-/// `deleter` must be null or a valid C function pointer, and owns `str_` after
-/// this call.
+/// `this_` must be valid and writable; `str_` must be null or NUL-terminated and stay
+/// readable until the deleter has run; `deleter` must be null or a valid C function pointer,
+/// and owns `str_` after this call.
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_from_str(
     this_: *mut z_owned_bytes_t,
@@ -1077,6 +1176,7 @@ pub unsafe extern "C" fn z_bytes_from_str(
     deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
     context: *mut c_void,
 ) -> ZResult {
+    let mut deleter_owned_by_payload = false;
     let rc = guarded(|| {
         if this_.is_null() {
             return Z_ENULL;
@@ -1086,20 +1186,18 @@ pub unsafe extern "C" fn z_bytes_from_str(
         if str_.is_null() {
             return Z_ENULL;
         }
-        // SAFETY: the caller's contract — NUL-terminated.
-        let bytes = unsafe { CStr::from_ptr(str_) }.to_bytes().to_vec();
+        // SAFETY: the caller's contract — NUL-terminated, kept until the deleter has run.
+        let len = unsafe { CStr::from_ptr(str_) }.to_bytes().len();
+        // SAFETY: as above; the payload now owns the deleter.
+        let buf = unsafe { ExternalBuf::new(str_ as *const u8, len, deleter, context) };
+        deleter_owned_by_payload = true;
         // SAFETY: `this_` is non-null and writable.
-        unsafe { install_payload(this_, bytes) };
+        unsafe { install_external(this_, buf) };
         Z_OK
     });
-    // UNCONDITIONAL, outside the `guarded` body so it runs on the error returns
-    // above too.
-    if let Some(free) = deleter {
-        // SAFETY: upstream's contract — the deleter owns `str_` from here, and
-        // an unwind across the C boundary is UB, so it is caught.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            free(str_ as *mut c_void, context);
-        }));
+    if !deleter_owned_by_payload {
+        // SAFETY: the caller's contract — the deleter owns `str_`.
+        unsafe { release_unused(str_ as *mut c_void, deleter, context) };
     }
     rc
 }
@@ -1122,17 +1220,14 @@ pub unsafe extern "C" fn z_bytes_is_empty(this_: *const z_loaned_bytes_t) -> boo
 /// Borrow the payload as a contiguous VIEW slice, without copying (zenoh-c
 /// `z_bytes_get_contiguous_view`).
 ///
-/// ## wz always succeeds here, and that is a superset rather than a shortcut
+/// ## A payload of several slices is refused, as upstream refuses it
 ///
-/// Upstream fails when the `ZBytes` is a sequence of several buffers, because
-/// there is no single run to point at. wz's payload IS contiguous by
-/// construction — see [`BytesState`], which keeps one `Vec<u8>` and records the
-/// slice boundaries alongside it — so the case upstream refuses cannot arise.
-///
-/// A caller that checks the return code is served correctly either way; one that
-/// relies on the FAILURE (to detect a multi-slice payload) should be asking
-/// [`z_bytes_get_slice_iterator`] instead, which reports the boundaries wz does
-/// keep.
+/// Upstream fails (`Z_EINVAL`) when the `ZBytes` is a sequence of several buffers, because
+/// there is no single run to point at, and `z_api_payload_test` holds a writer-built payload of
+/// ten one-byte appends to that. wz keeps the bytes in one run but records the slice
+/// boundaries ([`BytesState`]), and the boundaries are what "fragmented" means here: more than
+/// one of them is the payload upstream would not give a view of. A caller that wants the
+/// pieces asks [`z_bytes_get_slice_iterator`].
 ///
 /// UNSTABLE-gated, as upstream gates it.
 ///
@@ -1154,9 +1249,13 @@ pub unsafe extern "C" fn z_bytes_get_contiguous_view(
         // SAFETY: the caller's contract.
         unsafe { *view = crate::abi::z_view_slice_t::null_value() };
         // SAFETY: the caller's contract, delegated.
-        let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
+        let Some(state) = (unsafe { bytes_state(this_) }) else {
             return Z_ENULL;
         };
+        if state.bounds.as_slice().len() > 1 {
+            return crate::result::Z_EINVAL;
+        }
+        let bytes: &[u8] = &state.payload;
         // A BORROW of the payload this crate owns — the caller's own
         // `z_owned_bytes_t` is what keeps it alive, which is upstream's contract
         // for this view too.

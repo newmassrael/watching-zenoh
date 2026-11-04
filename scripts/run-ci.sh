@@ -23575,6 +23575,15 @@ layer_c1cc_api_compat_c() {
             --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
+    # zenoh-c's OWN tests (`tests/z_api_*.c`, `z_int_*.c`, `z_leak_*.c`), built the way its CMake
+    # builds them and linked to wz's library. Twenty-four programs: the two leak ones run under
+    # valgrind where it exists, `z_api_shm_test` and the three programs of the unstable API are
+    # built only where the oracle's header carries the features CMake gates them on, and
+    # `z_api_alignment_test` is left out for the reason upstream's own CI states
+    # (`WZ_ZENOHC_API_ORACLE=1` links the real library as the control).
+    _runci_guarded_test "C1cc upstream zenoh-c tests on wz" 24 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_upstream_api_tests_on_wz -- --ignored --quiet --test-threads=1 || return 1
     # R311y564 — the PURE-FUNCTION twice-and-diff, a separate binary. It reaches
     # the part of the ABI no session ever touches (the encoding constant table,
     # keyexpr canonization and the set relations), which is where a wrong answer

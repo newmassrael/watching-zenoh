@@ -66,6 +66,7 @@ pub mod faces;
 pub mod gossip;
 #[cfg(feature = "group")]
 pub mod group;
+mod handoff;
 pub mod listeners;
 pub mod node_auth;
 pub mod node_policy;

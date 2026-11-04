@@ -349,7 +349,12 @@ fn admitted_at_the_abi(staged: Result<(), wz_runtime_tokio::query_sink::ReplyErr
 ///
 /// Owns copies of everything the accessors read, so it outlives the wz
 /// [`QueryView`] borrow, and accumulates the replies the callback asks for.
+#[repr(C)]
 pub(crate) struct QueryMarshal {
+    /// This marshal's own address, set by [`Self::bind`]: the first word a loaned pointer
+    /// names (`crate::loan_at`), so a pointer to the marshal and a pointer to an owned query
+    /// that holds it both read back as this marshal.
+    me: usize,
     keyexpr: String,
     parameters: Vec<u8>,
     anyke: bool,
@@ -435,6 +440,7 @@ impl QueryMarshal {
         let parameters = view.parameters().map(<[u8]>::to_vec).unwrap_or_default();
         let keyexpr = view.keyexpr().to_owned();
         Self {
+            me: 0,
             anyke: parameters_has_anyke(&parameters),
             parameters,
             // R3061 -- a value the session delivered as a chunk of shared memory stays
@@ -472,6 +478,7 @@ impl QueryMarshal {
 
     /// Point every cached view at this marshal's own fields.
     fn bind(&mut self) {
+        self.me = self as *const QueryMarshal as usize;
         self.loaned_keyexpr = z_loaned_keyexpr_t::from_handle(
             &self.keyexpr_state as *const KeyexprState as *mut c_void,
         );
@@ -512,6 +519,7 @@ impl QueryMarshal {
     /// duplicating them here would send each one twice.
     fn deep_copy_deferred(&self, held: HeldRoute) -> Self {
         Self {
+            me: 0,
             keyexpr: self.keyexpr.clone(),
             parameters: self.parameters.clone(),
             anyke: self.anyke,
@@ -606,11 +614,14 @@ impl QueryView for QueryMarshal {
 /// `query` must be null or a pointer this crate handed to a query callback (or
 /// minted by [`z_query_loan`]) whose marshal is still alive.
 unsafe fn query_marshal<'a>(query: *const z_loaned_query_t) -> Option<&'a QueryMarshal> {
-    if query.is_null() {
+    // SAFETY: the caller's contract — the first word at `query` is the marshal's address,
+    // whether `query` is the marshal or the owned value that holds it (`crate::loan_at`).
+    let at = unsafe { crate::loan_at::state_addr(query as *const c_void) };
+    if at == 0 {
         return None;
     }
-    // SAFETY: the caller's contract.
-    Some(unsafe { &*(query as *const QueryMarshal) })
+    // SAFETY: as above.
+    Some(unsafe { &*(at as *const QueryMarshal) })
 }
 
 /// Build the wz-side queryable callback for ONE face from a shared C closure.
@@ -1693,17 +1704,14 @@ pub unsafe extern "C" fn z_query_reply_del(
 
 /// Mutably borrow an owned query (zenoh-c `z_query_loan_mut`).
 ///
+/// The loan is the owned value's own address, as zenoh-c's is, so that
+/// [`z_query_take_from_loaned`] can empty the value it takes from (`crate::loan_at`).
+///
 /// # Safety
 /// `this_` must be null or a valid owned query.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_loan_mut(this_: *mut z_owned_query_t) -> *mut z_loaned_query_t {
-    guard_val(std::ptr::null_mut(), || {
-        if this_.is_null() {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: the caller's contract.
-        unsafe { (*this_).handle as *mut z_loaned_query_t }
-    })
+    this_ as *mut z_loaned_query_t
 }
 
 /// Deep-copy a borrowed query into an owned one (zenoh-c `z_query_clone`).
@@ -1744,22 +1752,32 @@ pub unsafe extern "C" fn z_query_clone(dst: *mut z_owned_query_t, this_: *const 
 /// Take ownership of a mutably borrowed query (zenoh-c
 /// `z_query_take_from_loaned`).
 ///
-/// A COPY rather than a move, for the reason spelled out at
-/// [`crate::sample::z_sample_take_from_loaned`] — and here the copy is
-/// additionally the RIGHT shape, because it is an escape that takes its own
-/// `ResponseFinal` hold. Stealing the borrowed marshal would leave the dispatch
-/// with a marshal it still flushes replies from.
+/// A MOVE out of an owned query, a COPY out of a callback's argument, for the reason spelled out
+/// at [`crate::sample::z_sample_take_from_loaned`]. For the callback's marshal the copy is
+/// additionally the RIGHT shape, because it is an escape that takes its own `ResponseFinal`
+/// hold: stealing the borrowed marshal would leave the dispatch with a marshal it still flushes
+/// replies from.
 ///
 /// # Safety
-/// `dst` must be null or valid and writable; `src` must be null or a live loaned
-/// query.
+/// `dst` must be null or valid and writable; `src` must be null, a live owned query or a live
+/// loaned query.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_take_from_loaned(
     dst: *mut z_owned_query_t,
     src: *mut z_loaned_query_t,
 ) {
-    // SAFETY: the caller's contract, delegated.
-    unsafe { z_query_clone(dst, src as *const z_loaned_query_t) };
+    if dst.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    match unsafe { crate::loan_at::take_slot(src as *mut c_void, z_owned_query_t::null_value()) } {
+        Some(handle) => {
+            // SAFETY: the caller's contract — `dst` is writable. The word moved is not followed.
+            unsafe { *dst = z_owned_query_t::from_handle(handle as Handle) }
+        }
+        // SAFETY: the caller's contract, delegated.
+        None => unsafe { z_query_clone(dst, src as *const z_loaned_query_t) },
+    }
 }
 
 /// Borrow an owned query (zenoh-c `z_query_loan`).

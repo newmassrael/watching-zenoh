@@ -148,7 +148,12 @@ impl SampleMeta {
 /// uses ([`BytesState`] / [`KeyexprState`]), so `z_sample_payload` hands back a
 /// loaned bytes that `z_bytes_to_string` reads with no special case — one
 /// meaning for a handle slot across the whole crate.
+#[repr(C)]
 pub(crate) struct SampleMarshal {
+    /// This marshal's own address, set by [`Self::bind`] once it sits where it stays: the first
+    /// word a loaned pointer names (`crate::loan_at`), so a pointer to the marshal and a pointer
+    /// to an owned value that holds it both read back as this marshal.
+    me: usize,
     keyexpr: KeyexprState,
     payload: BytesState,
     attachment: Option<BytesState>,
@@ -206,6 +211,7 @@ impl SampleMarshal {
         meta: SampleMeta,
     ) -> Self {
         Self {
+            me: 0,
             keyexpr: KeyexprState::new(keyexpr),
             payload: BytesState::of(payload.into()),
             attachment: meta.attachment.map(BytesState::whole),
@@ -231,6 +237,7 @@ impl SampleMarshal {
     /// Point the cached views at this marshal's own fields. MUST run only once
     /// the marshal sits at its FINAL address.
     pub(crate) fn bind(&mut self) {
+        self.me = self as *const SampleMarshal as usize;
         self.loaned_keyexpr =
             z_loaned_keyexpr_t::from_handle(&self.keyexpr as *const KeyexprState as *mut c_void);
         self.loaned_payload =
@@ -410,11 +417,14 @@ impl MarshalCache {
 /// [`SampleMarshal::as_loaned`] and whose marshal is still alive — which, per
 /// zenoh-c's contract, means "inside the callback it was handed to".
 unsafe fn marshal<'a>(this_: *const z_loaned_sample_t) -> Option<&'a SampleMarshal> {
-    if this_.is_null() {
+    // SAFETY: the caller's contract — the first word at `this_` is the marshal's address,
+    // whether `this_` is the marshal or the owned value that holds it (`crate::loan_at`).
+    let at = unsafe { crate::loan_at::state_addr(this_ as *const c_void) };
+    if at == 0 {
         return None;
     }
-    // SAFETY: the caller's contract.
-    Some(unsafe { &*(this_ as *const SampleMarshal) })
+    // SAFETY: as above.
+    Some(unsafe { &*(at as *const SampleMarshal) })
 }
 
 /// Borrow a delivered sample's keyexpr (zenoh-c `z_sample_keyexpr`).
@@ -455,11 +465,13 @@ pub unsafe extern "C" fn z_sample_payload_mut(
     this_: *mut z_loaned_sample_t,
 ) -> *mut z_loaned_bytes_t {
     guard_val(std::ptr::null_mut(), || {
-        if this_.is_null() {
+        // SAFETY: the caller's contract; the first word is the marshal's address.
+        let at = unsafe { crate::loan_at::state_addr(this_ as *const c_void) };
+        if at == 0 {
             return std::ptr::null_mut();
         }
-        let m = this_ as *mut SampleMarshal;
-        // SAFETY: the caller's contract — `this_` aims at a live `SampleMarshal`,
+        let m = at as *mut SampleMarshal;
+        // SAFETY: the caller's contract — `at` is a live `SampleMarshal`,
         // and the field projection creates no intermediate reference.
         unsafe { std::ptr::addr_of_mut!((*m).loaned_payload) }
     })
@@ -1337,6 +1349,7 @@ impl SampleMarshal {
     /// own fields once it is at its final address.
     pub(crate) fn deep_copy(&self) -> Self {
         Self {
+            me: 0,
             keyexpr: KeyexprState::new(self.keyexpr.keyexpr.clone()),
             payload: BytesState::of(self.payload.payload.clone()),
             attachment: self
@@ -1467,52 +1480,61 @@ pub unsafe extern "C" fn z_sample_loan(
 
 /// Mutably borrow an owned sample (zenoh-c `z_sample_loan_mut`).
 ///
+/// The loan is the owned value's own address, as zenoh-c's is, so that
+/// [`z_sample_take_from_loaned`] can empty the value it takes from; every reader reads the
+/// first word at the pointer, which is the marshal's address for the owned value as it is for
+/// the marshal itself (`crate::loan_at`).
+///
 /// # Safety
 /// `this_` must be null or a valid owned sample.
 #[no_mangle]
 pub unsafe extern "C" fn z_sample_loan_mut(
     this_: *mut crate::abi::z_owned_sample_t,
 ) -> *mut z_loaned_sample_t {
-    guard_val(std::ptr::null_mut(), || {
-        if this_.is_null() {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: the caller's contract.
-        unsafe { (*this_).handle as *mut z_loaned_sample_t }
-    })
+    this_ as *mut z_loaned_sample_t
 }
 
 /// Take ownership of a mutably borrowed sample (zenoh-c
 /// `z_sample_take_from_loaned`).
 ///
-/// ## A COPY, and the divergence is deliberate
+/// ## A MOVE out of an owned value, a COPY out of a callback's argument
 ///
-/// Upstream MOVES the Rust `Sample` out of the loaned slot, leaving it
-/// moved-from. wz cannot: a `z_loaned_sample_t*` in this crate is a pointer at a
-/// `SampleMarshal` whose STORAGE belongs to someone else — the dispatcher's
-/// stack frame inside `with_marshalled`, or a `Box` behind a live
-/// `z_owned_sample_t` — and nothing in the pointer says which. Stealing the
-/// marshal would leave either a dangling owned value or a freed stack slot.
-///
-/// So this deep-copies, through the same `escape_sample` every channel handler
-/// uses. The C contract is unaffected: `dst` is a valid owned sample and `src`
-/// must not be used again, which is exactly what upstream promises. The one
-/// thing a caller could observe is `src` still reading as live afterwards — and
-/// there is no `z_internal_loaned_sample_check` for a caller to ask with, so the
-/// difference is unobservable through the ABI rather than merely unlikely to be
-/// noticed.
+/// Upstream MOVES the sample out of the loaned slot and leaves a gravestone there. A
+/// `z_loaned_sample_t*` names one of two things (`crate::loan_at`): an owned value, which a
+/// mutable loan (`z_loan_mut(v)`) is the address of, and which this empties: the handle goes
+/// to `dst` and `src` reads as a gravestone, so dropping it afterwards frees nothing twice
+/// (`z_api_null_drop_test` takes from an owned value filled with garbage and drops it). Or a
+/// marshal that a callback stands on, whose storage is the dispatcher's, which cannot be
+/// stolen, so `dst` gets a deep copy of it, through the same `escape_sample` every channel
+/// handler uses.
 ///
 /// # Safety
-/// `dst` must be null or valid and writable; `src` must be null or a live loaned
-/// sample.
+/// `dst` must be null or valid and writable; `src` must be null, a live owned sample, or a
+/// live loaned sample.
 #[no_mangle]
 pub unsafe extern "C" fn z_sample_take_from_loaned(
     dst: *mut crate::abi::z_owned_sample_t,
     src: *mut z_loaned_sample_t,
 ) {
-    // SAFETY: the caller's contract, delegated — a mutable loan is a valid
-    // immutable one, and the copy reads only.
-    unsafe { z_sample_clone(dst, src as *const z_loaned_sample_t) };
+    if dst.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    match unsafe {
+        crate::loan_at::take_slot(
+            src as *mut c_void,
+            crate::abi::z_owned_sample_t::null_value(),
+        )
+    } {
+        Some(handle) => {
+            // SAFETY: the caller's contract — `dst` is writable. The word moved is not followed.
+            unsafe {
+                *dst = crate::abi::z_owned_sample_t::from_handle(handle as crate::abi::Handle)
+            }
+        }
+        // SAFETY: the caller's contract, delegated — the copy reads only.
+        None => unsafe { z_sample_clone(dst, src as *const z_loaned_sample_t) },
+    }
 }
 
 /// Deep-copy a borrowed sample into an owned one (zenoh-c `z_sample_clone`).

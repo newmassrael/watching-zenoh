@@ -1420,6 +1420,58 @@ pub mod common {
         Ok(exe)
     }
 
+    /// Compile ONE of upstream zenoh-c's own `tests/*.c` against a chosen shared library, the way
+    /// its `tests/CMakeLists.txt` builds it: C11 with the GNU extensions CMake leaves on
+    /// (`usleep` is declared under them), `ZENOHC_DYN_LIB` as the shared library's interface
+    /// defines it, `-pthread` for `Threads::Threads`, and `tests/` on the include path for
+    /// `z_int_helpers.h` and `z_test_session.h`.
+    ///
+    /// `link` is the library NAME (`wz_capi_c`, or `zenohc` for the control) and `libdir` is where
+    /// it lives; the source and the headers are upstream's in both arms, unmodified. `Err`
+    /// carries the compiler's diagnostics.
+    pub fn compile_zenoh_c_upstream_test(
+        test: &str,
+        out_dir: &Path,
+        include: &Path,
+        tests_dir: &Path,
+        libdir: &Path,
+        link: &str,
+    ) -> Result<PathBuf, String> {
+        let src = tests_dir.join(format!("{test}.c"));
+        if !src.is_file() {
+            return Err(format!("upstream test {} missing", src.display()));
+        }
+        let exe = out_dir.join(format!("{test}_on_{link}"));
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let out = Command::new(&cc)
+            .arg(&src)
+            .arg("-std=gnu11")
+            .arg("-DZENOHC_DYN_LIB")
+            // An implicit declaration is an ERROR, for the reason `compile_zenoh_c_example_linked`
+            // gives: C lets a call to an undeclared function through and truncates what it
+            // returns.
+            .arg("-Werror=implicit-function-declaration")
+            .arg("-pthread")
+            .arg(format!("-I{}", include.display()))
+            .arg(format!("-I{}", tests_dir.display()))
+            .arg("-o")
+            .arg(&exe)
+            .arg(format!("-L{}", libdir.display()))
+            .arg(format!("-l{link}"))
+            .arg(baked_library_dir(libdir))
+            .arg("-lm")
+            .output_bounded()
+            .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
+        if !out.status.success() {
+            return Err(format!(
+                "{cc} failed for {test}.c linked with -l{link} (status {:?})\n--- stderr ---\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr),
+            ));
+        }
+        Ok(exe)
+    }
+
     /// R311y482 — refuse a cdylib OLDER than the `wz-capi-pico` sources it is
     /// supposed to be built from.
     ///

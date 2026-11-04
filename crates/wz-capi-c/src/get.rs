@@ -302,7 +302,12 @@ pub unsafe extern "C" fn z_get_options_default(this_: *mut z_get_options_t) {
 ///
 /// The Ok arm reuses [`SampleMarshal`] because `z_reply_ok` must hand back a
 /// `z_loaned_sample_t*` — so every sample accessor serves this plane unchanged.
+#[repr(C)]
 pub(crate) struct ReplyMarshal {
+    /// This marshal's own address, set by [`Self::bind`]: the first word a loaned pointer
+    /// names (`crate::loan_at`), so a pointer to the marshal and a pointer to an owned reply
+    /// that holds it both read back as this marshal.
+    me: usize,
     is_ok: bool,
     sample: SampleMarshal,
     /// The Err blob, meaningful iff `!is_ok`.
@@ -352,6 +357,7 @@ impl ReplyMarshal {
             _ => Z_SAMPLE_KIND_PUT,
         };
         Self {
+            me: 0,
             is_ok,
             sample: SampleMarshal::new(
                 view.keyexpr().to_owned(),
@@ -396,6 +402,7 @@ impl ReplyMarshal {
 
     /// Point every cached view at this marshal's own fields.
     fn bind(&mut self) {
+        self.me = self as *const ReplyMarshal as usize;
         self.sample.bind();
         self.loaned_err_payload =
             z_loaned_bytes_t::from_handle(&self.err_payload as *const BytesState as *mut c_void);
@@ -407,6 +414,7 @@ impl ReplyMarshal {
     /// An INDEPENDENT copy, for a reply CHANNEL to escape the callback with.
     fn deep_copy(&self) -> Self {
         Self {
+            me: 0,
             is_ok: self.is_ok,
             sample: self.sample.deep_copy(),
             err_payload: BytesState::of(self.err_payload.payload.clone()),
@@ -442,11 +450,14 @@ fn encoding_hint_from_wire(
 /// `this_` must be null or a pointer this crate handed to a reply callback (or
 /// minted by [`z_reply_loan`]) whose marshal is still alive.
 unsafe fn reply_marshal<'a>(this_: *const z_loaned_reply_t) -> Option<&'a ReplyMarshal> {
-    if this_.is_null() {
+    // SAFETY: the caller's contract — the first word at `this_` is the marshal's address,
+    // whether `this_` is the marshal or the owned value that holds it (`crate::loan_at`).
+    let at = unsafe { crate::loan_at::state_addr(this_ as *const c_void) };
+    if at == 0 {
         return None;
     }
-    // SAFETY: the caller's contract.
-    Some(unsafe { &*(this_ as *const ReplyMarshal) })
+    // SAFETY: as above.
+    Some(unsafe { &*(at as *const ReplyMarshal) })
 }
 
 /// Escape a borrowed reply onto the heap, bound at its final address — what a
@@ -868,17 +879,14 @@ pub unsafe extern "C" fn z_reply_ok_mut(this_: *mut z_loaned_reply_t) -> *mut z_
 
 /// Mutably borrow an owned reply (zenoh-c `z_reply_loan_mut`).
 ///
+/// The loan is the owned value's own address, as zenoh-c's is, so that
+/// [`z_reply_take_from_loaned`] can empty the value it takes from (`crate::loan_at`).
+///
 /// # Safety
 /// `this_` must be null or a valid owned reply.
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_loan_mut(this_: *mut z_owned_reply_t) -> *mut z_loaned_reply_t {
-    guard_val(std::ptr::null_mut(), || {
-        if this_.is_null() {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: the caller's contract.
-        unsafe { (*this_).handle as *mut z_loaned_reply_t }
-    })
+    this_ as *mut z_loaned_reply_t
 }
 
 /// Deep-copy a borrowed reply into an owned one (zenoh-c `z_reply_clone`).
@@ -907,21 +915,30 @@ pub unsafe extern "C" fn z_reply_clone(dst: *mut z_owned_reply_t, this_: *const 
 /// Take ownership of a mutably borrowed reply (zenoh-c
 /// `z_reply_take_from_loaned`).
 ///
-/// A COPY rather than a move, for the reason spelled out at
-/// [`crate::sample::z_sample_take_from_loaned`]: the loaned pointer's storage
-/// belongs to a stack frame or to a live owned value, and nothing in the pointer
-/// says which.
+/// A MOVE out of an owned reply, a COPY out of a callback's argument, for the reason spelled out
+/// at [`crate::sample::z_sample_take_from_loaned`]: the loaned pointer names either a live owned
+/// value, which is emptied, or a stack frame's marshal, which is copied (`crate::loan_at`).
 ///
 /// # Safety
-/// `dst` must be null or valid and writable; `src` must be null or a live loaned
-/// reply.
+/// `dst` must be null or valid and writable; `src` must be null, a live owned reply or a live
+/// loaned reply.
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_take_from_loaned(
     dst: *mut z_owned_reply_t,
     src: *mut z_loaned_reply_t,
 ) {
-    // SAFETY: the caller's contract, delegated.
-    unsafe { z_reply_clone(dst, src as *const z_loaned_reply_t) };
+    if dst.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    match unsafe { crate::loan_at::take_slot(src as *mut c_void, z_owned_reply_t::null_value()) } {
+        Some(handle) => {
+            // SAFETY: the caller's contract — `dst` is writable. The word moved is not followed.
+            unsafe { *dst = z_owned_reply_t::from_handle(handle as Handle) }
+        }
+        // SAFETY: the caller's contract, delegated.
+        None => unsafe { z_reply_clone(dst, src as *const z_loaned_reply_t) },
+    }
 }
 
 /// The REPLIER's global entity id, if the reply carried one (zenoh-c

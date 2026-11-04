@@ -374,6 +374,9 @@ unsafe fn cstr_to_string(s: *const c_char) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
+/// The label of the default encoding, table entry 0, which a gravestone encoding stands for.
+const DEFAULT_ENCODING_LABEL: &str = "zenoh/bytes";
+
 /// The DEFAULT encoding, borrowed (zenoh-c `z_encoding_loan_default`).
 ///
 /// `zenoh/bytes`, table entry 0 — the same constant [`z_encoding_zenoh_bytes`]
@@ -519,9 +522,11 @@ unsafe fn set_schema(this_: *mut z_loaned_encoding_t, schema: String) -> crate::
         if this_.is_null() {
             return Z_ENULL;
         }
-        // SAFETY: the caller's contract.
+        // SAFETY: the caller's contract. A gravestone encoding IS the default one in zenoh-c
+        // (`Encoding::default()`, `zenoh/bytes`), so a schema set on it extends that label:
+        // `zenoh/bytes;my_schema`, not a bare `;my_schema`.
         let prefix = unsafe { encoding_label(this_) }
-            .unwrap_or("")
+            .unwrap_or(DEFAULT_ENCODING_LABEL)
             .split(wz_capi_core::encoding_ids::SCHEMA_SEPARATOR)
             .next()
             .unwrap_or("")
@@ -712,6 +717,7 @@ pub unsafe extern "C" fn z_encoding_to_string(
             return;
         }
         // SAFETY: the caller's contract.
+        // A gravestone renders as the default encoding it stands for, as zenoh-c's does.
         let rendered = unsafe { encoding_hint(this_) }
             .map(|hint| {
                 wz_capi_core::encoding_ids::hint_to_string_in(
@@ -719,7 +725,7 @@ pub unsafe extern "C" fn z_encoding_to_string(
                     wz_capi_core::encoding_ids::EncodingDialect::ZenohC,
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| DEFAULT_ENCODING_LABEL.to_owned());
         unsafe { *out_str = crate::string::owned_string_from(rendered.as_bytes()) };
     });
 }

@@ -149,12 +149,17 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str(
     expr: *const c_char,
 ) -> ZResult {
     guarded(|| {
-        if this_.is_null() || expr.is_null() {
+        if this_.is_null() {
             return Z_ENULL;
         }
         // Always initialise the out-param before any fallible work, so a caller
         // that ignores the code sees a gravestone rather than a stale stack value.
         unsafe { *this_ = z_view_keyexpr_t::null_value() };
+        // A NULL string is an invalid keyexpr, not a missing out-param: zenoh-c answers
+        // `Z_EINVAL` and leaves the view empty (`z_view_keyexpr_from_substr`).
+        if expr.is_null() {
+            return Z_EINVAL;
+        }
         // SAFETY: the caller's contract.
         let Ok(text) = (unsafe { CStr::from_ptr(expr) }).to_str() else {
             return Z_EINVAL;
@@ -240,11 +245,14 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr(
     len: usize,
 ) -> ZResult {
     guarded(|| {
-        if this_.is_null() || expr.is_null() {
+        if this_.is_null() {
             return Z_ENULL;
         }
         // The gravestone before any fallible work.
         unsafe { *this_ = z_view_keyexpr_t::null_value() };
+        if expr.is_null() {
+            return Z_EINVAL;
+        }
         // SAFETY: the caller's contract — `len` readable bytes at `expr`.
         let bytes = unsafe { std::slice::from_raw_parts(expr as *const u8, len) };
         let Ok(text) = std::str::from_utf8(bytes) else {
@@ -351,8 +359,9 @@ pub unsafe extern "C" fn z_keyexpr_from_str(
         }
         // The gravestone before any fallible work.
         unsafe { *this_ = z_owned_keyexpr_t::null_value() };
+        // A NULL string is an invalid keyexpr (zenoh-c: `Z_EINVAL`), not a missing out-param.
         if expr.is_null() {
-            return Z_ENULL;
+            return Z_EINVAL;
         }
         // SAFETY: the caller's contract.
         let Ok(text) = (unsafe { CStr::from_ptr(expr) }).to_str() else {
@@ -386,7 +395,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         unsafe { *this_ = z_owned_keyexpr_t::null_value() };
         // SAFETY: the caller's contract.
         let Some(text) = (unsafe { substr(expr, len) }) else {
-            return if expr.is_null() { Z_ENULL } else { Z_EINVAL };
+            return Z_EINVAL;
         };
         if let Err(code) = require_canonical(text) {
             return code;
@@ -418,7 +427,7 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
         }
         unsafe { *this_ = z_owned_keyexpr_t::null_value() };
         if expr.is_null() {
-            return Z_ENULL;
+            return Z_EINVAL;
         }
         // SAFETY: the caller's contract.
         let Ok(text) = (unsafe { CStr::from_ptr(expr) }).to_str() else {
@@ -464,7 +473,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
         // only the VIEW autocanonize rewrites in place (it has to, because the
         // view aliases that buffer).
         let Some(text) = (unsafe { substr(start, *len) }) else {
-            return if start.is_null() { Z_ENULL } else { Z_EINVAL };
+            return Z_EINVAL;
         };
         match canonize(text) {
             // SAFETY: `this_` is valid and currently a gravestone.
@@ -509,8 +518,12 @@ fn require_canonical(text: &str) -> Result<(), ZResult> {
 #[no_mangle]
 pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize) -> ZResult {
     guarded(|| {
-        if start.is_null() || len.is_null() {
+        if len.is_null() {
             return Z_ENULL;
+        }
+        // zenoh-c: "Key expression can not be constructed from null string", `Z_EINVAL`.
+        if start.is_null() {
+            return Z_EINVAL;
         }
         // SAFETY: the caller's contract.
         let Some(text) = (unsafe { substr(start, *len) }) else {
@@ -526,6 +539,14 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
         // `copy_nonoverlapping`.
         unsafe {
             std::ptr::copy(canon.as_ptr(), start as *mut u8, canon.len());
+            // The bytes the shortening freed are zeroed, as zenoh's in-place canonizer does
+            // (`bytes[length..].fill(0)`): a caller that treats the buffer as a C string reads
+            // the canonical text and a terminator, not the canonical text and a stale tail.
+            std::ptr::write_bytes(
+                (start as *mut u8).add(canon.len()),
+                0,
+                text.len() - canon.len(),
+            );
             *len = canon.len();
         }
         Z_OK
@@ -544,7 +565,7 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
 pub unsafe extern "C" fn z_keyexpr_canonize_null_terminated(start: *mut c_char) -> ZResult {
     guarded(|| {
         if start.is_null() {
-            return Z_ENULL;
+            return Z_EINVAL;
         }
         // SAFETY: the caller's contract.
         let mut len = unsafe { CStr::from_ptr(start) }.to_bytes().len();

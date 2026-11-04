@@ -130,6 +130,7 @@ pub mod events;
 mod ffi;
 #[cfg(feature = "query")]
 pub mod get;
+mod loan_at;
 // R2932 — zenoh-ext's group membership, under wz's own `wz_capi_c_` prefix
 // (upstream zenoh-c has no group surface to be a drop-in for; the module doc
 // states the naming rule). On the unstable arm only, because zenoh-ext's

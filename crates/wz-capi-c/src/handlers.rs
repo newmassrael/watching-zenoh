@@ -832,6 +832,9 @@ mod tests {
                 crate::abi::Z_SAMPLE_KIND_PUT,
                 crate::sample::SampleMeta::default(),
             )));
+            // Bound where it stays, as every dispatch binds its marshal: the first word a
+            // loaned pointer names is the marshal's own address (`crate::loan_at`).
+            (*marshal).bind();
             let loaned_sample = marshal as *const crate::abi::z_loaned_sample_t;
             let call = callback.call.expect("the constructor wired a callback");
             call(loaned_sample, callback.context);

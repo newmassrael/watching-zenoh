@@ -199,12 +199,12 @@ const _: () = {
 };
 
 impl z_owned_transport_t {
-    /// The gravestone: an all-zero zid, which is the value
+    /// The gravestone: all zero, a zid and a role that are both absent, which is the value
     /// `z_internal_transport_check` reads as "not a transport".
     ///
-    /// A zid of sixteen zero bytes is not a zid any peer can have — wz mints one
-    /// from entropy and refuses a zero — so this needs no separate valid flag,
-    /// which is what lets the type stay nineteen bytes.
+    /// A transport that a session reports has a zid (wz mints one from entropy and refuses a
+    /// zero) and always a role, so this needs no separate valid flag, which is what lets the
+    /// type stay nineteen bytes.
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
@@ -229,9 +229,13 @@ impl z_owned_transport_t {
         }
     }
 
+    /// Whether this holds a transport and not the gravestone. A transport has a role (1, 2 or 4),
+    /// which the gravestone does not (it is all zero), and a program can build one over a zero
+    /// zid (`zc_internal_create_transport`, which zenoh-c's `z_api_info` does and then checks),
+    /// so the zid alone is not the test.
     #[inline]
     fn is_live(&self) -> bool {
-        self.zid != [0u8; 16]
+        self.zid != [0u8; 16] || self.whatami != 0
     }
 }
 
@@ -1189,7 +1193,8 @@ pub unsafe extern "C" fn z_transport_take_from_loaned(
         unsafe {
             *dst = z_owned_transport_t {
                 zid: std::mem::take(&mut (*src).zid),
-                whatami: (*src).whatami,
+                // The role goes with the zid: the gravestone has neither (`is_live`).
+                whatami: std::mem::take(&mut (*src).whatami),
                 is_qos: (*src).is_qos,
                 is_multicast: (*src).is_multicast,
                 #[cfg(feature = "zenoh-c-shared-memory")]
@@ -1454,7 +1459,8 @@ pub unsafe extern "C" fn z_transport_event_take_from_loaned(
             *dst = z_owned_transport_event_t {
                 transport: z_owned_transport_t {
                     zid: std::mem::take(&mut (*src).transport.zid),
-                    whatami: (*src).transport.whatami,
+                    // The role goes with the zid: the gravestone has neither (`is_live`).
+                    whatami: std::mem::take(&mut (*src).transport.whatami),
                     is_qos: (*src).transport.is_qos,
                     is_multicast: (*src).transport.is_multicast,
                     #[cfg(feature = "zenoh-c-shared-memory")]

@@ -2407,12 +2407,14 @@ pub unsafe extern "C" fn z_shm_mut_try_from_immut(
             // SAFETY: the caller's contract.
             unsafe { *this_ = z_owned_shm_mut_t::null_value() };
         }
-        if !immut.is_null() {
-            // SAFETY: the caller's contract.
-            unsafe { *immut = z_owned_shm_t::null_value() };
-        }
+        // "Z_EINVAL if moved value is incorrect" (zenoh-c's header): a missing or empty moved
+        // buffer is the caller's invalid argument, not a refusal to give write access.
         if that.is_null() {
-            return Z_ENULL;
+            if !immut.is_null() {
+                // SAFETY: the caller's contract.
+                unsafe { *immut = z_owned_shm_t::null_value() };
+            }
+            return Z_EINVAL;
         }
         // SAFETY: the caller's contract.
         let handle = unsafe { (*that)._this.handle };
@@ -2420,8 +2422,15 @@ pub unsafe extern "C" fn z_shm_mut_try_from_immut(
         // source: the caller's `that` is dead whether or not the recovery took.
         // SAFETY: the caller's contract.
         unsafe { (*that)._this = z_owned_shm_t::null_value() };
+        // `immut` is emptied only AFTER `that` is read: a program hands the SAME buffer as both
+        // (`z_shm_mut_try_from_immut(&mut, z_move(b), &b)`, which is how a refusal gives the
+        // buffer back), and emptying it first would empty `that` with it.
+        if !immut.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe { *immut = z_owned_shm_t::null_value() };
+        }
         if handle.is_null() {
-            return Z_ENULL;
+            return Z_EINVAL;
         }
         // SAFETY: a live `Box<ShmChunk>` this crate leaked.
         let recovered = unsafe { &*(handle as *const ShmChunk) }.may_write();
@@ -2442,7 +2451,9 @@ pub unsafe extern "C" fn z_shm_mut_try_from_immut(
         }
         // SAFETY: `immut` was checked non-null just above.
         unsafe { *immut = z_owned_shm_t::from_handle(handle) };
-        Z_EINVAL
+        // "Z_EUNAVAILABLE in case of unsuccessful write access": the buffer is held by someone
+        // else too, and comes back to the caller in `immut`.
+        Z_EUNAVAILABLE
     })
 }
 
@@ -4632,7 +4643,10 @@ mod immutability_recovery_tests {
             )
         };
 
-        assert_eq!(rc, Z_EINVAL, "a shared buffer cannot become mutable");
+        assert_eq!(
+            rc, Z_EUNAVAILABLE,
+            "a shared buffer cannot become mutable: write access is unavailable (zenoh-c's code)"
+        );
         assert!(
             !unsafe { z_internal_shm_mut_check(&out) },
             "the mutable out-parameter must be a gravestone on refusal"
@@ -7198,10 +7212,11 @@ pub unsafe extern "C" fn zc_shm_client_list_new(this_: *mut zc_owned_shm_client_
 ///
 /// A client whose `id_fn` is absent reports the reserved id 0 and is REFUSED
 /// rather than filed under a number it did not choose -- see
-/// [`ShmClientState::protocol`]. A duplicate protocol id is refused for the
-/// same reason: upstream's header states the contract that two incompatible
-/// implementations must never share a `ProtocolID`, and silently keeping one
-/// of them would decide for the caller which.
+/// [`ShmClientState::protocol`]. An EMPTY list is refused too, as zenoh-c refuses it.
+/// A protocol id that appears twice is NOT an error: the later client replaces the earlier,
+/// and a listed client replaces the default set's, as zenoh's storage builder extends a map
+/// keyed by protocol (measured: `z_api_shm_test` lists the POSIX client and asks for the
+/// default set as well, and the real library opens a session over the result).
 ///
 /// # Safety
 /// `this_` must be valid and writable; `clients` must be a live loan.
@@ -7224,6 +7239,10 @@ pub unsafe extern "C" fn z_shm_client_storage_new(
         let Some(list) = list_state(unsafe { &*clients }) else {
             return Z_EINVAL;
         };
+        // An empty list is refused, whatever the default set adds (zenoh-c: `Z_EINVAL`).
+        if list.clients.is_empty() {
+            return Z_EINVAL;
+        }
         let mut by_protocol: Vec<(z_protocol_id_t, Arc<ShmClientState>)> = Vec::new();
         if add_default_client_set {
             by_protocol.push((POSIX_PROTOCOL_ID, Arc::new(default_posix_client())));
@@ -7233,10 +7252,15 @@ pub unsafe extern "C" fn z_shm_client_storage_new(
             if protocol == 0 && client.callbacks.id_fn.is_none() {
                 return Z_EINVAL;
             }
-            if by_protocol.iter().any(|(id, _)| *id == protocol) {
-                return Z_EINVAL;
+            // A client of a protocol that is already there REPLACES it, the way zenoh's
+            // `ShmClientStorageBuilder::with_clients` extends a map keyed by protocol: the
+            // list wins over the default set, and a later entry over an earlier one. A
+            // program that lists the POSIX client and asks for the default set as well
+            // (`z_api_shm_test`) is not in error.
+            match by_protocol.iter_mut().find(|(id, _)| *id == protocol) {
+                Some(slot) => slot.1 = client.clone(),
+                None => by_protocol.push((protocol, client.clone())),
             }
-            by_protocol.push((protocol, client.clone()));
         }
         let handle = Box::into_raw(Box::new(ShmClientStorageState { by_protocol })) as Handle;
         // SAFETY: `this_` was checked non-null above.
@@ -7774,19 +7798,21 @@ mod client_registry_tests {
         }
     }
 
-    /// Two clients claiming ONE protocol id are refused, and so is a client
-    /// with no `id_fn`.
+    /// Two clients claiming ONE protocol id are not an error: the LATER one answers for it.
     ///
-    /// Upstream's header states the contract in the other direction ("it is up
-    /// to user to make sure that incompatible implementations never use the
-    /// same ProtocolID"). wz can CHECK it, and refusing is the only answer that
-    /// does not silently pick one of them for the caller.
+    /// Upstream's header states the contract in the other direction ("it is up to user to make
+    /// sure that incompatible implementations never use the same ProtocolID"), and the library
+    /// does not check it: its storage builder extends a map keyed by protocol, so the last
+    /// client of an id replaces the earlier ones, and `z_api_shm_test` hands the real library a
+    /// list and the default set that both name the POSIX client and gets a session. A client with
+    /// no `id_fn` is still refused: it names no id at all.
     #[test]
-    fn a_duplicate_protocol_id_is_refused() {
-        let attaches = Arc::new(AtomicU32::new(0));
+    fn the_later_client_of_a_protocol_id_replaces_the_earlier() {
+        let attaches_a = Arc::new(AtomicU32::new(0));
+        let attaches_b = Arc::new(AtomicU32::new(0));
         let maps = Arc::new(AtomicU32::new(0));
-        let mut a = client_for(3, &attaches, &maps);
-        let mut b = client_for(3, &attaches, &maps);
+        let mut a = client_for(3, &attaches_a, &maps);
+        let mut b = client_for(3, &attaches_b, &maps);
         let mut list = zc_owned_shm_client_list_t::null_value();
         // SAFETY: live locals.
         unsafe {
@@ -7805,20 +7831,30 @@ mod client_registry_tests {
         let rc = unsafe {
             z_shm_client_storage_new(&mut storage, zc_shm_client_list_loan(&list), false)
         };
-        assert_eq!(rc, Z_EINVAL, "two clients, one id");
-        // SAFETY: as above.
-        assert!(
-            !unsafe { z_internal_shm_client_storage_check(&storage) },
-            "the refusal leaves a gravestone, not a half-built registry"
+        assert_eq!(rc, Z_OK, "two clients, one id, is a storage");
+        // SAFETY: `storage` is live.
+        let loaned = unsafe { &*z_shm_client_storage_loan(&storage) };
+        assert!(z_shm_client_storage_attach(loaned, 3, 1).is_some());
+        assert_eq!(
+            (
+                attaches_a.load(Ordering::SeqCst),
+                attaches_b.load(Ordering::SeqCst)
+            ),
+            (0, 1),
+            "the client listed last is the one that answers for the id"
         );
 
-        // SAFETY: a live owned value, moved exactly once.
-        unsafe { zc_shm_client_list_drop(&mut list as *mut _ as *mut _) };
+        // SAFETY: live owned values, each moved exactly once.
+        unsafe {
+            z_shm_client_storage_drop(&mut storage as *mut _ as *mut _);
+            zc_shm_client_list_drop(&mut list as *mut _ as *mut _);
+        }
     }
 
-    /// The default client set OWNS the POSIX id, so a C client cannot take it.
+    /// A client listed at the POSIX id replaces the default set's, and an empty list is refused
+    /// whatever the default set would add.
     #[test]
-    fn the_default_set_reserves_the_posix_id() {
+    fn a_listed_client_replaces_the_default_sets_at_the_posix_id() {
         let attaches = Arc::new(AtomicU32::new(0));
         let maps = Arc::new(AtomicU32::new(0));
         let mut client = client_for(POSIX_PROTOCOL_ID, &attaches, &maps);
@@ -7835,20 +7871,36 @@ mod client_registry_tests {
         // SAFETY: live locals.
         let with_default =
             unsafe { z_shm_client_storage_new(&mut storage, zc_shm_client_list_loan(&list), true) };
-        assert_eq!(with_default, Z_EINVAL, "the default set is already at id 0");
+        assert_eq!(
+            with_default, Z_OK,
+            "the listed client and the default set share an id"
+        );
+        // SAFETY: `storage` is live.
+        let loaned = unsafe { &*z_shm_client_storage_loan(&storage) };
+        let _ = z_shm_client_storage_attach(loaned, POSIX_PROTOCOL_ID, 1);
+        assert_eq!(
+            attaches.load(Ordering::SeqCst),
+            1,
+            "the listed client answers for the POSIX id, not the default set's"
+        );
 
-        // WITHOUT the default set the same list resolves -- which is what makes
-        // the assertion above about the DEFAULT SET rather than about the id.
+        // An empty list is refused, with the default set or without it.
+        let mut empty = zc_owned_shm_client_list_t::null_value();
         let mut storage2 = z_owned_shm_client_storage_t::null_value();
         // SAFETY: live locals.
-        let without = unsafe {
-            z_shm_client_storage_new(&mut storage2, zc_shm_client_list_loan(&list), false)
+        let (empty_with_default, empty_without) = unsafe {
+            zc_shm_client_list_new(&mut empty);
+            (
+                z_shm_client_storage_new(&mut storage2, zc_shm_client_list_loan(&empty), true),
+                z_shm_client_storage_new(&mut storage2, zc_shm_client_list_loan(&empty), false),
+            )
         };
-        assert_eq!(without, Z_OK);
+        assert_eq!((empty_with_default, empty_without), (Z_EINVAL, Z_EINVAL));
 
         // SAFETY: live owned values, each moved exactly once.
         unsafe {
-            z_shm_client_storage_drop(&mut storage2 as *mut _ as *mut _);
+            z_shm_client_storage_drop(&mut storage as *mut _ as *mut _);
+            zc_shm_client_list_drop(&mut empty as *mut _ as *mut _);
             zc_shm_client_list_drop(&mut list as *mut _ as *mut _);
         }
     }

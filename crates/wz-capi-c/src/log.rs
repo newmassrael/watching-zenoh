@@ -275,18 +275,22 @@ pub extern "C" fn zc_try_init_log_from_env() {
 
 /// Stop zenoh's internal runtime (zenoh-c `zc_stop_z_runtime`).
 ///
-/// A NO-OP, and deliberately so. Upstream's is a teardown of the process-wide
-/// tokio runtime zenoh-c lazily starts; wz has no such singleton — each
-/// `z_open` owns its own drive task and `z_close` is what stops it
-/// ([`wz_capi_core`]). Calling this before every session is closed would, in
-/// upstream, kill the runtime out from under them; here there is nothing global
-/// to kill, so the no-op is the FAITHFUL behaviour for wz's model rather than an
-/// unimplemented stub.
+/// Stops the process-wide pool of tokio runtimes the sessions' links run on
+/// ([`wz_runtime_tokio::runtime_pool::WzRuntime::stop_all`]): their threads end and what they
+/// held is freed, which is what upstream's `ZRuntimePoolGuard` does and why upstream's own leak
+/// programs (`z_leak_pub_sub_test`, `z_leak_queryable_get_test`) call it last and then hold a
+/// memory checker to zero errors. This was a no-op once, on the belief that wz has no such
+/// singleton; it has one, and `valgrind` reported its threads as lost blocks.
+///
+/// As upstream states it: every structure is to be dropped or undeclared PRIOR to this call, and
+/// none of the library can be used after it.
 ///
 /// It lives in this module because it is the other process-lifecycle entry
 /// point a `zc_*` program calls, next to log init.
 #[no_mangle]
-pub extern "C" fn zc_stop_z_runtime() {}
+pub extern "C" fn zc_stop_z_runtime() {
+    guard_val((), wz_runtime_tokio::runtime_pool::WzRuntime::stop_all);
+}
 
 #[cfg(test)]
 mod tests {
@@ -406,6 +410,7 @@ mod tests {
             zc_internal_closure_log_null(std::ptr::null_mut());
         }
         zc_try_init_log_from_env();
-        zc_stop_z_runtime();
+        // `zc_stop_z_runtime` is not called here: it ends the process-wide runtimes, which the
+        // other tests of this binary share. It has a process of its own in `tests/`.
     }
 }
