@@ -360,6 +360,7 @@ where
         to: Locator,
     ) -> Result<HeapIpDriver<U, D::Stream, L::Stream>, LinkOpenError> {
         match to.proto {
+            LinkProto::Udp if !U::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Udp => {
                 // Port 0 has the stack choose a free one, one per initiator session.
                 let socket = U::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
@@ -616,6 +617,7 @@ where
         to: Locator,
     ) -> Result<IpDriver<U, D::Stream, L::Stream>, LinkOpenError> {
         match to.proto {
+            LinkProto::Udp if !U::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Udp => self.udp.bind_initiator(to.at).map(IpDriver::Udp),
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;

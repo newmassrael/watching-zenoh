@@ -136,6 +136,52 @@ pub trait DatagramSocket: Sized {
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         None
     }
+
+    /// Whether the platform opens datagram sockets at all. A stack asks before it claims any
+    /// buffer, so a `udp/` locator on a stack with none is [`LinkOpenError::Unsupported`]
+    /// (permanent) and never [`LinkOpenError::Exhausted`] (retried): the stream twin is
+    /// `StreamDial::CARRIED`.
+    const CARRIED: bool = true;
+}
+
+/// The datagram socket of a stack that carries none: an image whose links are all streams names it
+/// for [`IpStack`](crate::ip_stack::IpStack)'s `U`, and every `udp/` dial is
+/// [`LinkOpenError::Unsupported`]. There is no value of it, as there is none of `NoStream`.
+#[derive(Debug, Clone, Copy)]
+pub enum NoDatagram {}
+
+impl DatagramSocket for NoDatagram {
+    type Error = ();
+
+    const CARRIED: bool = false;
+
+    fn bind(_addr: [u8; 4], _port: u16) -> Result<Self, ()> {
+        Err(())
+    }
+
+    fn local(&self) -> ([u8; 4], u16) {
+        match *self {}
+    }
+
+    fn send_to(&self, _addr: [u8; 4], _port: u16, _bytes: &[u8]) -> Result<(), ()> {
+        match *self {}
+    }
+
+    fn wait_readable(&self, _timeout_ms: c_int) {
+        match *self {}
+    }
+
+    fn times_out(&self) -> bool {
+        match *self {}
+    }
+
+    fn recv_waiting(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        match *self {}
+    }
+
+    fn try_recv(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        match *self {}
+    }
 }
 
 /// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed text: the longest

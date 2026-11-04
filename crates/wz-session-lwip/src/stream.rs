@@ -188,6 +188,17 @@ where
     }
 }
 
+/// The slot profile's stack of a node whose links are all `tcp/`: the engine's own `IpStack`,
+/// which claims each link's buffers from the image's byte tables and yields the driver the session
+/// host runs, over lwIP's stream and with no datagram socket (a `udp/` dial is
+/// [`LinkOpenError::Unsupported`], before any buffer is claimed). Its dial is [`LwipTcpDial`] and
+/// its acceptor `stack.acceptor(LwipTcpListen::new(..))`.
+#[cfg(feature = "session-slot")]
+pub type LwipTcpStack<L, const RX: usize, const S: usize = 0> = wz_runtime_coop::ip_stack::IpStack<
+    wz_runtime_coop::udp_link::NoDatagram,
+    LwipTcpDial<L, RX, S>,
+>;
+
 /// How a node takes the `tcp/` connections that arrive on the port it listens on: the other half of
 /// [`LwipTcpDial`]. The connection it yields is the same [`LwipTcpStream`] a dial yields, so the
 /// stream link over it has nothing to tell which end opened it.
@@ -360,7 +371,7 @@ mod tests {
 
     /// The stream link over lwIP, end to end: the driver length-prefixes a batch, the echo sends
     /// the bytes back, and the driver hands the session the batch whole.
-    #[cfg(not(feature = "static-link-storage"))]
+    #[cfg(all(not(feature = "static-link-storage"), not(feature = "session-slot")))]
     #[test]
     fn the_stream_link_frames_a_batch_over_lwip() {
         use wz_runtime_coop::link_storage::HeapTx;
@@ -398,12 +409,13 @@ mod tests {
         assert_eq!(driver.lost(), None);
     }
 
+    #[cfg(all(not(feature = "static-link-storage"), not(feature = "session-slot")))]
     static LISTENER: LwipTcpListener<RX, 2> = LwipTcpListener::new();
 
     /// Both ends of a connection are the same stream: a dial and an accept yield streams that the
     /// stream link frames alike, and a batch crosses each way, whole, with the accepted end
     /// knowing its peer.
-    #[cfg(not(feature = "static-link-storage"))]
+    #[cfg(all(not(feature = "static-link-storage"), not(feature = "session-slot")))]
     #[test]
     fn a_dialled_and_an_accepted_stream_carry_batches_both_ways_through_the_stream_link() {
         use wz_runtime_coop::link_storage::HeapTx;
@@ -465,5 +477,94 @@ mod tests {
         );
         assert_eq!(client.lost(), None);
         assert_eq!(server.lost(), None);
+    }
+
+    #[cfg(feature = "session-slot")]
+    static SLOT_LISTENER: LwipTcpListener<RX, 2> = LwipTcpListener::new();
+    #[cfg(feature = "session-slot")]
+    static SLOT_RX: wz_session_core::byte_cells::ByteCells<2_050, 2> =
+        wz_session_core::byte_cells::ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static SLOT_TX: wz_session_core::byte_cells::ByteCells<2_050, 2> =
+        wz_session_core::byte_cells::ByteCells::new();
+
+    /// The engine's slot stack over lwIP's streams: a `tcp/` dial and an accept yield the drivers a
+    /// session host runs, the buffers of both from the image's tables, a `udp/` dial is refused as
+    /// unsupported before a buffer is claimed, and a batch crosses each way through the drivers.
+    #[cfg(all(feature = "session-slot", not(feature = "static-link-storage")))]
+    #[test]
+    fn a_tcp_only_slot_stack_dials_and_accepts_tcp_and_refuses_udp_as_unsupported() {
+        use wz_runtime_coop::ip_stack::IpDriver;
+        use wz_runtime_coop::session_drive::{
+            Accept, Bind, IpEndpoint, Locator, SessionDatagramLink,
+        };
+        use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
+        use wz_session_core::reliability::Reliability;
+
+        let (_gate, link) = lwip_test_link();
+        let link: &'static LwipLink = std::boxed::Box::leak(std::boxed::Box::new(link));
+        SLOT_LISTENER.listen(47_601).unwrap();
+
+        let mut stack = LwipTcpStack::<&'static LwipLink, RX>::new(
+            [127, 0, 0, 1],
+            &SLOT_RX,
+            &SLOT_TX,
+            LwipTcpDial::new(link),
+        );
+        let router = IpEndpoint {
+            addr: [127, 0, 0, 1],
+            port: 47_601,
+        };
+        assert!(
+            matches!(
+                stack.bind(Locator::udp(router)),
+                Err(LinkOpenError::Unsupported)
+            ),
+            "no datagram socket: permanent, and nothing claimed"
+        );
+        assert_eq!(SLOT_RX.in_use() + SLOT_TX.in_use(), 0);
+
+        let mut acceptor = stack.acceptor(LwipTcpListen::new(link, &SLOT_LISTENER));
+        let client = stack.bind(Locator::tcp(router)).expect("a tcp/ link");
+        assert!(matches!(client, IpDriver::Tcp(_)));
+        let mut server = None;
+        for _ in 0..4_000 {
+            if let Some(driver) = acceptor.accept().expect("the listener is sound") {
+                server = Some(driver);
+                break;
+            }
+        }
+        let server = server.expect("the connection that arrived");
+        assert_eq!(SLOT_RX.in_use(), 2, "both links took a receive buffer");
+
+        fn carry(
+            from: &impl BoxedLinkDriver,
+            to: &impl SessionDatagramLink,
+            batch: &[u8],
+        ) -> Option<Vec<u8>> {
+            assert!(matches!(
+                from.send_blocking(batch, Reliability::Reliable),
+                LinkSendOutcome::Sent
+            ));
+            let mut got = None;
+            for _ in 0..4_000 {
+                to.service();
+                to.recv_with(&mut |bytes| got = Some(bytes.to_vec()));
+                if got.is_some() {
+                    break;
+                }
+            }
+            got
+        }
+        assert_eq!(
+            carry(&client, &server, &[3u8; 400]).as_deref(),
+            Some(&[3u8; 400][..]),
+            "client to server"
+        );
+        assert_eq!(
+            carry(&server, &client, &[4u8; 700]).as_deref(),
+            Some(&[4u8; 700][..]),
+            "server to client"
+        );
     }
 }
