@@ -310126,6 +310126,34 @@
         "A hosted reading of Layers C1z, C1am, C1cn, C1bz and C1bzr at this round's head."
       ]
     },
+    "Round 4241": {
+      "decision_summary": "The Zephyr node whose links are on tcp/ is held to the same no-allocator link proof as the datagram node. The image row zephyr-admin-node-fixed gains a third build, the features of the tcp variant (fixed-tcp on top of the fixed-memory profile and the lwIP MAC backend), built with the stand-in for the board's values for thumbv7em. Read from the linked ELF it names no allocator entry point, implementation or alloc-crate code, and no crate of the graph carries extern crate alloc. This is also the first cross build of lwip-sys with its tcp feature for a thumb target outside west. The frame gate needed no new row: Layer Qzb already holds any image whose overlay list names the fixed overlay to the frame rule, and the tcp row does.",
+      "changes_bullets": [
+        "scripts/lib/no_allocator_link_gate.py: the image zephyr-admin-node-fixed has a third Build, cyt4bf-lwip-fixed-tcp (net-lwip-mac, mac-cyt4bf, fixed-memory, fixed-tcp), with the comment saying which axis value it proves."
+      ],
+      "verification_bullets": [
+        "On a build host through bx: the gate's image run passes for all three builds of zephyr-admin-node-fixed; the tcp build reads 3,038 symbols with 0 allocator entry points, 0 implementations, 0 alloc-crate code, 0 C heap and 0 crates carrying extern crate alloc. The population check (23 images) and the gate's selftest pass. On this host the frame gate for the fixed image, run on the west ELF of the tcp variant and of the udp variant, passes both: largest frame 19,104 B in spawn_pump against the 65,536 B main stack (budget 32,768), worst direct chain 28,768 B for tcp and 31,464 B for udp. Not run: the stack bound with calls through a register followed, and Layer Qzb as a lane."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "The frame gate's chain figure for the fixed image is not committed (peak is None), so a change that moves the chain is reported and not refused; the tcp image reads 28,768 B and the udp image 31,464 B on the same row, and the frame of spawn_pump (19,104 B) is the same in both and is the largest. The stack bound with calls through a register followed has no row for this image. Nothing has run through a MAC with TCP; the stock-router probe, listener close, mixing udp/ and tcp/, and the host switch remain as before."
+      ],
+      "publishable_decision_summary": "The Zephyr node whose links are on tcp/ is held to the same no-allocator link proof as the datagram node. The image row zephyr-admin-node-fixed gains a third build, the features of the tcp variant (fixed-tcp on top of the fixed-memory profile and the lwIP MAC backend), built with the stand-in for the board's values for thumbv7em. Read from the linked ELF it names no allocator entry point, implementation or alloc-crate code, and no crate of the graph carries extern crate alloc. This is also the first cross build of lwip-sys with its tcp feature for a thumb target outside west. The frame gate needed no new row: Layer Qzb already holds any image whose overlay list names the fixed overlay to the frame rule, and the tcp row does.",
+      "publishable_changes_bullets": [
+        "scripts/lib/no_allocator_link_gate.py: the image zephyr-admin-node-fixed has a third Build, cyt4bf-lwip-fixed-tcp (net-lwip-mac, mac-cyt4bf, fixed-memory, fixed-tcp), with the comment saying which axis value it proves."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host through bx: the gate's image run passes for all three builds of zephyr-admin-node-fixed; the tcp build reads 3,038 symbols with 0 allocator entry points, 0 implementations, 0 alloc-crate code, 0 C heap and 0 crates carrying extern crate alloc. The population check (23 images) and the gate's selftest pass. On this host the frame gate for the fixed image, run on the west ELF of the tcp variant and of the udp variant, passes both: largest frame 19,104 B in spawn_pump against the 65,536 B main stack (budget 32,768), worst direct chain 28,768 B for tcp and 31,464 B for udp. Not run: the stack bound with calls through a register followed, and Layer Qzb as a lane."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The frame gate's chain figure for the fixed image is not committed (peak is None), so a change that moves the chain is reported and not refused; the tcp image reads 28,768 B and the udp image 31,464 B on the same row, and the frame of spawn_pump (19,104 B) is the same in both and is the largest. The stack bound with calls through a register followed has no row for this image. Nothing has run through a MAC with TCP; the stock-router probe, listener close, mixing udp/ and tcp/, and the host switch remain as before."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
