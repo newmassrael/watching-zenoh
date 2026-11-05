@@ -22,6 +22,11 @@ each in turn.
   HW.38  conservation and re-establishment: after every release, the node takes the peer back and holds
          one session for it, through more releases than the node has cells (so a cell lost on a release is
          a node that stops accepting).
+  HW.39  silence: a peer that falls silent with its connection open (a black hole on the leg, which also
+         swallows the close the peer's own lease would make) is detected by the LEASE: its session ends,
+         no other does, not before the earliest moment a lease could have run out (a node that drops a
+         quiet peer early breaks the lease) and not after the lease and one more keep-alive interval, and
+         the peer is taken back.
 
 ## Where the numbers come from
 
@@ -83,6 +88,13 @@ class StreamSpec:
         return self.earliest_lease_detection_ms * 3 // 4
 
     @property
+    def silence_bound_ms(self) -> int:
+        """The latest a lease can be noticed: it runs out at most a lease after the last thing the node
+        heard, and a node that looks at it once per keep-alive interval sees it one interval later. The
+        peer here is the stock router, whose own lease is the default 10 s, the node's own figure."""
+        return self.lease_ms + self.lease_ms // self.keep_alive_per_lease
+
+    @property
     def return_guard_ms(self) -> int:
         """How long a peer that was released may take to be back: the guard for the peer's own redial,
         which is upstream's schedule (three of its longest waits, for a dial that fails twice first)."""
@@ -101,8 +113,16 @@ SENTENCES = {
     36: "an orderly release by the peer ends its session and no other, at once",
     37: "an abortive release by the peer ends its session and no other, at once",
     38: "the node takes its peer back after every release and holds one session for it",
+    39: "a peer that falls silent is detected by the lease and only its session ends, and it is taken back",
 }
-STEPS = (36, 37, 38)
+STEPS = (36, 37, 38, 39)
+#: What the grammar's `<...>` is for a step that was not run or could not be judged (the printed sentence
+#: is an instance of the grammar either way).
+UNRUN_TAIL = {38: ": 0 of 0 returned", 39: ": after 0 ms"}
+
+
+def unrun_sentence(step: int) -> str:
+    return SENTENCES[step] + UNRUN_TAIL.get(step, "")
 
 
 # ------------------------------------------------------------------------------- the comparisons --
@@ -111,6 +131,18 @@ STEPS = (36, 37, 38)
 def judge_release(sessions: set[str] | None, elapsed_ms: float, spec: StreamSpec = SPEC) -> bool:
     """The released peer is gone, the other is kept, and it was noticed within the prompt bound."""
     return sessions == {B_ID} and elapsed_ms <= spec.prompt_bound_ms
+
+
+def judge_silence(
+    sessions: set[str] | None, elapsed_ms: float, back: bool, spec: StreamSpec = SPEC
+) -> bool:
+    """The silent peer is gone and the other kept, it was noticed by the lease (no sooner than a lease
+    could have run out, no later than the lease and one keep-alive interval), and the peer came back."""
+    return (
+        sessions == {B_ID}
+        and spec.earliest_lease_detection_ms <= elapsed_ms <= spec.silence_bound_ms
+        and back
+    )
 
 
 def judge_conservation(returns: list[tuple[str, bool]], final: set[str] | None) -> bool:
@@ -179,8 +211,36 @@ def _released(
         env.fault("A", "admit")
 
 
+def _silenced(
+    env: StreamEnv, spec: StreamSpec, interval_s: float
+) -> tuple[int, float, set[str] | None, bool]:
+    """Make the leg to A a black hole (the connection stays open and nothing crosses, and a close either end
+    makes is not heard by the other), and read how the node took it: (connections it landed on,
+    milliseconds until the node's sessions were no longer both, the sessions then, whether the peer was
+    back after the black hole ended).
+
+    The leg is closed to new connections for the measurement, as in `_released`, so the only way the node
+    can lose A is its own lease. The black hole ends when the node has been read, whatever happened, and
+    the leg is opened after it; then the peer's return is awaited."""
+    both = {A_ID, B_ID}
+    env.fault("A", "refuse")
+    try:
+        landed = env.fault("A", "silence")
+        if landed == 0:
+            return 0, 0.0, None, False
+        try:
+            _, ms = _await(env, lambda: _changed(env, both), spec.lease_ms * 2 / 1000, interval_s)
+            seen = env.sessions("B")
+        finally:
+            env.fault("A", "speak")
+    finally:
+        env.fault("A", "admit")
+    back, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
+    return landed, ms, seen, back
+
+
 def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float = 0.2) -> list[Result]:
-    """Run HW.36 to HW.38 against a node holding sessions with routers A and B, the leg to A through a
+    """Run HW.36 to HW.39 against a node holding sessions with routers A and B, the leg to A through a
     proxy. A fault on that leg is observed through B, so no step asks a connection about its own end."""
     out: dict[int, Result] = {}
     both = {A_ID, B_ID}
@@ -218,8 +278,9 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
 
     if not fixture():
         for step in STEPS:
-            said = SENTENCES[step] + (": 0 of 0 returned" if step == 38 else "")
-            out[step] = Result(step, False, said, "the fixture was not established: the node does not hold A and B")
+            out[step] = Result(
+                step, False, unrun_sentence(step), "the fixture was not established: the node does not hold A and B"
+            )
         return [out[s] for s in STEPS]
 
     release(36, "close")
@@ -246,7 +307,8 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
                 break
     final = env.sessions("B")
     tally = f"{sum(1 for _, good in returns if good)} of {len(returns)} returned"
-    if judge_conservation(returns, final):
+    conserved = judge_conservation(returns, final)
+    if conserved:
         out[38] = Result(38, True, f"{SENTENCES[38]}: {tally}")
     else:
         failed = [label for label, good in returns if not good]
@@ -257,6 +319,31 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
             f"re-establishment FAIL: {failed[0] if failed else 'the node ended without both sessions'}; "
             f"sessions {sorted(final) if final is not None else None} after {len(returns)} release(s)",
         )
+
+    if not conserved:
+        out[39] = Result(39, None, unrun_sentence(39), "not run: the node did not take its peer back after the releases (HW.38)")
+    else:
+        landed, ms, seen, back_ok = _silenced(env, spec, interval_s)
+        said = f"{SENTENCES[39]}: after {ms:.0f} ms"
+        if landed == 0:
+            out[39] = Result(39, False, said, "the black hole landed on no connection: the leg to A held none")
+        elif judge_silence(seen, ms, back_ok, spec):
+            out[39] = Result(39, True, said)
+        else:
+            if seen is None or (seen != both and seen != {B_ID}):
+                why = f"B lost too or the answer was unreadable: sessions {sorted(seen) if seen is not None else None}"
+            elif seen == both:
+                why = f"the silent peer was still listed after {ms:.0f} ms (guard reached): the lease was never enforced"
+            elif ms < spec.earliest_lease_detection_ms:
+                why = (
+                    f"the silent peer was dropped after {ms:.0f} ms, before a lease could have run out "
+                    f"({spec.earliest_lease_detection_ms} ms): a quiet peer is not a dead one"
+                )
+            elif ms > spec.silence_bound_ms:
+                why = f"the silent peer was dropped after {ms:.0f} ms, past the lease and a keep-alive interval ({spec.silence_bound_ms} ms)"
+            else:
+                why = f"the peer was not taken back within {spec.return_guard_ms} ms of the black hole ending"
+            out[39] = Result(39, False, said, f"silence FAIL: {why}")
     return [out[s] for s in STEPS]
 
 
@@ -270,6 +357,8 @@ FAULTS = (
     "accept_stuck",  # after the first release the node accepts no more
     "reset_ignored",  # a RST is noticed only when the lease runs out
     "kills_other",  # a release of A's connection ends B's session too
+    "silence_never_detected",  # a peer that goes silent is held for ever: the lease is never enforced
+    "silence_premature",  # a peer that goes quiet is dropped after a second, long before its lease
 )
 
 
@@ -306,7 +395,9 @@ class StreamModel:
                 self._free_cell()
             elif kind == "back":
                 stuck = "accept_stuck" in self.faults and self.released > 0
-                if self.refusing or stuck or self.cells_used >= self.spec.cells:
+                if self.sess.get(peer):
+                    pass  # the node never lost this peer, so there is nothing to take back
+                elif self.refusing or stuck or self.cells_used >= self.spec.cells:
                     self.events.append((self.t + self.A_REDIAL_S, "back", peer))  # the peer tries again
                 else:
                     self.cells_used += 1
@@ -321,8 +412,19 @@ class StreamModel:
         if leg == "A" and action in ("refuse", "admit"):
             self.refusing = action == "refuse"
             return 1
+        if leg == "A" and action == "speak":
+            return 1  # the black hole ends; what the node does about a silent peer was decided when it began
         if leg != "A" or not self.sess.get(A_ID):
             return 0
+        if action == "silence":
+            # Nothing crosses and no close is heard, so the node can lose the peer only by its lease.
+            self.released += 1
+            if "silence_never_detected" not in self.faults:
+                lost = 1.0 if "silence_premature" in self.faults else self.spec.lease_ms / 1000.0
+                self.events.append((self.t + lost, "gone", A_ID))
+                self.events.append((self.t + lost, "free", A_ID))
+                self.events.append((self.t + lost + self.A_REDIAL_S, "back", A_ID))
+            return 1
         self.released += 1
         detect = 0.05
         if (action == "close" and "fin_ignored" in self.faults) or (action == "reset" and "reset_ignored" in self.faults):
@@ -412,9 +514,24 @@ def selftest() -> int:
         f"{SPEC.prompt_bound_ms} {SPEC.earliest_lease_detection_ms}",
     )
 
-    # A node that keeps its contract holds all three.
+    check(
+        "the silence bounds are the earliest detection and the lease and a keep-alive",
+        (SPEC.earliest_lease_detection_ms, SPEC.silence_bound_ms) == (7500, 12500),
+        f"{SPEC.earliest_lease_detection_ms} {SPEC.silence_bound_ms}",
+    )
+
+    # A node that keeps its contract holds all four.
     healthy = run_stream_steps(StreamModel())
-    check("healthy: HW.36 to HW.38 held", _held(healthy) == {36: True, 37: True, 38: True}, str([(r.step, r.held, r.fail_text) for r in healthy]))
+    check(
+        "healthy: HW.36 to HW.39 held",
+        _held(healthy) == {36: True, 37: True, 38: True, 39: True},
+        str([(r.step, r.held, r.fail_text) for r in healthy]),
+    )
+    check(
+        "healthy: HW.39 says when the lease was enforced (the lease, to the poll interval)",
+        re.search(r": after 10[0-3]\d\d ms$", healthy[3].sentence) is not None,
+        healthy[3].sentence,
+    )
     check(
         "healthy: HW.38 counts the returns (two releases and the cycles)",
         healthy[2].sentence.endswith(f"{2 + SPEC.cycles} of {2 + SPEC.cycles} returned"),
@@ -423,12 +540,14 @@ def selftest() -> int:
 
     # Each way a node breaks a property is caught by the step that holds it, and by no other.
     expect: dict[str, dict[int, bool | None]] = {
-        "leak_on_reset": {36: True, 37: True, 38: False},
-        "leak_on_close": {36: True, 37: True, 38: False},
-        "fin_ignored": {36: False, 37: True, 38: True},
-        "reset_ignored": {36: True, 37: False, 38: True},
-        "accept_stuck": {36: True, 37: None, 38: False},
-        "kills_other": {36: False, 37: None, 38: False},
+        "leak_on_reset": {36: True, 37: True, 38: False, 39: None},
+        "leak_on_close": {36: True, 37: True, 38: False, 39: None},
+        "fin_ignored": {36: False, 37: True, 38: True, 39: True},
+        "reset_ignored": {36: True, 37: False, 38: True, 39: True},
+        "accept_stuck": {36: True, 37: None, 38: False, 39: None},
+        "kills_other": {36: False, 37: None, 38: False, 39: None},
+        "silence_never_detected": {36: True, 37: True, 38: True, 39: False},
+        "silence_premature": {36: True, 37: True, 38: True, 39: False},
     }
     check("every fault has an expectation", set(expect) == set(FAULTS), str(set(expect) ^ set(FAULTS)))
     for fault, want in expect.items():
@@ -436,9 +555,13 @@ def selftest() -> int:
         check(f"{fault}: the steps red exactly where the property is", got == want, f"{got} want {want}")
 
     # The comparisons weakened let their fault through: the faults are red for the comparison's own sake.
-    global judge_release, judge_conservation
-    saved = (judge_release, judge_conservation)
+    global judge_release, judge_conservation, judge_silence
+    saved = (judge_release, judge_conservation, judge_silence)
     try:
+        judge_silence = lambda sessions, elapsed_ms, back, spec=SPEC: sessions == {B_ID} and back  # no lease bounds
+        got = _held(run_stream_steps(StreamModel(faults=("silence_premature",))))
+        check("weakened HW.39: a peer dropped long before its lease goes green there", got.get(39) is True, str(got))
+        judge_silence = saved[2]
         judge_release = lambda sessions, elapsed_ms, spec=SPEC: sessions == {B_ID}  # no promptness
         got = _held(run_stream_steps(StreamModel(faults=("fin_ignored",))))
         check("weakened HW.36: a FIN ignored until the lease goes green there", got.get(36) is True, str(got))
@@ -447,9 +570,18 @@ def selftest() -> int:
         got = _held(run_stream_steps(StreamModel(faults=("leak_on_reset",))))
         check("weakened HW.38: a cell lost on a reset goes green there", got.get(38) is True, str(got))
     finally:
-        judge_release, judge_conservation = saved
+        judge_release, judge_conservation, judge_silence = saved
 
     # The comparisons themselves.
+    lo, hi = SPEC.earliest_lease_detection_ms, SPEC.silence_bound_ms
+    check("judge_silence: detected inside the lease window, the other kept, the peer back", judge_silence({B_ID}, 10000.0, True))
+    check("judge_silence: the window's two ends are inside it", judge_silence({B_ID}, float(lo), True) and judge_silence({B_ID}, float(hi), True))
+    check("judge_silence: before a lease could run out is premature", not judge_silence({B_ID}, lo - 1.0, True))
+    check("judge_silence: after the lease and a keep-alive is late", not judge_silence({B_ID}, hi + 1.0, True))
+    check("judge_silence: a peer not taken back is not held", not judge_silence({B_ID}, 10000.0, False))
+    check("judge_silence: the other session lost is not kept", not judge_silence(set(), 10000.0, True))
+    check("judge_silence: the peer still listed is not detected", not judge_silence({A_ID, B_ID}, 10000.0, True))
+    check("judge_silence: an unreadable answer is not detected", not judge_silence(None, 10000.0, True))
     check("judge_release: a peer gone at once and the other kept", judge_release({B_ID}, 200.0))
     check("judge_release: too late is not at once", not judge_release({B_ID}, SPEC.prompt_bound_ms + 1))
     check("judge_release: the other lost is not kept", not judge_release(set(), 10.0))

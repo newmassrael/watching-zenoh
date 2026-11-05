@@ -69,9 +69,9 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
-### The steps for what only a stream suffers (HW.36 to HW.38 are built; the rest is design)
+### The steps for what only a stream suffers (HW.36 to HW.39 are built; the rest is design)
 
-The steps built so far are the release and conservation properties, run with `--stream-steps` on a
+The steps built so far are the release, conservation and silence properties, run with `--stream-steps` on a
 `tcp/` node (the base HW.0 to HW.7 are unchanged without it). The leg to A runs through the program's
 proxy and B carries a REST port of its own, so a release on A's leg is read through B:
 
@@ -79,7 +79,15 @@ proxy and B carries a REST port of its own, so a release on A's leg is read thro
 HW.36 an orderly release by the peer ends its session and no other, at once
 HW.37 an abortive release by the peer ends its session and no other, at once
 HW.38 the node takes its peer back after every release and holds one session for it: <N> of <N> returned
+HW.39 a peer that falls silent is detected by the lease and only its session ends, and it is taken back: after <N> ms
 ```
+
+HW.39 makes the leg to A a black hole: the connection stays open, nothing crosses it, and a close that
+either end makes (router A's own lease runs out too) is not heard by the other, so the only way the node
+can lose A is its own lease. The window is derived from the contract and not read off a run: no sooner
+than the lease less one keep-alive interval (7,500 ms: the last keep-alive the node heard was at most one
+interval before the black hole, so a node that drops a quiet peer earlier breaks the lease) and no later
+than the lease and one interval (12,500 ms). The peer is then taken back once the black hole has ended.
 
 "At once" is below the earliest moment a lease could have expired, which is derived from the node's
 contract (the lease less one keep-alive interval, three quarters of it), so a node that waits out its

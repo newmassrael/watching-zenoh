@@ -760,7 +760,7 @@ def run_scenario(plan: Plan, env: "Env", timing: Timing, out: Renderer) -> int:
 
         if plan.stream:
             if fail:
-                out.not_run(36, 38, stream_sentences())
+                out.not_run(stream_steps.STEPS[0], stream_steps.STEPS[-1], stream_sentences())
             else:
                 fail = not _run_stream(plan, env, out)
 
@@ -775,9 +775,7 @@ def run_scenario(plan: Plan, env: "Env", timing: Timing, out: Renderer) -> int:
 
 def stream_sentences() -> dict[int, str]:
     """The sentences of HW.36 to HW.38 as the grammar prints a step that was not run."""
-    s = dict(stream_steps.SENTENCES)
-    s[38] = f"{s[38]}: 0 of 0 returned"
-    return s
+    return {step: stream_steps.unrun_sentence(step) for step in stream_steps.STEPS}
 
 
 def _run_stream(plan: Plan, env: "Env", out: Renderer) -> bool:
@@ -786,7 +784,7 @@ def _run_stream(plan: Plan, env: "Env", out: Renderer) -> bool:
     se = env.stream_env()
     if se is None:
         out.note("  the stream steps need a proxy on A's leg and B's REST: this environment has none\n")
-        out.not_run(36, 38, stream_sentences())
+        out.not_run(stream_steps.STEPS[0], stream_steps.STEPS[-1], stream_sentences())
         return False
     env.put("/config/connect/endpoints", f'["{plan.b_dial}"]'.encode())
     ok = True
@@ -996,6 +994,10 @@ class HostStreamEnv:
         if action in ("refuse", "admit"):
             proxy.refuse(action == "refuse")
             return 1
+        if action in ("silence", "speak"):
+            held = proxy.live()
+            proxy.blackhole(action == "silence")
+            return held
         return {"close": proxy.close_all, "reset": proxy.reset_all}[action]()
 
     def sleep(self, seconds: float) -> None:
@@ -3136,11 +3138,11 @@ def selftest() -> int:
             so, se = io.BytesIO(), io.BytesIO()
             return run_scenario(sp, env, FAST, Renderer(sp, so, se)), so.getvalue(), se.getvalue()
 
-        every = list(range(8)) + [36, 37, 38]
+        every = list(range(8)) + list(stream_steps.STEPS)
         rc, so, se = stream_case()
         held = _grammar_steps(so)
         check(
-            "stream healthy: HW.0 to HW.7 and HW.36 to HW.38 held, nothing on standard error",
+            "stream healthy: HW.0 to HW.7 and HW.36 to HW.39 held, nothing on standard error",
             rc == 0 and sorted(held) == every and all(held.values()) and se == b"",
             f"rc {rc} {so!r} {se!r}",
         )
@@ -3152,12 +3154,16 @@ def selftest() -> int:
         ]
         check("stream healthy: every printed sentence is an instance of the grammar", not off, str(off))
         for fault, want in {
-            "leak_on_reset": {38},
-            "leak_on_close": {38},
+            # A step that was not run prints as a failure too, so each fault reds what it breaks and what
+            # needed it.
+            "leak_on_reset": {38, 39},
+            "leak_on_close": {38, 39},
             "fin_ignored": {36},
             "reset_ignored": {37},
-            "accept_stuck": {37, 38},
-            "kills_other": {36, 37, 38},
+            "accept_stuck": {37, 38, 39},
+            "kills_other": {36, 37, 38, 39},
+            "silence_never_detected": {39},
+            "silence_premature": {39},
         }.items():
             rc, so, se = stream_case((fault,))
             steps = _grammar_steps(so)
@@ -3178,13 +3184,13 @@ def selftest() -> int:
         steps = _grammar_steps(so)
         check(
             "stream after a base step that failed: the stream steps are printed, not run",
-            rc == 1 and {k for k, v in steps.items() if not v} == {3, 36, 37, 38} and b"HW.36 " in so,
+            rc == 1 and {k for k, v in steps.items() if not v} == {3, 36, 37, 38, 39} and b"HW.36 " in so,
             f"{steps} {so!r}",
         )
         rc, so, se = stream_case(model=False)
         check(
             "stream with no proxy: refused by name, the steps not run",
-            rc == 1 and b"need a proxy on A's leg" in se and {k for k, v in _grammar_steps(so).items() if not v} == {36, 37, 38},
+            rc == 1 and b"need a proxy on A's leg" in se and {k for k, v in _grammar_steps(so).items() if not v} == {36, 37, 38, 39},
             f"{rc} {so!r} {se!r}",
         )
 

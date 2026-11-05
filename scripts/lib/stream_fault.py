@@ -28,7 +28,11 @@ when it likes) is not that: it is a second subject.
   reset_all()   an abortive release: both ends are closed with a zero linger, so the kernel sends a
                 RST to both and discards what it held.
   blackhole(on) the half-open case: while on, every byte either end sends is read and dropped, and no
-                connection is closed; the ends are alive to the kernel and silent to each other.
+                connection is closed; the ends are alive to the kernel and silent to each other. An
+                end that closes its own while it is on (a router whose lease ran out) is not heard by
+                the other: the close is counted `swallowed` and delivered when the black hole ends.
+                Without that, the half-open case would end at the first end's own lease and a step
+                could not tell the other end's lease from the first's.
   refuse(on)    the listener's absence: while on, the listening socket is closed, so a connect is
                 refused; held connections are untouched.
   segment(n)    the stream's lack of boundaries: bytes are forwarded in writes of at most n bytes.
@@ -69,7 +73,7 @@ import struct
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 #: A guard against a hang, never a condition: a wait that reaches it has failed.
@@ -86,6 +90,7 @@ class Stats:
     down: int = 0  # bytes committed to be forwarded towards the client
     dropped: int = 0  # bytes read and discarded by a black hole
     held: int = 0  # bytes buffered by `hold` and not yet flushed
+    swallowed: int = 0  # ends' closings a black hole kept from the other end (delivered when it ends)
     writes: list = field(default_factory=list)  # (direction, size) of each write the proxy made
 
 
@@ -123,8 +128,12 @@ class _Pair:
                 try:
                     data = src.recv(65536)
                 except OSError:
+                    if self.proxy._blackhole:
+                        self._swallow()  # a reset the far end must not hear is not forwarded either
                     return
                 if not data:
+                    if self.proxy._blackhole and not self._swallow():
+                        return
                     try:
                         self._flush_direction(up, dst)
                         dst.shutdown(socket.SHUT_WR)
@@ -139,6 +148,16 @@ class _Pair:
             # An abort closes the pair itself, after the pumps have stopped, and decides how.
             if last and not self.stopping:
                 self._finish()
+
+    def _swallow(self) -> bool:
+        """An end closed its own while the network is a black hole: the other end does not hear it. The
+        record is made first (rule 1), then the pump waits for the state change that ends the black hole
+        (rule 5: a notification on the proxy's condition, never a timer). False when the pair was stopped
+        meanwhile, so the close is not delivered to sockets an abort is closing."""
+        self.proxy._count(swallowed=1)
+        with self.proxy._cv:
+            self.proxy._cv.wait_for(lambda: not self.proxy._blackhole or self.stopping)
+        return not self.stopping
 
     def _handle(self, data: bytes, dst: socket.socket, up: bool) -> None:
         proxy = self.proxy
@@ -217,6 +236,8 @@ class _Pair:
             os.write(self.wake_w, b"x")
         except OSError:
             pass
+        with self.proxy._cv:  # a pump parked by a black hole is woken too
+            self.proxy._cv.notify_all()
         for t in self.threads:
             if t is not threading.current_thread() and t.is_alive():
                 t.join(timeout=HANG_GUARD_S)
@@ -353,6 +374,7 @@ class StreamProxy:
         down: int = 0,
         dropped: int = 0,
         held: int = 0,
+        swallowed: int = 0,
         writes: list | None = None,
     ) -> None:
         with self._cv:
@@ -363,14 +385,18 @@ class StreamProxy:
             s.down += down
             s.dropped += dropped
             s.held += held
+            s.swallowed += swallowed
             if writes:
                 s.writes.extend(writes)
             self._cv.notify_all()
 
+    def _snapshot(self) -> Stats:
+        """A copy of the counters; the caller holds `_cv`."""
+        return replace(self._stats, writes=list(self._stats.writes))
+
     def stats(self) -> Stats:
         with self._cv:
-            s = self._stats
-            return Stats(s.accepted, s.closed, s.up, s.down, s.dropped, s.held, list(s.writes))
+            return self._snapshot()
 
     def live(self) -> int:
         """Connections held now."""
@@ -381,8 +407,7 @@ class StreamProxy:
         """Rule 5: wait for a state change to make `predicate(stats)` true. The deadline is a hang guard."""
         with self._cv:
             def ready() -> bool:
-                s = self._stats
-                return predicate(Stats(s.accepted, s.closed, s.up, s.down, s.dropped, s.held, list(s.writes)))
+                return predicate(self._snapshot())
 
             if not self._cv.wait_for(ready, timeout=HANG_GUARD_S):
                 raise TimeoutError(f"the proxy did not reach the state waited for ({what})")
@@ -411,8 +436,12 @@ class StreamProxy:
         return len(pairs)
 
     def blackhole(self, on: bool) -> None:
-        """While on, bytes from either end are read and dropped and no connection is closed."""
-        self._blackhole = on
+        """While on, bytes from either end are read and dropped and no connection is closed: an end that
+        closes its own (a lease that ran out, a reset) is not heard by the other, which is what a
+        half-open connection is. What was swallowed is delivered when the black hole ends."""
+        with self._cv:
+            self._blackhole = on
+            self._cv.notify_all()
 
     def refuse(self, on: bool) -> None:
         """While on, the listening socket is closed (a connect is refused); held connections are untouched,
@@ -438,13 +467,21 @@ class StreamProxy:
 # ------------------------------------------------------------------------------------ selftest --
 
 
-def _server() -> tuple[socket.socket, list]:
+class _Reads(list):
+    """What the echo upstream read, and an event that is set when one of its connections reaches EOF."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.eof = threading.Event()
+
+
+def _server() -> tuple[socket.socket, _Reads]:
     """An upstream that records each read it makes, and echoes each read back (the record comes first)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("127.0.0.1", 0))
     s.listen(8)
-    reads: list[bytes] = []
+    reads = _Reads()
 
     def serve() -> None:
         while True:
@@ -459,6 +496,7 @@ def _server() -> tuple[socket.socket, list]:
             while True:
                 data = c.recv(65536)
                 if not data:
+                    reads.eof.set()
                     c.close()
                     return
                 reads.append(data)
@@ -555,6 +593,39 @@ def _cases(proxy: StreamProxy, reads: list, failures: list) -> None:
     c.sendall(b"b")
     check("blackhole: forwarding resumes when it is off", _recv_exact(c, 1) == b"b")
     c.close()
+    proxy.wait(lambda s: s.closed >= base.closed + 3, "the pair of the black hole case ended")
+
+    # blackhole and a close: an end that closes its own under a black hole is not heard by the other, and
+    # the close is delivered when the black hole ends (the half-open case ends at the OTHER end's lease and
+    # never at the first end's own).
+    reads.eof.clear()
+    c = _client(port)
+    c.sendall(b"a")
+    _recv_exact(c, 1)
+    swallowed_before = proxy.stats().swallowed
+    proxy.blackhole(True)
+    c.shutdown(socket.SHUT_WR)
+    proxy.wait(lambda s: s.swallowed >= swallowed_before + 1, "the close was swallowed")
+    # An absence can only be shown by waiting; the wait is bounded and can only turn a broken proxy red
+    # (a correct one passes at any speed), the same asymmetry as the data case above.
+    check("blackhole: the far end did not hear the close", not reads.eof.wait(0.3))
+    check("blackhole: the connection is still held after a close", proxy.live() == 1, str(proxy.live()))
+    proxy.blackhole(False)
+    check("blackhole: the swallowed close is delivered when it ends", reads.eof.wait(HANG_GUARD_S))
+    c.close()
+    proxy.wait(lambda s: s.closed >= base.closed + 4, "the pair ended once the close was delivered")
+
+    # blackhole and a stop: a pump parked by a swallowed close does not hold the proxy up.
+    c = _client(port)
+    c.sendall(b"a")
+    _recv_exact(c, 1)
+    swallowed_before = proxy.stats().swallowed
+    proxy.blackhole(True)
+    c.close()
+    proxy.wait(lambda s: s.swallowed >= swallowed_before + 1, "the close was swallowed again")
+    proxy.reset_all()  # the abort wakes the parked pump, and the pair ends
+    proxy.wait(lambda s: s.closed >= base.closed + 5, "the parked pair was ended by an abort")
+    proxy.blackhole(False)
 
     # refuse: a closed listener refuses a connect, held connections stay, and it comes back.
     c = _client(port)
