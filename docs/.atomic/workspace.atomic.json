@@ -312556,6 +312556,34 @@
         "Merge the other crates one round each (wz-capi-pico, wz-capi-c, wz-ap-demo, wz-session-lwip, wz-session-core), measured with test_build_size. The capi crates first need the platform workflow's integration probe, which tests for a tests/*.rs glob, to read a merged target, and their re-exec test files need module_path. The cold build is 24 s slower in this crate; a crate whose merge costs more time than it saves disk should keep its files."
       ]
     },
+    "Round 4307": {
+      "decision_summary": "The reason-review pin gate was red on origin since round 4303: that round derived Clone on wz_routing_graph::LinkstateNetwork (with a doc paragraph saying why), which moved crates/wz-routing-graph/src/lib.rs past the blob the session-close-ingress atom's row pinned at round 4167. The atom's reason cites that file for one claim: `pub fn node_locators` is the retained zid-to-locator directory the link-state flood populates. Re-read against the file: the function is unchanged (it reads the graph node's locators by zid) and the only change since the pinned blob is the derive and its doc, so the claim holds and the row moves to the current blob. The round that changed the file did not run this gate before it landed; the pre-push hook defers it to hosted CI.",
+      "changes_bullets": [
+        "docs/reason-review-pins.md: the session-close-ingress row for crates/wz-routing-graph/src/lib.rs moves from blob 0ff9bfd523 (R4167) to 01c21b8e34 (R4307)."
+      ],
+      "verification_bullets": [
+        "python3 scripts/lib/reason_review_pin_gate.py: FAIL before (the one row above), OK after. git show 28d19a54a7 -- crates/wz-routing-graph/src/lib.rs shows the derive and its doc as the only change since the pinned blob."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Open: phase 4 of docs/router-table-snapshots.md (the snapshot cell and the policy routing-table-sharing) is verified apart and lands as its own round."
+      ],
+      "publishable_decision_summary": "The reason-review pin gate was red on origin since round 4303: that round derived Clone on wz_routing_graph::LinkstateNetwork (with a doc paragraph saying why), which moved crates/wz-routing-graph/src/lib.rs past the blob the session-close-ingress atom's row pinned at round 4167. The atom's reason cites that file for one claim: `pub fn node_locators` is the retained zid-to-locator directory the link-state flood populates. Re-read against the file: the function is unchanged (it reads the graph node's locators by zid) and the only change since the pinned blob is the derive and its doc, so the claim holds and the row moves to the current blob. The round that changed the file did not run this gate before it landed; the pre-push hook defers it to hosted CI.",
+      "publishable_changes_bullets": [
+        "docs/reason-review-pins.md: the session-close-ingress row for crates/wz-routing-graph/src/lib.rs moves from blob 0ff9bfd523 (R4167) to 01c21b8e34 (R4307)."
+      ],
+      "publishable_verification_bullets": [
+        "python3 scripts/lib/reason_review_pin_gate.py: FAIL before (the one row above), OK after. git show 28d19a54a7 -- crates/wz-routing-graph/src/lib.rs shows the derive and its doc as the only change since the pinned blob."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: phase 4 of docs/router-table-snapshots.md (the snapshot cell and the policy routing-table-sharing) is verified apart and lands as its own round."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
