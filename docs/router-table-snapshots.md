@@ -166,7 +166,10 @@ behaviour under A.
 2. **The memos' monotone clear** (section 3 (c)), with a test where an older inputs' store does not clear a
    newer one's entry.
 3. **`Tables: Clone` by path copying at field granularity**: `Arc` round the hats' graphs, interest tables
-   and stores and round each face's routing facts; the two writer-only locks become plain fields.
+   and stores and round each face's routing facts, each written through `Arc::make_mut`; the memos behind
+   an `Arc` shared by every clone and never copied. The two writer-only locks go: the recompute flag is a
+   plain `bool`, and the record of advertised tokens a map behind an `Arc` like the stores, written only
+   by methods that hold the tables for writing.
 4. **The cell and the policy**: `routing-table-sharing` declared, the `snapshot` cell, the admin views
    holding the cell instead of `Arc<PlainRwLock<Tables>>`, and the pair of behaviour tests: under
    `snapshot` a writer completes while a reader holds a version, and that reader still routes by the

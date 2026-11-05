@@ -35,7 +35,7 @@ use crate::accept_loop::FaceId;
 const LOG_CAPACITY: usize = 4096;
 
 /// The client faces' subscriptions: per face, by declaration id; and by key.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ClientSubStore {
     /// Per face, the subscription ids and the key each names.
     by_face: HashMap<FaceId, HashMap<u64, String>>,

@@ -790,6 +790,10 @@ pub struct Tree {
 /// state c2 owns: the self node, the neighbour links, and their
 /// psid<->zid mappings. The spanning trees + shortest-path distances
 /// (zenoh's `trees` / `distances`) are step d.
+///
+/// `Clone` so that a holder sharing one graph between several versions of its
+/// state can copy it before the first write to one of them.
+#[derive(Clone)]
 pub struct LinkstateNetwork {
     idx: NodeIndex,
     graph: Versioned<StableUnGraph<Node, f64>>,

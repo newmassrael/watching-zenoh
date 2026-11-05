@@ -147,7 +147,7 @@ impl InterestOrigin {
 /// One face's FUTURE interests + the declarations already pushed to it. See
 /// the module docs for the zenoh mapping. `V` is `()` for subs, [`QueryableInfo`]
 /// for queryables.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FaceFutureInterests<V> {
     /// Whether the push paths may reach this face — see [`InterestOrigin`].
     origin: InterestOrigin,
@@ -212,7 +212,7 @@ impl<V: Copy + PartialEq> FaceFutureInterests<V> {
 ///
 /// Holds BOTH roles — see [`InterestOrigin`]. The push paths walk only the
 /// `Client` ones, through the single private `push_faces_mut` filter.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FutureInterestStore<V> {
     by_face: HashMap<FaceId, FaceFutureInterests<V>>,
 }

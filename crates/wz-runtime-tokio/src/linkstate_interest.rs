@@ -65,7 +65,7 @@ use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 /// declared — the linkstate-peer interest table, instantiated once per interest
 /// plane (`V = ()` subscriptions, `V = QueryableInfo` queryables). See the module
 /// docs for the zenoh mapping, the value-diff change-gate, and the MVP scope.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LinkstatepeerInterest<V> {
     /// declared keyexpr (a literal OR a `*`/`**` pattern) -> the peers that
     /// declared interest in it, each mapped to its declared value `V`. A key is

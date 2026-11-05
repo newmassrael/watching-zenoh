@@ -577,44 +577,70 @@ fn is_router_hat(region: Region, node_mode: WhatAmI) -> bool {
 /// pin's router and peer hats owns its own `Network`
 /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `routers_net: Option<Network>,`). Steps 3b-3c bring
 /// the region's subscriber, queryable and token tables in here too.
+///
+/// The graph and the three interest tables are each behind an `Arc`, so that a clone of the
+/// hat shares them and a writer copies only the one it writes, through the `*_mut` accessors
+/// below (`docs/router-table-snapshots.md`, section 3 (a)). The two memos are shared between
+/// clones and never copied: a route is a function of the inputs it is cached against
+/// (section 3 (c)).
+#[derive(Clone)]
 struct MeshHat {
-    /// The region's link-state graph. `Rc<RefCell>`, single-task, like every
-    /// forwarder graph, and shared with the read-only admin views.
-    net: LinkstateNetwork,
+    /// The region's link-state graph.
+    net: Arc<LinkstateNetwork>,
     ///A spanning-tree recompute of `net` is pending (the D2c coalescing flag).
     /// zenoh runs a SEPARATE `TreesComputationWorker` per net; wz coalesces
     /// every net onto the one [`tick`](FaceForwarder::tick) cadence the trait
     /// seam offers, with one dirty flag per net (a functional-equivalent
-    /// simplification of the independent debounce workers).
-    trees_dirty: PlainCell<bool>,
+    /// simplification of the independent debounce workers). Only a writer of
+    /// the tables sets or clears it.
+    trees_dirty: bool,
     /// R2869 (step 3b) — the region's subscriber interest (zenoh's per-hat
     /// `router_subs` / `linkstatepeer_subs`): NATIVE sources of this region
     /// keyed by their zid. The cross-region self-bubble is NOT stored; it is
-    /// DERIVED at route-compute from the native tables. `Rc`, shared with the
-    /// admin `RouterDeclarationsView`.
-    subs: LinkstatepeerInterest<()>,
+    /// DERIVED at route-compute from the native tables.
+    subs: Arc<LinkstatepeerInterest<()>>,
     /// R2908 — the data routes computed over `net` and `subs`, per keyexpr and
     /// source, served until either changes: the pin keeps them per hat on the
     /// `Resource` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) data_routes: RwLock<DataRoutes>,`).
-    data_routes: DataRoutes,
+    data_routes: Arc<DataRoutes>,
     /// The region's queryable interest, the query-plane twin of `subs`: native
     /// sources keyed by zid, VALUE = their declared `QueryableInfo`. The
     /// cross-region self-bubble (a MERGED info in zenoh) is DERIVED at compute.
-    qabls: LinkstatepeerInterest<QueryableInfo>,
+    qabls: Arc<LinkstatepeerInterest<QueryableInfo>>,
     /// R2910 — the query routes computed over `net` and `qabls`, per keyexpr
     /// and source: the pin's per-hat `query_routes` on the `Resource`.
-    query_routes: QueryRoutes,
+    query_routes: Arc<QueryRoutes>,
     /// R2870 (step 3c) — the region's liveliness-TOKEN interest (zenoh's
     /// per-hat `router_tokens` / `linkstatepeer_tokens`), the token twin of
     /// `subs`: a source-zid set with NO value payload, so `V = ()` exactly like
     /// the sub plane. Native sources only; the cross-region self-bubble is
-    /// derived. `Rc` for the reason `subs` is: the admin `token/**` leg reads
-    /// it through the view rather than by recapturing the forwarder.
+    /// derived.
     #[cfg(feature = "routing-token-tables")]
-    tokens: LinkstatepeerInterest<()>,
+    tokens: Arc<LinkstatepeerInterest<()>>,
 }
 
 impl MeshHat {
+    /// The region's graph, for writing: copied first if another version of the tables shares it.
+    fn net_mut(&mut self) -> &mut LinkstateNetwork {
+        Arc::make_mut(&mut self.net)
+    }
+
+    /// The region's subscriber interest, for writing (see [`net_mut`](Self::net_mut)).
+    fn subs_mut(&mut self) -> &mut LinkstatepeerInterest<()> {
+        Arc::make_mut(&mut self.subs)
+    }
+
+    /// The region's queryable interest, for writing (see [`net_mut`](Self::net_mut)).
+    fn qabls_mut(&mut self) -> &mut LinkstatepeerInterest<QueryableInfo> {
+        Arc::make_mut(&mut self.qabls)
+    }
+
+    /// The region's token interest, for writing (see [`net_mut`](Self::net_mut)).
+    #[cfg(feature = "routing-token-tables")]
+    fn tokens_mut(&mut self) -> &mut LinkstatepeerInterest<()> {
+        Arc::make_mut(&mut self.tokens)
+    }
+
     /// Every mesh net of a node is seeded as that node's own mode: the pin
     /// seeds each hat's net with the node's `whatami`, whichever hat it is
     /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.routers_net = Some(Network::new(`).
@@ -652,14 +678,14 @@ impl MeshHat {
         };
         net.set_full_linkstate(!is_peer_hat(region, node_mode));
         Self {
-            net,
-            trees_dirty: PlainCell::new(false),
-            subs: LinkstatepeerInterest::new(),
-            data_routes: DataRoutes::new(),
-            qabls: LinkstatepeerInterest::new(),
-            query_routes: QueryRoutes::new(),
+            net: Arc::new(net),
+            trees_dirty: false,
+            subs: Arc::new(LinkstatepeerInterest::new()),
+            data_routes: Arc::new(DataRoutes::new()),
+            qabls: Arc::new(LinkstatepeerInterest::new()),
+            query_routes: Arc::new(QueryRoutes::new()),
             #[cfg(feature = "routing-token-tables")]
-            tokens: LinkstatepeerInterest::new(),
+            tokens: Arc::new(LinkstatepeerInterest::new()),
         }
     }
 }
@@ -895,12 +921,13 @@ type ClientTokens = HashMap<FaceId, HashMap<u64, String>>;
 ///
 /// Built for every leaf region the pin's router builds, not for a named one, so
 /// `Local` has its hat as upstream's does even though no remote face lands
-/// there. Each table is `Rc` for the reason [`MeshHat::subs`] is: the admin
-/// declarations view reads it through its own handle.
+/// there. Each table is behind an `Arc` and each memo is shared, for the reason
+/// [`MeshHat`]'s are.
 ///
 /// Every table is leaf state keyed by [`FaceId`], so
 /// [`deregister`](FaceForwarder::deregister) MUST purge the departing face from
 /// its region's hat BEFORE its linkless early-return (OBLIGATION 1).
+#[derive(Clone)]
 struct BrokerHat {
     /// The per-client-face subscription store (C2), zenoh's per-`Resource`
     /// `session_ctxs` leaf input (a client routes no topology, so its interest
@@ -920,9 +947,9 @@ struct BrokerHat {
     ///
     /// R2909 — [`Versioned`], so the client leg cached in `client_routes` is
     /// stale once it changes.
-    subs: ClientSubs,
+    subs: Arc<ClientSubs>,
     /// R2909 — the client leg of the data route over `subs`, per keyexpr.
-    client_routes: ClientRoutes,
+    client_routes: Arc<ClientRoutes>,
     /// The per-client-face QUERYABLE store (C5b), the query-plane twin of
     /// `subs`: per hosted keyexpr, the declared [`QueryableInfo`] (`complete` /
     /// `distance`) the query route reads.
@@ -936,9 +963,9 @@ struct BrokerHat {
     /// and the store contributes to the merged
     /// `derived_cross_tier_qabl_info`.
     /// Same keyexpr-keyed follow-up as `subs` (`undeclare_queryable`).
-    qabls: ClientQabls,
+    qabls: Arc<ClientQabls>,
     /// R2911 — the client leg of the query route over `qabls`, per keyexpr.
-    client_query_routes: ClientQueryRoutes,
+    client_query_routes: Arc<ClientQueryRoutes>,
     /// The per-client-face liveliness-TOKEN store (slice-3), keyed the way
     /// zenoh's `face_hat.remote_tokens: HashMap<TokenId, Arc<Resource>>` is: the
     /// client's DECL ID -> the resolved keyexpr, not a lossy keyexpr set. A
@@ -952,19 +979,36 @@ struct BrokerHat {
     /// FOLD this store (excluding the requester), the twin of
     /// `dump_interest_subs` folding `subs`.
     #[cfg(feature = "routing-token-tables")]
-    tokens: ClientTokens,
+    tokens: Arc<ClientTokens>,
 }
 
 impl BrokerHat {
     fn new() -> Self {
         Self {
-            subs: ClientSubStore::new(),
-            client_routes: ClientRoutes::new(),
-            qabls: Versioned::new(HashMap::new()),
-            client_query_routes: ClientQueryRoutes::new(),
+            subs: Arc::new(ClientSubStore::new()),
+            client_routes: Arc::new(ClientRoutes::new()),
+            qabls: Arc::new(Versioned::new(HashMap::new())),
+            client_query_routes: Arc::new(ClientQueryRoutes::new()),
             #[cfg(feature = "routing-token-tables")]
-            tokens: HashMap::new(),
+            tokens: Arc::new(HashMap::new()),
         }
+    }
+
+    /// The client faces' subscriptions, for writing: copied first if another version of the
+    /// tables shares them.
+    fn subs_mut(&mut self) -> &mut ClientSubs {
+        Arc::make_mut(&mut self.subs)
+    }
+
+    /// The client faces' queryables, for writing (see [`subs_mut`](Self::subs_mut)).
+    fn qabls_mut(&mut self) -> &mut ClientQabls {
+        Arc::make_mut(&mut self.qabls)
+    }
+
+    /// The client faces' tokens, for writing (see [`subs_mut`](Self::subs_mut)).
+    #[cfg(feature = "routing-token-tables")]
+    fn tokens_mut(&mut self) -> &mut ClientTokens {
+        Arc::make_mut(&mut self.tokens)
     }
 }
 
@@ -1000,11 +1044,8 @@ fn client_tokens_name(_hat: &BrokerHat, _keyexpr: &str) -> bool {
 /// The kind is read off the ported hat table ([`is_leaf`]), so which regions
 /// are meshes and which are brokers cannot drift from the pin's choice.
 ///
-/// A mesh hat holds its graph, its three interest tables and its memos by value (phase 3e, one
-/// guard round them), so the variants differ in size. There are a handful of hats in a router and
-/// they are read on every message, so a box would be a pointer to follow on the hot path for the
-/// sake of a size nothing multiplies.
-#[allow(clippy::large_enum_variant)]
+/// A clone shares every table and memo of the hat it copies (see [`MeshHat`]).
+#[derive(Clone)]
 enum Hat {
     Mesh(MeshHat),
     Broker(BrokerHat),
@@ -1123,7 +1164,7 @@ enum DeclKind {
 /// it, `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `ext_wire_expr: WireExprType::null(),`) is
 /// resolved by, upstream's hat keeping `remote_subs`, `remote_qabls` and `remote_tokens` for every
 /// face. A linkstate flood names its key and does not read this.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MeshDeclaredIds {
     subscribers: HashMap<FaceId, HashMap<u64, String>>,
     queryables: HashMap<FaceId, HashMap<u64, String>>,
@@ -1244,8 +1285,8 @@ trait DeclPlane {
     }
     /// Record that `value` is now what self advertises into `target` for `keyexpr`: `None` is a
     /// retraction. Nothing for a plane that does not keep what it sent.
-    fn remember<T: std::ops::Deref<Target = Tables>>(
-        _fwd: &OnTables<'_, T>,
+    fn remember<T: std::ops::DerefMut<Target = Tables>>(
+        _fwd: &mut OnTables<'_, T>,
         _target: Region,
         _keyexpr: &str,
         _value: Option<Self::Value>,
@@ -1377,19 +1418,21 @@ impl DeclPlane for TokenPlane {
         keyexpr: &str,
         derived: Option<()>,
     ) -> Option<()> {
-        let sent = fwd.tables.advertised_tokens.with(|all| {
-            all.get(&target.to_string())
-                .is_some_and(|keys| keys.contains(keyexpr))
-        });
+        let sent = fwd
+            .tables
+            .advertised_tokens
+            .get(&target.to_string())
+            .is_some_and(|keys| keys.contains(keyexpr));
         (sent || derived.is_some()).then_some(())
     }
-    fn remember<T: std::ops::Deref<Target = Tables>>(
-        fwd: &OnTables<'_, T>,
+    fn remember<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
         target: Region,
         keyexpr: &str,
         value: Option<()>,
     ) {
-        fwd.tables.advertised_tokens.with(|all| match value {
+        let all = Arc::make_mut(&mut fwd.tables.advertised_tokens);
+        match value {
             Some(()) => {
                 all.entry(target.to_string())
                     .or_default()
@@ -1400,7 +1443,7 @@ impl DeclPlane for TokenPlane {
                     keys.remove(keyexpr);
                 }
             }
-        });
+        }
     }
 }
 
@@ -1670,6 +1713,10 @@ impl GroupMember {
 /// is recorded at register so every later flood / purge targets the SAME net
 /// the face joined, without re-deriving it from the (possibly since-changed)
 /// handshake.
+///
+/// A clone shares the runtime and copies the routing facts, which is what a version of the
+/// tables that writes this face needs ([`Tables::face_mut`]).
+#[derive(Clone)]
 struct RouterFaceState {
     /// What the face is at run time, shared by every version of the tables that holds it (see
     /// [`FaceRuntime`](face_runtime::FaceRuntime)).
@@ -1821,7 +1868,10 @@ enum InboundFace<'a> {
 ///
 /// A free function over the borrowed map rather than a `&self` method, so it
 /// drops into the existing scoped-borrow blocks without a second borrow.
-fn classify_inbound(faces: &HashMap<FaceId, RouterFaceState>, inbound: FaceId) -> InboundFace<'_> {
+fn classify_inbound(
+    faces: &HashMap<FaceId, Arc<RouterFaceState>>,
+    inbound: FaceId,
+) -> InboundFace<'_> {
     // The node's own face asks with no routing identity of its own and no alias table, as a group
     // peer does: its keys are literal.
     if inbound == MCAST_INGRESS_FACE || inbound == LOCAL_FACE {
@@ -1953,6 +2003,7 @@ impl RouterSessionsView {
 /// link is acknowledged through those, not the primary's, because the counters it is owed are
 /// the ones the link's peer named: each link of a wz session is established on its own, with a
 /// handoff of its own, and only then joined (`crate::multilink::join_link`).
+#[derive(Clone)]
 struct JoinedLink {
     primary: FaceId,
     actions: Arc<SessionLinkActions>,
@@ -2090,18 +2141,18 @@ impl RouterDeclarationsView {
     /// answers these legs with its own admin queryable and nothing else.
     pub fn subscribers(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
-        let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.subs), |by_id| {
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.subs), |by_id| {
             by_id.values().cloned().collect()
         });
         Self::bucket_by_tier(
             &tables,
             &tables
                 .router_mesh_hats()
-                .map(|(region, hat)| (region, &hat.subs))
+                .map(|(region, hat)| (region, &*hat.subs))
                 .collect::<Vec<_>>(),
             &tables
                 .peer_mesh_hats()
-                .map(|(region, hat)| (region, &hat.subs))
+                .map(|(region, hat)| (region, &*hat.subs))
                 .collect::<Vec<_>>(),
             &clients,
         )
@@ -2113,18 +2164,18 @@ impl RouterDeclarationsView {
     /// reduced to its keyexpr set here.
     pub fn queryables(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
-        let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.qabls), |by_id| {
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.qabls), |by_id| {
             by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
         });
         Self::bucket_by_tier(
             &tables,
             &tables
                 .router_mesh_hats()
-                .map(|(region, hat)| (region, &hat.qabls))
+                .map(|(region, hat)| (region, &*hat.qabls))
                 .collect::<Vec<_>>(),
             &tables
                 .peer_mesh_hats()
-                .map(|(region, hat)| (region, &hat.qabls))
+                .map(|(region, hat)| (region, &*hat.qabls))
                 .collect::<Vec<_>>(),
             &clients,
         )
@@ -2158,18 +2209,18 @@ impl RouterDeclarationsView {
     #[cfg(feature = "routing-token-tables")]
     pub fn tokens(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
-        let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.tokens), |by_id| {
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.tokens), |by_id| {
             by_id.values().cloned().collect()
         });
         Self::bucket_by_tier(
             &tables,
             &tables
                 .router_mesh_hats()
-                .map(|(region, hat)| (region, &hat.tokens))
+                .map(|(region, hat)| (region, &*hat.tokens))
                 .collect::<Vec<_>>(),
             &tables
                 .peer_mesh_hats()
-                .map(|(region, hat)| (region, &hat.tokens))
+                .map(|(region, hat)| (region, &*hat.tokens))
                 .collect::<Vec<_>>(),
             &clients,
         )
@@ -2370,14 +2421,21 @@ impl RouterDeclarationsView {
 ///
 /// Upstream keeps these behind one lock, `TablesLock { tables: RwLock<Tables>, .. }`
 /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub struct TablesLock`), and its data path reads
-/// them under the read half. They are one struct here for the same reason, so that the phase that
-/// makes the forwarder `Send + Sync` puts ONE lock round them and not one round each of nine fields;
-/// until then it is a grouping and holds no lock, and every field is the type it was.
+/// them under the read half. They are one struct here for the same reason: ONE lock round them,
+/// and not one round each field.
+///
+/// A clone is a path copy (`docs/router-table-snapshots.md`, section 3): every large component,
+/// each face's routing facts included, is behind an `Arc` that the clone shares, and a writer
+/// reaches one through `Arc::make_mut`, which copies it only while another version holds it. A
+/// version of the tables can then be published while the next is drafted, at the cost of copying
+/// what the draft writes and nothing else. The memos and each face's runtime are shared and never
+/// copied: neither is a version of anything (section 3 (b) and (c)).
 ///
 /// What is NOT here, and why: the pending-query table, the group's subscriber set, the interceptor
 /// chains and their caches, and the counters. The data path WRITES those (a query allocates an
 /// entry, a Push fills a cache, every message counts), so under a read lock each needs a lock or an
 /// atomic of its own, which is a later phase's decision and not a grouping's.
+#[derive(Clone)]
 pub(crate) struct Tables {
     /// R2867 (open-debt item 751, step 3a) — one hat per region, keyed as the
     /// pin keys its hats
@@ -2410,19 +2468,16 @@ pub(crate) struct Tables {
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
     /// single net by filtering this map.
     ///
-    /// R2636 — behind an `Rc` for the reason `routers_net` is: the admin GET
-    /// handler is stored INSIDE this forwarder
-    /// (`register_local_queryable`), so it cannot capture the forwarder to read
-    /// the live face set. A shared handle to the sub-part is the same sidestep
-    /// [`LinkstateNetView`] already makes for the two graphs. Use sites are
-    /// unchanged — `Rc<RefCell<T>>` derefs to `RefCell<T>`.
-    faces: HashMap<FaceId, RouterFaceState>,
+    /// Each face behind an `Arc` of its own, so that a clone of the tables copies the map's
+    /// entries and not the faces' alias tables; a write to one face goes through
+    /// [`face_mut`](Self::face_mut).
+    faces: HashMap<FaceId, Arc<RouterFaceState>>,
     /// `resource-snapshot` — what the receive paths of the faces that have gone had counted when
     /// they went, retired in the step that removes the face, so the router's reading
     /// ([`RouterMessagesView::reading`]) never falls when a link does and a reader may take
     /// windows by subtraction.
     #[cfg(feature = "resource-snapshot")]
-    receive_ledger: wz_session_core::resource_snapshot::BuildReceiveLedger,
+    receive_ledger: Arc<wz_session_core::resource_snapshot::BuildReceiveLedger>,
     /// The joined aggregated links of the sessions in [`Self::faces`]: a second or
     /// later physical link of a peer's session is not a face of its own, so the
     /// table above holds only the primary. Two readers: a frame that arrives on a
@@ -2430,7 +2485,7 @@ pub(crate) struct Tables {
     /// ([`RouterForwarder::forward_frame`]), and a lifecycle close orders EVERY link to a
     /// peer closed ([`RouterForwarder::lifecycle_directory`]), the joined ones as well as
     /// the registered one.
-    joined_links: HashMap<FaceId, JoinedLink>,
+    joined_links: Arc<HashMap<FaceId, JoinedLink>>,
     /// Queryables HOSTED BY THIS ROUTER (§5.23 `adminspace-router-linkstate`) —
     /// e.g. the built-in admin queryable on `@/<self-zid>/router/**`. The
     /// router-idiom `derive-not-store` analogue of the retired peer forwarder's
@@ -2445,7 +2500,7 @@ pub(crate) struct Tables {
     /// excluded from the routing targets). Always compiled (like `client_qabls`);
     /// the `adminspace-router-linkstate` cfg gates only the demo registration + the
     /// session-core answerer, so an unused registry is a harmless empty no-op.
-    local_queryables: Vec<HostedQueryable>,
+    local_queryables: Arc<Vec<HostedQueryable>>,
     /// R2393 (§5.21 `router-connect-reconcile`) — subscribers HOSTED BY THIS ROUTER,
     /// the Push-plane twin of [`local_queryables`](Self#structfield.local_queryables).
     ///
@@ -2466,7 +2521,7 @@ pub(crate) struct Tables {
     /// subs, group subs and opposite-mesh natives — so it advertises by the SAME
     /// derive every other contributor uses rather than through a parallel path, and
     /// self is still never stored in either mesh's table.
-    local_subscribers: Vec<HostedSubscriber>,
+    local_subscribers: Arc<Vec<HostedSubscriber>>,
     /// The id the next declaration of the node's own face gets in the `Local` hat's stores, which
     /// is keyed by declaration id as a client's is. Counts from 1; only the node's own face uses
     /// it, so it cannot meet the id a client chose.
@@ -2478,9 +2533,10 @@ pub(crate) struct Tables {
     /// was the only gateway it knew of, and then learned of a gateway with a larger zid, would
     /// find "advertised before" false on the withdrawal if it recomputed it, and would leave its
     /// copy alive in every node it told. Upstream keeps what it propagated (`local_tokens`) and
-    /// withdraws that; this is the same, by region.
+    /// withdraws that; this is the same, by region. Only a writer of the tables records what it
+    /// advertised, so the map needs no lock of its own.
     #[cfg(feature = "routing-token-tables")]
-    advertised_tokens: PlainMutex<HashMap<String, HashSet<String>>>,
+    advertised_tokens: Arc<HashMap<String, HashSet<String>>>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
@@ -2493,14 +2549,14 @@ pub(crate) struct Tables {
     /// state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its
     /// linkless early-return (OBLIGATION 1), like `client_subs`. SUBS plane only
     /// (the QABL future-push is the value-aware [`future_qabls`](Self#structfield.future_qabls)).
-    future_subs: FutureSubStore,
+    future_subs: Arc<FutureSubStore>,
     /// The publishers and queriers of the node's own session, `(id, keyexpr, queryables)`, as
     /// they asked for subscribers (or queryables) of their key: a PEER node sends each as an
     /// interest to the routers it is linked to, and again to one that comes up later, as
     /// upstream's peer hat repropagates its interests on a new face
     /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn repropagate_interests`). A router has
     /// no router to ask and keeps them for the admin legs alone.
-    own_interests: Vec<(u64, String, bool)>,
+    own_interests: Arc<Vec<(u64, String, bool)>>,
     /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
     /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
     /// ([`declare_queryable`](RouterForwarder::declare_queryable)) is proactively
@@ -2508,7 +2564,7 @@ pub(crate) struct Tables {
     /// querier-BEFORE-queryable querier's write-filter deactivates, and a
     /// completeness flip re-pushes the same id. Same OBLIGATION-1 purge as
     /// `future_subs`.
-    future_qabls: FutureQablStore,
+    future_qabls: Arc<FutureQablStore>,
     /// §5.21 routing-token-tables (slice-4) — the liveliness-TOKEN FUTURE store,
     /// the token twin of [`future_subs`](Self#structfield.future_subs) (both
     /// `FutureInterestStore<()>` — tokens carry no value). A CLIENT face's FUTURE
@@ -2523,10 +2579,10 @@ pub(crate) struct Tables {
     /// ungraceful detach, id-reuse displacement, client face-down), so a future-push
     /// reader IS told a token withdrew: the liveliness stale-live residual is CLOSED.
     #[cfg(feature = "routing-token-tables")]
-    future_tokens: FutureSubStore,
+    future_tokens: Arc<FutureSubStore>,
     /// The key of each subscriber, queryable and token a face of a mesh region declared, by the
     /// id the face numbered it ([`MeshDeclaredIds`]).
-    mesh_ids: MeshDeclaredIds,
+    mesh_ids: Arc<MeshDeclaredIds>,
     /// Where what the router sends to its own `Local` face goes. The face is no transport: it is
     /// the session of the program that holds the router, and a message for it is handed to this
     /// sink, which must not call back into the router with the tables held (the program's
@@ -3245,6 +3301,9 @@ impl<H> Hosted<H> {
 /// in its routing tables. The DECLARATION is the `Local` face's, in the `Local` region's broker
 /// hat under [`LOCAL_FACE`] and the `id` kept here (item 751, step 6e), so the fold of what the
 /// node advertises and the admin legs read one table for the node and for a client.
+///
+/// A clone shares the handler: the tables are versioned, the callback is not.
+#[derive(Clone)]
 struct HostedQueryable {
     id: u64,
     keyexpr: String,
@@ -3262,6 +3321,7 @@ struct HostedQueryable {
 
 /// A subscriber HOSTED BY THIS ROUTER: its keyexpr (a pattern), its handler, and the id its
 /// declaration holds in the `Local` hat (see [`HostedQueryable`]).
+#[derive(Clone)]
 struct HostedSubscriber {
     id: u64,
     keyexpr: String,
@@ -3275,13 +3335,62 @@ struct HostedSubscriber {
 }
 
 impl Tables {
-    /// The graph + coalescing flag for a region, or `None` for a region with
+    /// The graph of a region, or `None` for a region with
     /// no mesh hat — every leaf region, the clients' included (a client is in no
     /// mesh). The single classifier `register` / `deregister` / `forward` route
     /// a face's work through. R2867: a lookup in [`hats`](Self::hats), so the
-    /// selection is the region map's and not a match over known regions.
-    fn plane(&self, tier: Region) -> Option<(&LinkstateNetwork, &PlainCell<bool>)> {
-        self.mesh_hat(tier).map(|hat| (&hat.net, &hat.trees_dirty))
+    /// selection is the region map's and not a match over known regions. The
+    /// region's coalescing flag is a writer's, set through [`mesh_mut`](Self::mesh_mut).
+    fn plane(&self, tier: Region) -> Option<&LinkstateNetwork> {
+        self.mesh_hat(tier).map(|hat| &*hat.net)
+    }
+
+    /// The routing facts of face `id`, for writing: copied first if another version of the
+    /// tables shares them. The face's runtime stays shared either way.
+    fn face_mut(&mut self, id: FaceId) -> Option<&mut RouterFaceState> {
+        self.faces.get_mut(&id).map(Arc::make_mut)
+    }
+
+    /// The FUTURE subscriber-interest store, for writing (see [`face_mut`](Self::face_mut)).
+    fn future_subs_mut(&mut self) -> &mut FutureSubStore {
+        Arc::make_mut(&mut self.future_subs)
+    }
+
+    /// The FUTURE queryable-interest store, for writing (see [`face_mut`](Self::face_mut)).
+    fn future_qabls_mut(&mut self) -> &mut FutureQablStore {
+        Arc::make_mut(&mut self.future_qabls)
+    }
+
+    /// The FUTURE token-interest store, for writing (see [`face_mut`](Self::face_mut)).
+    #[cfg(feature = "routing-token-tables")]
+    fn future_tokens_mut(&mut self) -> &mut FutureSubStore {
+        Arc::make_mut(&mut self.future_tokens)
+    }
+
+    /// The keys the faces of mesh regions declared by id, for writing (see
+    /// [`face_mut`](Self::face_mut)).
+    fn mesh_ids_mut(&mut self) -> &mut MeshDeclaredIds {
+        Arc::make_mut(&mut self.mesh_ids)
+    }
+
+    /// The joined links, for writing (see [`face_mut`](Self::face_mut)).
+    fn joined_links_mut(&mut self) -> &mut HashMap<FaceId, JoinedLink> {
+        Arc::make_mut(&mut self.joined_links)
+    }
+
+    /// The queryables the node hosts, for writing (see [`face_mut`](Self::face_mut)).
+    fn local_queryables_mut(&mut self) -> &mut Vec<HostedQueryable> {
+        Arc::make_mut(&mut self.local_queryables)
+    }
+
+    /// The subscribers the node hosts, for writing (see [`face_mut`](Self::face_mut)).
+    fn local_subscribers_mut(&mut self) -> &mut Vec<HostedSubscriber> {
+        Arc::make_mut(&mut self.local_subscribers)
+    }
+
+    /// The interests of the node's own session, for writing (see [`face_mut`](Self::face_mut)).
+    fn own_interests_mut(&mut self) -> &mut Vec<(u64, String, bool)> {
+        Arc::make_mut(&mut self.own_interests)
     }
 
     /// The hat of a mesh region this router always builds. Panics on any other
@@ -3456,7 +3565,7 @@ impl Tables {
         self.hats
             .iter()
             .filter(|(region, _)| is_peer_hat(*region, self.node_mode))
-            .filter_map(|(_, hat)| hat.mesh().map(|mesh| &mesh.net))
+            .filter_map(|(_, hat)| hat.mesh().map(|mesh| &*mesh.net))
     }
 }
 
@@ -4401,18 +4510,18 @@ impl RouterForwarder {
                 faces: HashMap::new(),
                 #[cfg(feature = "resource-snapshot")]
                 receive_ledger: Default::default(),
-                joined_links: HashMap::new(),
-                local_queryables: Vec::new(),
-                local_subscribers: Vec::new(),
+                joined_links: Arc::new(HashMap::new()),
+                local_queryables: Arc::new(Vec::new()),
+                local_subscribers: Arc::new(Vec::new()),
                 next_hosted_id: 1,
                 #[cfg(feature = "routing-token-tables")]
-                advertised_tokens: PlainMutex::new(HashMap::new()),
-                future_subs: FutureSubStore::new(),
-                own_interests: Vec::new(),
-                future_qabls: FutureQablStore::new(),
+                advertised_tokens: Arc::new(HashMap::new()),
+                future_subs: Arc::new(FutureSubStore::new()),
+                own_interests: Arc::new(Vec::new()),
+                future_qabls: Arc::new(FutureQablStore::new()),
                 #[cfg(feature = "routing-token-tables")]
-                future_tokens: FutureSubStore::new(),
-                mesh_ids: MeshDeclaredIds::default(),
+                future_tokens: Arc::new(FutureSubStore::new()),
+                mesh_ids: Arc::new(MeshDeclaredIds::default()),
                 local_face_sink: None,
             })),
             // R311y450 — this node's §5.18 clock, over the SAME `node_mode`
@@ -4573,7 +4682,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         for (_, hat) in self.tables.hats.iter_mut() {
             if let Some(hat) = hat.mesh_mut() {
-                hat.net.set_gossip_multihop(enabled);
+                hat.net_mut().set_gossip_multihop(enabled);
             }
         }
     }
@@ -4593,7 +4702,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         for (_, hat) in self.tables.hats.iter_mut() {
             if let Some(hat) = hat.mesh_mut() {
-                hat.net.set_self_locators(locators.clone());
+                hat.net_mut().set_self_locators(locators.clone());
             }
         }
     }
@@ -4619,7 +4728,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 continue;
             }
             if let Some(hat) = hat.mesh_mut() {
-                hat.net.set_full_linkstate(enabled);
+                hat.net_mut().set_full_linkstate(enabled);
             }
         }
     }
@@ -4638,7 +4747,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return;
         }
-        let Some((net, _)) = self.plane(tier) else {
+        let Some(net) = self.plane(tier) else {
             return;
         };
         let autoconnect = self.autoconnect.get();
@@ -4730,13 +4839,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if !self
                 .tables
                 .mesh_mut(region)
-                .net
+                .net_mut()
                 .update_link_weights(link_weights.clone())
             {
                 continue;
             }
             let _ = self.flood_self_links_changed_tier(region);
-            self.tables.mesh(region).trees_dirty.set(true);
+            self.tables.mesh_mut(region).trees_dirty = true;
             moved = true;
         }
         moved
@@ -5618,12 +5727,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         (self.clock)()
     }
 
-    /// The graph + coalescing flag for a region, or `None` for a region with
+    /// The graph of a region, or `None` for a region with
     /// no mesh hat — every leaf region, the clients' included (a client is in no
     /// mesh). The single classifier `register` / `deregister` / `forward` route
     /// a face's work through. R2867: a lookup in [`hats`](Self::hats), so the
     /// selection is the region map's and not a match over known regions.
-    fn plane(&self, tier: Region) -> Option<(&LinkstateNetwork, &PlainCell<bool>)> {
+    fn plane(&self, tier: Region) -> Option<&LinkstateNetwork> {
         self.tables.plane(tier)
     }
 
@@ -5979,7 +6088,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         neighbour: &Zid,
         neighbour_was_new: bool,
     ) -> Result<usize, CodecError> {
-        let Some((net, _)) = self.plane(tier) else {
+        let Some(net) = self.plane(tier) else {
             return Ok(0);
         };
         // R2893 (751 rule 8d) — both shapes are the graph's decision, by the
@@ -6012,7 +6121,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// topology at once (each receiver's own detached-node prune handles the
     /// rest). Reliable.
     fn flood_self_links_changed_tier(&self, tier: Region) -> Result<usize, CodecError> {
-        let Some((net, _)) = self.plane(tier) else {
+        let Some(net) = self.plane(tier) else {
             return Ok(0);
         };
         // R2893 — nothing to tell in a single-hop gossip `Network`.
@@ -6052,7 +6161,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let changes = self
             .tables
             .mesh_mut(tier)
-            .net
+            .net_mut()
             .ingest_linkstate_list(link_id, list);
         // R2639 — the discovery emit, for EITHER tier. Placed here rather than in
         // each caller because this is the one site where an ingest's `Changes`
@@ -6077,7 +6186,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
         }
-        let Some((net, _)) = self.plane(tier) else {
+        let Some(net) = self.plane(tier) else {
             return Ok(0);
         };
         // R2893 — the shape and the per-face exclusions are the graph's
@@ -6140,8 +6249,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         {
             let hat = self.tables.mesh_mut(tier);
             for zid in removed {
-                hat.subs.remove_peer_keys(zid);
-                hat.qabls.remove_peer_keys(zid);
+                hat.subs_mut().remove_peer_keys(zid);
+                hat.qabls_mut().remove_peer_keys(zid);
             }
         }
         // §5.21 routing-token-tables — drain the departed natives' token entries,
@@ -6160,7 +6269,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .map(|keyexpr| self.snapshot(keyexpr))
                 .collect();
             {
-                let tokens = &mut self.tables.mesh_mut(tier).tokens;
+                let tokens = self.tables.mesh_mut(tier).tokens_mut();
                 for zid in removed {
                     tokens.remove_peer_keys(zid);
                 }
@@ -6231,7 +6340,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// so both tiers are `LinkstatepeerInterest<()>`, identical to the sub plane.
     #[cfg(feature = "routing-token-tables")]
     fn tokens_table(&self, tier: Region) -> Option<&LinkstatepeerInterest<()>> {
-        self.mesh_hat(tier).map(|hat| &hat.tokens)
+        self.mesh_hat(tier).map(|hat| &*hat.tokens)
     }
 
     /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
@@ -6242,7 +6351,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let Some(state) = self.tables.faces.get_mut(&face) else {
+        let Some(state) = self.tables.face_mut(face) else {
             return;
         };
         absorb_keyexpr_into(&mut state.keyexpr_table, declare);
@@ -6311,7 +6420,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if let Declared::Sourced(sourced) = declared {
             if is_peer_hat(region, self.tables.node_mode) {
                 self.tables
-                    .mesh_ids
+                    .mesh_ids_mut()
                     .remember(kind, inbound, decl_id, &sourced.keyexpr);
             }
         }
@@ -6377,9 +6486,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         declare: &DeclareOwned,
         keyexpr_of: impl FnOnce(&hashbrown::HashMap<u64, String>) -> Option<String>,
     ) -> Option<Sourced> {
-        let (net, _dirty) = self.plane(tier)?; // Client tier: no net -> slice 1d.
-                                               // Resolve the keyexpr against the inbound face's alias table + read its
-                                               // zid / link, in one scoped borrow (an unresolvable alias drops it).
+        let net = self.plane(tier)?; // Client tier: no net -> slice 1d.
+                                     // Resolve the keyexpr against the inbound face's alias table + read its
+                                     // zid / link, in one scoped borrow (an unresolvable alias drops it).
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = &self.tables.faces;
             // R2734 — SourceOnly declines here, and the reason is that an
@@ -6589,12 +6698,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 region,
                 reliable,
                 sourced,
-                |hat| &mut hat.subs,
+                MeshHat::subs_mut,
                 (),
                 |ke| build_declare_subscriber(0, 0, Some(ke)),
             ),
             Declared::Face(keyexpr) => {
-                let store = &mut self.tables.owner_broker_mut(region).subs;
+                let store = self.tables.owner_broker_mut(region).subs_mut();
                 let already = store
                     .get(&inbound)
                     .is_some_and(|by_id| by_id.values().any(|k| k == keyexpr));
@@ -6641,7 +6750,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         self.tables
-            .mesh_ids
+            .mesh_ids_mut()
             .forget(DeclKind::Subscriber, inbound, decl_id);
         let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
         if self.unregister_subscriber(inbound, region, reliable, &declared, decl_id) {
@@ -6672,13 +6781,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 region,
                 reliable,
                 sourced,
-                |hat| &mut hat.subs,
+                MeshHat::subs_mut,
                 build_undeclare_subscriber_with_keyexpr,
             ),
             Declared::Face(_) => self
                 .tables
                 .owner_broker_mut(region)
-                .subs
+                .subs_mut()
                 .remove_id_leaving_key(inbound, decl_id),
         }
     }
@@ -6751,12 +6860,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 region,
                 reliable,
                 sourced,
-                |hat| &mut hat.qabls,
+                MeshHat::qabls_mut,
                 info,
                 move |ke| build_declare_queryable_with_info(ke, info),
             ),
             Declared::Face(keyexpr) => {
-                let store = &mut self.tables.owner_broker_mut(region).qabls;
+                let store = self.tables.owner_broker_mut(region).qabls_mut();
                 let by_id = store.entry(inbound).or_default();
                 let before = face_qabl_info(by_id, keyexpr);
                 by_id.insert(decl_id, (keyexpr.clone(), info));
@@ -6804,7 +6913,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         self.tables
-            .mesh_ids
+            .mesh_ids_mut()
             .forget(DeclKind::Queryable, inbound, decl_id);
         let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
         if self.unregister_queryable(inbound, region, reliable, &declared, decl_id) {
@@ -6832,11 +6941,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 region,
                 reliable,
                 sourced,
-                |hat| &mut hat.qabls,
+                MeshHat::qabls_mut,
                 build_undeclare_queryable_with_keyexpr,
             ),
             Declared::Face(keyexpr) => remove_from_face(
-                &mut self.tables.owner_broker_mut(region).qabls,
+                self.tables.owner_broker_mut(region).qabls_mut(),
                 inbound,
                 |by_id| {
                     let before = face_qabl_info(by_id, keyexpr);
@@ -6935,7 +7044,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 region,
                 reliable,
                 sourced,
-                |hat| &mut hat.tokens,
+                MeshHat::tokens_mut,
                 (),
                 |ke| build_declare_token(0, 0, Some(ke)),
             ),
@@ -6943,7 +7052,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 let previous = self
                     .tables
                     .owner_broker_mut(region)
-                    .tokens
+                    .tokens_mut()
                     .entry(inbound)
                     .or_default()
                     .insert(decl_id, keyexpr.clone());
@@ -6998,7 +7107,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         self.tables
-            .mesh_ids
+            .mesh_ids_mut()
             .forget(DeclKind::Token, inbound, decl_id);
         let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
         if self.unregister_token(inbound, region, reliable, &declared, decl_id) {
@@ -7027,11 +7136,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 region,
                 reliable,
                 sourced,
-                |hat| &mut hat.tokens,
+                MeshHat::tokens_mut,
                 build_undeclare_token_with_keyexpr,
             ),
             Declared::Face(_) => remove_from_face(
-                &mut self.tables.owner_broker_mut(region).tokens,
+                self.tables.owner_broker_mut(region).tokens_mut(),
                 inbound,
                 |ids| ids.remove(&decl_id),
             )
@@ -7071,14 +7180,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // qu() / to() — a single interest MAY set several); removing from all is
             // safe (a plane that never stored this id no-ops).
             self.tables
-                .future_subs
+                .future_subs_mut()
                 .remove_interest(inbound, interest.interest_id);
             self.tables
-                .future_qabls
+                .future_qabls_mut()
                 .remove_interest(inbound, interest.interest_id);
             #[cfg(feature = "routing-token-tables")]
             self.tables
-                .future_tokens
+                .future_tokens_mut()
                 .remove_interest(inbound, interest.interest_id);
             // R2903 — and a copy of it a gateway still holds is ended there.
             #[cfg(feature = "routing-interest-pending-gc")]
@@ -7142,7 +7251,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let store_future = interest.f() && body.su() && self.is_client_face(inbound);
         if store_future {
             if let Some(t) = target.as_deref() {
-                self.tables.future_subs.store_interest(
+                self.tables.future_subs_mut().store_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -7156,7 +7265,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let peer_hat_face = self.asks_for_declarations(inbound);
         if interest.f() && body.su() && peer_hat_face {
             if let Some(t) = target.as_deref() {
-                self.tables.future_subs.store_peer_hat_interest(
+                self.tables.future_subs_mut().store_peer_hat_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -7171,7 +7280,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let store_future_qabl = interest.f() && body.qu() && self.is_client_face(inbound);
         if store_future_qabl {
             if let Some(t) = target.as_deref() {
-                self.tables.future_qabls.store_interest(
+                self.tables.future_qabls_mut().store_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -7181,7 +7290,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         if interest.f() && body.qu() && peer_hat_face {
             if let Some(t) = target.as_deref() {
-                self.tables.future_qabls.store_peer_hat_interest(
+                self.tables.future_qabls_mut().store_peer_hat_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -7200,7 +7309,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if interest.f() && !self.is_client_face(inbound) && !peer_hat_face {
             if let Some(t) = target.as_deref() {
                 if body.su() {
-                    self.tables.future_subs.store_reporting_only_interest(
+                    self.tables.future_subs_mut().store_reporting_only_interest(
                         inbound,
                         interest_id,
                         t.to_owned(),
@@ -7208,12 +7317,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     );
                 }
                 if body.qu() {
-                    self.tables.future_qabls.store_reporting_only_interest(
-                        inbound,
-                        interest_id,
-                        t.to_owned(),
-                        aggregate,
-                    );
+                    self.tables
+                        .future_qabls_mut()
+                        .store_reporting_only_interest(
+                            inbound,
+                            interest_id,
+                            t.to_owned(),
+                            aggregate,
+                        );
                 }
             }
         }
@@ -7229,7 +7340,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         #[cfg(feature = "routing-token-tables")]
         if store_future_token {
             if let Some(t) = target.as_deref() {
-                self.tables.future_tokens.store_interest(
+                self.tables.future_tokens_mut().store_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -7463,10 +7574,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // CURRENT-only interest keeps id 0 (`make_sub_id` = 0 for non-future).
             |id, ke, ()| {
                 if future {
-                    let sub_id = self
-                        .tables
-                        .future_subs
-                        .intern_current_reply(inbound, ke, ());
+                    let sub_id =
+                        self.tables
+                            .future_subs_mut()
+                            .intern_current_reply(inbound, ke, ());
                     build_declare_subscriber_reply_with_id(id, sub_id, ke)
                 } else {
                     build_declare_subscriber_reply(id, ke)
@@ -7553,7 +7664,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 if future {
                     let qabl_id = self
                         .tables
-                        .future_qabls
+                        .future_qabls_mut()
                         .intern_current_reply(inbound, ke, info);
                     build_declare_queryable_reply_with_id(id, qabl_id, ke, info)
                 } else {
@@ -7612,10 +7723,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // (mirror of the sub future branch); a CURRENT-only interest keeps id 0.
             |id, ke, ()| {
                 if future {
-                    let token_id = self
-                        .tables
-                        .future_tokens
-                        .intern_current_reply(inbound, ke, ());
+                    let token_id =
+                        self.tables
+                            .future_tokens_mut()
+                            .intern_current_reply(inbound, ke, ());
                     build_declare_token_reply_with_id(id, token_id, ke)
                 } else {
                     build_declare_token_reply(id, ke)
@@ -7722,7 +7833,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         keyexpr: &str,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
-        let Some((net, _)) = self.plane(tier) else {
+        let Some(net) = self.plane(tier) else {
             return;
         };
         let children = net.tree_children_of(&source_zid);
@@ -8205,7 +8316,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         // R2893 — the origin alone, which needs no graph node (a peer-hat
         // region's single-hop gossip `Network` has none for a new neighbour).
-        let source = self.plane(tier).and_then(|(net, _dirty)| {
+        let source = self.plane(tier).and_then(|net| {
             resolve_source_zid_in(net, inbound_zid, inbound_link, read_push_source(push))
         });
         (source, inbound_zid)
@@ -8635,7 +8746,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if self.plane(tier).is_none() {
             return;
         }
-        let new_children = self.tables.mesh_mut(tier).net.compute_trees();
+        let new_children = self.tables.mesh_mut(tier).net_mut().compute_trees();
         self.recomputes.bump();
         // The tree that routes a token's declaration is an input of the rule that decides what is
         // advertised of it, and it has just been recomputed.
@@ -8736,7 +8847,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let tables: &mut Tables = &mut self.tables;
         let origin_tier = tables.faces.get(&origin).map(|s| s.tier);
         let faces = &tables.faces;
-        let pushes = tables.future_subs.pushes_for_new_in(
+        let pushes = Arc::make_mut(&mut tables.future_subs).pushes_for_new_in(
             new_ke,
             Some(origin),
             |face, role| {
@@ -8775,10 +8886,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let pushes = self
-            .tables
-            .future_tokens
-            .pushes_for_new(new_ke, Some(origin), |_, _, _| ());
+        let pushes =
+            self.tables
+                .future_tokens_mut()
+                .pushes_for_new(new_ke, Some(origin), |_, _, _| ());
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_token(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -8809,7 +8920,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let origin_tier = tables.faces.get(&origin).map(|s| s.tier);
         let faces = &tables.faces;
         let hats = &tables.hats;
-        let pushes = tables.future_qabls.pushes_for_new_in(
+        let pushes = Arc::make_mut(&mut tables.future_qabls).pushes_for_new_in(
             new_ke,
             Some(origin),
             |face, role| {
@@ -8845,8 +8956,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let tables: &mut Tables = &mut self.tables;
         let hats = &tables.hats;
-        let forgets = tables
-            .future_subs
+        let forgets = Arc::make_mut(&mut tables.future_subs)
             .forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
                 any_sub_matches_in(hats, rk, aggregate)
             });
@@ -8888,7 +8998,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let (forgets, re_pushes) = {
             let tables: &mut Tables = &mut self.tables;
             let hats = &tables.hats;
-            let store = &mut tables.future_qabls;
+            let store = Arc::make_mut(&mut tables.future_qabls);
             let forgets = store.forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
                 any_qabl_matches_in(hats, rk, aggregate)
             });
@@ -9101,9 +9211,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// The regions whose fold outside them changed since `snapshot`, with the value self now
     /// advertises into each (`None` for a retraction), after recording it.
     fn advertisement_changes<P: DeclPlane>(
-        &self,
+        &mut self,
         snapshot: Snapshot<P>,
-    ) -> Vec<(Region, Option<P::Value>)> {
+    ) -> Vec<(Region, Option<P::Value>)>
+    where
+        T: std::ops::DerefMut,
+    {
         let keyexpr = snapshot.keyexpr.as_str();
         let mut changed = Vec::new();
         for (target, derived_before) in snapshot.before {
@@ -9142,7 +9255,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let tables: &mut Tables = &mut self.tables;
         let faces = &tables.faces;
-        let pushes = tables.future_subs.pushes_for_new_in(
+        let pushes = Arc::make_mut(&mut tables.future_subs).pushes_for_new_in(
             keyexpr,
             None,
             |face, _| faces.get(&face).is_some_and(|s| s.tier == target),
@@ -9172,7 +9285,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let tables: &mut Tables = &mut self.tables;
         let faces = &tables.faces;
         let hats = &tables.hats;
-        let pushes = tables.future_qabls.pushes_for_new_in(
+        let pushes = Arc::make_mut(&mut tables.future_qabls).pushes_for_new_in(
             keyexpr,
             None,
             |face, _| faces.get(&face).is_some_and(|s| s.tier == target),
@@ -9207,7 +9320,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let tables: &mut Tables = &mut self.tables;
         let faces = &tables.faces;
-        let forgets = tables.future_subs.forgets_for_withdrawn_in(
+        let forgets = Arc::make_mut(&mut tables.future_subs).forgets_for_withdrawn_in(
             keyexpr,
             |face| faces.get(&face).is_some_and(|s| s.tier == target),
             |reply_ke, aggregate| aggregate || reply_ke != keyexpr,
@@ -9229,7 +9342,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let tables: &mut Tables = &mut self.tables;
         let faces = &tables.faces;
-        let forgets = tables.future_qabls.forgets_for_withdrawn_in(
+        let forgets = Arc::make_mut(&mut tables.future_qabls).forgets_for_withdrawn_in(
             keyexpr,
             |face| faces.get(&face).is_some_and(|s| s.tier == target),
             |reply_ke, aggregate| aggregate || reply_ke != keyexpr,
@@ -9251,7 +9364,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// message, a face that came or went), so that the advertisement follows the rule and a
     /// retraction still withdraws what was sent.
     #[cfg(feature = "routing-token-tables")]
-    fn reconcile_token_advertisements(&self) {
+    fn reconcile_token_advertisements(&mut self)
+    where
+        T: std::ops::DerefMut,
+    {
         for target in self.mesh_regions() {
             let desired: HashSet<String> = self
                 .derived_cross_tier_tokens_into(target)
@@ -9260,7 +9376,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let sent: HashSet<String> = self
                 .tables
                 .advertised_tokens
-                .with(|all| all.get(&target.to_string()).cloned().unwrap_or_default());
+                .get(&target.to_string())
+                .cloned()
+                .unwrap_or_default();
             for keyexpr in desired.difference(&sent) {
                 TokenPlane::remember(self, target, keyexpr, Some(()));
                 self.flood_self_sourced(target, keyexpr, |ke| TokenPlane::declare(ke, ()));
@@ -9430,7 +9548,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// an unknown forwarder: every gateway of the region is a candidate.
     #[cfg(feature = "routing-token-tables")]
     fn token_forwarder(&self, region: Region, source: &Zid) -> Option<Zid> {
-        let (net, _dirty) = self.plane(region)?;
+        let net = self.plane(region)?;
         net.next_hop(source, source)
             .or_else(|| net.next_hop(net.self_zid(), source))
     }
@@ -9522,8 +9640,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let tables: &mut Tables = &mut self.tables;
         let hats = &tables.hats;
-        let forgets = tables
-            .future_tokens
+        let forgets = Arc::make_mut(&mut tables.future_tokens)
             .forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
                 any_token_matches_in(hats, rk, aggregate)
             });
@@ -9651,7 +9768,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         keyexpr: &str,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
-        let Some((net, _dirty)) = self.plane(tier) else {
+        let Some(net) = self.plane(tier) else {
             return;
         };
         // R2890 (open-debt item 751, rule 8c) — in a peer-hat region the pin
@@ -9688,8 +9805,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// cross-tier bubble (both planes). The qabl re-advertise carries the MERGED
     /// info (`derived_cross_tier_qabl_info`), the same value the immediate advertise
     /// floods.
-    fn re_advertise_self_cross_tier(&self, tier: Region, new_children: &[(Zid, Vec<Zid>)]) {
-        let Some((net, _dirty)) = self.plane(tier) else {
+    fn re_advertise_self_cross_tier(&mut self, tier: Region, new_children: &[(Zid, Vec<Zid>)])
+    where
+        T: std::ops::DerefMut,
+    {
+        let Some(net) = self.plane(tier) else {
             return;
         };
         let self_zid = *net.self_zid();
@@ -9811,11 +9931,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // region's (item 751, step 6e); the callback is the session's.
         self.tables
             .owner_broker_mut(Region::Local)
-            .qabls
+            .qabls_mut()
             .entry(LOCAL_FACE)
             .or_default()
             .insert(id, (keyexpr.to_string(), QueryableInfo::local(complete)));
-        self.tables.local_queryables.push(HostedQueryable {
+        self.tables.local_queryables_mut().push(HostedQueryable {
             id,
             keyexpr: keyexpr.to_string(),
             complete,
@@ -9891,24 +10011,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let keyexpr = self.fwd.wire_key(keyexpr);
         self.tables
-            .own_interests
+            .own_interests_mut()
             .retain(|(held, _, plane)| !(*held == id && *plane == queryables));
         self.tables
-            .own_interests
+            .own_interests_mut()
             .push((id, keyexpr.to_string(), queryables));
         for face in self.router_faces() {
             self.send_own_interest(face, id, &keyexpr, queryables);
         }
         #[cfg(feature = "adminspace-introspection-handlers")]
         if queryables {
-            self.tables.future_qabls.store_reporting_only_interest(
-                LOCAL_FACE,
-                id,
-                keyexpr.to_string(),
-                false,
-            );
+            self.tables
+                .future_qabls_mut()
+                .store_reporting_only_interest(LOCAL_FACE, id, keyexpr.to_string(), false);
         } else {
-            self.tables.future_subs.store_reporting_only_interest(
+            self.tables.future_subs_mut().store_reporting_only_interest(
                 LOCAL_FACE,
                 id,
                 keyexpr.to_string(),
@@ -9927,7 +10044,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let before = self.tables.own_interests.len();
         self.tables
-            .own_interests
+            .own_interests_mut()
             .retain(|(held, _, plane)| !(*held == id && *plane == queryables));
         if self.tables.own_interests.len() != before {
             for face in self.router_faces() {
@@ -9941,9 +10058,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         #[cfg(feature = "adminspace-introspection-handlers")]
         if queryables {
-            self.tables.future_qabls.remove_interest(LOCAL_FACE, id);
+            self.tables
+                .future_qabls_mut()
+                .remove_interest(LOCAL_FACE, id);
         } else {
-            self.tables.future_subs.remove_interest(LOCAL_FACE, id);
+            self.tables
+                .future_subs_mut()
+                .remove_interest(LOCAL_FACE, id);
         }
         #[cfg(not(feature = "adminspace-introspection-handlers"))]
         let _ = (id, queryables);
@@ -9977,12 +10098,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let snapshot = self.snapshot::<SubPlane>(keyexpr);
         let id = self.tables.next_hosted_id;
         self.tables.next_hosted_id += 1;
-        self.tables.owner_broker_mut(Region::Local).subs.insert(
-            LOCAL_FACE,
-            id,
-            keyexpr.to_string(),
-        );
-        self.tables.local_subscribers.push(HostedSubscriber {
+        self.tables
+            .owner_broker_mut(Region::Local)
+            .subs_mut()
+            .insert(LOCAL_FACE, id, keyexpr.to_string());
+        self.tables.local_subscribers_mut().push(HostedSubscriber {
             id,
             keyexpr: keyexpr.to_string(),
             namespaced,
@@ -10012,11 +10132,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         let keyexpr = self.tables.local_subscribers[position].keyexpr.clone();
         let snapshot = self.snapshot::<SubPlane>(&keyexpr);
-        let sub = self.tables.local_subscribers.remove(position);
+        let sub = self.tables.local_subscribers_mut().remove(position);
         sub.handler.retract();
         self.tables
             .owner_broker_mut(Region::Local)
-            .subs
+            .subs_mut()
             .remove_id(LOCAL_FACE, id);
         self.repropagate(snapshot);
         // And the faces that were told of it are told it is gone, unless another holds the key.
@@ -10040,8 +10160,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         let keyexpr = self.tables.local_queryables[position].keyexpr.clone();
         let snapshot = self.snapshot::<QablPlane>(&keyexpr);
-        self.tables.local_queryables.remove(position);
-        let store = &mut self.tables.owner_broker_mut(Region::Local).qabls;
+        self.tables.local_queryables_mut().remove(position);
+        let store = self.tables.owner_broker_mut(Region::Local).qabls_mut();
         if let Some(by_id) = store.get_mut(&LOCAL_FACE) {
             by_id.remove(&id);
             if by_id.is_empty() {
@@ -10065,7 +10185,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let snapshot = self.snapshot::<SubPlane>(keyexpr);
         let mut withdrawn: Vec<u64> = Vec::new();
-        self.tables.local_subscribers.retain(|sub| {
+        self.tables.local_subscribers_mut().retain(|sub| {
             if sub.keyexpr != keyexpr {
                 return true;
             }
@@ -10075,7 +10195,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         });
         let hat = self.tables.owner_broker_mut(Region::Local);
         for id in &withdrawn {
-            hat.subs.remove_id(LOCAL_FACE, *id);
+            hat.subs_mut().remove_id(LOCAL_FACE, *id);
         }
         self.repropagate(snapshot);
         self.undeclare_push_subs(keyexpr);
@@ -10093,14 +10213,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let snapshot = self.snapshot::<QablPlane>(keyexpr);
         let mut withdrawn: Vec<u64> = Vec::new();
-        self.tables.local_queryables.retain(|qabl| {
+        self.tables.local_queryables_mut().retain(|qabl| {
             if qabl.keyexpr != keyexpr {
                 return true;
             }
             withdrawn.push(qabl.id);
             false
         });
-        let store = &mut self.tables.owner_broker_mut(Region::Local).qabls;
+        let store = self.tables.owner_broker_mut(Region::Local).qabls_mut();
         if let Some(by_id) = store.get_mut(&LOCAL_FACE) {
             for id in &withdrawn {
                 by_id.remove(id);
@@ -10141,9 +10261,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let self_zid = *self.north_net().self_zid();
         let target = self.fwd.wire_key(keyexpr).into_owned();
-        self.tables
-            .future_tokens
-            .store_interest(LOCAL_FACE, interest_id, target.clone(), false);
+        self.tables.future_tokens_mut().store_interest(
+            LOCAL_FACE,
+            interest_id,
+            target.clone(),
+            false,
+        );
         if current {
             self.dump_interest_tokens(
                 LOCAL_FACE,
@@ -10166,7 +10289,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         self.tables
-            .future_tokens
+            .future_tokens_mut()
             .remove_interest(LOCAL_FACE, interest_id)
     }
 
@@ -10185,7 +10308,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.next_hosted_id += 1;
         self.tables
             .owner_broker_mut(Region::Local)
-            .tokens
+            .tokens_mut()
             .entry(LOCAL_FACE)
             .or_default()
             .insert(id, keyexpr.to_owned());
@@ -10211,7 +10334,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return false;
         };
         let snapshot = self.snapshot::<TokenPlane>(&keyexpr);
-        let store = &mut self.tables.owner_broker_mut(Region::Local).tokens;
+        let store = self.tables.owner_broker_mut(Region::Local).tokens_mut();
         if let Some(ids) = store.get_mut(&LOCAL_FACE) {
             ids.remove(&id);
             if ids.is_empty() {
@@ -10994,7 +11117,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// holds, in the order they came up (a face whose handshake has not given its identity is no
     /// transport and is left out).
     pub fn face_snapshots(&self) -> Vec<FaceSnapshot> {
-        let mut faces: Vec<(&FaceId, &RouterFaceState)> = self.tables.faces.iter().collect();
+        let mut faces: Vec<(&FaceId, &Arc<RouterFaceState>)> = self.tables.faces.iter().collect();
         faces.sort_by_key(|(id, _)| **id);
         faces
             .into_iter()
@@ -11217,7 +11340,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // querier source, so they are unaffected by an unmapped source). A Client
         // inbound has no mesh source (both mesh legs are self-originated cross legs).
         let within = match self.plane(tier) {
-            Some((net, _)) => {
+            Some(net) => {
                 resolve_source_in(net, inbound_zid, inbound_link, read_request_source(request))
             }
             None => None,
@@ -12169,7 +12292,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// the re-advertise emits. RESIDUAL, recorded rather than assumed: pico
     /// keys a publisher's write filter on `(decl_id, peer)`, so whether a
     /// first push at id 0 is enough for every consumer is not established here.
-    fn replay_declarations_to_new_face(&self, face: FaceId, tier: Region) {
+    fn replay_declarations_to_new_face(&mut self, face: FaceId, tier: Region)
+    where
+        T: std::ops::DerefMut,
+    {
         // Not in a hat running wz's link-state peer extension: the replay
         // answers a remote that does not speak link-state (a zenoh-pico peer in
         // peer-to-peer mode), and a subsystem running the extension has none,
@@ -12429,7 +12555,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 let changes = self.ingest_inbound_linkstate_tier(id, tier, list);
                 let _ = self.propagate_tier(id, tier, &changes);
                 self.purge_detached_interest_tier(tier, &changes.removed);
-                self.tables.mesh(tier).trees_dirty.set(true);
+                self.tables.mesh_mut(tier).trees_dirty = true;
             }
             LinkstateOam::Malformed(_) | LinkstateOam::NotLinkstate => {}
         }
@@ -12493,7 +12619,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             DeclareOwnedVariant::CodecZenohDeclFinal(_)
                 if declare.interest_id == Some(INITIAL_INTEREST_ID) && !tier.bound().is_south() =>
             {
-                if let Some(face) = self.tables.faces.get_mut(&id) {
+                if let Some(face) = self.tables.face_mut(id) {
                     face.initial_final = true;
                 }
             }
@@ -12522,7 +12648,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             }
         };
         let added = match self.plane(tier) {
-            Some((net, _dirty)) => {
+            Some(net) => {
                 let self_zid = *net.self_zid();
                 // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's
                 // own zid (a self-connect) is HELD without a link. Adding it would
@@ -12536,7 +12662,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 peer_zid_routing(actions)
                     .filter(|neighbour| *neighbour != self_zid)
                     .map(|neighbour| {
-                        let net = &mut self.tables.mesh_mut(tier).net;
+                        let net = self.tables.mesh_mut(tier).net_mut();
                         // Whether this neighbour is NEW to the GRAPH (not merely a
                         // new face): a second link to a known peer re-advertises
                         // only self's links — zenoh add_link's `new` flag. Queried
@@ -12553,7 +12679,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         self.tables.faces.insert(
             id,
-            RouterFaceState {
+            Arc::new(RouterFaceState {
                 runtime: Arc::new(face_runtime::FaceRuntime::new(actions.clone())),
                 tier,
                 // R2685 — read UNCONDITIONALLY, not from `added`. The graph arm
@@ -12565,7 +12691,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
                 initial_final: false,
-            },
+            }),
         );
         self.shed_registry.add(id, actions.clone());
         let graph_done = Instant::now();
@@ -12575,9 +12701,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // tick). A held-without-identity face changed no link-state, so it
         // triggers no flood.
         if let Some((_, neighbour, neighbour_was_new)) = added {
-            if let Some((_, dirty)) = self.plane(tier) {
+            if self.plane(tier).is_some() {
                 let _ = self.flood_link_added_tier(id, tier, &neighbour, neighbour_was_new);
-                dirty.set(true);
+                self.tables.mesh_mut(tier).trees_dirty = true;
             }
         }
         let flood_done = Instant::now();
@@ -12586,7 +12712,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // The publishers and queriers the node already has ask the router that comes up now, as
         // they asked the ones that were there.
         if self.router_faces().contains(&id) {
-            let own = self.tables.own_interests.clone();
+            let own = self.tables.own_interests.to_vec();
             for (interest_id, keyexpr, queryables) in own {
                 self.send_own_interest(id, interest_id, &keyexpr, queryables);
             }
@@ -12645,7 +12771,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             state.runtime.actions.release_link_admission();
         }
         self.shed_registry.remove(id);
-        self.tables.mesh_ids.forget_face(id);
+        self.tables.mesh_ids_mut().forget_face(id);
         // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
         // early-return below (a Client face is `link == None`, so it never reaches
         // the graph teardown). (a) the pending-query return table entries keyed by
@@ -12716,7 +12842,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
         if let Some(region) = owner_region {
-            self.tables.owner_broker_mut(region).qabls.remove(&id);
+            self.tables.owner_broker_mut(region).qabls_mut().remove(&id);
         }
         for snapshot in qabl_snapshots {
             self.repropagate(snapshot);
@@ -12735,7 +12861,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
         if let Some(region) = owner_region {
-            self.tables.owner_broker_mut(region).subs.remove_face(id);
+            self.tables
+                .owner_broker_mut(region)
+                .subs_mut()
+                .remove_face(id);
         }
         for snapshot in sub_snapshots {
             self.repropagate(snapshot);
@@ -12766,7 +12895,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .map(|keyexpr| self.snapshot(keyexpr))
                 .collect();
             if let Some(region) = owner_region {
-                self.tables.owner_broker_mut(region).tokens.remove(&id);
+                self.tables
+                    .owner_broker_mut(region)
+                    .tokens_mut()
+                    .remove(&id);
             }
             for snapshot in snapshots {
                 self.repropagate(snapshot);
@@ -12782,12 +12914,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // benign over-deliver gap; a liveliness token's stale-live is not benign, so
         // tokens close it — zenoh close_face retracts on face-down for BOTH planes,
         // mod.rs:498/541).
-        self.tables.future_subs.purge_face(id);
-        self.tables.future_qabls.purge_face(id);
+        self.tables.future_subs_mut().purge_face(id);
+        self.tables.future_qabls_mut().purge_face(id);
         // §5.21 routing-token-tables (slice-4): the token FUTURE store is client leaf
         // state too — purge it alongside future_subs/future_qabls (OBLIGATION 1).
         #[cfg(feature = "routing-token-tables")]
-        self.tables.future_tokens.purge_face(id);
+        self.tables.future_tokens_mut().purge_face(id);
         // §5.21 slice-5: NOW notify the surviving future-push readers (future_tokens no
         // longer holds the departed face). Runs before the `link == None` early-return
         // so a Client face is covered.
@@ -12801,8 +12933,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // What its receive path counted stays in the router's total, in the same step that
         // removes it, so a reader sees the face's count in one place and never in two or none.
         #[cfg(feature = "resource-snapshot")]
-        self.tables
-            .receive_ledger
+        Arc::make_mut(&mut self.tables.receive_ledger)
             .retire(&state.runtime.actions.message_reading());
         // What it held for its link goes with it, and no face waits on it or for it.
         self.forget_egress_and_release(id, &state);
@@ -12819,13 +12950,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // returns, and purge each pruned node's interest from THAT tier's
         // tables (a neighbour still reachable via another face keeps its
         // interest — only the genuinely detached set is purged).
-        let removed = self.tables.mesh_mut(tier).net.remove_link(link);
+        let removed = self.tables.mesh_mut(tier).net_mut().remove_link(link);
         self.purge_detached_interest_tier(tier, &removed);
         // Self LOST a link in this tier: flood its updated links-only entry to
         // the surviving same-tier faces, and coalesce the recompute onto the
         // tick.
         let _ = self.flood_self_links_changed_tier(tier);
-        self.tables.mesh(tier).trees_dirty.set(true);
+        self.tables.mesh_mut(tier).trees_dirty = true;
     }
 
     fn tick(&mut self)
@@ -12846,9 +12977,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let dirty: Vec<Region> = self
             .tables
             .hats
-            .iter()
-            .filter(|(_, hat)| hat.mesh().is_some_and(|hat| hat.trees_dirty.replace(false)))
-            .map(|(region, _)| region)
+            .iter_mut()
+            .filter_map(|(region, hat)| {
+                let hat = hat.mesh_mut()?;
+                std::mem::take(&mut hat.trees_dirty).then_some(region)
+            })
             .collect();
         for region in dirty {
             self.recompute_and_advertise_tier(region);
@@ -12880,7 +13013,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
-        self.tables.joined_links.insert(
+        self.tables.joined_links_mut().insert(
             joined_id,
             JoinedLink {
                 primary: primary_id,
@@ -12903,7 +13036,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        self.tables.joined_links.remove(&joined_id);
+        self.tables.joined_links_mut().remove(&joined_id);
     }
 
     /// Item 751 -- the pin refuses a remote its region rules cannot place
@@ -13565,6 +13698,100 @@ mod tests {
         shared::<RouterForwarder>();
         shared::<Hosted<HostedQueryHandler>>();
         shared::<Hosted<HostedSubscriberHandler>>();
+    }
+
+    /// A clone of the tables is a path copy (`docs/router-table-snapshots.md`, section 3): it
+    /// shares every component with the tables it was taken from, a write to it through the
+    /// accessor a writer uses copies the one component written and leaves the original as it
+    /// was, and the route memos stay one object between the two versions.
+    #[test]
+    fn a_clone_of_the_tables_copies_only_what_a_write_to_it_reaches_and_shares_the_memos() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _router_sink) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, _client_sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/mesh"));
+        forward_one(&fwd, FaceId(1), declare_sub("demo/client"));
+
+        let on = fwd.on_tables();
+        let mut draft = Tables::clone(&on.tables);
+        let version = on.tables.mesh(NORTH_REGION).subs.version();
+        assert!(
+            Arc::ptr_eq(
+                &on.tables.mesh(NORTH_REGION).subs,
+                &draft.mesh(NORTH_REGION).subs
+            ),
+            "a clone shares a table nothing has written"
+        );
+
+        assert!(
+            draft
+                .mesh_mut(NORTH_REGION)
+                .subs_mut()
+                .register("demo/draft", zid(0xDD), ()),
+            "the draft takes a source the original does not hold"
+        );
+        let previous = draft
+            .face_mut(FaceId(0))
+            .expect("the router face is held")
+            .keyexpr_table
+            .insert(7, "demo/alias".to_owned());
+        assert!(previous.is_none());
+
+        let original = on.tables.mesh(NORTH_REGION);
+        let copy = draft.mesh(NORTH_REGION);
+        assert_eq!(original.subs.interested("demo/mesh"), vec![zid(0xAA)]);
+        assert!(
+            original.subs.interested("demo/draft").is_empty(),
+            "the write to the draft did not reach the original"
+        );
+        assert_eq!(original.subs.count(), 1);
+        assert_eq!(
+            original.subs.version(),
+            version,
+            "nothing wrote the original"
+        );
+        assert_eq!(copy.subs.interested("demo/draft"), vec![zid(0xDD)]);
+        assert_eq!(copy.subs.interested("demo/mesh"), vec![zid(0xAA)]);
+        assert!(
+            !Arc::ptr_eq(&original.subs, &copy.subs),
+            "the written table was copied"
+        );
+        assert!(Arc::ptr_eq(&original.net, &copy.net));
+        assert!(Arc::ptr_eq(&original.qabls, &copy.qabls));
+        assert!(
+            Arc::ptr_eq(&original.data_routes, &copy.data_routes),
+            "the memos are one object between the versions"
+        );
+        assert!(Arc::ptr_eq(&original.query_routes, &copy.query_routes));
+
+        // The broker hat holding the client's declaration was not written, and is shared whole.
+        let original_clients = on.tables.owner_broker(CLIENTS_REGION);
+        let copy_clients = draft.owner_broker(CLIENTS_REGION);
+        assert!(original_clients.subs.contains_key(&FaceId(1)));
+        assert!(Arc::ptr_eq(&original_clients.subs, &copy_clients.subs));
+        assert!(Arc::ptr_eq(&original_clients.qabls, &copy_clients.qabls));
+        assert!(Arc::ptr_eq(
+            &original_clients.client_routes,
+            &copy_clients.client_routes
+        ));
+        assert!(Arc::ptr_eq(
+            &original_clients.client_query_routes,
+            &copy_clients.client_query_routes
+        ));
+        assert!(Arc::ptr_eq(&on.tables.future_subs, &draft.future_subs));
+
+        // A write to one face copies that face's routing facts and keeps its runtime shared.
+        let original_face = &on.tables.faces[&FaceId(0)];
+        let copy_face = &draft.faces[&FaceId(0)];
+        assert!(original_face.keyexpr_table.get(&7).is_none());
+        assert!(!Arc::ptr_eq(original_face, copy_face));
+        assert!(Arc::ptr_eq(&original_face.runtime, &copy_face.runtime));
+        assert!(Arc::ptr_eq(
+            &on.tables.faces[&FaceId(1)],
+            &draft.faces[&FaceId(1)]
+        ));
     }
 
     /// The test phase 3 could not write until the tables were one value under one guard: many
@@ -14937,13 +15164,13 @@ mod tests {
             0,
             "register only SCHEDULES, never recomputes inline"
         );
-        assert!(fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get());
-        assert!(fwd.on_tables().mesh(PEERS_REGION).trees_dirty.get());
+        assert!(fwd.on_tables().mesh(NORTH_REGION).trees_dirty);
+        assert!(fwd.on_tables().mesh(PEERS_REGION).trees_dirty);
         fwd.tick();
         // Both nets had a pending change -> one recompute each, flags cleared.
         assert_eq!(fwd.recomputes.get(), 2);
-        assert!(!fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get());
-        assert!(!fwd.on_tables().mesh(PEERS_REGION).trees_dirty.get());
+        assert!(!fwd.on_tables().mesh(NORTH_REGION).trees_dirty);
+        assert!(!fwd.on_tables().mesh(PEERS_REGION).trees_dirty);
         // An idle tick is a no-op poll.
         fwd.tick();
         assert_eq!(fwd.recomputes.get(), 2, "an idle window adds no recompute");
@@ -15067,7 +15294,7 @@ mod tests {
             "no live link moved"
         );
         assert!(
-            !fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get(),
+            !fwd.on_tables().mesh(NORTH_REGION).trees_dirty,
             "nothing to recompute"
         );
         let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
@@ -15134,8 +15361,8 @@ mod tests {
             let weights = links_weights.second();
             assert_eq!(weights[slot].weight, 300, "Router face {name} sees 300");
         }
-        assert!(fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get());
-        assert!(!fwd.on_tables().mesh(PEERS_REGION).trees_dirty.get());
+        assert!(fwd.on_tables().mesh(NORTH_REGION).trees_dirty);
+        assert!(!fwd.on_tables().mesh(PEERS_REGION).trees_dirty);
         fwd.tick();
         assert_eq!(
             fwd.recomputes.get(),
@@ -15147,7 +15374,7 @@ mod tests {
         sink_c.reset();
         assert!(!fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
         assert_eq!(sink_a.frame_count() + sink_c.frame_count(), 0);
-        assert!(!fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get());
+        assert!(!fwd.on_tables().mesh(NORTH_REGION).trees_dirty);
     }
 
     /// R2636 (open-debt item 748) — the router reports its transports. Before
@@ -15775,7 +16002,7 @@ mod tests {
                 weights[slot].weight, 400,
                 "the RELOADED weight is on the wire"
             );
-            assert!(fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get());
+            assert!(fwd.on_tables().mesh(NORTH_REGION).trees_dirty);
             fwd.tick();
             assert_eq!(
                 fwd.recomputes.get(),
@@ -15792,7 +16019,7 @@ mod tests {
                 "the graph keeps the installed weight"
             );
             assert_eq!(sink_a.frame_count(), 0, "nothing is re-flooded");
-            assert!(!fwd.on_tables().mesh(NORTH_REGION).trees_dirty.get());
+            assert!(!fwd.on_tables().mesh(NORTH_REGION).trees_dirty);
             let _ = recomputes;
         }
 
