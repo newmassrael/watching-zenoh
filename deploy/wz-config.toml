@@ -2521,6 +2521,27 @@ host with one core loses nothing by it. Neither changes what a peer is sent or
 in what order one link's messages are routed.
 '''
 
+[[policy]]
+id = "routing-table-sharing"
+kind = "choice"
+kconfig = "WZ_POLICY_ROUTING_TABLE_SHARING"
+choices = ["rwlock", "snapshot"]
+default = "rwlock"
+upstream = "Keeps a router's routing tables behind one reader-writer lock (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face coming up or one leaving waits for the messages being routed, and they wait for it."
+since = 2
+help = '''
+How a node that routes for others shares its routing tables between the links
+that route by them and the changes made to them. `rwlock` is upstream's: one
+reader-writer lock, so a declaration, a link coming up or one leaving waits for
+the messages being routed, and they wait for it. `snapshot` publishes each
+change of the tables as a new version that the links route by without waiting:
+a change copies only the part of the tables it touches, and a link that leaves
+is sent nothing after its leaving has returned. What `snapshot` does not keep
+of `rwlock`: a message being routed by the version before a change may reach a
+link after a declaration that change sends to the same link, an order no rule
+of the protocol sets.
+'''
+
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),
 # so that every tree that sources the capabilities can state it, and each option selects the
 # capabilities it needs: the role pulls what it requires, and nothing else. What an image also

@@ -112,7 +112,7 @@ kept, and the cell behind it gets two forms selected by the policy at build time
 | | Reader holds | Writer does | Commit |
 |---|---|---|---|
 | `rwlock` (A, upstream's) | `PlainReadGuard<Tables>` | takes the write guard, mutates in place | dropping the guard |
-| `snapshot` (B) | `Arc<Tables>` loaded from an `ArcSwap` | takes the writer mutex, works on a draft that shares every unchanged field with the published version (path copying), mutates the draft | `WrittenTables::drop` stores the draft, then lets the mutex go |
+| `snapshot` (B) | `Arc<Tables>` loaded from an `ArcSwap`: an `Arc<Tables>` pinned per thread, loaded once by the outermost read, so that the reads nested in it see the version it loaded | takes the writer mutex, works on a draft that shares every unchanged field with the published version (path copying), mutates the draft | `WrittenTables::drop` stores the draft, then lets the mutex go |
 
 `WrittenTables::drop` is already the one place a write ends (it tells the local face and the face watchers
 after the guard is gone), so it is where B publishes. Under A the same restructured `Tables` is used: an
@@ -174,7 +174,13 @@ behaviour under A.
    holding the cell instead of `Arc<PlainRwLock<Tables>>`, and the pair of behaviour tests: under
    `snapshot` a writer completes while a reader holds a version, and that reader still routes by the
    version it loaded; under `rwlock` the writer waits for it. The multicast ingress opens a
-   `DeliveryScope` under both values.
+   `DeliveryScope` under both values. As built (`router_forward/tables_cell.rs`): the build's
+   value is the router's unless a test or a host names one with `with_table_sharing` before any
+   face registers; `deregister` is the one entry point that waits for a grace period
+   (`TablesCell::synchronize`), after its write is published and the writer mutex let go; a write
+   that panics is abandoned and not published; the fan-out test above runs under both values.
+   The tick is still a write, so under `snapshot` it publishes a version every `trees_delay`
+   whether or not a tree is dirty; splitting it (section 7) waits for phase 5's reading.
 5. **Measurement of both values**: the phase 0 instrument and Layer E7s, built with each value of the policy,
    on pc2, alternating runs, recorded here with the build and the host.
 6. **What the measurement asks for, and only that**: persistent maps for a keyed table whose copy is

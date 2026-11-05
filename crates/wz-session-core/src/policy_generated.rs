@@ -367,6 +367,51 @@ impl Default for RoutingFaceDrive {
     }
 }
 
+/// `routing-table-sharing`: How a node that routes for others shares its routing tables
+/// between the links that route by them and the changes made to them. `rwlock` is
+/// upstream's: one reader-writer lock, so a declaration, a link coming up or one leaving
+/// waits for the messages being routed, and they wait for it. `snapshot` publishes each
+/// change of the tables as a new version that the links route by without waiting: a change
+/// copies only the part of the tables it touches, and a link that leaves is sent nothing
+/// after its leaving has returned. What `snapshot` does not keep of `rwlock`: a message
+/// being routed by the version before a change may reach a link after a declaration that
+/// change sends to the same link, an order no rule of the protocol sets.
+/// Upstream: Keeps a router's routing tables behind one reader-writer lock
+/// (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face coming up or one
+/// leaving waits for the messages being routed, and they wait for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutingTableSharing {
+    /// `rwlock`.
+    Rwlock,
+    /// `snapshot`.
+    Snapshot,
+}
+
+impl RoutingTableSharing {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Rwlock => "rwlock",
+            Self::Snapshot => "snapshot",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["rwlock", "snapshot"];
+    const ALL: [Self; 2] = [Self::Rwlock, Self::Snapshot];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_ROUTING_TABLE_SHARING");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for RoutingTableSharing {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -420,6 +465,10 @@ pub struct SessionPolicy {
     /// read lock of the routing tables, so the links of a node are served by several
     /// threads at once.
     pub routing_face_drive: RoutingFaceDrive,
+    /// `routing-table-sharing`. Upstream: Keeps a router's routing tables behind one
+    /// reader-writer lock (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face
+    /// coming up or one leaving waits for the messages being routed, and they wait for it.
+    pub routing_table_sharing: RoutingTableSharing,
 }
 
 impl SessionPolicy {
@@ -438,6 +487,7 @@ impl SessionPolicy {
         let event_ring_full = EventRingFull::stated();
         let clock_quality_stamping = ClockQualityStamping::stated();
         let routing_face_drive = RoutingFaceDrive::stated();
+        let routing_table_sharing = RoutingTableSharing::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
@@ -452,6 +502,7 @@ impl SessionPolicy {
             event_ring_full,
             clock_quality_stamping,
             routing_face_drive,
+            routing_table_sharing,
         }
     }
 }

@@ -15,10 +15,6 @@ use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use std::sync::atomic::{AtomicBool, Ordering};
 use wz_runtime_core::runtime::Runtime;
 
-/// How the tables are shared in this build. The policy that chooses it is phase 4's; until then
-/// the router has one structure, upstream's reader-writer lock.
-const STRUCTURE: &str = "rwlock";
-
 /// The publishers' threads, each a face forwarding Puts without pause.
 const PUBLISHERS: u64 = 8;
 
@@ -181,9 +177,12 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
             "subscriber {s} was given every Put"
         );
     }
+    // The structure is the build's value of the `routing-table-sharing` policy, so that one
+    // instrument measures both values, each in a build that states it.
     println!(
-        "table-sharing: structure={STRUCTURE} publishers={PUBLISHERS} fan_out={FAN_OUT} \
+        "table-sharing: structure={} publishers={PUBLISHERS} fan_out={FAN_OUT} \
          window={:.2}s puts_routed_per_s={:.0}",
+        fwd.table_sharing().id(),
         window.as_secs_f64(),
         total as f64 / window.as_secs_f64()
     );

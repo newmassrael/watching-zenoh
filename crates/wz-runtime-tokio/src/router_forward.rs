@@ -467,11 +467,18 @@ mod shed;
 #[cfg(test)]
 mod shed_tests;
 #[cfg(test)]
+mod table_sharing_pair_tests;
+#[cfg(test)]
 mod table_sharing_tests;
+mod tables_cell;
 use crate::counter::Counter;
 use crate::sync::{PlainCell, PlainMutex, PlainRwLock};
 pub use egress::{EgressBudget, EgressView};
 pub use shed::{ShedBatch, ShedRegistry};
+use tables_cell::{TablesCell, TablesRead, TablesWrite};
+/// The `routing-table-sharing` policy [`RouterForwarder::with_table_sharing`] takes; its
+/// `Default` is the build's value.
+pub use wz_session_core::policy::RoutingTableSharing;
 
 /// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
 /// are keyed by the pin's [`Region`] now. The 1.5.0 `FaceTier` classifier
@@ -1902,13 +1909,14 @@ pub use crate::linkstate_forward::LinkstateNetView;
 #[cfg(feature = "resource-snapshot")]
 #[derive(Clone)]
 pub struct RouterMessagesView {
-    tables: Arc<PlainRwLock<Tables>>,
+    tables: Arc<TablesCell>,
 }
 
 #[cfg(feature = "resource-snapshot")]
 impl RouterMessagesView {
-    /// The count of every face's receive path. Taken under the tables' read lock, which a face's
-    /// removal holds for writing, so a face that goes down in the middle is counted once.
+    /// The count of every face's receive path. Taken from one reading of the tables, in which a
+    /// face's removal and the retiring of its count are one change, so a face that goes down in
+    /// the middle is counted once.
     pub fn reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
         let tables = self.tables.read();
         tables.receive_ledger.total(
@@ -1933,7 +1941,7 @@ pub struct RouterSessionsView {
     /// The router's tables: the faces, and the ROUTERS-tier graph (R2637), because a session's
     /// weight is a property of the link and not of the face. One handle rather than moving the
     /// renderer back onto the forwarder: the enumeration stays ONE derivation site.
-    tables: Arc<PlainRwLock<Tables>>,
+    tables: Arc<TablesCell>,
 }
 
 #[cfg(feature = "adminspace-core")]
@@ -2041,7 +2049,7 @@ impl Drop for ReceivingLink {
 /// which is every link to it.
 #[cfg(feature = "session-close-ingress")]
 pub struct RouterSessionDirectory {
-    tables: Arc<PlainRwLock<Tables>>,
+    tables: Arc<TablesCell>,
 }
 
 #[cfg(feature = "session-close-ingress")]
@@ -2094,7 +2102,7 @@ pub struct RouterDeclarationsView {
     /// else to read it from). The `token/**` leg is folded from exactly the same trio as the
     /// other two legs, as upstream's router hat enumerates tokens like every other hat
     /// (`zenoh/src/net/routing/hat/router/token.rs` @ `fn sourced_tokens`).
-    tables: Arc<PlainRwLock<Tables>>,
+    tables: Arc<TablesCell>,
 }
 
 #[cfg(feature = "adminspace-introspection-handlers")]
@@ -2688,7 +2696,7 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
 pub struct RouterForwarder {
     /// The routing tables: the hats, the faces and the stores a declaration writes, in one
     /// place (see [`Tables`]).
-    tables: Arc<PlainRwLock<Tables>>,
+    tables: Arc<TablesCell>,
     /// What the destinations hold back, and which faces are not read for it: the router's
     /// credit-based flow control (see [`egress`]).
     ///
@@ -3581,7 +3589,7 @@ impl Tables {
     )
 ))]
 pub(crate) struct TablesNet {
-    tables: Arc<PlainRwLock<Tables>>,
+    tables: Arc<TablesCell>,
     region: Region,
 }
 
@@ -3628,8 +3636,8 @@ impl<T> std::ops::Deref for OnTables<'_, T> {
 impl RouterForwarder {
     /// The forwarder with its tables held for reading, until the result is dropped. Any number of
     /// readers hold them at once; a thread that already holds them for reading may take them
-    /// again (see [`PlainRwLock::read`]).
-    fn on_tables(&self) -> OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>> {
+    /// again, and sees the same tables (see [`TablesCell::read`]).
+    fn on_tables(&self) -> OnTables<'_, TablesRead<'_>> {
         OnTables {
             fwd: self,
             tables: self.tables.read(),
@@ -3637,12 +3645,13 @@ impl RouterForwarder {
     }
 
     /// [`Self::on_tables`] for a face's own frame, taken behind a writer that has waited
-    /// [`TABLES_WRITER_FIRST_AFTER`] ([`PlainRwLock::read_behind_a_writer_waiting`]): every face's
+    /// [`TABLES_WRITER_FIRST_AFTER`] ([`TablesCell::read_behind_a_writer_waiting`]): every face's
     /// thread takes the tables once per message, and with the recursive read alone their guards
     /// overlap without end, so that a face coming up, a declaration or a face leaving waits for as
     /// long as the faces route. Only where the thread holds no guard of the tables, which is the
-    /// top of [`Self::forward_frame`]: a face's drive calls it with nothing held.
-    fn on_tables_for_a_frame(&self) -> OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>> {
+    /// top of [`Self::forward_frame`]: a face's drive calls it with nothing held. Under the
+    /// `snapshot` value no reader keeps a writer out, and this is [`Self::on_tables`].
+    fn on_tables_for_a_frame(&self) -> OnTables<'_, TablesRead<'_>> {
         OnTables {
             fwd: self,
             tables: self
@@ -3653,16 +3662,22 @@ impl RouterForwarder {
 
     /// The forwarder with its tables held for writing: alone, until the result is dropped. A
     /// thread that holds them for writing must not take them again for any use, which is why
-    /// the methods that write take `&mut self` and call the readers through it.
+    /// the methods that write take `&mut self` and call the readers through it. Under the
+    /// `snapshot` value "alone" is among the writers only: the readers route by the version
+    /// published before, and the write is published when the result is dropped.
     fn on_tables_mut(&self) -> OnTables<'_, WrittenTables<'_>> {
         let began = Instant::now();
         let guard = self.tables.write();
         let waited = began.elapsed();
         if waited >= SLOW_TABLES_WAIT {
+            // Under `rwlock` the holder is a reader or a writer; under `snapshot` it is a writer,
+            // as the readers hold no lock a writer waits for.
             log::warn!(
-                "router: node={} waited {waited:?} for the routing tables, so a holder was kept \
-                 from letting them go (a face coming up, a topology list and the tick wait with it)",
-                self.own_zid
+                "router: node={} waited {waited:?} for the routing tables ({}), so a holder was \
+                 kept from letting them go (a face coming up, a topology list and the tick wait \
+                 with it)",
+                self.own_zid,
+                self.tables.sharing().id()
             );
         }
         OnTables {
@@ -3777,8 +3792,12 @@ impl RouterForwarder {
 /// have changed, if it watches anything and has not been told since it last looked: the
 /// verdicts it owes (a matching listener's) are worked out by the face, outside every lock,
 /// and not by a writer that holds the tables.
+///
+/// Its drop is the one place a write ends (`docs/router-table-snapshots.md`, section 4), so it is
+/// where the write is committed: the guard is let go under `rwlock`, and under `snapshot` the
+/// draft is published and then the writers' lock let go ([`TablesWrite::publish`]).
 pub(crate) struct WrittenTables<'a> {
-    guard: Option<crate::sync::PlainWriteGuard<'a, Tables>>,
+    guard: Option<TablesWrite<'a>>,
     fwd: &'a RouterForwarder,
 }
 
@@ -3805,7 +3824,14 @@ impl Drop for WrittenTables<'_> {
         let sink = (self.fwd.watchers.load(Ordering::Acquire) > 0)
             .then(|| guard.local_face_sink.clone())
             .flatten();
-        drop(guard);
+        if std::thread::panicking() {
+            // A write that unwinds is not published: under `snapshot` the published version stays
+            // the last whole one, and under `rwlock` the guard is let go with the tables as the
+            // panic left them, as it always was.
+            drop(guard);
+        } else {
+            guard.publish();
+        }
         if let Some(sink) = sink {
             if !self.fwd.change_told.swap(true, Ordering::AcqRel) {
                 sink(LocalFaceEvent::Changed);
@@ -3979,10 +4005,7 @@ router_entry_points! { on_tables:
 /// found no room for is sent once they are released (`local_publish`, a private module).
 impl RouterForwarder {
     /// Route a publish with the tables read, then make the sends it owes with them released.
-    fn publishing<R>(
-        &self,
-        publish: impl FnOnce(OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>>) -> R,
-    ) -> R {
+    fn publishing<R>(&self, publish: impl FnOnce(OnTables<'_, TablesRead<'_>>) -> R) -> R {
         let scope = local_publish::Scope::enter();
         // Declared before the tables are taken, so that it ends after they are let go.
         let deliveries = local_publish::DeliveryScope::enter(self);
@@ -4014,9 +4037,7 @@ impl RouterForwarder {
                         continue;
                     }
                     if handler.call(|h| h(&*sample as &dyn SampleView)).is_none() {
-                        OnTables::<crate::sync::PlainReadGuard<'_, Tables>>::enqueue_self_echo(
-                            &handler, &*sample,
-                        );
+                        OnTables::<TablesRead<'_>>::enqueue_self_echo(&handler, &*sample);
                     }
                 }
                 local_publish::OwedDelivery::Query(job) => self.run_query_job(*job),
@@ -4024,7 +4045,7 @@ impl RouterForwarder {
         }
         if inside.is_outermost() {
             drop(inside);
-            OnTables::<crate::sync::PlainReadGuard<'_, Tables>>::drain_self_echo();
+            OnTables::<TablesRead<'_>>::drain_self_echo();
         }
     }
 
@@ -4361,6 +4382,33 @@ impl RouterForwarder {
         self
     }
 
+    /// Share the routing tables as `sharing` says (`docs/router-table-snapshots.md`), in place of
+    /// the build's value of the `routing-table-sharing` policy: what a test of one value's
+    /// behaviour calls, and a host that chooses the value when it starts.
+    ///
+    /// Call it before any face registers and before any view of the tables is taken (the admin
+    /// views, the session directory): a view holds the tables it was taken from, and would go on
+    /// reading them after they were replaced.
+    pub fn with_table_sharing(mut self, sharing: RoutingTableSharing) -> Self {
+        assert!(
+            Arc::strong_count(&self.tables) == 1,
+            "a router's table sharing is chosen before anything holds its tables"
+        );
+        let tables = Tables::clone(&self.tables.read());
+        assert!(
+            tables.faces.is_empty(),
+            "a router's table sharing is chosen before any face registers"
+        );
+        self.tables = Arc::new(TablesCell::new(tables, sharing));
+        self
+    }
+
+    /// How this router shares its routing tables: the build's value of the
+    /// `routing-table-sharing` policy, or the one [`Self::with_table_sharing`] named.
+    pub fn table_sharing(&self) -> RoutingTableSharing {
+        self.tables.sharing()
+    }
+
     /// Make this node a CLIENT of its north: a node that keeps a south apart
     /// ([`with_south_partition`](Self::with_south_partition)) and announces itself as a client to
     /// the router it dials. Upstream builds its north as the client hat
@@ -4499,31 +4547,36 @@ impl RouterForwarder {
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
         Self {
-            tables: Arc::new(PlainRwLock::new(Tables {
-                hats: regions_of(node_mode, &SouthPartition::Auto)
-                    .into_iter()
-                    .map(|region| (region, Hat::for_region(region, self_zid, node_mode)))
-                    .collect(),
-                node_mode,
-                partition: SouthPartition::Auto,
-                north_is_client: false,
-                faces: HashMap::new(),
-                #[cfg(feature = "resource-snapshot")]
-                receive_ledger: Default::default(),
-                joined_links: Arc::new(HashMap::new()),
-                local_queryables: Arc::new(Vec::new()),
-                local_subscribers: Arc::new(Vec::new()),
-                next_hosted_id: 1,
-                #[cfg(feature = "routing-token-tables")]
-                advertised_tokens: Arc::new(HashMap::new()),
-                future_subs: Arc::new(FutureSubStore::new()),
-                own_interests: Arc::new(Vec::new()),
-                future_qabls: Arc::new(FutureQablStore::new()),
-                #[cfg(feature = "routing-token-tables")]
-                future_tokens: Arc::new(FutureSubStore::new()),
-                mesh_ids: Arc::new(MeshDeclaredIds::default()),
-                local_face_sink: None,
-            })),
+            // Shared as the build's `routing-table-sharing` value says; a test names the other
+            // value with [`Self::with_table_sharing`].
+            tables: Arc::new(TablesCell::new(
+                Tables {
+                    hats: regions_of(node_mode, &SouthPartition::Auto)
+                        .into_iter()
+                        .map(|region| (region, Hat::for_region(region, self_zid, node_mode)))
+                        .collect(),
+                    node_mode,
+                    partition: SouthPartition::Auto,
+                    north_is_client: false,
+                    faces: HashMap::new(),
+                    #[cfg(feature = "resource-snapshot")]
+                    receive_ledger: Default::default(),
+                    joined_links: Arc::new(HashMap::new()),
+                    local_queryables: Arc::new(Vec::new()),
+                    local_subscribers: Arc::new(Vec::new()),
+                    next_hosted_id: 1,
+                    #[cfg(feature = "routing-token-tables")]
+                    advertised_tokens: Arc::new(HashMap::new()),
+                    future_subs: Arc::new(FutureSubStore::new()),
+                    own_interests: Arc::new(Vec::new()),
+                    future_qabls: Arc::new(FutureQablStore::new()),
+                    #[cfg(feature = "routing-token-tables")]
+                    future_tokens: Arc::new(FutureSubStore::new()),
+                    mesh_ids: Arc::new(MeshDeclaredIds::default()),
+                    local_face_sink: None,
+                },
+                RoutingTableSharing::default(),
+            )),
             // R311y450 — this node's §5.18 clock, over the SAME `node_mode`
             // both nets above are seeded with, so the timestamping gate cannot
             // disagree with the role. Router is the one role zenoh's shipped map
@@ -13430,11 +13483,20 @@ impl FaceForwarder for RouterForwarder {
         on.reconcile_token_advertisements();
     }
 
+    /// The face leaves, and nothing is sent to it once this has returned
+    /// (`docs/router-table-snapshots.md`, section 5 item 3). Under `rwlock` the write waited for
+    /// every fan-out that found the face. Under `snapshot` a reader of a version published before
+    /// still finds it, so the tables without it are published first and this then waits until
+    /// every such version is let go (the grace period of the tables' cell), with the writers' lock
+    /// already released so that a reader that writes is not kept from finishing.
     fn deregister(&self, id: FaceId) {
-        let mut on = self.on_tables_mut();
-        on.deregister(id);
-        #[cfg(feature = "routing-token-tables")]
-        on.reconcile_token_advertisements();
+        {
+            let mut on = self.on_tables_mut();
+            on.deregister(id);
+            #[cfg(feature = "routing-token-tables")]
+            on.reconcile_token_advertisements();
+        }
+        self.tables.synchronize();
     }
 
     /// `Some(self.trees_delay)`: the router DOES tick — it flushes the coalesced
@@ -13541,8 +13603,13 @@ impl FaceForwarder for RouterForwarder {
         push: &PushOwned,
         from: Option<&MulticastPeerId>,
     ) {
+        // The subscribers of the node's own session are handed what the group brought once the
+        // tables are let go, as a face's frame does: a callback may declare. Declared before
+        // the tables are taken, so that it ends after they are let go.
+        let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
-            .route_mcast_ingress(priority, reliable, push, from)
+            .route_mcast_ingress(priority, reliable, push, from);
+        deliveries.finish();
     }
 
     #[cfg(feature = "router-multicast-faces")]
@@ -13552,8 +13619,12 @@ impl FaceForwarder for RouterForwarder {
         request: &RequestOwned,
         from: Option<&MulticastPeerId>,
     ) {
+        // The queryables of the node's own session are called once the tables are let go, as
+        // for a face's frame. Declared before the tables are taken, so that it ends after.
+        let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
-            .route_mcast_ingress_request(reliable, request, from)
+            .route_mcast_ingress_request(reliable, request, from);
+        deliveries.finish();
     }
 
     #[cfg(feature = "router-multicast-faces")]
@@ -13695,6 +13766,7 @@ mod tests {
         fn shared<T: Send + Sync>() {}
         shared::<Tables>();
         shared::<PlainRwLock<Tables>>();
+        shared::<TablesCell>();
         shared::<RouterForwarder>();
         shared::<Hosted<HostedQueryHandler>>();
         shared::<Hosted<HostedSubscriberHandler>>();
@@ -13872,21 +13944,43 @@ mod tests {
     }
 
     /// A face that leaves while other faces' threads fan out to it (`docs/router-task-per-face.md`,
-    /// section 7, the first question). A fan-out reads its targets and sends to them under one read
-    /// guard of the tables, and `deregister` takes them for writing, so the face's leaving waits for
-    /// every fan-out that found it, and no fan-out that starts after finds it: once `deregister` has
-    /// returned, its link is given nothing more. Eight publisher faces forward Puts to `demo/data`
-    /// without pause while a ninth thread, two hundred times, registers a subscriber of
-    /// `demo/data`, waits until the fan-out has written to it, and deregisters it while the
-    /// publishers go on: every round is a face leaving in the middle of the fan-outs that target it.
-    /// The face that stays receives every Put, the count is exact, every thread finishes, and no
-    /// face that left was written to after it left.
+    /// section 7, the first question), under the `rwlock` value. A fan-out reads its targets and
+    /// sends to them under one read guard of the tables, and `deregister` takes them for writing,
+    /// so the face's leaving waits for every fan-out that found it, and no fan-out that starts
+    /// after finds it: once `deregister` has returned, its link is given nothing more. Turned red
+    /// by a `deregister` that returns before the fan-outs that found the face are done.
     #[test]
-    fn a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left() {
+    fn a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left_rwlock() {
+        a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left(
+            RoutingTableSharing::Rwlock,
+        );
+    }
+
+    /// The same guarantee under the `snapshot` value (`docs/router-table-snapshots.md`, section 5
+    /// item 3): a fan-out routes by the version it loaded, which may still hold the face, so
+    /// `deregister` publishes the tables without it and then waits until every version before is
+    /// let go. Turned red by a `deregister` that does not wait for that grace period
+    /// ([`TablesCell::synchronize`]).
+    #[test]
+    fn a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left_snapshot() {
+        a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left(
+            RoutingTableSharing::Snapshot,
+        );
+    }
+
+    /// Eight publisher faces forward Puts to `demo/data` without pause while a ninth thread, two
+    /// hundred times, registers a subscriber of `demo/data`, waits until the fan-out has written
+    /// to it, and deregisters it while the publishers go on: every round is a face leaving in the
+    /// middle of the fan-outs that target it. The face that stays receives every Put, the count is
+    /// exact, every thread finishes, and no face that left was written to after it left.
+    fn a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left(
+        sharing: RoutingTableSharing,
+    ) {
         use std::sync::atomic::{AtomicBool, Ordering};
         const PUBLISHERS: u64 = 8;
         const ROUNDS: u64 = 200;
-        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)).with_table_sharing(sharing));
+        assert_eq!(fwd.table_sharing(), sharing);
         let (subscriber, sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &subscriber);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));

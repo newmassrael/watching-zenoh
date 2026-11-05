@@ -3713,6 +3713,7 @@ version = "0.1.0"
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "futures-util",
  "getrandom 0.2.17",

@@ -285,4 +285,30 @@ config WZ_POLICY_ROUTING_FACE_DRIVE_ONE_TASK
 
 endchoice
 
+choice WZ_POLICY_ROUTING_TABLE_SHARING
+	prompt "routing-table-sharing"
+	default WZ_POLICY_ROUTING_TABLE_SHARING_RWLOCK
+	help
+	  How a node that routes for others shares its routing tables between the links
+	  that route by them and the changes made to them. `rwlock` is upstream's: one
+	  reader-writer lock, so a declaration, a link coming up or one leaving waits for
+	  the messages being routed, and they wait for it. `snapshot` publishes each
+	  change of the tables as a new version that the links route by without waiting:
+	  a change copies only the part of the tables it touches, and a link that leaves
+	  is sent nothing after its leaving has returned. What `snapshot` does not keep
+	  of `rwlock`: a message being routed by the version before a change may reach a
+	  link after a declaration that change sends to the same link, an order no rule
+	  of the protocol sets.
+	  Upstream: Keeps a router's routing tables behind one reader-writer lock
+	  (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face coming up or
+	  one leaving waits for the messages being routed, and they wait for it.
+
+config WZ_POLICY_ROUTING_TABLE_SHARING_RWLOCK
+	bool "rwlock"
+
+config WZ_POLICY_ROUTING_TABLE_SHARING_SNAPSHOT
+	bool "snapshot"
+
+endchoice
+
 endmenu
