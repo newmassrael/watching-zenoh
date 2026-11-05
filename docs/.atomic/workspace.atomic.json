@@ -313308,6 +313308,50 @@
         "Next: the 20-run volume job on the build host at the fixed tip, for HW.36 to HW.40; then the kit run, framing, admission and the sustained run of 2,000 queries. Any other place that stops a resource twice on the way out of a scenario (the environment's own stop is called twice by the scenario and is safe for processes) should be read for the same shape."
       ]
     },
+    "Round 4328": {
+      "decision_summary": "The carry of round 4323 is read in the fleet, because hosted CI has not reached it. Run 42087308054 (at 0d824e8d5c) has had C1cs, Layer Q, Z8 and C1ce queued for hours, and the run of round 4323's tip (c999d35dfd) was cancelled by the next push. So `bx --checks ci` ran the two lanes this session owns on main's 348ff830fe:\n- C1cs passed on hkl001. Round 4322's nine budgets hold on the whole gate as hosted runs it.\n- Layer Q passed on pc2. frt's chain matches round 4323's figure of 7,436.\n\nThe fleet still exited 2, because a check changed a machine's tree. Layer Q builds `deploy/mcu-link-noalloc-probe`, and its `target/` was not ignored, so cargo's output stayed in the checkout as untracked files. `deploy/zephyr-pico-compare/rust` has the same gap.\n- `.gitignore` names each standalone workspace's `target/` on a line of its own, added when the workspace was. These two were never added.\n- Hosted CI does not compare the tree after a lane, so nothing reported the gap until a fleet check did.\n- The fix states the class rather than the two names: `deploy/**/target/` and `deploy/**/target-*/`. A workspace added under `deploy/` later is covered without a line of its own. The per-workspace lines stay as the record of why each workspace exists.",
+      "changes_bullets": [
+        "`.gitignore`: `deploy/**/target/` and `deploy/**/target-*/`, with a comment that states the class and names the two workspaces it caught."
+      ],
+      "verification_bullets": [
+        "`bx --checks ci -- python3 scripts/lib/runci_plan.py --only C1cs,Q` at 348ff830fe passed both units: C1cs on hkl001 in 802.5 s, Q on pc2 in 579.3 s.",
+        "It exited 2 and listed the untracked files under `deploy/mcu-link-noalloc-probe/target/` as a change to the machine's tree.",
+        "With the new rules, `git check-ignore -v` matches `deploy/mcu-link-noalloc-probe/target/` and `deploy/zephyr-pico-compare/rust/target/` to `deploy/**/target/`. The workspaces already listed still match their own lines.",
+        "`git ls-files deploy` shows no tracked file under a `target/` or `target-*/` directory, so the rules hide nothing that is committed.",
+        "`bx --checks ci -- python3 scripts/lib/runci_plan.py --only Q` on the tree with the fix passed on hkl001 in 458.9 s and exited 0, with no change to the tree reported."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "At the next round:",
+        "Read hosted CI per job for whatever run completes first.",
+        "Lanes this session owns: C1bnl shard 1 with the raised memlock limit, which only a hosted runner can show, since build machines have no 8 MiB limit. Also C1cs and Layer Q, now that the fleet has passed them.",
+        "The test-merge leftovers, C1bz/C1bzr, C1bf and the S7 registration count belong to the sessions that took them. Read their landings before repaying any of those again.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md (all lanes green in the fleet) is held until those sessions' repairs land, so a whole run does not re-read reds that are already owned."
+      ],
+      "publishable_decision_summary": "The carry of round 4323 is read in the fleet, because hosted CI has not reached it. Run 42087308054 (at 0d824e8d5c) has had C1cs, Layer Q, Z8 and C1ce queued for hours, and the run of round 4323's tip (c999d35dfd) was cancelled by the next push. So `bx --checks ci` ran the two lanes this session owns on main's 348ff830fe:\n- C1cs passed on hkl001. Round 4322's nine budgets hold on the whole gate as hosted runs it.\n- Layer Q passed on pc2. frt's chain matches round 4323's figure of 7,436.\n\nThe fleet still exited 2, because a check changed a machine's tree. Layer Q builds `deploy/mcu-link-noalloc-probe`, and its `target/` was not ignored, so cargo's output stayed in the checkout as untracked files. `deploy/zephyr-pico-compare/rust` has the same gap.\n- `.gitignore` names each standalone workspace's `target/` on a line of its own, added when the workspace was. These two were never added.\n- Hosted CI does not compare the tree after a lane, so nothing reported the gap until a fleet check did.\n- The fix states the class rather than the two names: `deploy/**/target/` and `deploy/**/target-*/`. A workspace added under `deploy/` later is covered without a line of its own. The per-workspace lines stay as the record of why each workspace exists.",
+      "publishable_changes_bullets": [
+        "`.gitignore`: `deploy/**/target/` and `deploy/**/target-*/`, with a comment that states the class and names the two workspaces it caught."
+      ],
+      "publishable_verification_bullets": [
+        "`bx --checks ci -- python3 scripts/lib/runci_plan.py --only C1cs,Q` at 348ff830fe passed both units: C1cs on hkl001 in 802.5 s, Q on pc2 in 579.3 s.",
+        "It exited 2 and listed the untracked files under `deploy/mcu-link-noalloc-probe/target/` as a change to the machine's tree.",
+        "With the new rules, `git check-ignore -v` matches `deploy/mcu-link-noalloc-probe/target/` and `deploy/zephyr-pico-compare/rust/target/` to `deploy/**/target/`. The workspaces already listed still match their own lines.",
+        "`git ls-files deploy` shows no tracked file under a `target/` or `target-*/` directory, so the rules hide nothing that is committed.",
+        "`bx --checks ci -- python3 scripts/lib/runci_plan.py --only Q` on the tree with the fix passed on hkl001 in 458.9 s and exited 0, with no change to the tree reported."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "At the next round:",
+        "Read hosted CI per job for whatever run completes first.",
+        "Lanes this session owns: C1bnl shard 1 with the raised memlock limit, which only a hosted runner can show, since build machines have no 8 MiB limit. Also C1cs and Layer Q, now that the fleet has passed them.",
+        "The test-merge leftovers, C1bz/C1bzr, C1bf and the S7 registration count belong to the sessions that took them. Read their landings before repaying any of those again.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md (all lanes green in the fleet) is held until those sessions' repairs land, so a whole run does not re-read reds that are already owned."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
