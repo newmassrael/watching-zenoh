@@ -34,6 +34,9 @@ A file is NOT merged when it must be its own process or cannot be a module:
   * it sets or removes an environment variable or changes the working directory
     (`PROCESS_WRITE`): every other file of a shared executable would run under what it set, as
     the key log of a TLS test set by `SSLKEYLOGFILE` collected every neighbour's sessions;
+  * it calls into a registry the process owns (`PROCESS_REGISTRY`: the `wz_ext_*` clock, event
+    log, supervisor, sampler and snapshot of the C ABI library), or says of itself that it needs
+    "a process of its own" (`PROCESS_OWN`): a neighbour in the same process would read its state;
   * an explicit `--keep NAME` (a file that reads the process's environment, its working directory
     or a signal, which a neighbour in the same process could disturb).
 
@@ -97,6 +100,14 @@ FILES_HEADER = """\
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # A call that changes what every thread of the process reads: its environment or its directory.
 PROCESS_WRITE = re.compile(r"\benv::(set_var|remove_var)\s*\(|\bset_current_dir\s*\(")
+# A call into a registry the PROCESS owns, which one executable per file kept apart: the observation
+# plane's clock source, event log, supervisor, resource sampler and snapshot are statics of the C
+# ABI library (`wz_ext_*` doors of `wz-capi-pico`), so two files that read or set them in one
+# executable read each other's state. Measured 2026-11-06: exactly the seven files that had been
+# kept by hand call them, and no other file of the C ABI crates does.
+PROCESS_REGISTRY = re.compile(r"\bwz_ext_(?:clock|event|supervision|snapshot|resource)_\w+")
+# A file that says of itself that it needs a process of its own (its header gives the reason).
+PROCESS_OWN = re.compile(r"(?i)\b(?:in a process of its own|in its own process|needs? its own process)\b")
 KEYWORDS = {
     "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
@@ -268,6 +279,12 @@ def classify(
             stay.append((name, "has its own fn main"))
         elif re.search(r"(?m)^(pub )?fn main\s*\(", text):
             stay.append((name, "has its own fn main"))
+        elif PROCESS_REGISTRY.search(text):
+            stay.append((name, "reads or sets a registry the process owns (`wz_ext_*` clock, event "
+                               "log, supervisor, sampler, snapshot), which every file of a shared "
+                               "executable would share"))
+        elif PROCESS_OWN.search(text):
+            stay.append((name, "says it needs a process of its own"))
         elif PROCESS_WRITE.search(text):
             stay.append((name, "changes the process's environment or working directory, which "
                                "every file of a shared executable reads"))
@@ -553,12 +570,18 @@ def selftest() -> int:
             "9bad": "#[test] fn t() {}\n",
             "envset": '#[test] fn t() { std::env::set_var("SSLKEYLOGFILE", "x"); }\n',
             "envread": '#[test] fn t() { let _ = std::env::var("HOME"); }\n',
+            "registry": "#[test] fn t() { unsafe { wz_ext_event_emit(0); } }\n",
+            "ownproc": "//! One test, in a process of its own, because the log is the process's.\n"
+                       "#[test] fn t() {}\n",
+            "prose": "//! The doors wz_ext are described in the book.\n#[test] fn t() {}\n",
         }.items():
             (crate / "tests" / f"{name}.rs").write_text(body)
         merge, stay = classify(crate, {"kept"})
-        check("merge set", merge == {"it": ["envread", "gated", "plain"]})
+        check("merge set", merge == {"it": ["envread", "gated", "plain", "prose"]})
         check("stay set", {n for n, _ in stay}
-              == {"alloc", "tabled", "mainful", "kept", "9bad", "envset"})
+              == {"alloc", "tabled", "mainful", "kept", "9bad", "envset", "registry", "ownproc"})
+        check("a call into a process registry keeps a file, prose naming the family does not",
+              "registry" in {n for n, _ in stay} and "prose" not in {n for n, _ in stay})
         (crate / "tests" / "envset.rs").unlink()
         (crate / "tests" / "envread.rs").unlink()
         (crate / "tests" / "pico.rs").write_text("use zenoh_pico_sys::z_close;\n")
