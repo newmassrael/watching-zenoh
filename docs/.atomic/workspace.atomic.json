@@ -312744,6 +312744,34 @@
         "Lesson of this round: phases 2 and 3 landed without moving the C1AY and C1X count pins nor the reason pin of the graph crate (repaid in round 4307 and here); a change that adds tests to a pinned filter re-measures its pins before it lands."
       ]
     },
+    "Round 4312": {
+      "decision_summary": "The row of the Zephyr board table for the fixed-memory node over tcp/ (rmii-dp83825i-fixed-tcp, the T2G kit's onboard port) is graded HARDWARE, which the record of Round 4310 supports: the program that is the steps of HARDWARE_VERDICT.md put HW.0 to HW.7 to the image on the kit over tcp/ and each step printed OK in three runs, each flashed and reset again, and the entry names the image's sha256 as it was flashed and the CM0+ launcher's as the table lists it. The row narrows its verdict to those steps (verdict_steps HW.0 to HW.7): the pool steps are the datagram transport's, and the steps for what only a stream can do do not exist yet, and its note says so.",
+      "changes_bullets": [
+        "deploy/zephyr-boards.json: the row rmii-dp83825i-fixed-tcp goes from BUILT (witness lane Qzb) to HARDWARE with its witness (record Round 4310, the flashed image's sha256, the verdict text opening with HW.0 to HW.7, the date and who), verdict_steps HW.0 to HW.7, and a note that states what the run holds and what no step holds yet."
+      ],
+      "verification_bullets": [
+        "The board table gate passes in its default check (10 rows: 0 DECLARED, 3 BUILT, 2 QEMU, 5 HARDWARE, one more than before), which reads each HARDWARE row against its ledger entry: here, that Round 4310's entry holds the image hash as a 64 hex digit string, the date, every step HW.0 to HW.7 as OK, and the launcher's hash as the table lists it. The gate's selftest and its row reader pass. The kit run itself is the record of Round 4310. Not changed: the datagram node's row (its record is of the pool steps), and the row's Layer Qzb build, which still builds the image as it did."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The steps for the failure modes of a stream (a connection that resets, a listener that closes, a peer that reconnects, many requests on one connection) are still to be designed, each with a control that passes first, in the verdict program and the grammar file; the pool steps HW.26 to HW.35 are not in the kit lane; the hosted runs of this series are unread."
+      ],
+      "publishable_decision_summary": "The row of the Zephyr board table for the fixed-memory node over tcp/ (rmii-dp83825i-fixed-tcp, the T2G kit's onboard port) is graded HARDWARE, which the record of Round 4310 supports: the program that is the steps of HARDWARE_VERDICT.md put HW.0 to HW.7 to the image on the kit over tcp/ and each step printed OK in three runs, each flashed and reset again, and the entry names the image's sha256 as it was flashed and the CM0+ launcher's as the table lists it. The row narrows its verdict to those steps (verdict_steps HW.0 to HW.7): the pool steps are the datagram transport's, and the steps for what only a stream can do do not exist yet, and its note says so.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-boards.json: the row rmii-dp83825i-fixed-tcp goes from BUILT (witness lane Qzb) to HARDWARE with its witness (record Round 4310, the flashed image's sha256, the verdict text opening with HW.0 to HW.7, the date and who), verdict_steps HW.0 to HW.7, and a note that states what the run holds and what no step holds yet."
+      ],
+      "publishable_verification_bullets": [
+        "The board table gate passes in its default check (10 rows: 0 DECLARED, 3 BUILT, 2 QEMU, 5 HARDWARE, one more than before), which reads each HARDWARE row against its ledger entry: here, that Round 4310's entry holds the image hash as a 64 hex digit string, the date, every step HW.0 to HW.7 as OK, and the launcher's hash as the table lists it. The gate's selftest and its row reader pass. The kit run itself is the record of Round 4310. Not changed: the datagram node's row (its record is of the pool steps), and the row's Layer Qzb build, which still builds the image as it did."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The steps for the failure modes of a stream (a connection that resets, a listener that closes, a peer that reconnects, many requests on one connection) are still to be designed, each with a control that passes first, in the verdict program and the grammar file; the pool steps HW.26 to HW.35 are not in the kit lane; the hosted runs of this series are unread."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
