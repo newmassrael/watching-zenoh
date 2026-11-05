@@ -61,6 +61,12 @@ use std::time::{Duration, Instant};
 use wz_runtime_tokio::group::{Group, GroupEvent, Member};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 
+// A group a router node holds: one copy over the port's engine, in the same aggregate.
+#[cfg(feature = "router-node")]
+mod node;
+#[cfg(feature = "router-node")]
+pub use node::{NodeGroup, NodeGroupError};
+
 // Re-exported for the ABI shims, which name these in their signatures.
 pub use wz_runtime_tokio::group::{GroupError, MemberLiveliness};
 pub use wz_runtime_tokio::locality::Locality;

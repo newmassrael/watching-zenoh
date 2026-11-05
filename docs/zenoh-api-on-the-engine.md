@@ -1132,7 +1132,13 @@ Each lands whole with its surface lines, tests and faults in one round.
       one coming and going, read off the node's own face table through the one `FaceSource`
       the registry shares (`SessionHandle::face_source`), then what is left (the resource
       snapshot, which counts the messages a session received and a node does not count, so
-      it answers unavailable and not a snapshot of nothing; the group), and the advanced
+      it answers unavailable and not a snapshot of nothing), and a group is carried: the
+      membership rules the runtime's group runs (the keys, the ids refused, the table of leases
+      and what an event does to it) are `wz_session_core::group_view`'s and shared by both hosts,
+      and a node joins ONE copy of the group over its engine (`NodeGroup`, where the registry
+      joins one for each face), into the same aggregate the C program reads, with its beacon and
+      watchdog the node's own periodic jobs and a member heard of by its beacon alone asked for its
+      record by a query of the node's own face; and the advanced
       subscriber is carried: its host is written over the port's engine, and a node is one
       (`RouterState` implements `SessionEngine`, so that the subscriber is hosted on the data
       plane, its liveliness on the node's own face, its history and recovery are queries of

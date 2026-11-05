@@ -58,7 +58,6 @@
 //!   ABIs' per-face sessions plus a local plane) needs it to keep the wire
 //!   half and the in-process half disjoint.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -84,75 +83,15 @@ use crate::session_glue::SessionLinkActions;
 
 pub use wz_session_core::group_membership::{Member, MemberLiveliness};
 
-/// The group key-expression namespace (zenoh-ext `GROUP_PREFIX`,
-/// group.rs:37). The single source of truth for both KE shapes below.
-const GROUP_PREFIX: &str = "zenoh/ext/net/group";
-/// The event-key trailing chunk (zenoh-ext `EVENT_POSTFIX`, group.rs:38).
-const EVENT_POSTFIX: &str = "evt";
-/// The watchdog sweep period — once per second (zenoh-ext
-/// `Duration::from_secs(1)`, group.rs:402).
-const WATCHDOG_PERIOD_MS: u64 = 1_000;
-/// The unknown-member `get` timeout. The recovered member is only relevant
-/// for the duration of its lease, so an unanswered `get` (the member left
-/// between its beacon and our query) is bounded tighter than the platform
-/// default. R311y326 — a `0` would no longer wedge (it resolves to the 10s
-/// `DEFAULT_QUERY_TIMEOUT_MS`); this explicit 5s is chosen because a stale
-/// member is lease-scoped and the next beacon re-issues if it was a transient
-/// miss, so a shorter bound than the default is wanted here.
-const MEMBER_QUERY_TIMEOUT_MS: u32 = 5_000;
-
-/// The group event key `zenoh/ext/net/group/<gid>/evt` — the pub/sub channel
-/// the join / leave / keep-alive events travel on.
-fn event_keyexpr(gid: &str) -> String {
-    format!("{GROUP_PREFIX}/{gid}/{EVENT_POSTFIX}")
-}
-
-/// The per-member query key `zenoh/ext/net/group/<gid>/<mid>` — the queryable
-/// each member declares to serve its own record (zenoh-ext group.rs:231-234).
-fn member_keyexpr(gid: &str, mid: &str) -> String {
-    format!("{GROUP_PREFIX}/{gid}/{mid}")
-}
-
-/// Whether a group or member id contains a key-expression wildcard. zenoh-ext
-/// rejects a wild group id / member id (group.rs:118-120, 369-371); a
-/// non-wild keyexpr contains none of the wildcard chunks, all of which carry
-/// a `*`.
-fn is_wild(ke: &str) -> bool {
-    ke.contains('*')
-}
-
-/// R2622 — whether `ke` is a CANONICAL key expression, the property upstream
-/// gets from its type and wz has to check.
-///
-/// zenoh-ext types both group ids as `OwnedKeyExpr`, and a key expression "must
-/// be in canon-form" to construct one
-/// (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs`
-/// @ `/// Note that to be considered a valid key expression, a string MUST be canon.`),
-/// so `a//b` never reaches its `Group::join`. wz types them as `String`, which
-/// carries no such guarantee, and the wildcard checks alone did not supply it.
-///
-/// Canonical means the canonizer returns the input UNCHANGED -- not merely that
-/// it succeeds, which is the `autocanonize` contract upstream deliberately keeps
-/// as a separate constructor. A canonizer error (invalid grammar) is likewise
-/// not canonical.
-///
-/// The Pico dialect is used and the choice does not matter here: the two
-/// dialects differ only on where a `$*` chunk lands inside a WILD run, and every
-/// caller pairs this with [`is_wild`], which rejects the whole class.
-fn is_canonical(ke: &str) -> bool {
-    wz_session_core::keyexpr_canon::canonize_keyexpr(ke)
-        .map(|canon| canon.as_str() == ke)
-        .unwrap_or(false)
-}
-
-/// The keep-alive beacon period: `lease * refresh_ratio`, so a refresh always
-/// precedes the lease elapsing (zenoh-ext group.rs:190-193). Clamped to
-/// `>= 1ms` BY CONSTRUCTION so a degenerate zero period cannot spin the beacon
-/// task (the advanced-publisher C4 lesson) — the floor lives here, not at the
-/// call site, so any future caller is spin-safe too (R311y102 review).
-fn keepalive_period_ms(lease: Duration, refresh_ratio: f32) -> u64 {
-    (((lease.as_millis() as f64) * (refresh_ratio as f64)) as u64).max(1)
-}
+// The keys, the ids that may join, the table of known members and what an event does to it are
+// the hosts' shared part ([`wz_session_core::group_view`]): a node hosts a group over the port's
+// engine with the same rules. The watchdog period and the unknown-member query's bound (R311y326:
+// a `0` would resolve to the 10 s default, so the explicit 5 s) are there too.
+pub use wz_session_core::group_view::GroupEvent;
+use wz_session_core::group_view::{
+    check_ids, event_keyexpr, keepalive_period_ms, member_keyexpr, react, IdError, MemberTable,
+    Reaction, MEMBER_QUERY_TIMEOUT_MS, WATCHDOG_PERIOD_MS,
+};
 
 /// Construction options for a [`Group`]. `#[non_exhaustive]` for additive
 /// stability (mirrors the advanced pub/sub option structs).
@@ -265,7 +204,7 @@ impl GroupOptions {
 /// `AdvancedPublisherOptions` applies, and for the same measured reason: writing
 /// the default explicitly is not a no-op on the wire, it adds an extension every
 /// default publisher would suddenly emit.
-fn event_publish_options(priority: Priority, locality: Locality) -> PublishOptions {
+pub fn event_publish_options(priority: Priority, locality: Locality) -> PublishOptions {
     let opts = PublishOptions::put().with_locality(locality);
     #[cfg(feature = "pubsub-qos")]
     let opts = if priority != Priority::DEFAULT {
@@ -277,23 +216,8 @@ fn event_publish_options(priority: Priority, locality: Locality) -> PublishOptio
     opts
 }
 
-/// A change in the group the user is informed of via [`Group::subscribe`].
-/// Mirror of zenoh-ext `GroupEvent` (group.rs:83-90).
-#[derive(Clone, Debug)]
-pub enum GroupEvent {
-    /// A member joined (or was recovered via the unknown-member query).
-    Join(Member),
-    /// A member announced it is leaving.
-    Leave(String),
-    /// A member's lease elapsed without a refreshing keep-alive.
-    LeaseExpired(String),
-    /// The group leader changed. RESERVED + never emitted — a faithful mirror
-    /// of zenoh-ext, which likewise DECLARES `GroupEvent::NewLeader`
-    /// (group.rs:89) but never sends it (no construction site upstream); the
-    /// leader is a pull query ([`Group::leader`]), not a push event. Kept for
-    /// wire/API parity, not a wz-specific dead stub (R311y102 review arbitration).
-    NewLeader(String),
-}
+// `GroupEvent`, a change in the group the user is informed of via [`Group::subscribe`] (mirror of
+// zenoh-ext `GroupEvent`, group.rs:83-90), is the hosts' shared type and is re-exported above.
 
 /// Why [`Group::join`] failed.
 #[derive(Debug)]
@@ -333,10 +257,10 @@ pub enum GroupError {
 struct GroupState {
     gid: String,
     local_member: Member,
-    /// Known peers: `mid -> (record, alive_till_ms)` keyed by member id. The
-    /// local member is NOT here (it is the always-present `+1`); the value's
-    /// `alive_till_ms` is a monotonic-clock deadline.
-    members: Mutex<HashMap<String, (Member, u64)>>,
+    /// Known peers, each with the monotonic-clock deadline its lease runs to. The local member
+    /// is NOT here (it is the always-present `+1`). What an event does to it is
+    /// [`wz_session_core::group_view::react`]'s.
+    members: Mutex<MemberTable>,
     /// The user event channel sender, present once [`Group::subscribe`] was
     /// called (a single subscription, last-wins — zenoh-ext group.rs:412-415).
     event_tx: Mutex<Option<UnboundedSender<GroupEvent>>>,
@@ -367,32 +291,15 @@ impl GroupState {
         }
     }
 
-    /// Insert (or replace) a known member with a fresh lease deadline, wake
-    /// view-size waiters, and emit a [`GroupEvent::Join`]. Used by both the
-    /// inbound `Join` event and the unknown-member query recovery.
-    fn insert_member(&self, mid: String, member: Member, now_ms: u64) {
-        let alive_till = now_ms.saturating_add(member.lease.as_millis() as u64);
-        {
-            let mut ms = self.members.lock().expect("group members mutex poisoned");
-            ms.insert(mid, (member.clone(), alive_till));
-        }
+    /// Insert (or replace) a known member recovered by the unknown-member query, with a fresh lease
+    /// deadline, wake view-size waiters, and emit a [`GroupEvent::Join`].
+    fn insert_member(&self, member: Member, now_ms: u64) {
+        self.members
+            .lock()
+            .expect("group members mutex poisoned")
+            .insert(member.clone(), now_ms);
         self.notify.notify_waiters();
         self.send_event(GroupEvent::Join(member));
-    }
-
-    /// Refresh a known member's lease deadline. Returns `false` (without
-    /// touching state) when the member is unknown — the caller then recovers
-    /// it via the per-member query. The lock is released on return, so the
-    /// caller may safely re-enter `Session::query`.
-    fn refresh_member(&self, mid: &str, now_ms: u64) -> bool {
-        let mut ms = self.members.lock().expect("group members mutex poisoned");
-        match ms.get_mut(mid) {
-            Some((member, alive_till)) => {
-                *alive_till = now_ms.saturating_add(member.lease.as_millis() as u64);
-                true
-            }
-            None => false,
-        }
     }
 }
 
@@ -472,21 +379,14 @@ where
         options: GroupOptions,
         event_tx: Option<UnboundedSender<GroupEvent>>,
     ) -> Result<Self, GroupError> {
-        // R2622 — canonicity BEFORE the wildcard test, mirroring the order
-        // upstream is forced into: its `try_into` to `OwnedKeyExpr` runs first
-        // and its `is_wild` bail second, on both ids.
-        if !is_canonical(&gid) {
-            return Err(GroupError::NonCanonicalGroupId(gid));
-        }
-        if is_wild(&gid) {
-            return Err(GroupError::WildcardGroupId(gid));
-        }
-        if !is_canonical(&member.mid) {
-            return Err(GroupError::NonCanonicalMemberId(member.mid.clone()));
-        }
-        if is_wild(&member.mid) {
-            return Err(GroupError::WildcardMemberId(member.mid.clone()));
-        }
+        // R2622 — canonicity BEFORE the wildcard test, mirroring the order upstream is forced
+        // into, on both ids (the order is `check_ids`').
+        check_ids(&gid, &member.mid).map_err(|refused| match refused {
+            IdError::NonCanonicalGroupId(id) => GroupError::NonCanonicalGroupId(id),
+            IdError::WildcardGroupId(id) => GroupError::WildcardGroupId(id),
+            IdError::NonCanonicalMemberId(id) => GroupError::NonCanonicalMemberId(id),
+            IdError::WildcardMemberId(id) => GroupError::WildcardMemberId(id),
+        })?;
         // Fail fast & clear if off-runtime: the watchdog (+ keep-alive) below
         // are tokio::spawn tasks that PANIC without a runtime. Checked BEFORE
         // any declare / publish so a failure leaves nothing half-built.
@@ -499,7 +399,7 @@ where
         let state = Arc::new(GroupState {
             gid,
             local_member: member.clone(),
-            members: Mutex::new(HashMap::new()),
+            members: Mutex::new(MemberTable::new()),
             event_tx: Mutex::new(event_tx),
             notify: Notify::new(),
             get_locality: options.get_locality,
@@ -632,7 +532,7 @@ where
             .members
             .lock()
             .expect("group members mutex poisoned");
-        let mut v: Vec<Member> = ms.values().map(|(m, _)| m.clone()).collect();
+        let mut v: Vec<Member> = ms.members().cloned().collect();
         v.push(self.state.local_member.clone());
         v
     }
@@ -729,35 +629,22 @@ fn handle_net_event<R, T>(
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    let local_mid = state.local_member.id();
-    match evt {
-        GroupNetEvent::Join(member) => {
-            if member.mid != local_mid {
-                state.insert_member(member.mid.clone(), member, clock.now_monotonic_ms());
-            }
+    // The table is applied to under its lock, and the lock is released before anything is told or
+    // asked: `Session::query` re-enters the session, and its reply callback locks the state again.
+    let reaction = react(
+        &mut state.members.lock().expect("group members mutex poisoned"),
+        state.local_member.id(),
+        evt,
+        clock.now_monotonic_ms(),
+    );
+    match reaction {
+        Reaction::Joined(member) => {
+            state.notify.notify_waiters();
+            state.send_event(GroupEvent::Join(member));
         }
-        GroupNetEvent::Leave(mid) => {
-            if mid != local_mid {
-                let removed = state
-                    .members
-                    .lock()
-                    .expect("group members mutex poisoned")
-                    .remove(&mid)
-                    .is_some();
-                if removed {
-                    state.send_event(GroupEvent::Leave(mid));
-                }
-            }
-        }
-        GroupNetEvent::KeepAlive(mid) => {
-            if mid != local_mid {
-                // refresh_member releases the members lock before we return, so
-                // re-entering Session::query for the unknown case is safe.
-                if !state.refresh_member(&mid, clock.now_monotonic_ms()) {
-                    issue_member_query(state, session, clock, mid);
-                }
-            }
-        }
+        Reaction::Left(mid) => state.send_event(GroupEvent::Leave(mid)),
+        Reaction::Unknown(mid) => issue_member_query(state, session, clock, mid),
+        Reaction::None => {}
     }
 }
 
@@ -820,11 +707,7 @@ fn issue_member_query<R, T>(
         opts,
         move |reply: &dyn ReplyView| {
             if let Ok(member) = decode_member(reply.payload()) {
-                reply_state.insert_member(
-                    member.mid.clone(),
-                    member,
-                    reply_clock.now_monotonic_ms(),
-                );
+                reply_state.insert_member(member, reply_clock.now_monotonic_ms());
             }
         },
         move |_rid| {},
@@ -835,18 +718,11 @@ fn issue_member_query<R, T>(
 /// [`GroupEvent::LeaseExpired`] for each. The wz equivalent of zenoh-ext's
 /// `watchdog_task` body (group.rs:201-227).
 fn sweep_expired(state: &Arc<GroupState>, now_ms: u64) {
-    let mut expired: Vec<String> = Vec::new();
-    {
-        let mut ms = state.members.lock().expect("group members mutex poisoned");
-        ms.retain(|mid, (_, alive_till)| {
-            if *alive_till < now_ms {
-                expired.push(mid.clone());
-                false
-            } else {
-                true
-            }
-        });
-    }
+    let expired = state
+        .members
+        .lock()
+        .expect("group members mutex poisoned")
+        .sweep(now_ms);
     for mid in expired {
         state.send_event(GroupEvent::LeaseExpired(mid));
     }
@@ -952,6 +828,7 @@ mod tests {
 
     #[test]
     fn wildcard_ids_are_rejected_by_is_wild() {
+        use wz_session_core::group_view::is_wild;
         assert!(is_wild("a/*/b"));
         assert!(is_wild("a/**"));
         assert!(!is_wild("a/b/c"));

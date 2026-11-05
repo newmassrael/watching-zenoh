@@ -65,7 +65,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{priority_from_c, z_priority_t};
 use crate::result::{ZResult, Z_EBUSY_MUTEX, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{not_a_registry, session_handle, SessionHandle};
 use crate::string::{take_moved_string, view_string_over};
 
 // ---------------------------------------------------------------------------
@@ -921,14 +921,30 @@ fn deliver_event(closure: &CEventClosure, event: &GroupEvent) {
 
 /// What an owned group points at. Dropping it leaves the group.
 pub(crate) struct GroupHandleState {
-    shared: Arc<SharedSession>,
-    id: GroupId,
+    host: GroupHost,
     agg: Arc<GroupAggregate>,
+}
+
+/// Where the group is joined: the registry, which joins a wz group for each face it holds, or a
+/// node, which holds one copy over its data plane. Each leaves the group when it is let go of.
+enum GroupHost {
+    Registry {
+        shared: Arc<SharedSession>,
+        id: GroupId,
+    },
+    #[cfg(feature = "router-node")]
+    #[allow(dead_code)] // held for its drop, which leaves the group
+    Node(wz_capi_core::group::NodeGroup),
 }
 
 impl Drop for GroupHandleState {
     fn drop(&mut self) {
-        self.shared.leave_group(self.id);
+        match &self.host {
+            GroupHost::Registry { shared, id } => shared.leave_group(*id),
+            // A node's copy leaves the group in its own drop, which runs with this state's fields.
+            #[cfg(feature = "router-node")]
+            GroupHost::Node(_) => {}
+        }
     }
 }
 
@@ -997,14 +1013,43 @@ pub unsafe extern "C" fn wz_capi_c_group_join(
         // SAFETY: the caller's contract.
         unsafe { *this_ = wz_capi_c_owned_group_t::null_value() };
         // SAFETY: the caller's contract, for each handle.
-        let (Some(state), Some(gid), Some(member)) = (
-            unsafe { session_state(session) },
+        let (Some(held), Some(gid), Some(member)) = (
+            unsafe { session_handle(session) },
             unsafe { keyexpr_str(group) },
             member,
         ) else {
             return unsafe { not_a_registry(session) };
         };
         let MemberState { member, priority } = *member;
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            SessionHandle::Registry(state) => state,
+            // A node holds one copy of the group over its data plane.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => {
+                let joined = match wz_capi_core::group::NodeGroup::join(
+                    node,
+                    gid.to_owned(),
+                    member,
+                    priority,
+                ) {
+                    Ok(joined) => joined,
+                    Err(wz_capi_core::group::NodeGroupError::Id(_)) => return Z_EINVAL,
+                    Err(wz_capi_core::group::NodeGroupError::Refused(_)) => return Z_EGENERIC,
+                };
+                let boxed = Box::new(GroupHandleState {
+                    agg: Arc::clone(joined.aggregate()),
+                    host: GroupHost::Node(joined),
+                });
+                // SAFETY: checked non-null above.
+                unsafe { (*this_).handle = Box::into_raw(boxed) as Handle };
+                return Z_OK;
+            }
+        };
         let (id, agg) = match state.shared.join_group(gid.to_owned(), member, priority) {
             Ok(joined) => joined,
             Err(
@@ -1016,8 +1061,10 @@ pub unsafe extern "C" fn wz_capi_c_group_join(
             Err(_) => return Z_EGENERIC,
         };
         let boxed = Box::new(GroupHandleState {
-            shared: state.shared.clone(),
-            id,
+            host: GroupHost::Registry {
+                shared: state.shared.clone(),
+                id,
+            },
             agg,
         });
         // SAFETY: checked non-null above.

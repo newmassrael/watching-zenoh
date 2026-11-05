@@ -1715,6 +1715,10 @@ pub mod wire_bincode;
 // advanced-pubsub `@adv` family (its own wire + KE namespace).
 #[cfg(feature = "ext-pubsub-group-membership")]
 pub mod group_membership;
+// What the hosts of a group share beside the wire: the keys, the ids that may join, the table of
+// known members and what an event does to it (`group_view`).
+#[cfg(feature = "ext-pubsub-group-membership")]
+pub mod group_view;
 
 // R311dy — application-layer reply registry (`ReplyRegistry` +
 // `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
