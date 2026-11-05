@@ -311516,6 +311516,44 @@
         "Stage seven is one operation short of closed: the resource snapshot answers Z_EUNAVAILABLE on a node, by design, because it counts the messages a session received and the node's forwarder keeps no such counter (a snapshot of zero would read as a node that received nothing); opening it is a counter in the forwarder's face receive path first. The node's group has no witness below a real zenohd or against zenoh-ext (the runtime's group has the interop test, which needs the oracle lane), none with more than two members, and nothing that reads the leader or the view through the C accessors on a node; neither host publishes a Leave when a member is dropped, so a departure is found by the lease. The node as an engine has methods no test reaches (its queryable, token, matching, face watch and shared-memory publish through the port, and the engine's own liveliness subscription), and does not offer the liveliness get through the port; the advanced subscriber's recovery and sample-miss listeners on a node, and both advanced planes below a real zenohd, are unwitnessed. The registry arms of the advanced publisher, the advanced subscriber and the group are unrun against upstream here (the oracle lanes own them). A remote the node dials and places in its own south has no stock witness yet. The C ABI default does not have router-node (capic-router-node is 5,729,813 bytes of text against capic-default's 9,467,100 budget; the engine and the node's group add to it where router-node is built), a peer that listens and keeps no south is the registry in the C ABI, and the value of a get in shared memory goes out as bytes on a node. The hosted runs of the rounds since 4242 are unread."
       ]
     },
+    "Round 4279": {
+      "decision_summary": "Measuring the selector_term fuzz target's regress time (open since round 4234) found Layer Fz dead before any target ran: `wz-capi-c` did not compile in the fuzz targets' build (`e2e-sender` alone) because `session_state`, defined for every build, has callers only in the modules `group`, `snapshot` and `zenoh_ext`, each behind a feature. Clippying every arm C1cc compiles found the same shape on the `nounstable` arms: `FaceSource` and `face_source` serve only `events`, which those arms do not export. Both are reds the capi-c rounds of today left on main, where the hosted runs, all replaced while queued, never graded them. Each helper is now compiled under exactly its callers' gates, so a caller added outside them is a compile error and not a silent widening. The target's time, measured once Fz ran: 194 seeds in about 280 s on pc2 under ASan, more than half of what Fz spends running its ten targets; the hosted time stays open until a run is graded.",
+      "changes_bullets": [
+        "wz-capi-c session.rs: session_state compiled under any(group and not nounstable, resource-snapshot, query and queryable and not nounstable), its three callers' gates; FaceSource, its impl, face_source and the FaceSnapshot/FaceEventSink imports under not(zenoh-c-no-unstable-api), the gate of events, their one reader."
+      ],
+      "verification_bullets": [
+        "Layer Fz on pc2: FAIL before the fix (`function session_state is never used`, -D warnings, in wz-capi-c's e2e-sender build); pass after it (514 s), every target's seeds run: pcap 194, live 195, transport 512, text 18, proto 5, e2e 4, replay 8, config 8, sender 6, selector_term 194.",
+        "`fuzz.sh regress selector_term` alone on pc2: 314.8 s wall, of which the build was 34.9 s.",
+        "clippy -D warnings of wz-capi-c on the four arms C1cc compiles (default, shared-memory, no-unstable-api, both) and on the fuzz targets' --no-default-features e2e-sender: all 0; the no-unstable arm was red (FaceSource never used) before the second gate.",
+        "The 133 round-fed static gates after the rebase: 0."
+      ],
+      "impact_refs": [
+        "intrinsics-runtime--symbol-surface/5-1-trait-shape"
+      ],
+      "carry_forward_bullets": [
+        "Open: the selector_term target's hosted time (fuzz-regress, a 30-minute job; the target is about 280 s of pc2's ASan replay) is read from the first graded hosted run; every CI run of today was replaced while queued.",
+        "Open: the Zephyr images make their key at start; a provisioned identity there needs the board's secure storage. The admin images' commander lists are Kconfig text, not built from a declaration.",
+        "Open from round 4234: RENAMED is empty, so the first real rename is the rule's first use."
+      ],
+      "publishable_decision_summary": "Measuring the selector_term fuzz target's regress time (open since round 4234) found Layer Fz dead before any target ran: `wz-capi-c` did not compile in the fuzz targets' build (`e2e-sender` alone) because `session_state`, defined for every build, has callers only in the modules `group`, `snapshot` and `zenoh_ext`, each behind a feature. Clippying every arm C1cc compiles found the same shape on the `nounstable` arms: `FaceSource` and `face_source` serve only `events`, which those arms do not export. Both are reds the capi-c rounds of today left on main, where the hosted runs, all replaced while queued, never graded them. Each helper is now compiled under exactly its callers' gates, so a caller added outside them is a compile error and not a silent widening. The target's time, measured once Fz ran: 194 seeds in about 280 s on pc2 under ASan, more than half of what Fz spends running its ten targets; the hosted time stays open until a run is graded.",
+      "publishable_changes_bullets": [
+        "wz-capi-c session.rs: session_state compiled under any(group and not nounstable, resource-snapshot, query and queryable and not nounstable), its three callers' gates; FaceSource, its impl, face_source and the FaceSnapshot/FaceEventSink imports under not(zenoh-c-no-unstable-api), the gate of events, their one reader."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Fz on pc2: FAIL before the fix (`function session_state is never used`, -D warnings, in wz-capi-c's e2e-sender build); pass after it (514 s), every target's seeds run: pcap 194, live 195, transport 512, text 18, proto 5, e2e 4, replay 8, config 8, sender 6, selector_term 194.",
+        "`fuzz.sh regress selector_term` alone on pc2: 314.8 s wall, of which the build was 34.9 s.",
+        "clippy -D warnings of wz-capi-c on the four arms C1cc compiles (default, shared-memory, no-unstable-api, both) and on the fuzz targets' --no-default-features e2e-sender: all 0; the no-unstable arm was red (FaceSource never used) before the second gate.",
+        "The 133 round-fed static gates after the rebase: 0."
+      ],
+      "publishable_impact_refs": [
+        "intrinsics-runtime--symbol-surface/5-1-trait-shape"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the selector_term target's hosted time (fuzz-regress, a 30-minute job; the target is about 280 s of pc2's ASan replay) is read from the first graded hosted run; every CI run of today was replaced while queued.",
+        "Open: the Zephyr images make their key at start; a provisioned identity there needs the board's secure storage. The admin images' commander lists are Kconfig text, not built from a declaration.",
+        "Open from round 4234: RENAMED is empty, so the first real rename is the rule's first use."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
