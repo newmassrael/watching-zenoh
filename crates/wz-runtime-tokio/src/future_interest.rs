@@ -72,13 +72,22 @@
 //! zenoh `propagate_forget_simple_subscription/_queryable`) is a SEPARATE unit
 //! (R311y151). See [`remove_interest`](FutureInterestStore::remove_interest) for the
 //! stale-`pushed` residual it closes.
-
-use std::collections::HashMap;
+//!
+//! ## Persistent, and written only where it changes
+//!
+//! The store is part of the router's tables, which the `snapshot` value of the
+//! `routing-table-sharing` policy copies as a version and writes as the next one
+//! (`docs/router-table-snapshots.md`, phase 6). Every map in it is a
+//! [`PersistentMap`], so a copy shares the store and a write copies the path to what it
+//! changes. The walkers that answer a declaration or a withdrawal therefore read every
+//! face first and then write only the faces they push to or forget on: writing through
+//! every face, as a mutable walk does, would copy every face of a shared version.
 
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::queryable_info::QueryableInfo;
 
 use crate::accept_loop::FaceId;
+use crate::persistent_map::PersistentMap;
 
 /// The subscriber-plane store: presence-only (no value), so a pushed
 /// `DeclareSubscriber` is never re-pushed.
@@ -152,12 +161,12 @@ struct FaceFutureInterests<V> {
     /// Whether the push paths may reach this face — see [`InterestOrigin`].
     origin: InterestOrigin,
     /// Declared FUTURE interests, keyed by the soliciting `interest_id`.
-    interests: HashMap<u64, FutureInterest>,
+    interests: PersistentMap<u64, FutureInterest>,
     /// `reply keyexpr -> (decl id declared to this face, last-declared value)`
     /// (zenoh `face_hat.local_subs` / `local_qabls`). Seeded by the current dump
     /// (get-or-alloc, so a redundant re-declare REUSES the id) and by each FUTURE
     /// push. The value drives the re-push decision (a change re-pushes the SAME id).
-    pushed: HashMap<String, (u64, V)>,
+    pushed: PersistentMap<String, (u64, V)>,
     /// Per-face monotonic decl-id source. Ids start at 1 (0 is a NON-future
     /// current-dump reply id and pico's declarations-propagation sentinel, so any
     /// interned id is `>= 1`) and are never recycled.
@@ -172,28 +181,36 @@ impl<V> Default for FaceFutureInterests<V> {
     fn default() -> Self {
         Self {
             origin: InterestOrigin::Client,
-            interests: HashMap::new(),
-            pushed: HashMap::new(),
+            interests: PersistentMap::new(),
+            pushed: PersistentMap::new(),
             next_id: 0,
         }
     }
 }
 
 impl<V: Copy + PartialEq> FaceFutureInterests<V> {
+    /// The id `reply_ke` was declared to this face under, when it was declared with `value`
+    /// already: the answer [`intern`](Self::intern) gives without writing anything.
+    fn interned_as(&self, reply_ke: &str, value: V) -> Option<u64> {
+        self.pushed
+            .get(reply_ke)
+            .and_then(|&(id, stored)| (stored == value).then_some(id))
+    }
+
     /// Get-or-allocate the decl id for `reply_ke` carrying `value`, returning
     /// `(id, should_push)`. `should_push` is `true` when the reply ke is NEW (first
     /// declaration) or its value CHANGED (a value-aware re-push, same id, updated
     /// value); `false` when the same value was already declared (dedup). For
     /// `V = ()` a value never changes, so `should_push == is_new` — presence-only,
-    /// the subscriber behavior.
+    /// the subscriber behavior. A dedup writes nothing.
     fn intern(&mut self, reply_ke: &str, value: V) -> (u64, bool) {
+        if let Some(id) = self.interned_as(reply_ke, value) {
+            return (id, false);
+        }
         match self.pushed.get_mut(reply_ke) {
             Some((id, stored)) => {
-                let changed = *stored != value;
-                if changed {
-                    *stored = value;
-                }
-                (*id, changed)
+                *stored = value;
+                (*id, true)
             }
             None => {
                 self.next_id += 1;
@@ -203,6 +220,35 @@ impl<V: Copy + PartialEq> FaceFutureInterests<V> {
             }
         }
     }
+
+    /// The reply keyexprs this face's interests want for a newly-learned `new_ke`, each
+    /// tagged with whether it aggregates. A key that one interest aggregates and another
+    /// asks for as a resource is the aggregate, so that it is folded once.
+    fn reply_kes_for(&self, new_ke: &str) -> Vec<(String, bool)> {
+        let mut reply_kes: Vec<(String, bool)> = Vec::new();
+        for interest in self.interests.values() {
+            let target_chunks: Vec<&str> = interest.target.split('/').collect();
+            if keyexpr_intersects_target(new_ke, &target_chunks) {
+                let reply_ke = if interest.aggregate {
+                    interest.target.as_str()
+                } else {
+                    new_ke
+                };
+                match reply_kes.iter_mut().find(|(ke, _)| ke == reply_ke) {
+                    Some((_, aggregate)) => *aggregate |= interest.aggregate,
+                    None => reply_kes.push((reply_ke.to_owned(), interest.aggregate)),
+                }
+            }
+        }
+        reply_kes
+    }
+
+    /// Whether `reply_ke` is the target of an aggregate interest of this face.
+    fn aggregates(&self, reply_ke: &str) -> bool {
+        self.interests
+            .values()
+            .any(|interest| interest.aggregate && interest.target == reply_ke)
+    }
 }
 
 /// The per-forwarder FUTURE-mode declare-interest store — the wz analogue of
@@ -211,16 +257,16 @@ impl<V: Copy + PartialEq> FaceFutureInterests<V> {
 /// ([`FutureSubStore`] + [`FutureQablStore`]); the store logic is shared here.
 ///
 /// Holds BOTH roles — see [`InterestOrigin`]. The push paths walk only the
-/// `Client` ones, through the single private `push_faces_mut` filter.
+/// `Client` ones, through the single private `push_faces` filter.
 #[derive(Debug, Clone)]
 pub struct FutureInterestStore<V> {
-    by_face: HashMap<FaceId, FaceFutureInterests<V>>,
+    by_face: PersistentMap<FaceId, FaceFutureInterests<V>>,
 }
 
 impl<V> Default for FutureInterestStore<V> {
     fn default() -> Self {
         Self {
-            by_face: HashMap::new(),
+            by_face: PersistentMap::new(),
         }
     }
 }
@@ -231,10 +277,12 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         Self::default()
     }
 
-    /// Every face whose entry the PUSH paths may reach, mutably — the walk
+    /// Every face whose entry the PUSH paths may reach — the walk
     /// [`pushes_for_new`](Self::pushes_for_new),
     /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) and
-    /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn) share.
+    /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn) share. Each reads
+    /// through it what to change and then writes the faces it chose through
+    /// [`push_face_mut`](Self::push_face_mut) (see the module documentation).
     ///
     /// ⛔ THOSE THREE MUST GO THROUGH THIS, never `by_face` directly, and
     /// `by_face` is private so that they can be made to. A fourth push walker
@@ -244,10 +292,22 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// duplicate declarations onto a plane `flood_to_tree_children` already
     /// serves, which is a DATA-plane fault, strictly worse than the reporting
     /// gap this whole arrangement exists to close.
-    fn push_faces_mut(&mut self) -> impl Iterator<Item = (&FaceId, &mut FaceFutureInterests<V>)> {
+    fn push_faces(&self) -> impl Iterator<Item = (FaceId, &FaceFutureInterests<V>)> {
         self.by_face
-            .iter_mut()
+            .iter()
             .filter(|(_, state)| state.origin.is_pushed_to())
+            .map(|(face, state)| (*face, state))
+    }
+
+    /// The entry of `face`, which [`push_faces`](Self::push_faces) has just yielded, for
+    /// writing.
+    fn push_face_mut(&mut self, face: FaceId) -> &mut FaceFutureInterests<V> {
+        let state = self
+            .by_face
+            .get_mut(&face)
+            .expect("a face the push walk read is held until the walk writes it");
+        debug_assert!(state.origin.is_pushed_to(), "only a push face is written");
+        state
     }
 
     /// Record a CLIENT face's FUTURE interest for `target` (a resolved literal; a
@@ -261,8 +321,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         aggregate: bool,
     ) {
         self.by_face
-            .entry(face)
-            .or_default()
+            .get_mut_or_default(face)
             .interests
             .insert(interest_id, FutureInterest { target, aggregate });
     }
@@ -285,7 +344,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         target: String,
         aggregate: bool,
     ) {
-        let state = self.by_face.entry(face).or_default();
+        let state = self.by_face.get_mut_or_default(face);
         state.origin = InterestOrigin::Mesh;
         state
             .interests
@@ -303,7 +362,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         target: String,
         aggregate: bool,
     ) {
-        let state = self.by_face.entry(face).or_default();
+        let state = self.by_face.get_mut_or_default(face);
         state.origin = InterestOrigin::PeerHat;
         state
             .interests
@@ -319,9 +378,15 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// entry's id is reused (redundant re-declare stays idempotent on pico), and its
     /// stored value is REFRESHED to `value` so the seed matches what the dump emitted.
     pub fn intern_current_reply(&mut self, face: FaceId, reply_ke: &str, value: V) -> u64 {
+        if let Some(id) = self
+            .by_face
+            .get(&face)
+            .and_then(|state| state.interned_as(reply_ke, value))
+        {
+            return id;
+        }
         self.by_face
-            .entry(face)
-            .or_default()
+            .get_mut_or_default(face)
             .intern(reply_ke, value)
             .0
     }
@@ -374,40 +439,29 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         reaches: R,
         value_of: F,
     ) -> Vec<(FaceId, String, u64, V)> {
-        let mut out = Vec::new();
-        for (face, state) in self.push_faces_mut() {
-            if origin == Some(*face) {
+        // Read: the reply kes each face wants and the value each would carry, kept only where
+        // interning would push (a new reply ke or a changed value).
+        let mut to_push: Vec<(FaceId, String, V)> = Vec::new();
+        for (face, state) in self.push_faces() {
+            if origin == Some(face) {
                 continue; // never echo a declaration back to the face that sourced it
             }
-            if !reaches(*face, state.origin) {
+            if !reaches(face, state.origin) {
                 continue;
             }
-            // Gather the reply kes this face's interests want BEFORE interning: the
-            // read borrow of `interests` and the mutable `intern` cannot overlap. Each is
-            // tagged with whether it aggregates; a key that one interest aggregates and
-            // another asks for as a resource is the aggregate, so that it is folded once.
-            let mut reply_kes: Vec<(String, bool)> = Vec::new();
-            for interest in state.interests.values() {
-                let target_chunks: Vec<&str> = interest.target.split('/').collect();
-                if keyexpr_intersects_target(new_ke, &target_chunks) {
-                    let reply_ke = if interest.aggregate {
-                        interest.target.as_str()
-                    } else {
-                        new_ke
-                    };
-                    match reply_kes.iter_mut().find(|(ke, _)| ke == reply_ke) {
-                        Some((_, aggregate)) => *aggregate |= interest.aggregate,
-                        None => reply_kes.push((reply_ke.to_owned(), interest.aggregate)),
-                    }
+            for (reply_ke, aggregate) in state.reply_kes_for(new_ke) {
+                let value = value_of(&reply_ke, face, aggregate);
+                if state.interned_as(&reply_ke, value).is_none() {
+                    to_push.push((face, reply_ke, value));
                 }
             }
-            for (reply_ke, aggregate) in reply_kes {
-                let value = value_of(&reply_ke, *face, aggregate);
-                let (id, should_push) = state.intern(&reply_ke, value);
-                if should_push {
-                    out.push((*face, reply_ke, id, value));
-                }
-            }
+        }
+        // Write: only the faces pushed to.
+        let mut out = Vec::with_capacity(to_push.len());
+        for (face, reply_ke, value) in to_push {
+            let (id, should_push) = self.push_face_mut(face).intern(&reply_ke, value);
+            debug_assert!(should_push, "the read kept only what interning pushes");
+            out.push((face, reply_ke, id, value));
         }
         out
     }
@@ -440,6 +494,17 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// `pushed`-clear — is CLOSED by
     /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn) (R311y153).
     pub fn remove_interest(&mut self, face: FaceId, interest_id: u64) -> bool {
+        // Read first, so that an id the face does not hold writes nothing unless the face is
+        // left with no interest, which drops it as before.
+        let Some(held) = self.by_face.get(&face) else {
+            return false;
+        };
+        if !held.interests.contains_key(&interest_id) {
+            if held.interests.is_empty() {
+                self.by_face.remove(&face);
+            }
+            return false;
+        }
         let Some(state) = self.by_face.get_mut(&face) else {
             return false;
         };
@@ -489,32 +554,27 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         reaches: R,
         still_backed: B,
     ) -> Vec<(FaceId, String, u64)> {
-        let mut out = Vec::new();
-        for (face, state) in self.push_faces_mut() {
-            if !reaches(*face) {
+        // Read: the pushed reply kes the withdrawal could have un-backed (the withdrawn ke
+        // intersects the reply ke) that are now unbacked, by face.
+        let mut to_forget: Vec<(FaceId, String)> = Vec::new();
+        for (face, state) in self.push_faces() {
+            if !reaches(face) {
                 continue;
             }
-            // Select the pushed reply kes the withdrawal could have un-backed (the
-            // withdrawn ke intersects the reply ke) that are now unbacked — collect
-            // before mutating `pushed` (the read borrow can't overlap the remove).
-            let to_forget: Vec<String> = state
-                .pushed
-                .keys()
-                .filter(|reply_ke| {
-                    let chunks: Vec<&str> = reply_ke.split('/').collect();
-                    let aggregate = state
-                        .interests
-                        .values()
-                        .any(|interest| interest.aggregate && interest.target == **reply_ke);
-                    keyexpr_intersects_target(withdrawn_ke, &chunks)
-                        && !still_backed(reply_ke, aggregate)
-                })
-                .cloned()
-                .collect();
-            for reply_ke in to_forget {
-                if let Some((id, _)) = state.pushed.remove(&reply_ke) {
-                    out.push((*face, reply_ke, id));
+            for reply_ke in state.pushed.keys() {
+                let chunks: Vec<&str> = reply_ke.split('/').collect();
+                if keyexpr_intersects_target(withdrawn_ke, &chunks)
+                    && !still_backed(reply_ke, state.aggregates(reply_ke))
+                {
+                    to_forget.push((face, reply_ke.clone()));
                 }
+            }
+        }
+        // Write: only the faces forgotten on.
+        let mut out = Vec::with_capacity(to_forget.len());
+        for (face, reply_ke) in to_forget {
+            if let Some((id, _)) = self.push_face_mut(face).pushed.remove(&reply_ke) {
+                out.push((face, reply_ke, id));
             }
         }
         out
@@ -586,31 +646,28 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         withdrawn_ke: &str,
         value_of: F,
     ) -> Vec<(FaceId, String, u64, V)> {
-        let mut out = Vec::new();
-        for (face, state) in self.push_faces_mut() {
-            // Collect the still-present pushed reply kes intersecting withdrawn_ke
-            // BEFORE interning (the read borrow of `pushed` cannot overlap `intern`'s
-            // mutable borrow) — the same collect-then-intern shape as `pushes_for_new`.
-            let candidates: Vec<String> = state
-                .pushed
-                .keys()
-                .filter(|reply_ke| {
-                    let chunks: Vec<&str> = reply_ke.split('/').collect();
-                    keyexpr_intersects_target(withdrawn_ke, &chunks)
-                })
-                .cloned()
-                .collect();
-            for reply_ke in candidates {
-                let aggregate = state
-                    .interests
-                    .values()
-                    .any(|interest| interest.aggregate && interest.target == reply_ke);
-                let value = value_of(&reply_ke, *face, aggregate);
-                let (id, changed) = state.intern(&reply_ke, value);
-                if changed {
-                    out.push((*face, reply_ke, id, value));
+        // Read: the still-present pushed reply kes intersecting `withdrawn_ke` whose
+        // re-folded value differs from the one declared — the same read-then-write shape
+        // as `pushes_for_new`.
+        let mut to_re_push: Vec<(FaceId, String, V)> = Vec::new();
+        for (face, state) in self.push_faces() {
+            for reply_ke in state.pushed.keys() {
+                let chunks: Vec<&str> = reply_ke.split('/').collect();
+                if !keyexpr_intersects_target(withdrawn_ke, &chunks) {
+                    continue;
+                }
+                let value = value_of(reply_ke, face, state.aggregates(reply_ke));
+                if state.interned_as(reply_ke, value).is_none() {
+                    to_re_push.push((face, reply_ke.clone(), value));
                 }
             }
+        }
+        // Write: only the faces re-pushed to.
+        let mut out = Vec::with_capacity(to_re_push.len());
+        for (face, reply_ke, value) in to_re_push {
+            let (id, changed) = self.push_face_mut(face).intern(&reply_ke, value);
+            debug_assert!(changed, "the read kept only the values that changed");
+            out.push((face, reply_ke, id, value));
         }
         out
     }

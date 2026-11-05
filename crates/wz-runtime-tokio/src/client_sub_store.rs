@@ -22,13 +22,19 @@
 //! The log is bounded. A reader that fell further behind than it reaches is told so
 //! (`changed_since` answers `false`) and drops everything, which is the answer the unindexed store gave
 //! to every change.
+//!
+//! Every part of it is a [`PersistentMap`], so that the router's tables, which hold it, can be
+//! copied as a version and the copy written: a change copies the path to what it moves and not the
+//! store (`docs/router-table-snapshots.md`, phase 6). A store held in `HashMap`s was copied whole by
+//! the first change in each version, which made a declaration cost as much as the store is large.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::ops::Deref;
 
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 
 use crate::accept_loop::FaceId;
+use crate::persistent_map::{PersistentMap, PersistentSet};
 
 /// How many changed keys the log keeps. A cache consulted by every message is never this far behind;
 /// one that is drops its routes instead.
@@ -38,23 +44,29 @@ const LOG_CAPACITY: usize = 4096;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ClientSubStore {
     /// Per face, the subscription ids and the key each names.
-    by_face: HashMap<FaceId, HashMap<u64, String>>,
+    by_face: PersistentMap<FaceId, PersistentMap<u64, String>>,
     /// Per key some client subscribes to, the faces subscribing it and how many ids each holds on it.
-    by_key: HashMap<String, HashMap<FaceId, usize>>,
+    by_key: PersistentMap<String, PersistentMap<FaceId, usize>>,
     /// The keys in `by_key` that contain a wildcard: the only ones a literal key can intersect without
     /// being equal to.
-    wild: HashSet<String>,
+    wild: PersistentSet<String>,
     /// How many changes the store has seen; wraps.
     version: u64,
-    /// The keys changed, each under the version its change produced, oldest first.
-    log: VecDeque<(u64, String)>,
+    /// The keys changed, each under the version its change produced, by the order they were logged
+    /// in: the entries numbered from `log_first` up to before `log_next`. A change that drops a face
+    /// logs several keys under one version, so the log is numbered by entry and not by version.
+    log: PersistentMap<u64, (u64, String)>,
+    /// The number of the oldest entry the log holds.
+    log_first: u64,
+    /// The number the next entry is logged under.
+    log_next: u64,
     /// The version of the newest change whose entries the log has dropped, or 0 while none has been.
     /// A reader that was fresh at this version or later is answered from the log; an earlier one is not.
     log_floor: u64,
 }
 
 impl Deref for ClientSubStore {
-    type Target = HashMap<FaceId, HashMap<u64, String>>;
+    type Target = PersistentMap<FaceId, PersistentMap<u64, String>>;
 
     fn deref(&self) -> &Self::Target {
         &self.by_face
@@ -91,8 +103,7 @@ impl ClientSubStore {
         self.index_add(face, &keyexpr);
         let displaced = self
             .by_face
-            .entry(face)
-            .or_default()
+            .get_mut_or_default(face)
             .insert(id, keyexpr.clone());
         if let Some(old) = &displaced {
             self.record(old);
@@ -103,6 +114,10 @@ impl ClientSubStore {
 
     /// Withdraw `id` of `face`, returning the key it named. A face left with nothing is dropped.
     pub(crate) fn remove_id(&mut self, face: FaceId, id: u64) -> Option<String> {
+        // Looked up before it is written, so that an id the face does not hold copies nothing.
+        if !self.by_face.get(&face)?.contains_key(&id) {
+            return None;
+        }
         let by_id = self.by_face.get_mut(&face)?;
         let removed = by_id.remove(&id)?;
         if by_id.is_empty() {
@@ -129,7 +144,7 @@ impl ClientSubStore {
     }
 
     /// Withdraw every subscription of `face`, returning what it held by id.
-    pub(crate) fn remove_face(&mut self, face: FaceId) -> Option<HashMap<u64, String>> {
+    pub(crate) fn remove_face(&mut self, face: FaceId) -> Option<PersistentMap<u64, String>> {
         let removed = self.by_face.remove(&face)?;
         // One change for the whole face: the version moves once, and each distinct key it held is
         // logged under it.
@@ -153,7 +168,7 @@ impl ClientSubStore {
     pub(crate) fn faces_intersecting(&self, keyexpr: &str) -> Vec<FaceId> {
         let target: Vec<&str> = keyexpr.split('/').collect();
         let mut faces: Vec<FaceId> = Vec::new();
-        let mut take = |key: &str, holders: &HashMap<FaceId, usize>| {
+        let mut take = |key: &str, holders: &PersistentMap<FaceId, usize>| {
             if keyexpr_intersects_target(key, &target) {
                 faces.extend(holders.keys().copied());
             }
@@ -166,7 +181,7 @@ impl ClientSubStore {
             if let Some((key, holders)) = self.by_key.get_key_value(keyexpr) {
                 take(key, holders);
             }
-            for key in &self.wild {
+            for key in self.wild.iter() {
                 if let Some(holders) = self.by_key.get(key) {
                     take(key, holders);
                 }
@@ -185,7 +200,14 @@ impl ClientSubStore {
         if behind > reach {
             return false;
         }
-        for (at, keyexpr) in self.log.iter().rev() {
+        // Newest first, as far back as the reader is behind.
+        let mut entry = self.log_next;
+        while entry != self.log_first {
+            entry = entry.wrapping_sub(1);
+            let (at, keyexpr) = self
+                .log
+                .get(&entry)
+                .expect("the log holds every entry from the first to before the next");
             if self.version.wrapping_sub(*at) >= behind {
                 break;
             }
@@ -202,11 +224,14 @@ impl ClientSubStore {
 
     /// Log `keyexpr` under the current version, dropping the oldest entry past the capacity.
     fn log_key(&mut self, keyexpr: &str) {
-        self.log.push_back((self.version, keyexpr.to_owned()));
+        self.log
+            .insert(self.log_next, (self.version, keyexpr.to_owned()));
+        self.log_next = self.log_next.wrapping_add(1);
         while self.log.len() > LOG_CAPACITY {
-            if let Some((at, _)) = self.log.pop_front() {
+            if let Some((at, _)) = self.log.remove(&self.log_first) {
                 self.log_floor = at;
             }
+            self.log_first = self.log_first.wrapping_add(1);
         }
     }
 
@@ -216,10 +241,8 @@ impl ClientSubStore {
         }
         *self
             .by_key
-            .entry(keyexpr.to_owned())
-            .or_default()
-            .entry(face)
-            .or_insert(0) += 1;
+            .get_mut_or_default(keyexpr.to_owned())
+            .get_mut_or_insert_with(face, || 0) += 1;
     }
 
     fn index_remove(&mut self, face: FaceId, keyexpr: &str) {

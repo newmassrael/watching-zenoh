@@ -417,6 +417,7 @@ use crate::linkstate_forward::{
     ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore, DataRoutes, QueryCandidate,
     QueryRoutes,
 };
+use crate::persistent_map::PersistentMap;
 #[cfg(feature = "router-multicast-faces")]
 use crate::routing_region::is_primary_gateway;
 use crate::routing_region::{
@@ -900,7 +901,7 @@ fn any_qabl_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> bool
 /// once, however many ids name it. Every reader goes through this rather than
 /// the id map, so a face with two subscribers on one key is never delivered
 /// to, advertised or counted twice.
-fn face_sub_keyexprs(by_id: &HashMap<u64, String>) -> HashSet<&str> {
+fn face_sub_keyexprs(by_id: &PersistentMap<u64, String>) -> HashSet<&str> {
     by_id.values().map(String::as_str).collect()
 }
 
@@ -1489,37 +1490,41 @@ fn remove_from_face<M: FaceStore, R>(
     removed
 }
 
-/// R2909 — a broker-hat store read as its per-face map, whether it is kept
-/// plain or [`Versioned`] (the subscriber store is, because a route is cached
-/// against it). The views fold every store through this one read, so it is
-/// gated as they are.
+/// R2909 — a broker-hat store read face by face, whether it is kept plain, [`Versioned`] (a
+/// route is cached against it) or persistent (the subscriber store, which a version of the
+/// tables shares, `docs/router-table-snapshots.md` phase 6). The views fold every store through
+/// this one read, so it is gated as they are.
 #[cfg(feature = "adminspace-introspection-handlers")]
 trait FaceMap {
     type Entry;
-    fn faces(&self) -> &HashMap<FaceId, Self::Entry>;
+    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &Self::Entry));
 }
 
 #[cfg(feature = "adminspace-introspection-handlers")]
 impl<T> FaceMap for HashMap<FaceId, T> {
     type Entry = T;
-    fn faces(&self) -> &HashMap<FaceId, T> {
-        self
+    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &T)) {
+        for (face, entry) in self {
+            visit(*face, entry);
+        }
     }
 }
 
 #[cfg(feature = "adminspace-introspection-handlers")]
 impl<T> FaceMap for Versioned<HashMap<FaceId, T>> {
     type Entry = T;
-    fn faces(&self) -> &HashMap<FaceId, T> {
-        self
+    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &T)) {
+        (**self).each_face(visit);
     }
 }
 
 #[cfg(feature = "adminspace-introspection-handlers")]
 impl FaceMap for ClientSubStore {
-    type Entry = HashMap<u64, String>;
-    fn faces(&self) -> &HashMap<FaceId, HashMap<u64, String>> {
-        self
+    type Entry = PersistentMap<u64, String>;
+    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &PersistentMap<u64, String>)) {
+        for (face, entry) in self.iter() {
+            visit(*face, entry);
+        }
     }
 }
 
@@ -1553,15 +1558,13 @@ fn client_keyexprs<'a, S: FaceMap + 'a>(
     stores: impl Iterator<Item = &'a S>,
     keys: impl Fn(&S::Entry) -> HashSet<String>,
 ) -> FaceKeyexprs {
-    stores
-        .flat_map(|store| {
-            store
-                .faces()
-                .iter()
-                .map(|(face, entry)| (*face, keys(entry)))
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut out = FaceKeyexprs::new();
+    for store in stores {
+        store.each_face(&mut |face, entry| {
+            out.insert(face, keys(entry));
+        });
+    }
+    out
 }
 
 /// The region a router places a face in, as the pin computes it when the
