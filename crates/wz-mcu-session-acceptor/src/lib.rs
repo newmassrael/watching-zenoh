@@ -104,7 +104,7 @@ pub use lwip::{run_acceptor_e2e, run_acceptor_e2e_with_progress, LwipTopology};
 #[cfg(all(feature = "fixed-memory", lwip_real_build))]
 pub mod fixed;
 #[cfg(all(feature = "fixed-memory", lwip_real_build))]
-pub use fixed::{run_acceptor_e2e_fixed, AcceptorStatics};
+pub use fixed::{acceptor_task_cell_bytes, run_acceptor_e2e_fixed, AcceptorStatics};
 
 /// UDP port the acceptor session socket binds to.
 pub const SESSION_PORT: u16 = 7460;

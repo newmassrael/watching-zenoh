@@ -21,8 +21,8 @@
 #![cfg(all(feature = "fixed-memory", lwip_real_build))]
 
 use wz_mcu_session_acceptor::{
-    run_acceptor_e2e_fixed, AcceptorE2eOutcome, AcceptorStage, AcceptorStatics, ClockSource,
-    DataMode, FixtureEntropy,
+    acceptor_task_cell_bytes, run_acceptor_e2e_fixed, AcceptorE2eOutcome, AcceptorStage,
+    AcceptorStatics, ClockSource, DataMode, FixtureEntropy,
 };
 
 #[path = "../../wz-session-lwip/tests/support/alloc_count.rs"]
@@ -46,7 +46,11 @@ impl ClockSource for FrozenClock {
 
 #[test]
 fn the_fixed_acceptor_reaches_established_with_the_heap_asked_for_nothing() {
-    static STATICS: AcceptorStatics<FrozenClock, FixtureEntropy> = AcceptorStatics::new();
+    static STATICS: AcceptorStatics<
+        FrozenClock,
+        FixtureEntropy,
+        { acceptor_task_cell_bytes::<FrozenClock>() },
+    > = AcceptorStatics::new();
 
     // The stage log is a fixed array: a `Vec` here would be the test's own allocation
     // inside the window it counts.

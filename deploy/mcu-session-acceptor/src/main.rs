@@ -53,7 +53,7 @@ use wz_mcu_clock::SystickClock;
 #[cfg(not(feature = "fixed-memory"))]
 use wz_mcu_session_acceptor::run_acceptor_e2e_with_progress;
 #[cfg(feature = "fixed-memory")]
-use wz_mcu_session_acceptor::{run_acceptor_e2e_fixed, AcceptorStatics};
+use wz_mcu_session_acceptor::{acceptor_task_cell_bytes, run_acceptor_e2e_fixed, AcceptorStatics};
 use wz_mcu_session_acceptor::{AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy};
 
 // Heap sizing fork per target SRAM budget. The mps2 family (M3/M4/M7) has
@@ -76,7 +76,11 @@ static HEAP: Heap = Heap::empty();
 /// The e2e's statics on the fixed-memory profile: the runtime, the session table, the
 /// pump table, the listener and the two socket pools, in `.bss`, sized by the types.
 #[cfg(feature = "fixed-memory")]
-static E2E: AcceptorStatics<SystickClockRef, FixtureEntropy> = AcceptorStatics::new();
+static E2E: AcceptorStatics<
+    SystickClockRef,
+    FixtureEntropy,
+    { acceptor_task_cell_bytes::<SystickClockRef>() },
+> = AcceptorStatics::new();
 
 /// CPU clock per target (MHz) — QEMU clocks the mps2 family at 25 MHz and the
 /// `microbit` (nrf51) at 16 MHz. SysTick counts processor cycles when

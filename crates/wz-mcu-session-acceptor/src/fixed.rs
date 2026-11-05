@@ -27,13 +27,15 @@ use core::cell::RefCell;
 
 use wz::link_lwip::rx_sockets::{SessionRxPool, SESSION_RX_SLOT_SIZE};
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket, UdpSocketPool};
-use wz::runtime_coop::session_drive::{PumpSlots, SessionDriveConfig, SessionRole};
+use wz::runtime_coop::session_drive::{
+    pump_task_cell_bytes, PumpSlots, SessionDriveConfig, SessionRole,
+};
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz::session_lwip::driver::LwipUdpDriver;
 use wz::session_lwip::listener::SessionListener;
 use wz::session_lwip::session_host::{OpenRefused, OpenedSession, SessionHost};
 use wz::session_lwip::{LwipLinks, LwipSessionLink};
-use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::driver_loop::{EventSink, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -48,14 +50,31 @@ use crate::{
 /// outstanding.
 const PEER_RX_SLOTS: usize = 4;
 
-/// Tasks the runtime holds: the session's pump, with room beside it.
-const TASKS: usize = 2;
-/// Bytes of one task cell. The task future is the pump's handle and the application
-/// layer's state (a reference to the run and the caller's fragment hook), well under
-/// this; the number is the e2e's own, sized with margin, and a task that did not fit
-/// is a counted refusal (`task_refusals().too_large`), which the run reports as an
-/// e2e that never established.
-const TASK_BYTES: usize = 512;
+/// Tasks the runtime holds: the session's pump, and nothing else runs as a task (a cell stays in
+/// use until the session's last handle drops, which is when its slot is freed, and the table holds
+/// one slot).
+const TASKS: usize = 1;
+/// What the session's task keeps of the run: where its events are written (the run's own cell) and
+/// the hook of the dispatched fragment. A struct of its own and not a closure, so that the task is
+/// a type this file can name and [`acceptor_task_cell_bytes`] is a constant of it.
+struct AcceptorSink {
+    run: &'static RefCell<Run>,
+    hook: fn(),
+}
+
+impl EventSink for AcceptorSink {
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
+        self.run.borrow_mut().event(event, &mut self.hook);
+    }
+}
+
+/// Bytes of the task cell that holds the session's task over the clock `C`: what the task is, as
+/// the compiler lays it out (the pump's handle and the application layer's state, a reference to
+/// the run and the fragment hook), and not a figure written beside it. An image declares its
+/// statics with it: `AcceptorStatics<C, E, { acceptor_task_cell_bytes::<C>() }>`.
+pub const fn acceptor_task_cell_bytes<C: ClockSource + 'static>() -> usize {
+    pump_task_cell_bytes::<C, LwipSessionLink<&'static LwipLink>, LwipUdpDriver, AcceptorSink>()
+}
 /// Timers the runtime holds: the handshake and the lease deadlines of one session.
 const TIMERS: usize = 4;
 
@@ -82,9 +101,14 @@ const MAX_TURNS: usize = MAX_ITERS * 4;
 /// What the acceptor e2e declares, as an image declares it, in a `static`:
 ///
 /// ```ignore
-/// static E2E: AcceptorStatics<BoardClock, BoardEntropy> = AcceptorStatics::new();
+/// static E2E: AcceptorStatics<BoardClock, BoardEntropy, { acceptor_task_cell_bytes::<BoardClock>() }> =
+///     AcceptorStatics::new();
 /// let report = run_acceptor_e2e_fixed(&E2E, clock, entropy, DataMode::WholeFrame, || {}, |_| {});
 /// ```
+///
+/// `TASK_BYTES` is the bytes of the runtime's one task cell, which the image states as
+/// [`acceptor_task_cell_bytes`] of its clock: the cell is a constant of the session task's types
+/// and cannot be written from the generic parameters here.
 ///
 /// A set of statics runs ONE e2e: the runtime is started once, and the sockets of its
 /// pools are bound by the run and given back when it returns, so a second run on the
@@ -93,7 +117,11 @@ const MAX_TURNS: usize = MAX_ITERS * 4;
 ///
 /// Like every table of the profile it is `Sync` by the profile's rule (one cooperative
 /// task on one core drives it), not by anything a compiler can check.
-pub struct AcceptorStatics<C: ClockSource + 'static, E: EntropySource + Send + 'static> {
+pub struct AcceptorStatics<
+    C: ClockSource + 'static,
+    E: EntropySource + Send + 'static,
+    const TASK_BYTES: usize,
+> {
     runtime: RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>,
     sessions: SessionSlots<CoopRuntime<C, LwipUdpDriver>, CoopTime<C>, LwipUdpDriver, E, 1>,
     pumps: PumpSlots<C, LwipSessionLink<&'static LwipLink>, 1, LwipUdpDriver>,
@@ -109,12 +137,14 @@ pub struct AcceptorStatics<C: ClockSource + 'static, E: EntropySource + Send + '
 // SAFETY: the profile's rule, stated on the type: the e2e is driven by one cooperative
 // task on one core, which is the only thing that reaches `run`; every other member is
 // a table that is `Sync` by the same rule.
-unsafe impl<C: ClockSource + 'static, E: EntropySource + Send + 'static> Sync
-    for AcceptorStatics<C, E>
+unsafe impl<C: ClockSource + 'static, E: EntropySource + Send + 'static, const TASK_BYTES: usize>
+    Sync for AcceptorStatics<C, E, TASK_BYTES>
 {
 }
 
-impl<C: ClockSource + 'static, E: EntropySource + Send + 'static> AcceptorStatics<C, E> {
+impl<C: ClockSource + 'static, E: EntropySource + Send + 'static, const TASK_BYTES: usize>
+    AcceptorStatics<C, E, TASK_BYTES>
+{
     /// The statics of one e2e, for a `static`.
     pub const fn new() -> Self {
         Self {
@@ -129,8 +159,8 @@ impl<C: ClockSource + 'static, E: EntropySource + Send + 'static> AcceptorStatic
     }
 }
 
-impl<C: ClockSource + 'static, E: EntropySource + Send + 'static> Default
-    for AcceptorStatics<C, E>
+impl<C: ClockSource + 'static, E: EntropySource + Send + 'static, const TASK_BYTES: usize> Default
+    for AcceptorStatics<C, E, TASK_BYTES>
 {
     fn default() -> Self {
         Self::new()
@@ -150,29 +180,30 @@ fn peer_send(peer: &LwipUdpSocket<SESSION_RX_SLOT_SIZE, PEER_RX_SLOTS>, bytes: &
 /// lease comparator read, `entropy` the source the cookie nonce and the signing key are
 /// drawn from, `data_mode` what the peer sends once the session is `Established`,
 /// `on_fragment` the hook of the dispatched fragment (only under `reassembly`), and
-/// `on_stage` the stage announcements. `on_fragment` is `'static` because the session's
-/// application layer keeps it in its task.
+/// `on_stage` the stage announcements. `on_fragment` is a function pointer because the
+/// session's application layer keeps it in its task, whose cell is a constant of the types the
+/// task is made of ([`acceptor_task_cell_bytes`]): a closure's type is one of those types, and no
+/// statics could name it.
 ///
 /// An e2e whose socket could not be bound, whose runtime was already started, or whose
 /// peer's `InitSyn` the node refused, returns the report of a run that never
 /// established, the outcome the image already reads as a failure.
-pub fn run_acceptor_e2e_fixed<C, E, H, S>(
-    statics: &'static AcceptorStatics<C, E>,
+pub fn run_acceptor_e2e_fixed<C, E, S, const TASK_BYTES: usize>(
+    statics: &'static AcceptorStatics<C, E, TASK_BYTES>,
     clock_source: C,
     entropy: E,
     data_mode: DataMode,
-    on_fragment: H,
+    on_fragment: fn(),
     mut on_stage: S,
 ) -> AcceptorE2eReport
 where
     C: ClockSource + 'static,
     E: EntropySource + Send + 'static,
-    H: FnMut() + 'static,
     S: FnMut(AcceptorStage),
 {
     *statics.run.borrow_mut() = Run::new(data_mode);
     let never_established =
-        |statics: &AcceptorStatics<C, E>| statics.run.borrow().report(false, 0, 0);
+        |statics: &AcceptorStatics<C, E, TASK_BYTES>| statics.run.borrow().report(false, 0, 0);
 
     // ── The stack, the runtime and the host the session is opened by.
     let link = LwipLink::init_static();
@@ -227,7 +258,7 @@ where
                 // One session is admitted: the entropy source, the parameters and the
                 // hook go into it, and a second InitSyn finds them gone and is refused
                 // as the session table having no slot for it.
-                let (Some(entropy), Some(params), Some(mut hook)) =
+                let (Some(entropy), Some(params), Some(hook)) =
                     (entropy.take(), params.take(), on_fragment.take())
                 else {
                     return Err(OpenRefused::SessionSlot);
@@ -242,11 +273,7 @@ where
                         role: SessionRole::Acceptor,
                         max_iters: Some(MAX_ITERS),
                     },
-                    |_handle| {
-                        move |event: IterationEvent<'_, '_>| {
-                            run.borrow_mut().event(event, &mut hook);
-                        }
-                    },
+                    |_handle| AcceptorSink { run, hook },
                 )?;
                 session = Some(opened);
                 Ok(())
