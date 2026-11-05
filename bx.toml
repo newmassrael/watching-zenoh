@@ -129,6 +129,33 @@ path = "~/zephyrproject/.venv/bin/west"
 check = "West version"
 needed_by = ["Qz"]
 
+# THE SHELLCHECK Layer 0 lints with, at the revision CI installs. `packages` above asks only whether
+# some shellcheck runs, and a machine whose system copy is older answered yes: on 2026-11-06 a fleet
+# run of Layer 0 landed on a machine whose fleet account found the apt 0.9.0 first, and redded on
+# 5,557 SC2317 false positives the pinned 0.11.0 does not report (the same tree passes Layer 0 under
+# 0.11.0). The version is CI's pin (`SHELLCHECK_VERSION`), read from the workflow that installs it,
+# so there is one source; the install is the repository's own script, which reads that same pin and
+# checks its digest, so the steps are not written twice. bx puts `~/.local/bin` first on a run's
+# PATH, so the `shellcheck` Layer 0 calls by name is this one. A machine whose tool store lacks it is
+# not a candidate for a run whose command line names Layer 0; `bx-provision <host> --apply` builds it
+# there (in the run account, an owner's step). `needed_by` is the lane's own argument; a whole
+# `run-ci.sh` with no `--layer` runs Layer 0 too and is not matched, the caveat the Zephyr tools
+# above state.
+#
+# ⚠ NOT YET for a `bx --checks ci` unit (measured 2026-11-06, the bx session confirmed it): the
+# fan-out places units by capacity alone and matches `needed_by` against each machine's batch command
+# line rather than a unit's own argv, so a Layer 0 unit is still sent to a machine without this tool.
+# That is bx's to fix (a unit carries the tools its argv needs); this declaration is what the fix
+# will read, and a plain `bx -- bash scripts/run-ci.sh --layer 0` is steered by it now.
+[tools.shellcheck]
+version_file = ".github/workflows/ci.yml"
+version_pattern = 'SHELLCHECK_VERSION: *"?([0-9.]+)"?'
+path = "~/.local/bin/shellcheck"
+install = "PREFIX={prefix} bash scripts/install-shellcheck.sh --force"
+install_inputs = ["scripts/install-shellcheck.sh", ".github/workflows/ci.yml"]
+prefix_file = "shellcheck"
+needed_by = ["--layer 0"]
+
 [commands]
 # NOT `cargo test --workspace`: this tree refuses a whole-workspace build on
 # purpose (`sce-rust-runtime` raises a `compile_error!`), so the workspace form
