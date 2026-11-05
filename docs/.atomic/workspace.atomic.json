@@ -310340,6 +310340,92 @@
         "Open from round 4234: the fuzz target's hosted time is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use."
       ]
     },
+    "Round 4248": {
+      "decision_summary": "The upstream feature census no longer claims what it could not\nsupport. Three rows of its breadth axis carried verdicts read\nfrom the feature names and not from the code: uring and\ntracing-instrument were filed as unanswered, and unstable as a\ngap. Read against the pinned zenoh checkout and wz's own source,\nunstable is answered by the surface gate and the facade's\nunstable feature, tracing-instrument had no forwarding feature\nand now has one, and uring is answered by a real reactor that\nonly some link kinds reach.\n\nThe census gains a class between answered and unanswered: PARTIAL,\na feature wz carries with a named residual that cites an open debt\nitem. It is not a pass and not a silent gap; the shape arm refuses\na PARTIAL whose citation is missing and reports the class by name.\nThe earlier claim in the ledger that no link selects the io_uring\nreactor was wrong: StreamReadDriver::choose_ring does select it,\nfor TCP. The module headers that said otherwise now say what the\ncode does.",
+      "changes_bullets": [
+        "scripts/lib/upstream_feature_census.py: rows tracing-instrument,",
+        "unstable and uring are answered by wz features; a PARTIAL table",
+        "holds tracing-instrument (item 201) and uring (item 583) with the",
+        "residual each names; shape_arm checks the citation, prints the three",
+        "classes, and the selftest gains six synthetic shape cases.",
+        "crates/wz-zenoh: the tracing-instrument feature forwards to",
+        "zenoh-runtime, so a facade user turns it on the way an upstream",
+        "user does.",
+        "crates/wz-zenoh-runtime: a test that a future spawned from inside a",
+        "span sees that span as current with the feature on and sees none",
+        "with it off, with tracing-subscriber's registry as a dev-dependency.",
+        "crates/wz-runtime-tokio: uring.rs and uring_reactor.rs headers name",
+        "what the reactor serves today (TCP, through choose_ring) and point",
+        "to item 583 for the fds upstream also hands the ring."
+      ],
+      "verification_bullets": [
+        "Bench host, final tree: the test the feature decides passes with the",
+        "feature off and with it on, each 1 test run; the crate's 6 tests",
+        "pass with it on; cargo check -p zenoh --features tracing-instrument",
+        "and clippy -D warnings on zenoh-runtime all targets are clean.",
+        "Local: the census selftest passes (12 of 12) and the shape arm",
+        "reports 19 answered by a wz feature, 2 PARTIAL, 0 UNANSWERED;",
+        "rustfmt --check on the three edited Rust files, the feature public",
+        "surface census, the lane feature membership gate and the census arm",
+        "gate lint all pass. The census --upstream arm was not run here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 583 stays open: upstream hands the ring TCP, unix-domain, UDP",
+        "and vsock fds, wz hands it TCP only. Item 201 stays open: no",
+        "zenoh-task crate here and the engine's own spawns on",
+        "wz-runtime-tokio carry no span.",
+        "The inventory status of runtime-tokio-uring was not changed; it",
+        "needs the typed primitive and a read of its current value first.",
+        "Not done: the census --upstream arm against the pinned checkout,",
+        "and the cargo form of the zenoh-c lane after round 4232's repairs."
+      ],
+      "publishable_decision_summary": "The upstream feature census no longer claims what it could not\nsupport. Three rows of its breadth axis carried verdicts read\nfrom the feature names and not from the code: uring and\ntracing-instrument were filed as unanswered, and unstable as a\ngap. Read against the pinned zenoh checkout and wz's own source,\nunstable is answered by the surface gate and the facade's\nunstable feature, tracing-instrument had no forwarding feature\nand now has one, and uring is answered by a real reactor that\nonly some link kinds reach.\n\nThe census gains a class between answered and unanswered: PARTIAL,\na feature wz carries with a named residual that cites an open debt\nitem. It is not a pass and not a silent gap; the shape arm refuses\na PARTIAL whose citation is missing and reports the class by name.\nThe earlier claim in the ledger that no link selects the io_uring\nreactor was wrong: StreamReadDriver::choose_ring does select it,\nfor TCP. The module headers that said otherwise now say what the\ncode does.",
+      "publishable_changes_bullets": [
+        "scripts/lib/upstream_feature_census.py: rows tracing-instrument,",
+        "unstable and uring are answered by wz features; a PARTIAL table",
+        "holds tracing-instrument (item 201) and uring (item 583) with the",
+        "residual each names; shape_arm checks the citation, prints the three",
+        "classes, and the selftest gains six synthetic shape cases.",
+        "crates/wz-zenoh: the tracing-instrument feature forwards to",
+        "zenoh-runtime, so a facade user turns it on the way an upstream",
+        "user does.",
+        "crates/wz-zenoh-runtime: a test that a future spawned from inside a",
+        "span sees that span as current with the feature on and sees none",
+        "with it off, with tracing-subscriber's registry as a dev-dependency.",
+        "crates/wz-runtime-tokio: uring.rs and uring_reactor.rs headers name",
+        "what the reactor serves today (TCP, through choose_ring) and point",
+        "to item 583 for the fds upstream also hands the ring."
+      ],
+      "publishable_verification_bullets": [
+        "Bench host, final tree: the test the feature decides passes with the",
+        "feature off and with it on, each 1 test run; the crate's 6 tests",
+        "pass with it on; cargo check -p zenoh --features tracing-instrument",
+        "and clippy -D warnings on zenoh-runtime all targets are clean.",
+        "Local: the census selftest passes (12 of 12) and the shape arm",
+        "reports 19 answered by a wz feature, 2 PARTIAL, 0 UNANSWERED;",
+        "rustfmt --check on the three edited Rust files, the feature public",
+        "surface census, the lane feature membership gate and the census arm",
+        "gate lint all pass. The census --upstream arm was not run here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 583 stays open: upstream hands the ring TCP, unix-domain, UDP",
+        "and vsock fds, wz hands it TCP only. Item 201 stays open: no",
+        "zenoh-task crate here and the engine's own spawns on",
+        "wz-runtime-tokio carry no span.",
+        "The inventory status of runtime-tokio-uring was not changed; it",
+        "needs the typed primitive and a read of its current value first.",
+        "Not done: the census --upstream arm against the pinned checkout,",
+        "and the cargo form of the zenoh-c lane after round 4232's repairs."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
