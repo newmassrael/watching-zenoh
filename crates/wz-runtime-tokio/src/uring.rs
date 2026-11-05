@@ -47,11 +47,12 @@
 //! link yet. The atom's status records that residual rather than leaving it to
 //! be discovered.
 //!
-//! ⚠ STALE SINCE THE REACTOR: a TCP stream link on Linux now selects this path
-//! (`StreamReadDriver::choose_ring`, over `crate::uring_reactor`), as
-//! upstream's `rx_task_uring` does for a link whose `get_fd` answers; the
-//! paragraph above is what this header said when only the adapter existed. The
-//! links that are not on it are open-debt item 583's.
+//! ⚠ STALE SINCE THE REACTOR: a TCP, unix-domain stream, unixpipe or vsock link
+//! on Linux now selects this path (`StreamReadDriver::choose_ring`, over
+//! `crate::uring_reactor`), as upstream's `rx_task_uring` does for a link whose
+//! `get_fd` answers; the paragraph above is what this header said when only the
+//! adapter existed. The one link upstream puts on its ring that wz does not is
+//! UDP, which is open-debt item 583's.
 //!
 //! ⚠ R2747 — THIS PARAGRAPH USED TO PRESCRIBE THE REPAIR, AND THE
 //! PRESCRIPTION WAS WRONG. It said selecting the path "needs the length-prefix

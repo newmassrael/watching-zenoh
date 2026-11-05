@@ -67,12 +67,14 @@
 //! link whose reader can name a raw descriptor
 //! (`crate::link_ring_fd::RingReadable`), which is upstream's dispatch on
 //! `get_fd`, and a TCP stream link on Linux with `runtime-tokio-uring` on is
-//! one. A reader that cannot name one (a TLS stream, QUIC, an in-memory
-//! duplex that is not a witness) stays on the framed body. Of the four links
-//! whose descriptor the pinned upstream hands its ring (TCP, unix-domain
-//! stream, UDP and vsock) wz hands this reactor TCP's alone, which is what
-//! open-debt item 583 owns now. What follows is what the paragraph said when
-//! it was written, kept because the argument in it still holds:
+//! one, as are a unix-domain stream, a unixpipe and a vsock link. A reader that
+//! cannot name one (a TLS stream, QUIC, an in-memory duplex that is not a
+//! witness) stays on the framed body. Of the five links whose descriptor the
+//! pinned upstream hands its ring (TCP, unix-domain stream, unixpipe, vsock and
+//! connected UDP) wz hands this reactor all but UDP, which is what open-debt
+//! item 583 owns now and which `crate::link_ring_fd` explains. What follows is
+//! what the paragraph said when it was written, kept because the argument in
+//! it still holds:
 //!
 //! Nothing here SELECTS this body for a production link. A link reaches it by
 //! being [`attach`](UringReactor::attach)ed, and no `wire_*` constructor calls

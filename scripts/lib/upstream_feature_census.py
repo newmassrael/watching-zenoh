@@ -111,6 +111,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -264,10 +265,11 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
         "uring",
         "runtime-tokio-uring",
         "the io_uring fixed-buffer read adapter (`uring.rs`) and the reactor "
-        "that drives it (`uring_reactor.rs`); on Linux a TCP stream link "
-        "picks the ring body when the feature is on (`StreamReadDriver::"
-        "choose_ring`), as upstream's `rx_task_uring` dispatch picks it for a "
-        "link whose `get_fd` answers. ARRIVED in 1.10.0 and was judged "
+        "that drives it (`uring_reactor.rs`); on Linux a TCP, unix-domain "
+        "stream, unixpipe or vsock link picks the ring body when the feature "
+        "is on (`StreamReadDriver::choose_ring`), as upstream's "
+        "`rx_task_uring` dispatch picks it for a link whose `get_fd` answers "
+        "(`link_ring_fd.rs` holds the table row by row). ARRIVED in 1.10.0 and was judged "
         "UNANSWERED at R2230 on the belief that wz had no io_uring path and "
         "that `uring.rs` shared only a name with it; both were wrong, and the "
         "module headers that said no link selects it were stale too. It adds "
@@ -296,10 +298,13 @@ PARTIAL: dict[str, str] = {
         "facade makes through `ZRuntime`"
     ),
     "uring": (
-        "open-debt item 583 owns the links that are not on the ring: upstream "
-        "hands it the fd of its TCP, unix-domain stream, UDP and vsock links "
-        "(the TLS, QUIC, serial and WebSocket links answer `get_fd` with an "
-        "error), and wz hands it TCP's alone"
+        "open-debt item 583 owns the link that is not on the ring: upstream "
+        "hands it the fd of its TCP, unix-domain stream, unixpipe, vsock and "
+        "connected UDP links (the TLS, QUIC, serial and WebSocket links answer "
+        "`get_fd` with an error), and wz hands it all of those but UDP, "
+        "which is a datagram link with no length prefix for the stream body "
+        "to frame by and would need upstream's multishot, provided-buffer "
+        "shape, which `runtime-tokio-uring`'s design row does not choose"
     ),
 }
 
@@ -428,6 +433,44 @@ def upstream_anchors() -> list[tuple[str, Path]]:
     return [a for a in out if not (a in seen or seen.add(a))]
 
 
+def manifest_declares(path: Path, want: str) -> bool:
+    """Whether the `zenoh` manifest at `path` belongs to a tree at version `want`.
+
+    The member manifest inherits its version (`version = { workspace = true }`), so the number is
+    read from the workspace manifest two directories up when the member does not quote one. The
+    anchor gate's `upstream_root` reads it the same way.
+    """
+    for candidate in (path, path.parent.parent / "Cargo.toml"):
+        try:
+            text = candidate.read_text(errors="replace")
+        except OSError:
+            continue
+        m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+        if m:
+            return m.group(1) == want
+    return False
+
+
+def pick_anchor(
+    tried: list[tuple[str, Path]], want: str
+) -> tuple[str, Path] | None:
+    """The anchor the census reads: the first present one that IS the pin.
+
+    A machine that kept the previous pin's checkout beside the current one lists the older first
+    (the cargo glob is sorted), and taking the first present file graded the table against the
+    wrong upstream and then failed on the version it had just chosen. A recorded `metadata` answer
+    is taken as it stands, since its version is checked against the pin when it is read; a manifest
+    is taken only if it declares `want`. When nothing present declares the pin the first present
+    one is returned, so the version refusal names the tree that was actually found rather than the
+    run claiming that nothing was found.
+    """
+    present = [(k, p) for k, p in tried if p.is_file()]
+    for kind, path in present:
+        if kind == "metadata" or manifest_declares(path, want):
+            return kind, path
+    return present[0] if present else None
+
+
 def _read_metadata_json(path: Path, what: str) -> dict:
     """Read a RECORDED `cargo metadata` answer, as an INPUT rather than a verdict.
 
@@ -462,7 +505,7 @@ def upstream_package() -> dict:
         md = _read_metadata_json(Path(injected), source)
     else:
         tried = upstream_anchors()
-        found = next(((k, p) for k, p in tried if p.is_file()), None)
+        found = pick_anchor(tried, UPSTREAM_VERSION)
         if found is None:
             raise InputError(
                 "no pinned zenoh feature table found. Tried, in order:\n    "
@@ -927,6 +970,35 @@ def selftest() -> int:
         shape_passed += 1
     passed += shape_passed
 
+    # The CHOICE among present anchors, on trees built in a temporary directory: the previous pin
+    # listed first must not be the one read when the current pin is also present.
+    with tempfile.TemporaryDirectory() as td:
+        def tree(name: str, version: str) -> Path:
+            root = Path(td) / name
+            (root / "zenoh").mkdir(parents=True)
+            (root / "zenoh" / "Cargo.toml").write_text("[package]\nversion = { workspace = true }\n")
+            (root / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+            return root / "zenoh" / "Cargo.toml"
+
+        old, new = tree("old", "9.9.1"), tree("new", "9.9.2")
+        meta = Path(td) / "zenoh-cargo-metadata.json"
+        meta.write_text("{}")
+        anchor_cases: list[tuple[str, list[tuple[str, Path]], tuple[str, Path] | None]] = [
+            ("the pin is chosen over an older tree listed before it",
+             [("manifest", old), ("manifest", new)], ("manifest", new)),
+            ("the only tree present is returned even when it is not the pin",
+             [("manifest", old)], ("manifest", old)),
+            ("nothing present answers none",
+             [("manifest", Path(td) / "gone" / "Cargo.toml")], None),
+            ("a recorded metadata answer listed first is kept",
+             [("metadata", meta), ("manifest", new)], ("metadata", meta)),
+        ]
+        for label, tried, want_pick in anchor_cases:
+            if pick_anchor(tried, "9.9.2") != want_pick:
+                print(f"  selftest FAIL [{label}]", file=sys.stderr)
+                return 1
+            passed += 1
+
     # ARM TWO (R2164) -- an UNUSABLE denominator must raise InputError, which is
     # rc=2, which the caller reports as "nothing was graded". The arm above can
     # never see this: every fixture there is well formed by construction, so the
@@ -983,7 +1055,7 @@ def selftest() -> int:
     # The BREAKDOWN, not the total: the two arms answer different questions, and
     # one number lets a collapsed population hide behind the other's.
     print(
-        f"  upstream-feature-census: selftest {passed}/{len(cases) + len(shape_cases)} comparison "
+        f"  upstream-feature-census: selftest {passed}/{len(cases) + len(shape_cases) + len(anchor_cases)} comparison "
         f"case(s) + {input_faults}/{len(unusable)} unusable-denominator case(s) "
         f"pass"
     )
