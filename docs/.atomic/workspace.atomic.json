@@ -313066,6 +313066,76 @@
         "Shell gates that run in Layer C0 and read a test file by a path were not run here. The hook's round-fed list does not run selftests or the gates' default modes, so a gate can be red in Layer C0 and green at the push; running every python3 call of run-ci.sh once per round that moves test files, or putting those calls in the hook, is open."
       ]
     },
+    "Round 4322": {
+      "decision_summary": "Two items. First, the one red of CI run 42061671165 (at 215e687827) that has finished, repaid at its cause. Second, the carry of round 4290: the SCE pin moves to the inbox size fix, and the cost budgets that fix promised to return come back down.\n\nThe red is Layer C1cc, the shared-memory arm of `wz-capi-c`. `node_group::a_node_that_joined_second_finds_a_peer_by_asking_and_misses_it_when_it_is_gone` saw the view reach two members, but no join event came (`node_group.rs:237`).\n- The test joins and then subscribes. The peer's keep-alive beacon runs on its own clock. One that lands between the two puts the peer in the view while the group has no event sink.\n- `GroupAggregate::apply` delivers into the sink that exists at that moment, and upstream's `subscribe` has the same contract. So the API is right and the assertion was not.\n- The test now reads the view right after the subscription. It waits for the join event only when the view then holds the node alone; a join after that point is always delivered. `group_roundtrip`'s joined-second test already asserts no event for the same reason.\n- The session that wrote the test was told, and agreed.\n\nThe pin moves from d7de4b6858 to SCE 06f8147241. That commit gives the std inbox one policy-free held input, makes the ending of a started invoke non-generic, and adds the `HAS_HOST_INVOKES` const. Every wz machine states it false, so the code that starts, ends and expires host-run invokes folds away. Regeneration adds that one const to 11 machines and changes nothing else.\n\nRound 4290 had moved six cost budgets for the inbox's per-policy copies, and 9e3e643439 two more. Each now goes back to its reading at this pin plus its own margin. `capic-default-lean` joins them, because its first budget was `capic-default`'s and carried the same growth.",
+      "changes_bullets": [
+        "`crates/wz-capi-c/tests/it/files/node_group.rs`: the joined-second test reads the view size after the subscription. It asserts the join event only when the peer was still to come.",
+        "`vendor/sce` moves to 06f8147241 (64 commits past d7de4b6858). `out/`: 11 generated machines gain `const HAS_HOST_INVOKES: bool = false`.",
+        "`scripts/lib/capability_cost_gate.py`: nine budgets move to the hkl001 reading at this pin, with the case's margin, rounded up to the hundred. A note states the symbol reading.",
+        "3,500 margin: pico-client 1,854,600, pico-client-small 1,514,500, pico-client-udp 1,915,700, pico-peer 2,974,800, pico-default 4,408,100, capic-client-small 1,965,500.",
+        "3,184 plus 3,500 margin: capic-router-node 5,807,400, capic-default 10,894,700, capic-default-lean 9,550,400."
+      ],
+      "verification_bullets": [
+        "Run 42061671165 was read per job. One job had failed, C1cc; its log names the test and line. Six jobs passed, and 39 are still queued behind the concurrency group.",
+        "On the fleet, `cargo test -p wz-capi-c --features zenoh-c-shared-memory --test it node_group` passes 2 of 2 (ran=2).",
+        "`bx --action regen-codegen` at the new pin changed 11 files, each by the one const.",
+        "On the fleet, `cargo check --workspace --all-targets` passes at the new pin.",
+        "On hkl001, `capability_cost_gate.py --measure` read every case; each reading is under its new budget.",
+        "In pico-default, `nm -C -S` finds no `apply_inbox_input` and no `end_host_invoke`. `apply_held_inputs` is 6 copies, 13,748 B together; round 4290 read 74,040 for the three.",
+        "libwz_capi_c reads the same symbols.",
+        "The gate's selftest passes 16 of 16.",
+        "The six Zephyr images were built locally with `kit-lane.sh build`, which runs their gates: zephyr-client-fixed, -batching, -get, -tls, -heap and zephyr-admin-fixed-tls.",
+        "Each passes the stack chain, the stack bound and the text gate.",
+        "Chains and bounds are unchanged.",
+        "Text is 8 to 636 B under the committed rows.",
+        "The hook's round-fed static gates pass."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The next hosted CI run is read per job:",
+        "C1cs grades the nine moved budgets on hosted readings. A hosted reading over a build machine's by more than the margin moves that budget to the hosted reading.",
+        "C1cc's shared-memory arm is green.",
+        "The carry of round 4317 stands: C1bnl on four shards, census shard 0, validate, gate provenance, C1cn clippy, C1bz and the C1bzr shards.",
+        "The six Zephyr images were not run on the kit at this pin. Their stack chains and bounds did not move, so the kit peaks recorded at the earlier pin stand.",
+        "Budgets with wide headroom that this round does not touch: capic-client (79 percent), capic-scout (78 percent) and capic-peer (84 percent)."
+      ],
+      "publishable_decision_summary": "Two items. First, the one red of CI run 42061671165 (at 215e687827) that has finished, repaid at its cause. Second, the carry of round 4290: the SCE pin moves to the inbox size fix, and the cost budgets that fix promised to return come back down.\n\nThe red is Layer C1cc, the shared-memory arm of `wz-capi-c`. `node_group::a_node_that_joined_second_finds_a_peer_by_asking_and_misses_it_when_it_is_gone` saw the view reach two members, but no join event came (`node_group.rs:237`).\n- The test joins and then subscribes. The peer's keep-alive beacon runs on its own clock. One that lands between the two puts the peer in the view while the group has no event sink.\n- `GroupAggregate::apply` delivers into the sink that exists at that moment, and upstream's `subscribe` has the same contract. So the API is right and the assertion was not.\n- The test now reads the view right after the subscription. It waits for the join event only when the view then holds the node alone; a join after that point is always delivered. `group_roundtrip`'s joined-second test already asserts no event for the same reason.\n- The session that wrote the test was told, and agreed.\n\nThe pin moves from d7de4b6858 to SCE 06f8147241. That commit gives the std inbox one policy-free held input, makes the ending of a started invoke non-generic, and adds the `HAS_HOST_INVOKES` const. Every wz machine states it false, so the code that starts, ends and expires host-run invokes folds away. Regeneration adds that one const to 11 machines and changes nothing else.\n\nRound 4290 had moved six cost budgets for the inbox's per-policy copies, and 9e3e643439 two more. Each now goes back to its reading at this pin plus its own margin. `capic-default-lean` joins them, because its first budget was `capic-default`'s and carried the same growth.",
+      "publishable_changes_bullets": [
+        "`crates/wz-capi-c/tests/it/files/node_group.rs`: the joined-second test reads the view size after the subscription. It asserts the join event only when the peer was still to come.",
+        "`vendor/sce` moves to 06f8147241 (64 commits past d7de4b6858). `out/`: 11 generated machines gain `const HAS_HOST_INVOKES: bool = false`.",
+        "`scripts/lib/capability_cost_gate.py`: nine budgets move to the hkl001 reading at this pin, with the case's margin, rounded up to the hundred. A note states the symbol reading.",
+        "3,500 margin: pico-client 1,854,600, pico-client-small 1,514,500, pico-client-udp 1,915,700, pico-peer 2,974,800, pico-default 4,408,100, capic-client-small 1,965,500.",
+        "3,184 plus 3,500 margin: capic-router-node 5,807,400, capic-default 10,894,700, capic-default-lean 9,550,400."
+      ],
+      "publishable_verification_bullets": [
+        "Run 42061671165 was read per job. One job had failed, C1cc; its log names the test and line. Six jobs passed, and 39 are still queued behind the concurrency group.",
+        "On the fleet, `cargo test -p wz-capi-c --features zenoh-c-shared-memory --test it node_group` passes 2 of 2 (ran=2).",
+        "`bx --action regen-codegen` at the new pin changed 11 files, each by the one const.",
+        "On the fleet, `cargo check --workspace --all-targets` passes at the new pin.",
+        "On hkl001, `capability_cost_gate.py --measure` read every case; each reading is under its new budget.",
+        "In pico-default, `nm -C -S` finds no `apply_inbox_input` and no `end_host_invoke`. `apply_held_inputs` is 6 copies, 13,748 B together; round 4290 read 74,040 for the three.",
+        "libwz_capi_c reads the same symbols.",
+        "The gate's selftest passes 16 of 16.",
+        "The six Zephyr images were built locally with `kit-lane.sh build`, which runs their gates: zephyr-client-fixed, -batching, -get, -tls, -heap and zephyr-admin-fixed-tls.",
+        "Each passes the stack chain, the stack bound and the text gate.",
+        "Chains and bounds are unchanged.",
+        "Text is 8 to 636 B under the committed rows.",
+        "The hook's round-fed static gates pass."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The next hosted CI run is read per job:",
+        "C1cs grades the nine moved budgets on hosted readings. A hosted reading over a build machine's by more than the margin moves that budget to the hosted reading.",
+        "C1cc's shared-memory arm is green.",
+        "The carry of round 4317 stands: C1bnl on four shards, census shard 0, validate, gate provenance, C1cn clippy, C1bz and the C1bzr shards.",
+        "The six Zephyr images were not run on the kit at this pin. Their stack chains and bounds did not move, so the kit peaks recorded at the earlier pin stand.",
+        "Budgets with wide headroom that this round does not touch: capic-client (79 percent), capic-scout (78 percent) and capic-peer (84 percent)."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
