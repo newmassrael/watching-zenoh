@@ -14,7 +14,8 @@ The layout this tool makes, for a crate `C` whose files are `tests/<name>.rs`:
 
     tests/it/main.rs          `mod files;`          (cargo finds `tests/<dir>/main.rs` by itself)
     tests/it/files/mod.rs     `mod <name>;` for every file moved, in order
-    tests/it/files/<name>.rs  the file, moved with `git mv`, its text UNCHANGED
+    tests/it/files/<name>.rs  the file, moved with `git mv`, its text UNCHANGED but for a `crate::`
+                              path of its code, which names the file's own module now
 
 The test of a file is `files::<name>::<test>` and a script that ran one file ran
 `--test <name>`, which is `--test it files::<name>::` now. libtest's filter is a substring and
@@ -102,13 +103,26 @@ def toml_tests(manifest: Path) -> set[str]:
     return names
 
 
-def classify(crate: Path, keep: set[str]) -> tuple[list[str], list[tuple[str, str]]]:
-    """(the names to merge, [(name, why it stays)]) for the files `crate/tests/*.rs`."""
+def families_of(text: str, exclusive: list[str]) -> list[str]:
+    """The exclusive crates a file uses by path (`token::...`, `use token`), not in prose."""
+    return [t for t in exclusive if re.search(rf"(?<![\w`]){t}::|\buse\s+{t}\b", text)]
+
+
+def classify(
+    crate: Path, keep: set[str], exclusive: list[str] | None = None
+) -> tuple[dict[str, list[str]], list[tuple[str, str]]]:
+    """({target: [names]}, [(name, why it stays)]) for the files `crate/tests/*.rs`.
+
+    The target is `it` for a file that uses none of the `exclusive` crates and `it_<crate>` for
+    one that uses that crate. Two crates are exclusive when one executable cannot link both: they
+    export the same symbol (`zenoh_pico_sys`, the vendored C library, and `wz_capi_pico`, which is
+    its drop-in, both define `z_close`), and a file used to link only the one it named."""
+    exclusive = exclusive or []
     tests = crate / "tests"
     tabled = toml_tests(crate / "Cargo.toml")
     manifest = (crate / "Cargo.toml").read_text() if (crate / "Cargo.toml").exists() else ""
     harnessless = "harness = false" in manifest or "harness=false" in manifest
-    merge: list[str] = []
+    merge: dict[str, list[str]] = {}
     stay: list[tuple[str, str]] = []
     for path in sorted(tests.glob("*.rs")):
         name = path.stem
@@ -128,17 +142,40 @@ def classify(crate: Path, keep: set[str]) -> tuple[list[str], list[tuple[str, st
         elif name in keep:
             stay.append((name, "kept by --keep"))
         else:
-            merge.append(name)
+            used = families_of(text, exclusive)
+            if len(used) > 1:
+                stay.append((name, f"links two exclusive crates: {', '.join(used)}"))
+            else:
+                target = f"it_{used[0]}" if used else "it"
+                merge.setdefault(target, []).append(name)
     return merge, stay
 
 
-def plan(crate: Path, keep: set[str]) -> int:
-    merge, stay = classify(crate, keep)
-    print(f"{crate.name}: {len(merge)} file(s) merge into tests/it, {len(stay)} stay")
+def reexecuters(crate: Path) -> list[str]:
+    """The files that run their own test binary again (`current_exe`): they name a test of their
+    own to the child (`--exact <name>`), and the name of a test is its module path now."""
+    return [p.stem for p in sorted((crate / "tests").glob("*.rs"))
+            if "current_exe" in p.read_text()]
+
+
+def warn_reexec(names: list[str]) -> None:
+    for name in names:
+        print(f"  WARNING {name}: re-executes its own binary; the child's `--exact` name must be "
+              f"the module path (`module_path!()` below the crate root), see merge_tests.py")
+
+
+def plan(crate: Path, keep: set[str], exclusive: list[str]) -> int:
+    merge, stay = classify(crate, keep, exclusive)
+    warn_reexec(reexecuters(crate))
+    print(f"{crate.name}: {sum(map(len, merge.values()))} file(s) merge into "
+          f"{len(merge)} target(s), {len(stay)} stay")
+    for target, names in sorted(merge.items()):
+        print(f"  tests/{target}: {len(names)} file(s)")
     for name, why in stay:
         print(f"  stays   {name}: {why}")
-    if (crate / "tests" / "it").exists():
-        print("  ERROR: tests/it exists already")
+    taken = [t for t in merge if (crate / "tests" / t).exists()]
+    if taken:
+        print(f"  ERROR: tests/{taken[0]} exists already")
         return 1
     return 0
 
@@ -147,23 +184,61 @@ def git(*args: str) -> None:
     subprocess.run(["git", *args], cwd=ROOT, check=True)
 
 
-def apply(crate: Path, keep: set[str]) -> int:
-    merge, stay = classify(crate, keep)
-    it = crate / "tests" / "it"
-    if it.exists():
-        print(f"{it} exists already: nothing done", file=sys.stderr)
-        return 1
+# `crate::` in the code of a test file named the file's own root, which was the crate root of its
+# executable; it is a module now, at `crate::files::<name>`. A `$crate` of a macro is not it, and a
+# comment is only text.
+CRATE_PATH = re.compile(r"(?<![\w$`])crate::")
+# A path in backticks is prose that quotes a path (a block comment or a string holds some), not code.
+
+
+def rebase_crate_paths(text: str, name: str) -> tuple[str, list[str]]:
+    """`text` with each `crate::` of its code made `crate::files::<name>::`, and the changed lines."""
+    changed: list[str] = []
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("//"):
+            out.append(line)
+            continue
+        code, sep, comment = line.partition("//")
+        new = CRATE_PATH.sub(f"crate::files::{name}::", code)
+        if new != code:
+            changed.append(line.rstrip("\n"))
+        out.append(new + sep + comment)
+    return "".join(out), changed
+
+
+def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
+    merge, stay = classify(crate, keep, exclusive)
     if not merge:
         print("no file to merge", file=sys.stderr)
         return 1
-    (it / "files").mkdir(parents=True)
-    for name in merge:
-        git("mv", str((crate / "tests" / f"{name}.rs").relative_to(ROOT)),
-            str((it / "files" / f"{name}.rs").relative_to(ROOT)))
-    (it / "main.rs").write_text(HEADER)
-    (it / "files" / "mod.rs").write_text(FILES_HEADER + "".join(f"mod {n};\n" for n in merge))
-    git("add", str(it.relative_to(ROOT)))
-    print(f"{crate.name}: {len(merge)} file(s) moved to tests/it/files, {len(stay)} stay")
+    for target in merge:
+        if (crate / "tests" / target).exists():
+            print(f"tests/{target} exists already: nothing done", file=sys.stderr)
+            return 1
+    warn_reexec(reexecuters(crate))
+    rebased = 0
+    moved = 0
+    for target, names in sorted(merge.items()):
+        it = crate / "tests" / target
+        (it / "files").mkdir(parents=True)
+        for name in names:
+            src = crate / "tests" / f"{name}.rs"
+            dst = it / "files" / f"{name}.rs"
+            git("mv", str(src.relative_to(ROOT)), str(dst.relative_to(ROOT)))
+            text, changed = rebase_crate_paths(dst.read_text(), name)
+            if changed:
+                dst.write_text(text)
+                rebased += len(changed)
+                for line in changed:
+                    print(f"  crate:: rewritten in {name}: {line.strip()}")
+        (it / "main.rs").write_text(HEADER.replace("one test executable", f"the test executable `{target}`"))
+        (it / "files" / "mod.rs").write_text(FILES_HEADER + "".join(f"mod {n};\n" for n in names))
+        git("add", str(it.relative_to(ROOT)))
+        moved += len(names)
+        print(f"  tests/{target}: {len(names)} file(s)")
+    print(f"{crate.name}: {moved} file(s) moved into {len(merge)} target(s), {len(stay)} stay, "
+          f"{rebased} line(s) with a crate:: path rebased")
     return 0
 
 
@@ -188,11 +263,13 @@ def listing(text: str, merged: bool) -> set[tuple[str, str]]:
         if not m:
             continue
         test = m.group(1)
-        if merged and current == "it" and test.startswith("files::"):
+        if merged and (current == "" or current.startswith("it")) and test.startswith("files::"):
             _, name, rest = test.split("::", 2) if test.count("::") >= 2 else (None, None, None)
             if name is None:
                 return out | {("<malformed>", test)}
-            out.add((name, rest))
+            # A listing with no `Running` header (`--quiet`) does not say which file a test of the
+            # old layout belonged to, so the file is left out of both sides.
+            out.add((name if current else "", rest))
         else:
             out.add((current, test))
     return out
@@ -233,6 +310,14 @@ def selftest() -> int:
     check("unit tests are not files", ("lib", "t") in listing(
         "Running unittests src/lib.rs (t/lib)\nt: test\n", False) or True)
     check("keywords are refused", "match" in KEYWORDS and "mod" in KEYWORDS)
+    text, changed = rebase_crate_paths(
+        "//! see `crate::agg`\nfn f() { crate::g(); $crate::h(); }\nlet s = x; // crate::y\n", "n")
+    check("crate:: of code is rebased", "crate::files::n::g()" in text)
+    check("a $crate is not", "$crate::h()" in text)
+    check("a comment is not", "// crate::y" in text and "`crate::agg`" in text)
+    check("prose quoting a path is not", rebase_crate_paths("  as a test in `crate::scout`.\n", "n")[1] == [])
+    check("one line changed", len(changed) == 1)
+    check("an unchanged file has no change", rebase_crate_paths("fn f() {}\n", "n")[1] == [])
     with tempfile.TemporaryDirectory() as tmp:
         crate = Path(tmp) / "c"
         (crate / "tests").mkdir(parents=True)
@@ -249,8 +334,21 @@ def selftest() -> int:
         }.items():
             (crate / "tests" / f"{name}.rs").write_text(body)
         merge, stay = classify(crate, {"kept"})
-        check("merge set", merge == ["gated", "plain"])
+        check("merge set", merge == {"it": ["gated", "plain"]})
         check("stay set", {n for n, _ in stay} == {"alloc", "tabled", "mainful", "kept", "9bad"})
+        (crate / "tests" / "pico.rs").write_text("use zenoh_pico_sys::z_close;\n")
+        (crate / "tests" / "drop_in.rs").write_text("use wz_capi_pico::z_close;\n")
+        (crate / "tests" / "both.rs").write_text("use zenoh_pico_sys::a;\nuse wz_capi_pico::b;\n")
+        (crate / "tests" / "prose.rs").write_text("//! about `zenoh_pico_sys::z_close`\nfn f() {}\n")
+        merge, stay = classify(crate, {"kept"}, ["zenoh_pico_sys", "wz_capi_pico"])
+        check("an exclusive crate makes a target of its own",
+              merge.get("it_zenoh_pico_sys") == ["pico"]
+              and merge.get("it_wz_capi_pico") == ["drop_in"])
+        check("prose quoting a crate is not a use", "prose" in merge.get("it", []))
+        check("a file of two exclusive crates stays", ("both", "links two exclusive crates: "
+              "zenoh_pico_sys, wz_capi_pico") in stay)
+        check("a target name is read back", ("a", "t") in listing(
+            "Running tests/it_x/main.rs (t/it_x)\nfiles::a::t: test\n", True))
         check("a [[test]] name is read", toml_tests(crate / "Cargo.toml") == {"tabled"})
     if failures == 0:
         print("merge_tests: selftest OK")
@@ -261,6 +359,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--crate")
     ap.add_argument("--keep", default="", help="comma-separated file names that stay")
+    ap.add_argument("--exclusive", default="",
+                    help="comma-separated crates one executable cannot link together: a file that "
+                         "uses one goes to the target `it_<crate>`, so each target links one")
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--plan", action="store_true")
     group.add_argument("--apply", action="store_true")
@@ -278,7 +379,8 @@ def main() -> int:
         print(f"{crate} has no tests/", file=sys.stderr)
         return 1
     keep = {n for n in args.keep.split(",") if n}
-    return plan(crate, keep) if args.plan else apply(crate, keep)
+    exclusive = [n for n in args.exclusive.split(",") if n]
+    return plan(crate, keep, exclusive) if args.plan else apply(crate, keep, exclusive)
 
 
 if __name__ == "__main__":
