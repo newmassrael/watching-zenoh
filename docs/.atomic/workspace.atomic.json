@@ -311090,6 +311090,34 @@
         "Open from round 4234: the fuzz target's hosted time is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use."
       ]
     },
+    "Round 4267": {
+      "decision_summary": "The fixed-memory TLS admin node (fixed_admin, the product image of the secure channel) sizes its task cell by the task it holds and holds one cell per session, as the other node images do. The cell was 2,048 bytes written beside the image, twice a pump future measured on the kit, and the table SESSIONS + 1 cells; it is now pump_task_cell_bytes over the image's clock, pump link, driver and the events of its factory, and SESSIONS cells. With the limits the node does not use stated as zero the application layer is a few pointers, so the derived cell is a small fraction of the old figure. Static RAM falls by 6,096 bytes (457,872 to 451,776).",
+      "changes_bullets": [
+        "zephyr-admin-node: fixed_admin.rs declares TASK_BYTES as pump_task_cell_bytes of its own types and TASKS as SESSIONS."
+      ],
+      "verification_bullets": [
+        "On this host with west: the image built as Layer Qz builds it (mps2/an385, overlays/qemu_admin_fixed_tls.conf) reads RAM 451,776 bytes with the derived cells and 457,872 with the figures written by hand (the same tree otherwise); FLASH 293,640 against 293,712. Booted on qemu it prints its READY line and a stock TLS 1.3 client (admin_tls_probe.py) completes the mutual handshake and finds the certificate the READY line names, in both builds. The frame gate reads the largest frame 3,968 bytes and the worst chain 7,704 bytes. That probe does not speak zenoh, so no session task was spawned on this image: the cell is exact by the types it is derived from, and the same expression over the same node type (the admin node with the secure channel's stream driver) is the loopback witness's server cell, whose session answered on qemu. Not run: a zenoh session through this image, and Layer Qz as a lane."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "The client images (fixed_client, fixed_get; their cells are 384 bytes or a figure from the getter's limits) and the host tests of the slot node still write their cells by hand; no run has put a zenoh session through the TLS admin image on qemu or the kit with the derived cell."
+      ],
+      "publishable_decision_summary": "The fixed-memory TLS admin node (fixed_admin, the product image of the secure channel) sizes its task cell by the task it holds and holds one cell per session, as the other node images do. The cell was 2,048 bytes written beside the image, twice a pump future measured on the kit, and the table SESSIONS + 1 cells; it is now pump_task_cell_bytes over the image's clock, pump link, driver and the events of its factory, and SESSIONS cells. With the limits the node does not use stated as zero the application layer is a few pointers, so the derived cell is a small fraction of the old figure. Static RAM falls by 6,096 bytes (457,872 to 451,776).",
+      "publishable_changes_bullets": [
+        "zephyr-admin-node: fixed_admin.rs declares TASK_BYTES as pump_task_cell_bytes of its own types and TASKS as SESSIONS."
+      ],
+      "publishable_verification_bullets": [
+        "On this host with west: the image built as Layer Qz builds it (mps2/an385, overlays/qemu_admin_fixed_tls.conf) reads RAM 451,776 bytes with the derived cells and 457,872 with the figures written by hand (the same tree otherwise); FLASH 293,640 against 293,712. Booted on qemu it prints its READY line and a stock TLS 1.3 client (admin_tls_probe.py) completes the mutual handshake and finds the certificate the READY line names, in both builds. The frame gate reads the largest frame 3,968 bytes and the worst chain 7,704 bytes. That probe does not speak zenoh, so no session task was spawned on this image: the cell is exact by the types it is derived from, and the same expression over the same node type (the admin node with the secure channel's stream driver) is the loopback witness's server cell, whose session answered on qemu. Not run: a zenoh session through this image, and Layer Qz as a lane."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The client images (fixed_client, fixed_get; their cells are 384 bytes or a figure from the getter's limits) and the host tests of the slot node still write their cells by hand; no run has put a zenoh session through the TLS admin image on qemu or the kit with the derived cell."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
