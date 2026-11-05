@@ -208,6 +208,49 @@ above 10 000. Under A on a busy router a write therefore costs the bound, about 
 from one writer, whatever the write is. This is the figure phase 5 compares B against; it says what A pays
 and not yet what B would.
 
+### 6.2 The phase 5 reading (round 4312)
+
+Both values built from the tree of round 4311 (release, `routing-router-hat`; the value set by
+`WZ_POLICY_ROUTING_TABLE_SHARING` at build time, each value in a target directory of its own), run on one
+build machine of 22 cores and 30 GB, alternating A and B. The phase 0 instrument, four runs of each:
+
+| Run | Value | Puts routed per second | Declarations: n, p50, p99, longest | Face transitions: n, p50, longest |
+|---|---|---|---|---|
+| 1 | rwlock | 1 254 128 | 298, 10 027, 10 909, 11 787 us | 10, 10 056, 10 111 us |
+| 1 | snapshot | 1 086 330 | 5 570, 566, 1 079, 2 532 us | 176, 75, 1 808 us |
+| 2 | rwlock | 1 238 853 | 314, 10 025, 10 148, 11 532 us | 10, 10 030, 10 054 us |
+| 2 | snapshot | 1 088 871 | 5 528, 561, 1 100, 4 235 us | 174, 83, 3 566 us |
+| 3 | rwlock | 1 266 896 | 296, 10 025, 10 448, 11 059 us | 10, 10 028, 10 093 us |
+| 3 | snapshot | 1 103 244 | 5 584, 521, 1 057, 2 760 us | 176, 72, 1 196 us |
+| 4 | rwlock | 1 260 585 | 298, 10 029, 10 449, 11 847 us | 10, 10 030, 10 100 us |
+| 4 | snapshot | 1 106 757 | 5 568, 516, 1 053, 2 448 us | 174, 72, 2 387 us |
+
+Under B a writer no longer waits for the readers: a declaration takes about half a millisecond at the median
+where A's took the 10 ms bound, a face comes up or goes in about 75 us, and one writer completes eighteen
+times the writes in the same window. The readers routed 12 to 14 per cent fewer Puts a second under B while
+that writer published eighteen times as often; the instrument does not separate what the readers pay for a
+load from what they pay for the routes the writes retire.
+
+Layer E7s, one run of each before the run of B stopped the sequence (the second pair did not run):
+
+| | rwlock | snapshot |
+|---|---|---|
+| us per message, 256 / 1024 / 2048 subscribers, no churn | 26.0 / 30.3 / 30.8 | 26.9 / 30.9 / 31.3 |
+| us per message, 256 / 1024 subscribers, churn | 27.5 / 34.0 | 29.3 / 35.5 |
+| starved router: 2048 sessions up within the deadline | all, 0 faces down, 11 % of the offered load forwarded | 1 735 and 1 700 of 2 048: the three tests that wait for every session to come up fail |
+| told 1.32 % of a core, 32 hogs | 288 msg/s forwarded, 1 face down, 8 table waits of 250 ms or more | 489 msg/s forwarded, 4 faces down, no table wait of 250 ms or more |
+
+Per message B costs 2 to 6 per cent more in this one pair of runs, within the spread E7s has shown on one
+host before (`docs/router-task-per-face.md` records 18.3 and 23.2 for the same router at 256). What is not
+within any spread is the starved router: under B every face that comes up is a write, and every write copies
+the face map's spine and every store it reaches, so bringing up n faces costs O(n squared) on a core that has
+little to give. That is the measurement section 6 item 6 waited for: B as built does not hold the
+admission the router promises when it is short of CPU, so it is not yet a value a deployment should choose.
+Phase 6 is therefore not optional for B. It finds, by profile, which copies a write pays, and makes those
+tables persistent (section 2, path copying inside a keyed map), and it removes the per-message count of the
+outermost read if the profile shows it. The default stays `rwlock` until a reading of B holds every test of
+E7s and costs no more per message.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
@@ -223,4 +266,6 @@ and not yet what B would.
   publish is possible because a later version cannot lose what the replay was computed from, and is not
   done until a measurement asks for it.
 - **The gain is a prediction until phase 5 runs.** If B costs more per message than A, B stays a value for
-  the deployments whose writers are what they pay for, and the reading is recorded here as such.
+  the deployments whose writers are what they pay for, and the reading is recorded here as such. Phase 5
+  ran (section 6.2): B's writers no longer wait, and B as built fails the starved router's admission, so
+  phase 6 comes before any recommendation of B.
