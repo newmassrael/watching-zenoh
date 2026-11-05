@@ -1222,10 +1222,26 @@ jobs:
   # baseline now pays for both jobs instead of failing early in one. That is
   # runner minutes on an already-broken tree, not a lost gate, and the lane
   # still fails by design on such a tree rather than measuring nothing.
+  #
+  # R4244 -- TWO SHARDS. The job itself then grew to its limit: 26 to 28 minutes when it
+  # finished, cancelled at 30 in hosted runs 41732702195, 41858067005 and 41884918361, each
+  # mutant a build and a run of the leg's crates (3.4 s and 12.8 s in wz-capture). Each shard
+  # asks the legs and predicate thresholds whose position is congruent to it
+  # (`verdict_leg_mutation.py`, `WZ_MUTANTS_SHARD`); the population checks run in both.
+  #
+  # DROP-PROOF INVARIANT: `shard` MUST list exactly [0 .. WZ_MUTANTS_SHARDS-1];
+  # `scripts/lib/shard_matrix_binding.py` holds the list to the count.
   verdict-legs:
-    name: verdict-leg mutation gate (Layer C0mut)
+    name: verdict-leg mutation gate (Layer C0mut, shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    env:
+      WZ_MUTANTS_SHARDS: "2"
+      WZ_MUTANTS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Checkout (with submodules)
         # `submodules: recursive` is load-bearing: the packages this lane
@@ -5872,6 +5888,84 @@ jobs:
 
       - name: Layer C1bf — wz-runtime-tokio --all-features clippy (R311y420)
         run: bash scripts/run-ci.sh --layer C1bf
+
+  # ─────────────────────────────────────────────────────────────────
+  # R4244 -- the ANALYZER crates' lanes, out of `isolated-crates`. That job reached its
+  # 30-minute limit and was cancelled in every run read from 41732702195 to 41884918361:
+  # C3 to C1bx took 25 minutes there (C1m alone 10), C1bz was cancelled three minutes in, and
+  # C1by was never reached, so the replay engine and the analyzer crates' docs had no hosted
+  # verdict at all. A larger limit would be spent again by the next lane the genre gains;
+  # these five share a subject of their own (the analyzer's crates: wz-capture, wz-analyze,
+  # wz-tls-record, wz-replay) and run here, on a runner of their own.
+  analyzer-crates:
+    name: analyzer-crate lanes (capture, command line, decryptor, docs, replay)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Free runner disk space (headroom for the analyzer feature sets)
+        # `isolated-crates`' prune, for the same reason: each lane is a feature set of its own.
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        # `recursive`: wz-session-core, under every analyzer crate, compiles against
+        # sce_forge_runtime from vendor/sce.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `isolated-crates` copy for why RESTORE and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The set `isolated-crates` ran these lanes with, carried over with them.
+        run: |
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `isolated-crates` copy for why `always()` and why the dirty gate.
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there. The `ci` job builds the
+        # workspace these crates are members of.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       # R311y612 (§5.11) — the same genre as C3 above and hosted for the same
       # reason: `--workspace` unification re-enables `wz-capture/reassembly`

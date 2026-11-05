@@ -286,6 +286,9 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        # R4244 -- five lanes peeled off `isolated-crates` for its budget, one of them
+        # Layer C1bz, which documents every workspace member: it takes that job's rows.
+        "analyzer-crates",
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",
@@ -348,6 +351,7 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        "analyzer-crates",
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",
@@ -410,6 +414,7 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        "analyzer-crates",
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",
@@ -515,7 +520,7 @@ _add(
     # nondefault gets a separate native-engine row above (R2805).
     ["ci", "validate-codegen", "codegen-verify", "interop", "feature-gates",
      "feature-gates-peel-2",
-     "transport-modes", "isolated-crates", "capi-c-arms", "e2e-demo",
+     "transport-modes", "isolated-crates", "analyzer-crates", "capi-c-arms", "e2e-demo",
      "e2e-demo-pico", "e2e-router-scale", "dissect", "defaults-off", "gate-provenance"],
 )
 _add(
@@ -626,6 +631,7 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        "analyzer-crates",
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",

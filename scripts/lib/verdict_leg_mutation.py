@@ -1719,6 +1719,34 @@ def main() -> int:
             return 1
         raised = [only]
 
+    # R4244 -- SHARDED (hosted runs 41732702195 to 41884918361). The one job read 26 to 28
+    # minutes when it finished and was cancelled at its 30-minute limit in the others: each
+    # mutant is a build and a run of the leg's crates (3.4 s and 12.8 s in wz-capture), and
+    # the population only grows. Hosted CI runs `WZ_MUTANTS_SHARDS` jobs, each asking the legs
+    # and the predicate thresholds whose position is congruent to its `WZ_MUTANTS_SHARD`.
+    # Every check of the POPULATION above runs in every shard, since each is cheap and each
+    # is about the whole. Unset, one shard asks everything, which is what a local run wants.
+    # The partition covers the population only if every shard runs, and this script cannot
+    # see a missing one: `scripts/lib/shard_matrix_binding.py` holds the workflow's list to
+    # the count. `--only` is a probe of one leg and is not sharded.
+    shards_text = os.environ.get("WZ_MUTANTS_SHARDS", "1")
+    shard_text = os.environ.get("WZ_MUTANTS_SHARD", "0")
+    if not (shards_text.isdigit() and shard_text.isdigit()) or not (
+        0 <= int(shard_text) < int(shards_text)
+    ):
+        print(
+            f"verdict-leg mutation: FAIL — WZ_MUTANTS_SHARD={shard_text} of "
+            f"WZ_MUTANTS_SHARDS={shards_text} is not a shard of a positive count",
+            file=sys.stderr,
+        )
+        return 1
+    shards, shard = int(shards_text), int(shard_text)
+    if only is not None:
+        shards, shard = 1, 0
+    raised = [v for i, v in enumerate(raised) if i % shards == shard]
+    predicates = [p for j, p in enumerate(PREDICATES) if j % shards == shard]
+    part = f" (shard {shard} of {shards})" if shards > 1 else ""
+
     # Every file this run can touch, held together. R311y729 (N20) added the
     # predicate layer, which mutates three files outside `report.rs`, and a
     # restore that covered only the first would leave the others rewritten.
@@ -1779,7 +1807,7 @@ def main() -> int:
     try:
         print(
             ("verdict-leg mutation PROBE: " if only else "verdict-leg mutation: ")
-            + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s), suite = "
+            + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s){part}, suite = "
             + " ".join(packages),
             flush=True,
         )
@@ -1883,13 +1911,13 @@ def main() -> int:
         # kill says "some test depends on this threshold", not "this leg is
         # pinned at its boundary". Conflating the two would claim a precision
         # this does not have.
-        if PREDICATES:
+        if predicates:
             print(
-                f"  predicate thresholds: {len(PREDICATES)} mutant(s), one "
+                f"  predicate thresholds: {len(predicates)} mutant(s), one "
                 "step each",
                 flush=True,
             )
-        for label, rel, p_anchor, p_old, p_new in PREDICATES:
+        for label, rel, p_anchor, p_old, p_new in predicates:
             at = REPO_ROOT / Path(rel)
             base = pristine_of[Path(rel)]
             mutant = apply_predicate(base, p_anchor, p_old, p_new)
@@ -2054,7 +2082,8 @@ def main() -> int:
         ("verdict-leg mutation PROBE: OK for " if only else "verdict-leg mutation: OK (")
         + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s) [{ops}] = "
         f"{len(evidence)} mutant(s) asked"
-        + (f" (incl. {len(PREDICATES)} predicate threshold(s))" if PREDICATES else "")
+        + (f" (incl. {len(predicates)} predicate threshold(s))" if predicates else "")
+        + part
         + (f", {len(unasked)} not applicable" if unasked else "")
         + f", every one killed by at least {least} test(s); "
         f"suite = {' '.join(packages)}"
