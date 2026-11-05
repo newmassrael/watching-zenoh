@@ -54,7 +54,7 @@ use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::WhatAmI;
 
 use crate::app_layer::NoReplies;
-use crate::group_drive::{spawn_multicast_pump, MulticastSession, MulticastSlots};
+use crate::group_drive::{multicast_pump_task, MulticastRef, MulticastSession, MulticastSlots};
 use crate::slot_client::DocumentSinks;
 use crate::slot_node::ZID_MAX;
 use crate::slot_plane::{Plane, PlaneContext, PlaneRunning};
@@ -229,6 +229,68 @@ impl<const P: usize> GroupPublisher<P> {
     }
 }
 
+/// What the group's task is made of besides its pump: the state it shares with the loop, the
+/// observer its events are dispatched to, the clock its offers read, and what it publishes and
+/// counts. Plain values the task's two callbacks are built from ([`group_task`]).
+struct GroupTaskParts<C: ClockSource + 'static, const P: usize> {
+    state: &'static GroupState,
+    observer: &'static ObserverCell<DocumentSinks>,
+    clock: CoopTime<C>,
+    publications: [Publication; P],
+    counts: &'static PublishCounts<P>,
+}
+
+/// The group's session as a task: the pump driven by its two callbacks, the events it raises
+/// (dispatched to the node's observer, counting the members that come and go) and the puts it
+/// offers (the publishers of the declaration, one round per drain).
+///
+/// The callbacks are made HERE, from [`GroupTaskParts`], so that the task is a function of two
+/// named types and its future is a type that [`group_task_cell_bytes`] can name: a closure a caller
+/// made has a type no one else can write, and a cell derived from it could not be declared.
+fn group_task<C, T, const MEMBERS: usize, const P: usize>(
+    pump: MulticastRef<C, T, MEMBERS>,
+    parts: GroupTaskParts<C, P>,
+) -> impl core::future::Future<Output = MulticastOutcome>
+where
+    C: ClockSource + 'static,
+    T: GroupTransport + 'static,
+{
+    let GroupTaskParts {
+        state,
+        observer,
+        clock,
+        publications,
+        counts,
+    } = parts;
+    let mut requesters = Requesters::<NoReplies, NoReplies>::new();
+    let on_event = move |event: IterationEvent<'_, '_>| {
+        match event {
+            IterationEvent::MulticastPeerArrived(_) => state.member_arrived(),
+            IterationEvent::MulticastPeerLost(_) => state.member_lost(),
+            _ => {}
+        }
+        let mut peers = state.peers.borrow_mut();
+        observer
+            .borrow_mut()
+            .dispatch_event(&mut peers, &mut requesters, event);
+    };
+    let mut publisher = GroupPublisher::<P>::new();
+    let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);
+    multicast_pump_task(pump, on_event, next_tx, || false)
+}
+
+/// The bytes of the task cell that holds a group's task ([`group_task`]) over these types, as a
+/// constant of them: the size an image declares for its runtime's cells, so that a group that
+/// grows (more publications, a larger member table) is a number that follows and not a spawn the
+/// runtime refuses.
+pub const fn group_task_cell_bytes<C, T, const MEMBERS: usize, const P: usize>() -> usize
+where
+    C: ClockSource + 'static,
+    T: GroupTransport + 'static,
+{
+    wz_runtime_coop::executor::cell_bytes_of(group_task::<C, T, MEMBERS, P>)
+}
+
 /// A node's group: the table its pump lives in, the state it shares with the loop, how the stack
 /// joins the group, what the node publishes on it, and its timing.
 pub struct SlotGroup<C, T, B, const MEMBERS: usize, const P: usize>
@@ -336,26 +398,17 @@ where
             // The table counted the refusal, and dropped the session with its socket.
             return false;
         };
-        let observer = self.observer;
-        let mut requesters = Requesters::<NoReplies, NoReplies>::new();
-        let on_event = move |event: IterationEvent<'_, '_>| {
-            match event {
-                IterationEvent::MulticastPeerArrived(_) => state.member_arrived(),
-                IterationEvent::MulticastPeerLost(_) => state.member_lost(),
-                _ => {}
-            }
-            let mut peers = state.peers.borrow_mut();
-            observer
-                .borrow_mut()
-                .dispatch_event(&mut peers, &mut requesters, event);
+        let parts = GroupTaskParts {
+            state,
+            observer: self.observer,
+            clock: CoopTime::new(&self.runtime),
+            publications: self.plane.publications,
+            counts: self.plane.counts,
         };
-        let clock = CoopTime::new(&self.runtime);
-        let publications = self.plane.publications;
-        let counts = self.plane.counts;
-        let mut publisher = GroupPublisher::<P>::new();
-        let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);
         let local = CoopLocalSet::new(&self.runtime);
-        match spawn_multicast_pump(&local, pump, on_event, next_tx, || false) {
+        // Made in the cell: the task holds the node's state and a frame as large as it would be
+        // on the stack of the loop that joins.
+        match local.spawn_local_with(move || group_task(pump, parts)) {
             Ok(task) => {
                 // The table of a fresh session holds nobody and has turned nobody away.
                 state.members.set(0);

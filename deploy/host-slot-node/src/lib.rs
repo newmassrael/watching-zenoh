@@ -35,15 +35,6 @@ pub mod tuning {
     pub const SESSIONS: usize = 1;
     /// The runtime's task table: a pump task per session, and nothing else runs as a task.
     pub const TASKS: usize = SESSIONS;
-    /// Bytes of one task cell of a node that PUBLISHES and ASKS on its own (a declared node): what the
-    /// answering node keeps, a handle to its own session, the schedules and the publications of at
-    /// most four publishers and four queriers (a declaration holds no more, `wz_node.py`), and the
-    /// pending queries of the queriers (a row each, with a two-word sink). Not found by the search
-    /// the numbers above were: it is a step above the asking node's cell, which holds the pending
-    /// rows alone, and a task a cell cannot hold is refused and said on the console, so the node
-    /// that does not start says why. The interop runs of the declared nodes start a session in it.
-    /// It is `.bss`, so the cell a node that only publishes does not need costs no flash.
-    pub const TASK_BYTES_ACTIVE: usize = 4096;
     /// Bytes of the arena the loop's own state is built in (the host, the factory and the node of
     /// the session it dials). The loop checks the number when it is compiled, and a build that
     /// grows past it stops, so the number is the measured need and not a guess.

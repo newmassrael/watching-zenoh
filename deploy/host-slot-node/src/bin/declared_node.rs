@@ -28,9 +28,10 @@ use host_slot_node_glue::group::{HostGroupTransport, PosixGroupBind};
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
-    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN_ACTIVE, RX, TASK_BYTES_ACTIVE, TIMERS, TX,
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN_ACTIVE, RX, TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, SlotStack};
 use wz_runtime_posix::glue::{log, log_args, log_whole};
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
@@ -48,13 +49,14 @@ use wz_session_mcu::group_drive::MulticastSlots;
 use wz_session_mcu::latest::{Latest, LatestCells, LatestRef, LatestWatch};
 use wz_session_mcu::slot_active::Active;
 use wz_session_mcu::slot_client::Listening;
+use wz_session_mcu::slot_dial::EventsOf;
 #[cfg(feature = "multicast")]
-use wz_session_mcu::slot_group::{GroupState, GroupTiming, SlotGroup};
+use wz_session_mcu::slot_group::{group_task_cell_bytes, GroupState, GroupTiming, SlotGroup};
 #[cfg(not(feature = "multicast"))]
 use wz_session_mcu::slot_node::NoPlane;
 use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
-    NodeIdentity, NodePort, NodeStorage, Subscription,
+    NodeIdentity, NodePort, NodeStorage, SessionLayer, Subscription,
 };
 use wz_session_mcu::slot_publisher::{
     Body, MadeBuffer, Process, Publication, PublishCounts, PublishWatch,
@@ -340,6 +342,34 @@ type Clock = PosixClock;
 type Stack = PosixStack;
 #[cfg(feature = "tls")]
 type Stack = tls::Stack;
+/// The link driver of the node's stack, which a session's pump is generic over.
+type Driver = <Stack as SlotStack>::Driver;
+
+/// Bytes of the task cell of a session: what the task is, as the compiler lays it out for this
+/// node's types (the pump's handle and the application layer's state, which holds the node's
+/// publishers, queriers and replays), and not a figure found by running the node.
+const SESSION_TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    <Stack as SlotStack>::Pump,
+    Driver,
+    EventsOf<
+        <Active<PUBLISHERS, QUERIERS, REPLAYS, MADE_MAX> as SessionLayer<Clock, Driver>>::Events,
+    >,
+>();
+/// Bytes of the task cell of the group the node is a member of, the same way; none for a node that
+/// is not a member of one.
+#[cfg(feature = "multicast")]
+const GROUP_TASK_BYTES: usize =
+    group_task_cell_bytes::<Clock, HostGroupTransport, MEMBERS, PUBLISHERS>();
+#[cfg(not(feature = "multicast"))]
+const GROUP_TASK_BYTES: usize = 0;
+/// Bytes of one task cell: the runtime's cells are all one size, so it is the larger of the two
+/// tasks that run in them.
+const TASK_BYTES: usize = if SESSION_TASK_BYTES > GROUP_TASK_BYTES {
+    SESSION_TASK_BYTES
+} else {
+    GROUP_TASK_BYTES
+};
 
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` and not in `.data`.
@@ -348,7 +378,7 @@ type Storage = NodeStorage<
     Stack,
     PosixEntropy,
     TASKS,
-    TASK_BYTES_ACTIVE,
+    TASK_BYTES,
     TIMERS,
     SESSIONS,
     RX,
