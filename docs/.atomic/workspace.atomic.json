@@ -311458,6 +311458,34 @@
         "Stages 2 to 5 of docs/verdicts-in-the-fleet.md carry as filed in round 4268."
       ]
     },
+    "Round 4277": {
+      "decision_summary": "The task cell the client images derive from their task (the round before this one) is read back from the images and recorded here, since that round could only say the get image's figure was computed from a RAM difference. No code changes in this round.",
+      "changes_bullets": [
+        "None: a reading. The five client images of the kit lane's list were built with a probe static whose size is the derived cell (a build-only edit of fixed_client.rs, reverted, never committed) and the size of the symbol read with nm."
+      ],
+      "verification_bullets": [
+        "The derived task cell reads 33 bytes in the client images that only answer (fixed, batching, heap and the secure-channel client; written by hand as 384) and 265 bytes in the get image with two pending-query rows (written as 768, 256 plus 256 per row). The 265 bytes of the get image lie below the 640 a kit run of 2026-10-23 held for two rows; the pump task was an async fn then, which stores a by-value argument twice, and is an async block now. Still not run: any client image on the kit or an emulator, so no session task of a client image with the derived cell was spawned."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "A kit run of the get image and of the answering client with the derived cells, which would show the runtime refusing no task. The reading above is of the compiler's figure and not of a session that ran in the cell."
+      ],
+      "publishable_decision_summary": "The task cell the client images derive from their task (the round before this one) is read back from the images and recorded here, since that round could only say the get image's figure was computed from a RAM difference. No code changes in this round.",
+      "publishable_changes_bullets": [
+        "None: a reading. The five client images of the kit lane's list were built with a probe static whose size is the derived cell (a build-only edit of fixed_client.rs, reverted, never committed) and the size of the symbol read with nm."
+      ],
+      "publishable_verification_bullets": [
+        "The derived task cell reads 33 bytes in the client images that only answer (fixed, batching, heap and the secure-channel client; written by hand as 384) and 265 bytes in the get image with two pending-query rows (written as 768, 256 plus 256 per row). The 265 bytes of the get image lie below the 640 a kit run of 2026-10-23 held for two rows; the pump task was an async fn then, which stores a by-value argument twice, and is an async block now. Still not run: any client image on the kit or an emulator, so no session task of a client image with the derived cell was spawned."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A kit run of the get image and of the answering client with the derived cells, which would show the runtime refusing no task. The reading above is of the compiler's figure and not of a session that ran in the cell."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
