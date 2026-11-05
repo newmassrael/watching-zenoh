@@ -72,7 +72,6 @@ mod storage_aligner_convergence_e2e;
 mod storage_manager_hosts_a_storage_e2e;
 mod switchboard_inject;
 mod tcp_driver_cancel_safety;
-mod tls_keylog_e2e;
 mod tls_pem_mtls_e2e;
 mod transport_compose_e2e;
 mod transport_mode_pairs_e2e;

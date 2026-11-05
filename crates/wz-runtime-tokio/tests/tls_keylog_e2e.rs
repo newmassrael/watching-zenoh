@@ -43,7 +43,6 @@ use wz_runtime_tokio::tls_config::{client_config_from_pem, server_config_from_pe
 use wz_runtime_tokio::tls_keylog::{keylog_armed, keylog_supported, KEYLOG_ENV};
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
-#[path = "../../tls_harness/mod.rs"]
 mod tls_harness;
 
 /// One parsed key-log line.

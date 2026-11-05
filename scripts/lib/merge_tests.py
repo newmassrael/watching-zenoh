@@ -12,7 +12,8 @@ link, one copy of the code the tests share, and the files as modules.
 
 The layout this tool makes, for a crate `C` whose files are `tests/<name>.rs`:
 
-    tests/it/main.rs          `mod files;`          (cargo finds `tests/<dir>/main.rs` by itself)
+    tests/it/main.rs          `mod files;`          (cargo finds `tests/<dir>/main.rs` by itself),
+                              and a helper module two files share, once (`shared_helpers`)
     tests/it/files/mod.rs     `mod <name>;` for every file moved, in order
     tests/it/files/<name>.rs  the file, moved with `git mv`, its text UNCHANGED but for a `crate::`
                               path of its code, which names the file's own module now
@@ -29,6 +30,9 @@ A file is NOT merged when it must be its own process or cannot be a module:
   * it has a `[[test]]` table in the crate's `Cargo.toml` (a `required-features` list, `harness`,
     a name the scripts use): the table names a file, and a table is the crate's own decision;
   * it has `harness = false` or an `fn main` (it is not a libtest target);
+  * it sets or removes an environment variable or changes the working directory
+    (`PROCESS_WRITE`): every other file of a shared executable would run under what it set, as
+    the key log of a TLS test set by `SSLKEYLOGFILE` collected every neighbour's sessions;
   * an explicit `--keep NAME` (a file that reads the process's environment, its working directory
     or a signal, which a neighbour in the same process could disturb).
 
@@ -80,6 +84,8 @@ FILES_HEADER = """\
 """
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A call that changes what every thread of the process reads: its environment or its directory.
+PROCESS_WRITE = re.compile(r"\benv::(set_var|remove_var)\s*\(|\bset_current_dir\s*\(")
 KEYWORDS = {
     "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
@@ -139,6 +145,9 @@ def classify(
             stay.append((name, "has its own fn main"))
         elif re.search(r"(?m)^(pub )?fn main\s*\(", text):
             stay.append((name, "has its own fn main"))
+        elif PROCESS_WRITE.search(text):
+            stay.append((name, "changes the process's environment or working directory, which "
+                               "every file of a shared executable reads"))
         elif name in keep:
             stay.append((name, "kept by --keep"))
         else:
@@ -155,8 +164,10 @@ def helper_modules(crate: Path, test_names: set[str]) -> dict[str, str]:
     """{module name: path from `tests/` of its source} for the helper modules of the crate: a
     `tests/<name>/mod.rs` (or a `tests/<name>.rs` that is not itself a test file) that test files
     declare with `mod <name>;`. Declared in a file that is a module now, that line would look for
-    `tests/it/files/<file>/<name>.rs`; a `#[path]` to where the helper is keeps it, and keeps one
-    instance of the helper for each file, as each file was an executable with its own."""
+    `tests/it/files/<file>/<name>.rs`; a `#[path]` to where the helper is keeps it. A helper that
+    two or more files of one target declare is declared once, at the target's root, and each of
+    those files `use`s it ([`shared_helpers`]): one source file loaded as two modules is what
+    clippy's `duplicate_mod` refuses."""
     found: dict[str, str] = {}
     tests = crate / "tests"
     for sub in tests.iterdir():
@@ -170,8 +181,25 @@ def helper_modules(crate: Path, test_names: set[str]) -> dict[str, str]:
     return found
 
 
-def point_helper_modules(text: str, helpers: dict[str, str]) -> tuple[str, int]:
-    """`text` with each `mod <helper>;` given a `#[path]` to the helper, from `tests/<t>/files/`."""
+MOD_DECL = re.compile(r"(?m)^(?P<indent>[ \t]*)mod (?P<name>[A-Za-z_][A-Za-z0-9_]*);[ \t]*$")
+# What makes a module's instance matter: state of the process (a static, a thread-local), which
+# one executable per file held once per file and one shared module would hold once for all.
+STATEFUL = re.compile(r"(?m)^\s*(pub(\([^)]*\))?\s+)?(static\s|thread_local!)")
+
+
+def shared_helpers(texts: list[str], helpers: dict[str, str]) -> set[str]:
+    """The helpers that two or more of `texts` (the files of one target) declare with `mod`."""
+    count: dict[str, int] = {}
+    for text in texts:
+        for name in {m.group("name") for m in MOD_DECL.finditer(text)} & helpers.keys():
+            count[name] = count.get(name, 0) + 1
+    return {name for name, n in count.items() if n > 1}
+
+
+def point_helper_modules(text: str, helpers: dict[str, str],
+                         shared: frozenset[str] | set[str] = frozenset()) -> tuple[str, int]:
+    """`text` with each `mod <helper>;` given a `#[path]` to the helper, from `tests/<t>/files/`,
+    or, for a helper the target's root declares (`shared`), turned into `use crate::<helper>;`."""
     count = 0
 
     def sub(m: re.Match[str]) -> str:
@@ -180,9 +208,11 @@ def point_helper_modules(text: str, helpers: dict[str, str]) -> tuple[str, int]:
         if name not in helpers:
             return m.group(0)
         count += 1
+        if name in shared:
+            return f'{m.group("indent")}use crate::{name};'
         return f'{m.group("indent")}#[path = "../../{helpers[name]}"]\n{m.group(0)}'
 
-    return re.sub(r"(?m)^(?P<indent>[ \t]*)mod (?P<name>[A-Za-z_][A-Za-z0-9_]*);[ \t]*$", sub, text), count
+    return MOD_DECL.sub(sub, text), count
 
 
 def reexecuters(crate: Path) -> list[str]:
@@ -255,15 +285,29 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
                              | {n for n, _ in stay})
     rebased = 0
     moved = 0
+    shared_by: dict[str, set[str]] = {}
+    for target, names in sorted(merge.items()):
+        shared = shared_helpers(
+            [(crate / "tests" / f"{n}.rs").read_text() for n in names], helpers)
+        stateful = sorted(h for h in shared
+                          if STATEFUL.search((crate / "tests" / helpers[h]).read_text()))
+        if stateful:
+            print(f"tests/{target}: the helper(s) {', '.join(stateful)} hold a static or a "
+                  f"thread-local, which each file's executable held once and one shared module "
+                  f"would hold once for all: keep all but one of their files (--keep), or decide "
+                  f"by hand. Nothing done", file=sys.stderr)
+            return 1
+        shared_by[target] = shared
     for target, names in sorted(merge.items()):
         it = crate / "tests" / target
         (it / "files").mkdir(parents=True)
+        shared = shared_by[target]
         for name in names:
             src = crate / "tests" / f"{name}.rs"
             dst = it / "files" / f"{name}.rs"
             git("mv", str(src.relative_to(ROOT)), str(dst.relative_to(ROOT)))
             text, changed = rebase_crate_paths(dst.read_text(), name)
-            text, pointed = point_helper_modules(text, helpers)
+            text, pointed = point_helper_modules(text, helpers, shared)
             if pointed:
                 print(f"  helper module pointed by #[path] in {name}")
             if changed or pointed:
@@ -271,7 +315,9 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
                 rebased += len(changed)
                 for line in changed:
                     print(f"  crate:: rewritten in {name}: {line.strip()}")
-        (it / "main.rs").write_text(HEADER.replace("one test executable", f"the test executable `{target}`"))
+        (it / "main.rs").write_text(
+            HEADER.replace("one test executable", f"the test executable `{target}`")
+            + "".join(f'\n#[path = "../{helpers[h]}"]\nmod {h};\n' for h in sorted(shared)))
         (it / "files" / "mod.rs").write_text(FILES_HEADER + "".join(f"mod {n};\n" for n in names))
         git("add", str(it.relative_to(ROOT)))
         moved += len(names)
@@ -370,11 +416,16 @@ def selftest() -> int:
             "gated": '#![cfg(feature = "x")]\n#[test] fn t() {}\n',
             "kept": "#[test] fn t() {}\n",
             "9bad": "#[test] fn t() {}\n",
+            "envset": '#[test] fn t() { std::env::set_var("SSLKEYLOGFILE", "x"); }\n',
+            "envread": '#[test] fn t() { let _ = std::env::var("HOME"); }\n',
         }.items():
             (crate / "tests" / f"{name}.rs").write_text(body)
         merge, stay = classify(crate, {"kept"})
-        check("merge set", merge == {"it": ["gated", "plain"]})
-        check("stay set", {n for n, _ in stay} == {"alloc", "tabled", "mainful", "kept", "9bad"})
+        check("merge set", merge == {"it": ["envread", "gated", "plain"]})
+        check("stay set", {n for n, _ in stay}
+              == {"alloc", "tabled", "mainful", "kept", "9bad", "envset"})
+        (crate / "tests" / "envset.rs").unlink()
+        (crate / "tests" / "envread.rs").unlink()
         (crate / "tests" / "pico.rs").write_text("use zenoh_pico_sys::z_close;\n")
         (crate / "tests" / "drop_in.rs").write_text("use wz_capi_pico::z_close;\n")
         (crate / "tests" / "both.rs").write_text("use zenoh_pico_sys::a;\nuse wz_capi_pico::b;\n")
@@ -396,6 +447,17 @@ def selftest() -> int:
         text, n = point_helper_modules("mod harness;\nmod other;\n", helpers)
         check("a helper module gets a path and another does not",
               n == 1 and text == '#[path = "../../harness/mod.rs"]\nmod harness;\nmod other;\n')
+        check("a helper two files declare is shared, one file's is not",
+              shared_helpers(["mod harness;\n", "mod harness;\nmod other;\n", "mod other;\n"],
+                             helpers) == {"harness"}
+              and shared_helpers(["mod harness;\n"], helpers) == set())
+        text, n = point_helper_modules("    mod harness;\n", helpers, {"harness"})
+        check("a shared helper is used from the root, not declared again",
+              n == 1 and text == "    use crate::harness;\n")
+        check("a static or a thread-local is state, a fn is not",
+              bool(STATEFUL.search("pub static X: u8 = 0;\n"))
+              and bool(STATEFUL.search("thread_local! { }\n"))
+              and not STATEFUL.search("pub fn h() {}\n// a static note\n"))
         check("a [[test]] name is read", toml_tests(crate / "Cargo.toml") == {"tabled"})
     if failures == 0:
         print("merge_tests: selftest OK")
