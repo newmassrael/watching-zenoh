@@ -312584,6 +312584,38 @@
         "Open: phase 4 of docs/router-table-snapshots.md (the snapshot cell and the policy routing-table-sharing) is verified apart and lands as its own round."
       ]
     },
+    "Round 4308": {
+      "decision_summary": "Two reds came in with the merge of wz-runtime-tokio's test files into one executable (commit 200b647971), both from one file. tls_keylog_e2e sets SSLKEYLOGFILE for the process; merged, every TLS test running beside it in the same executable logged its sessions into its key log, and its assertion that each secret has one value saw ten (files::tls_keylog_e2e::a_tls_session_exports_its_keys_in_nss_format failed under --all-features). The file's own documentation says it is its own test binary for exactly this reason, and the merge tool's documentation says such a file stays apart, but the tool learned that only from a hand-written --keep. The same file also declared tls_harness by #[path] beside tls_pem_mtls_e2e, so one source file was two modules of the executable, which clippy's duplicate_mod refuses (`cargo clippy -p wz-runtime-tokio --all-targets -D warnings` red). The file goes back to tests/ as it was before the merge, which ends both. The tool now finds such a file itself: a call that sets or removes an environment variable or changes the working directory keeps the file out of a shared executable. And a helper that two or more files of one target declare is declared once at the target's root and used by each, unless it holds a static or a thread-local, which the tool refuses rather than merge, since one module would then hold once what each executable held once.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/tls_keylog_e2e.rs: back from tests/it/files/, as it was before the merge (its own `mod tls_harness;`); tests/it/files/mod.rs no longer names it.",
+        "scripts/lib/merge_tests.py: PROCESS_WRITE keeps a file that sets or removes an environment variable or changes the working directory out of a merge; shared_helpers and STATEFUL declare a helper two files of one target share once at the root (`use crate::<helper>;` in each file) and refuse a stateful one; the selftest gains five checks."
+      ],
+      "verification_bullets": [
+        "Before, on origin at round 4307 through bx (hkl001): cargo clippy -p wz-runtime-tokio --all-targets --all-features -D warnings failed with clippy::duplicate_mod on tests/it/files/../../tls_harness/mod.rs; cargo test -p wz-runtime-tokio --all-features --test it files::tls_ ran 9, 8 passed and files::tls_keylog_e2e::a_tls_session_exports_its_keys_in_nss_format failed: CLIENT_HANDSHAKE_TRAFFIC_SECRET logged with 10 disagreeing values.",
+        "After, same host: the clippy call rc 0; --test it files::tls_ 8 passed; --test tls_keylog_e2e 1 passed; --test tls_e2e 8 passed. python3 scripts/lib/merge_tests.py --selftest: OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Open: phase 4 of docs/router-table-snapshots.md (the snapshot cell and the policy routing-table-sharing) is verified apart and lands as its own round."
+      ],
+      "publishable_decision_summary": "Two reds came in with the merge of wz-runtime-tokio's test files into one executable (commit 200b647971), both from one file. tls_keylog_e2e sets SSLKEYLOGFILE for the process; merged, every TLS test running beside it in the same executable logged its sessions into its key log, and its assertion that each secret has one value saw ten (files::tls_keylog_e2e::a_tls_session_exports_its_keys_in_nss_format failed under --all-features). The file's own documentation says it is its own test binary for exactly this reason, and the merge tool's documentation says such a file stays apart, but the tool learned that only from a hand-written --keep. The same file also declared tls_harness by #[path] beside tls_pem_mtls_e2e, so one source file was two modules of the executable, which clippy's duplicate_mod refuses (`cargo clippy -p wz-runtime-tokio --all-targets -D warnings` red). The file goes back to tests/ as it was before the merge, which ends both. The tool now finds such a file itself: a call that sets or removes an environment variable or changes the working directory keeps the file out of a shared executable. And a helper that two or more files of one target declare is declared once at the target's root and used by each, unless it holds a static or a thread-local, which the tool refuses rather than merge, since one module would then hold once what each executable held once.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/tls_keylog_e2e.rs: back from tests/it/files/, as it was before the merge (its own `mod tls_harness;`); tests/it/files/mod.rs no longer names it.",
+        "scripts/lib/merge_tests.py: PROCESS_WRITE keeps a file that sets or removes an environment variable or changes the working directory out of a merge; shared_helpers and STATEFUL declare a helper two files of one target share once at the root (`use crate::<helper>;` in each file) and refuse a stateful one; the selftest gains five checks."
+      ],
+      "publishable_verification_bullets": [
+        "Before, on origin at round 4307 through bx (hkl001): cargo clippy -p wz-runtime-tokio --all-targets --all-features -D warnings failed with clippy::duplicate_mod on tests/it/files/../../tls_harness/mod.rs; cargo test -p wz-runtime-tokio --all-features --test it files::tls_ ran 9, 8 passed and files::tls_keylog_e2e::a_tls_session_exports_its_keys_in_nss_format failed: CLIENT_HANDSHAKE_TRAFFIC_SECRET logged with 10 disagreeing values.",
+        "After, same host: the clippy call rc 0; --test it files::tls_ 8 passed; --test tls_keylog_e2e 1 passed; --test tls_e2e 8 passed. python3 scripts/lib/merge_tests.py --selftest: OK."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: phase 4 of docs/router-table-snapshots.md (the snapshot cell and the policy routing-table-sharing) is verified apart and lands as its own round."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
