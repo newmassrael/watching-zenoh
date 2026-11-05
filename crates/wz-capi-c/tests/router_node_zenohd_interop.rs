@@ -28,6 +28,15 @@
 //! the node and zenohd and runs the same put: it must not arrive, which is what makes a delivery
 //! in the leg a delivery through the node and not through some path the harness left open.
 //!
+//! A third leg holds the interest of a node's publisher and querier. A peer node below zenohd
+//! (the same peer as above) declares a publisher and a querier, a wz client beyond zenohd then
+//! declares a subscriber and a queryable, and the node's matching must say that something
+//! matches. zenohd tells a peer below it a declaration only for an interest the peer holds, so
+//! the node's publisher and querier each declare one; with either left out, that one never learns
+//! (each measured on its own). A publisher on a key nothing subscribes to stays unmatched, and
+//! nothing matches before the client declares anything. The interest is not witnessed where the
+//! peer dials the node directly, which is why this leg sits below a router.
+//!
 //! # What is NOT claimed
 //!
 //! A remote the node dials and places in its own south (a node that dials into a subregion) has
@@ -51,14 +60,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wz_capi_c::abi::{
-    z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_sample_t, z_moved_config_t,
-    z_moved_session_t, z_owned_bytes_t, z_owned_closure_sample_t, z_owned_config_t,
-    z_owned_session_t, z_owned_subscriber_t, z_view_keyexpr_t,
+    z_loaned_query_t, z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_query_t,
+    z_moved_closure_sample_t, z_moved_config_t, z_moved_session_t, z_owned_bytes_t,
+    z_owned_closure_query_t, z_owned_closure_sample_t, z_owned_config_t, z_owned_publisher_t,
+    z_owned_querier_t, z_owned_queryable_t, z_owned_session_t, z_owned_subscriber_t,
+    z_view_keyexpr_t,
 };
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
+use wz_capi_c::matching::{
+    z_matching_status_t, z_publisher_get_matching_status, z_querier_get_matching_status,
+};
+use wz_capi_c::publisher::{z_declare_publisher, z_publisher_loan};
 use wz_capi_c::put::z_put;
+use wz_capi_c::querier::{z_declare_querier, z_querier_loan};
+use wz_capi_c::query::{z_closure_query, z_declare_queryable};
 use wz_capi_c::result::Z_OK;
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
@@ -327,6 +344,164 @@ fn a_router_node_and_a_zenohd_forward_between_the_clients_of_each() {
         b_to_a,
         "a put of the client of zenohd never reached the client of the wz router"
     );
+}
+
+/// A queryable handler that answers nothing: the matching of a querier counts the declaration.
+unsafe extern "C" fn on_query_ignored(_query: *mut z_loaned_query_t, _ctx: *mut c_void) {}
+
+/// Declare a queryable on [`KEYEXPR`] that answers nothing.
+unsafe fn declare_silent_queryable(session: &z_owned_session_t) -> z_owned_queryable_t {
+    let mut closure: z_owned_closure_query_t = std::mem::zeroed();
+    z_closure_query(
+        &mut closure,
+        Some(on_query_ignored),
+        None,
+        std::ptr::null_mut(),
+    );
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+    let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+    assert_eq!(
+        z_declare_queryable(
+            z_session_loan(session),
+            &mut queryable,
+            z_view_keyexpr_loan(&view),
+            (&mut closure as *mut z_owned_closure_query_t).cast::<z_moved_closure_query_t>(),
+            std::ptr::null_mut(),
+        ),
+        Z_OK
+    );
+    queryable
+}
+
+/// Wait up to [`DELIVERY_BUDGET`] for `check` to hold, and say whether it did.
+fn eventually(check: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + DELIVERY_BUDGET;
+    while !check() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    check()
+}
+
+/// Whether `check` stays false for [`ABSENCE_WINDOW`].
+fn never(check: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + ABSENCE_WINDOW;
+    while Instant::now() < deadline {
+        if check() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+#[test]
+#[ignore = "binary-dep e2e (a peer node's matching below a real zenohd); Layer Z runs via --ignored"]
+fn a_node_below_a_zenohd_learns_of_the_subscriber_and_queryable_beyond_it() {
+    let (zenohd_port, node_port) = (free_port(), free_port());
+    let _zenohd = spawn_zenohd(zenohd_port);
+    let south = [(
+        "gateway",
+        String::from(r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#),
+    )];
+    // SAFETY: fresh sessions, closed below; the contexts outlive their sessions.
+    unsafe {
+        let node = open(&node_entries("peer", node_port, Some(zenohd_port), &south));
+        let beyond = open_client(zenohd_port);
+        let key = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        let elsewhere = CString::new("wz/router-node/elsewhere").unwrap();
+        let mut elsewhere_view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut elsewhere_view, elsewhere.as_ptr()),
+            Z_OK
+        );
+
+        // The node's publisher and querier are declared BEFORE anything beyond the router holds
+        // a subscriber or a queryable, so what they learn they learn from the router's interest
+        // answer and its later declarations.
+        let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+        let mut apart: z_owned_publisher_t = std::mem::zeroed();
+        let mut querier: z_owned_querier_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(&node),
+                &mut publisher,
+                z_view_keyexpr_loan(&view),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(&node),
+                &mut apart,
+                z_view_keyexpr_loan(&elsewhere_view),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_declare_querier(
+                z_session_loan(&node),
+                &mut querier,
+                z_view_keyexpr_loan(&view),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        let publisher_matches = || {
+            let mut status: z_matching_status_t = std::mem::zeroed();
+            assert_eq!(
+                z_publisher_get_matching_status(z_publisher_loan(&publisher), &mut status),
+                Z_OK
+            );
+            status.matching
+        };
+        let apart_matches = || {
+            let mut status: z_matching_status_t = std::mem::zeroed();
+            assert_eq!(
+                z_publisher_get_matching_status(z_publisher_loan(&apart), &mut status),
+                Z_OK
+            );
+            status.matching
+        };
+        let querier_matches = || {
+            let mut status: z_matching_status_t = std::mem::zeroed();
+            assert_eq!(
+                z_querier_get_matching_status(z_querier_loan(&querier), &mut status),
+                Z_OK
+            );
+            status.matching
+        };
+
+        // The control: nothing beyond the router holds anything yet, so nothing matches.
+        assert!(
+            never(|| publisher_matches() || querier_matches()),
+            "the node matched before anything beyond zenohd held a subscriber or a queryable"
+        );
+
+        let (_heard, ctx) = count_samples(&beyond);
+        let _queryable = declare_silent_queryable(&beyond);
+        assert!(
+            eventually(&publisher_matches),
+            "the node's publisher never learned of the subscriber beyond zenohd"
+        );
+        assert!(
+            eventually(&querier_matches),
+            "the node's querier never learned of the queryable beyond zenohd"
+        );
+        assert!(
+            never(&apart_matches),
+            "a publisher on a key nothing subscribes to matched"
+        );
+
+        close_session(beyond);
+        close_session(node);
+        drop(Box::from_raw(ctx));
+    }
 }
 
 #[test]

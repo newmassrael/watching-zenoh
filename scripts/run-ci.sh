@@ -20679,10 +20679,16 @@ layer_z_zenohd_interop() {
     # each with its own control (no link between the node and zenohd: a put must not cross) and
     # each failing, MEASURED, with the node taken out (the router opened as the registry of faces,
     # the peer's partition replaced by the preset): both on "a put of the client of the wz node
-    # never reached the client of zenohd". 2 passed against zenohd 1.10.2 (build machine hkl002).
-    # Built with `router-node`, which the lane above does not turn on. In this crate for the
-    # reason the legs above give.
-    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+    # never reached the client of zenohd". A third leg holds the INTEREST of a node's publisher and
+    # querier: a peer node below zenohd learns of the subscriber and the queryable of a client
+    # beyond the router, and a publisher on a key nothing subscribes to matches nothing; it fails,
+    # MEASURED, with the publisher's interest not declared ("never learned of the subscriber
+    # beyond zenohd") and, separately, with the querier's. The interest is not witnessed where the
+    # peer dials the node directly (the node then holds the peer's declarations whatever it
+    # asked), which is why this leg sits below a router. 3 passed against zenohd 1.10.2 (build
+    # machine hkl002). Built with `router-node`, which the lane above does not turn on. In this
+    # crate for the reason the legs above give.
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
         --features router-node --test router_node_zenohd_interop -- --ignored --quiet \
         --test-threads=1 \
         || return 1
