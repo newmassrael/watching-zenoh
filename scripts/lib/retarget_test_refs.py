@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""Make a script's `--test <name>` of one crate independent of where the crate keeps the file.
+"""R4296 (no register item) -- make a script's `--test <name>` of one crate independent of where
+the crate keeps the file.
 
 `cargo test -p C --test N` runs the test file `tests/N.rs`. Once `merge_tests.py` has merged the
 crate, `N` is a module of an executable and the spelling is `--test <target> files::N::`, which
@@ -53,8 +54,17 @@ TEST_REF = re.compile(r"--test\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 TEST_EQ = re.compile(r"--test=([A-Za-z_][A-Za-z0-9_]*)")
 PACKAGE = re.compile(r"(?:-p|--package)[ =]+([A-Za-z0-9_-]+)")
 ARRAY = '"${WZ_TEST_ARGS[@]}"'
-CALL = re.compile(r"(?m)^[ \t]*wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+([A-Za-z0-9_]+))?[ \t]*\n")
-IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A command that builds a test target and runs none (clippy, check, build, doc) takes the target
+# alone: a filter is `cargo test`'s.
+TARGET_ARRAY = '"${WZ_TEST_TARGET[@]}"'
+BUILD_ONLY = {"clippy", "check", "build", "doc", "fix", "bench"}
+CARGO_SUB = re.compile(r"\bcargo\s+(?:\+\S+\s+)?([a-z][a-z-]*)")
+CALL = re.compile(r"(?m)^[ \t]*wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+([A-Za-z0-9_:]+))?[ \t]*\n")
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_:]*")
+CHAIN_CALL = re.compile(
+    r"^[ \t]*&&[ \t]+wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+([A-Za-z0-9_:]+))?[ \t]*\\\n")
+INLINE_CALL = re.compile(
+    r"wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+([A-Za-z0-9_:]+))?[ \t]*&&[ \t]*")
 
 
 def logical_commands(lines: list[str]) -> list[tuple[int, int]]:
@@ -122,6 +132,11 @@ def retarget(text: str, crate: str, crate_tests: Path) -> tuple[str, int, list[s
         refs = TEST_REF.findall(command)
         if not refs and not TEST_EQ.search(command):
             continue
+        subs = CARGO_SUB.findall(command)
+        if len(subs) > 1:
+            manual.append(f"{first + 1}: {len(subs)} cargo commands in one ({', '.join(subs)})")
+            continue
+        build_only = bool(subs) and subs[0] in BUILD_ONLY
         located = [n for n in refs if test_sources.locate(crate_tests, n)]
         if TEST_EQ.search(command):
             manual.append(f"{first + 1}: `--test=NAME` spelling")
@@ -134,6 +149,9 @@ def retarget(text: str, crate: str, crate_tests: Path) -> tuple[str, int, list[s
             continue
         others = positionals(command)
         within = None
+        if build_only and others:
+            manual.append(f"{first + 1}: a filter {others} beside `--test {refs[0]}` of a build")
+            continue
         if len(others) == 1 and IDENT.fullmatch(others[0]):
             within = others[0]
         elif others:
@@ -148,7 +166,7 @@ def retarget(text: str, crate: str, crate_tests: Path) -> tuple[str, int, list[s
                 manual.append(f"{i + 1}: `--test {m.group(1)}` inside single quotes")
                 break
             args = f"{crate} {m.group(1)}" + (f" {within}" if within else "")
-            call = ARRAY
+            call = TARGET_ARRAY if build_only else ARRAY
             lines[i] = lines[i][:m.start()] + call + lines[i][m.end():]
             indent = re.match(r"\s*", lines[first]).group(0)
             inserted[first] = inserted.get(first, "") + f"{indent}wz_test_args {args}\n"
@@ -189,17 +207,38 @@ def expand(text: str, keep_lines: bool = False) -> str:
     A lint that reports `file:line` reads it with `keep_lines`: a call line is left as an empty
     line, so every other line keeps the number it has in the file."""
     out: list[str] = []
-    pending: str | None = None
+    pending: tuple[str, str] | None = None  # (what ARRAY stands for, what TARGET_ARRAY stands for)
     for line in text.splitlines(keepends=True):
+        # A call on a line of its own inside a chain of commands:
+        #     && wz_test_args C N [W] \
+        #     && cargo ...
+        # The `&&` of the next line is the one the command always had.
+        chain = CHAIN_CALL.match(line)
+        if chain:
+            target = f"--test {chain.group(1)}"
+            pending = (target + (f" {chain.group(2)}" if chain.group(2) else ""), target)
+            if keep_lines:
+                out.append("\\\n")
+            continue
+        # A call inside a chain of commands: `... && wz_test_args C N [W] && cargo ...`.
+        inline = INLINE_CALL.search(line)
+        if inline:
+            target = f"--test {inline.group(1)}"
+            pending = (target + (f" {inline.group(2)}" if inline.group(2) else ""), target)
+            line = line[:inline.start()] + line[inline.end():]
         m = CALL.match(line)
         if m:
-            pending = f"--test {m.group(1)}" + (f" {m.group(2)}" if m.group(2) else "")
+            target = f"--test {m.group(1)}"
+            pending = (target + (f" {m.group(2)}" if m.group(2) else ""), target)
             if keep_lines:
                 out.append("\n")
             continue
-        if pending is not None and ARRAY in line:
-            line = line.replace(ARRAY, pending, 1)
-            pending = None
+        if pending is not None:
+            for token, stands_for in zip((ARRAY, TARGET_ARRAY), pending):
+                if token in line:
+                    line = line.replace(token, stands_for, 1)
+                    pending = None
+                    break
         out.append(line)
     return "".join(out)
 
@@ -210,7 +249,8 @@ def tokens(text: str) -> list[str]:
 
 def verify(current: str, before: str) -> tuple[bool, str]:
     """Whether `current`, expanded, has the same words as `before`; the first difference if not."""
-    a, b = tokens(expand(current)), tokens(before)
+    # `before` is expanded too: it may already hold the calls of an earlier crate's rewrite.
+    a, b = tokens(expand(current)), tokens(expand(before))
     if a == b:
         return True, f"{len(a)} words, all the same"
     for i, (x, y) in enumerate(zip(a, b)):
@@ -243,7 +283,7 @@ def selftest() -> int:
             "    cargo test -p wz-c --test alpha --test beta\n"
             "    cargo test -p wz-c --test gamma\n"
             "    sh -c 'cargo test -p wz-c --test alpha'\n"
-            "    cargo test -p wz-c --features a,b --test alpha -- x\n"
+            "    cargo test -p wz-c --target-dir out --test alpha -- x\n"
             "    echo done\n"
         )
         out, done, manual = retarget(text, "wz-c", tests)
@@ -268,7 +308,7 @@ def selftest() -> int:
         check("two --test are listed", any("2 `--test`" in m for m in manual))
         check("a non-file is listed", any("gamma" in m for m in manual))
         check("single quotes are listed", any("single quotes" in m for m in manual))
-        check("a features list is no filter", ARRAY + " -- x" in out)
+        check("a flag's value is no filter", ARRAY + " -- x" in out)
         again, more, _ = retarget(out, "wz-c", tests)
         check("a second run changes nothing", more == 0 and again == out)
         ok, why = verify(out, text)

@@ -5350,11 +5350,14 @@ layer_c1t_cargo_test_serial() {
     # buffer-clear witness: +2 in both feature sets. READ off what the two
     # commands PRINTED (9 and 10), and the two deltas are EQUAL, which is
     # R311y805's check that no new case hid behind transport-fragmentation.
-    _runci_guarded_test C1t 14 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_link_e2e --quiet \
+    wz_test_args wz-runtime-tokio serial_link_e2e
+    _runci_guarded_test C1t 14 cargo test -p wz-runtime-tokio --features transport-link-serial "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1t 16 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_link_e2e --quiet \
+    wz_test_args wz-runtime-tokio serial_link_e2e
+    _runci_guarded_test C1t 16 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1t 2 cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet \
+    wz_test_args wz-runtime-tokio link_endpoints_pairing
+    _runci_guarded_test C1t 2 cargo test -p wz-runtime-tokio --features transport-link-serial "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
@@ -5439,7 +5442,8 @@ layer_c1u_cargo_test_tls() {
     # matcher in `wz-access-control`) and neither said the wiring carried the
     # value between them. Its anti-vacuity arm is a plain TCP link through the
     # same accessor, answering `None`. The number is what the command PRINTED.
-    _runci_guarded_test C1u 8 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+    wz_test_args wz-runtime-tokio tls_e2e
+    _runci_guarded_test C1u 8 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     #
     # R311y801 — 6 -> 7, the THIRD instance of the same missed update, and this
@@ -5451,14 +5455,16 @@ layer_c1u_cargo_test_tls() {
     # trapped behind either link feature: both sets compile and run it.
     # f0676600a -- 7 -> 9: two cases of the declaration replay's pacing of a reconnect, in the file
     # both transports' legs run (C1v counts the same file, and moves with this one). PRINTED.
-    _runci_guarded_test C1u 9 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_reconnect_e2e
+    _runci_guarded_test C1u 9 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3463 — 6 -> 8. The two witnesses of decision D9 of
     # docs/session-lifecycle-intent.md: over mutual TLS a peer that claims the zid its
     # certificate's key names is verified on both sides (and one that claims another is
     # not), and over one-way TLS only the client verifies. The number is what the
     # command PRINTED.
-    _runci_guarded_test C1u 8 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_pem_mtls_e2e --quiet \
+    wz_test_args wz-runtime-tokio tls_pem_mtls_e2e
+    _runci_guarded_test C1u 8 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-tls --quiet -- -D warnings \
@@ -5509,11 +5515,13 @@ layer_c1v_cargo_test_ws() {
     # its own message.
     _runci_guarded_test C1v + cargo test -p wz-session-core --features alloc --lib locator --quiet \
         || return 1
-    _runci_guarded_test C1v 5 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
+    wz_test_args wz-runtime-tokio ws_e2e
+    _runci_guarded_test C1v 5 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
     # f0676600a -- 7 -> 9, with C1u, same commit, same reason. PRINTED.
-    _runci_guarded_test C1v 9 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_reconnect_e2e
+    _runci_guarded_test C1v 9 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R2355 — the MULTI-PEER ws accept, which no lane ran until now. The
     # `transport-link-ws` registry entry carried "the multi-peer `--router ws/`
@@ -5595,7 +5603,8 @@ layer_c1aa_cargo_test_unixsock() {
         || return 1
     _runci_guarded_test C1aa 7 cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet \
         || return 1
-    _runci_guarded_test C1aa 2 cargo test -p wz-runtime-tokio --features transport-link-unixsock --test unixsock_e2e --quiet \
+    wz_test_args wz-runtime-tokio unixsock_e2e
+    _runci_guarded_test C1aa 2 cargo test -p wz-runtime-tokio --features transport-link-unixsock "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixsock --quiet -- -D warnings \
@@ -5655,7 +5664,8 @@ layer_c1ab_cargo_test_vsock() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-vsock --lib vsock_pipeline --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-vsock --test vsock_e2e --quiet \
+        && wz_test_args wz-runtime-tokio vsock_e2e \
+        && cargo test -p wz-runtime-tokio --features transport-link-vsock "${WZ_TEST_ARGS[@]}" --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-vsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-vsock --quiet -- -D warnings) \
         || return 1
@@ -5687,9 +5697,10 @@ layer_c1ab_cargo_test_vsock() {
         cargo test -p wz-runtime-tokio \
         --features transport-link-vsock,runtime-tokio-uring \
         --lib vsock_pipeline -- --ignored || return 1
+    wz_test_args wz-runtime-tokio vsock_e2e
     _runci_guarded_test "Layer C1ab vsock wz<->wz e2e" 2 \
         cargo test -p wz-runtime-tokio --features transport-link-vsock \
-        --test vsock_e2e -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
 }
 
 # ─── Layer C1ac — QUIC link: locator parse + wz-runtime-tokio backend ─
@@ -5724,7 +5735,8 @@ layer_c1ab_cargo_test_vsock() {
 layer_c1ac_cargo_test_quic() {
     (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
         || return 1
-    _runci_guarded_test C1ac 5 cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet \
+    wz_test_args wz-runtime-tokio quic_e2e
+    _runci_guarded_test C1ac 5 cargo test -p wz-runtime-tokio --features transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
@@ -5771,7 +5783,8 @@ layer_c1ac_cargo_test_quic() {
 layer_c1ad_cargo_test_lowlatency() {
     _runci_guarded_test C1ad 4 cargo test -p wz-session-core --features transport-lowlatency --lib extlowlatency --quiet \
         || return 1
-    _runci_guarded_test C1ad 3 cargo test -p wz-runtime-tokio --features transport-lowlatency,transport-unicast,transport-link-tcp --test lowlatency_e2e --quiet \
+    wz_test_args wz-runtime-tokio lowlatency_e2e
+    _runci_guarded_test C1ad 3 cargo test -p wz-runtime-tokio --features transport-lowlatency,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,transport-unicast,transport-link-tcp --quiet -- -D warnings \
@@ -5893,7 +5906,8 @@ layer_c1bb_cargo_test_qos() {
         && cargo check -p wz-session-core --features transport-qos,transport-lowlatency --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos --quiet -- -D warnings) \
         || return 1
-    _runci_guarded_test C1bb 3 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test qos_e2e --quiet \
+    wz_test_args wz-runtime-tokio qos_e2e
+    _runci_guarded_test C1bb 3 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3366 -- the stream writer packs what is queued into one write. This is the
     # session's side of that claim: a burst over three priorities arrives whole, once
@@ -5901,7 +5915,8 @@ layer_c1bb_cargo_test_qos() {
     # 1 -> 3 with the session's own batching: a put on a declared alias never overtakes
     # its declaration, and a long stream of kilobyte puts is never stalled by the writer's
     # flush waiting for a lock a sender holds. 3 = what the command PRINTED.
-    _runci_guarded_test C1bb 3 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test packed_writer_e2e --quiet \
+    wz_test_args wz-runtime-tokio packed_writer_e2e
+    _runci_guarded_test C1bb 3 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     _runci_guarded_test C1bb 1 cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,transport-unicast --lib is_qos_negotiates_by_and_and_is_lowlatency_exclusive --quiet \
         || return 1
@@ -6051,7 +6066,8 @@ layer_c1bd_locator_iface() {
     (cd crates \
         && cargo test -p wz-session-core --lib locator::tests --quiet \
         && cargo test -p wz-runtime-tokio --features locator-iface,transport-link-udp --lib link_interfaces --quiet \
-        && cargo test -p wz-runtime-tokio --features locator-iface,transport-link-quic --test quic_e2e --quiet \
+        && wz_test_args wz-runtime-tokio quic_e2e \
+        && cargo test -p wz-runtime-tokio --features locator-iface,transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-udp,transport-link-ws --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-tls --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-quic,transport-link-quic-datagram --quiet -- -D warnings \
@@ -6094,7 +6110,8 @@ layer_c1bd_locator_iface() {
 layer_c1ae_cargo_test_compression() {
     _runci_guarded_test C1ae 6 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
         || return 1
-    _runci_guarded_test C1ae 2 cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp --test compression_e2e --quiet \
+    wz_test_args wz-runtime-tokio compression_e2e
+    _runci_guarded_test C1ae 2 cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extcompression,transport-unicast,transport-link-tcp --quiet -- -D warnings \
@@ -6149,18 +6166,24 @@ layer_c1ax_cargo_test_routing_namespace() {
     # unconditionally.
     _runci_guarded_test "C1AX namespace 22" 22 \
         cargo test -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --lib namespace --quiet || return 1
+    wz_test_args wz-runtime-tokio namespace_e2e
     _runci_guarded_test "C1AX namespace_e2e 4" 4 \
-        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-namespace "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-runtime-tokio namespace_query_e2e
     _runci_guarded_test "C1AX namespace_query_e2e 1" 1 \
-        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_query_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-namespace "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-runtime-tokio namespace_matching_e2e
     _runci_guarded_test "C1AX namespace_matching_e2e 2" 2 \
-        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_matching_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-namespace "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-runtime-tokio namespace_alias_e2e
     _runci_guarded_test "C1AX namespace_alias_e2e 1" 1 \
-        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_alias_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-namespace "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-runtime-tokio namespace_reassembly_e2e
     _runci_guarded_test "C1AX namespace_reassembly_e2e 1" 1 \
-        cargo test -p wz-runtime-tokio --features routing-namespace,transport-fragmentation --test namespace_reassembly_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-namespace,transport-fragmentation "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-runtime-tokio namespace_reconnect_e2e
     _runci_guarded_test "C1AX namespace_reconnect_e2e 2" 2 \
-        cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect --test namespace_reconnect_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2220 — 25 -> 28, the same three tests as the unicast guard above seen
     # through the multicast feature set (this selection is the `namespace`
     # filter over a `--no-default-features` build, so it carries them too).
@@ -6551,8 +6574,9 @@ layer_c1ay_cargo_test_router_hat() {
     # adds a `clone` or a `Vec` to the path reads as red with the new figure named; record
     # it in BUDGET of the test in the same commit. Exactly one test, so that a rename or a
     # dropped `#[test]` reddens.
+    wz_test_args wz-runtime-tokio router_hot_path_cost
     _runci_guarded_test "C1AY hot path allocations" 1 \
-        cargo test -p wz-runtime-tokio --features routing-router-hat --test router_hot_path_cost --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-router-hat "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2734 — THE EIGHTH ARM, and it exists because the seven above cannot see
     # this round's third test. `a_group_query_reaches_a_client_hosted_queryable`
     # is `router-multicast-faces`-gated, because the method it drives
@@ -6706,13 +6730,15 @@ layer_c1ay_cargo_test_router_hat() {
         the_redial_wait_grows_per_address two_addresses_do_not_share_a_wait \
         forget_returns_an_address_to_the_initial_wait a_recovered_address_leaves_no_entry_behind \
         a_constant_policy_reproduces_the_fixed_backoff || return 1
+    wz_test_args wz-runtime-tokio router_redial_backoff_e2e
     _runci_guarded_test "C1AY redial_backoff_e2e 3" 3 \
-        cargo test -p wz-runtime-tokio --features routing-router-hat,router-connect-reconcile --test router_redial_backoff_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-router-hat,router-connect-reconcile "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Item 751 — the LOOP-level witness that a partitioned router's sessions,
     # accepted and dialled, announce the bound its partition gives the far end
     # (two claims and the auto-preset control). 3, read off the command's total.
+    wz_test_args wz-runtime-tokio router_partition_open_bound_e2e
     _runci_guarded_test "C1AY partition_open_bound_e2e 3" 3 \
-        cargo test -p wz-runtime-tokio --features routing-router-hat --test router_partition_open_bound_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-router-hat "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R311y786 — and the CLI surface that reaches it: `--connect-retry
     # <init>,<max>,<factor>` must REFUSE a malformed schedule rather than degrade
     # to the default. A silently-defaulted cadence is the failure mode nothing
@@ -7385,7 +7411,8 @@ layer_c1af_cargo_test_shm() {
     # body marker, so the negotiation was decorative on the receive side; zenoh
     # gates the whole un-swap on the negotiated capability
     # (io/zenoh-transport/src/unicast/universal/rx.rs:50-51).
-    _runci_guarded_test C1af 6 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --test shm_e2e --quiet \
+    wz_test_args wz-runtime-tokio shm_e2e
+    _runci_guarded_test C1af 6 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3122 -- the last two clippy runs are builds the lines before them do not reach: the runtime
     # with multilink, where the three tests of the leg above compile, and the core with the
@@ -7450,9 +7477,11 @@ layer_c1ag_cargo_test_transport_compose() {
         || return 1
     _runci_guarded_test C1ag 1 cargo test -p wz-session-core --features transport-shm,codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --lib shm_put_with_no_resolver --quiet \
         || return 1
-    _runci_guarded_test C1ag 2 cargo test -p wz-runtime-tokio --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --test transport_compose_e2e --quiet \
+    wz_test_args wz-runtime-tokio transport_compose_e2e
+    _runci_guarded_test C1ag 2 cargo test -p wz-runtime-tokio --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1ag 4 cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,session-extcompression,transport-batching,transport-unicast,transport-link-tcp --test transport_mode_pairs_e2e --quiet \
+    wz_test_args wz-runtime-tokio transport_mode_pairs_e2e
+    _runci_guarded_test C1ag 4 cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,session-extcompression,transport-batching,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings) \
@@ -7631,9 +7660,11 @@ layer_c1ai_cargo_test_liveliness_history() {
 layer_c1aj_cargo_test_quic_datagram() {
     (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
         || return 1
-    _runci_guarded_test C1aj 4 cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet \
+    wz_test_args wz-runtime-tokio quic_datagram_e2e
+    _runci_guarded_test C1aj 4 cargo test -p wz-runtime-tokio --features transport-link-quic-datagram "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1aj 3 cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test link_endpoints_pairing --quiet \
+    wz_test_args wz-runtime-tokio link_endpoints_pairing
+    _runci_guarded_test C1aj 3 cargo test -p wz-runtime-tokio --features transport-link-quic-datagram "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
@@ -7671,8 +7702,9 @@ layer_c1aj_cargo_test_quic_datagram() {
 # server); with ONLY the server config's Initial keys left unwrapped, case one
 # times out, because the server cannot read the first packet.
 layer_c1ci_cargo_test_udp_reliable() {
+    wz_test_args wz-runtime-tokio udp_reliable_e2e
     _runci_guarded_test C1ci 4 \
-        cargo test -p wz-runtime-tokio --features transport-link-udp-reliable --test udp_reliable_e2e --quiet \
+        cargo test -p wz-runtime-tokio --features transport-link-udp-reliable "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-udp-reliable --quiet -- -D warnings \
@@ -7719,7 +7751,8 @@ layer_c1ak_cargo_test_transport_stats() {
         --features transport-stats,codec-push,codec-request --lib payload_size_tests --quiet \
         || return 1
     # R2825 — 2 -> 3: `a_publish_is_recorded_in_the_registry_on_its_link`.
-    _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
+    wz_test_args wz-runtime-tokio transport_stats_e2e
+    _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R2844 — the NODE registry: its lifecycle (open, closed, retired after the
     # collection delay) and the face loop recording into it. Needs the loop,
@@ -7861,9 +7894,11 @@ layer_c1ak_cargo_test_transport_stats() {
 layer_c1al_cargo_test_unixpipe() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet) \
+        && wz_test_args wz-runtime-tokio unixpipe_e2e \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixpipe "${WZ_TEST_ARGS[@]}" --quiet) \
         || return 1
-    _runci_guarded_test C1al 2 cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test link_endpoints_pairing --quiet \
+    wz_test_args wz-runtime-tokio link_endpoints_pairing
+    _runci_guarded_test C1al 2 cargo test -p wz-runtime-tokio --features transport-link-unixpipe "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     _runci_guarded_test C1al 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet \
         || return 1
@@ -7941,13 +7976,15 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # command, since the count gate DEFERS these two -- the shell assembles
     # their features -- and a moved number no local run checks is the number
     # that reds hosted: 6 passed without transport-qos, 7 with it.
-    _runci_guarded_test C1ba 6 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_multilink_e2e
+    _runci_guarded_test C1ba 6 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R311y218 — qos x multilink composition: the qos-gated e2e proves the
     # _with_multilink entrypoints negotiate is_qos over the 0x4 handshake
     # (both-offer -> is_qos true; qos=false control -> false). The 5 -> 6 count
     # step IS that proof: the qos build activates one more case.
-    _runci_guarded_test C1ba 7 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_multilink_e2e
+    _runci_guarded_test C1ba 7 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R2941 — the session-extqos arm: the dialled end advertises its band and
     # the accepted end adopts it, over real loopback TCP with the two ends
@@ -7957,22 +7994,26 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # links split by a DECLARED class (upstream's `rel=`), the only way two
     # links of one protocol segregate once a link's class is its protocol's.
     # MEASURED: 9 passed on this command.
-    _runci_guarded_test C1ba 9 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" --test session_multilink_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_multilink_e2e
+    _runci_guarded_test C1ba 9 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_multilink_deploy_e2e
+    _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R311y219 — qos x multilink PRIORITY segregation over the DEPLOY path: the
     # transport-qos deploy build activates the #[cfg(transport-qos)] priority
     # test (an EXPRESS + a LOW Put ride DISTINCT physical links; the reliability
     # tests stay green with the band inert). Runs BOTH deploy tests with qos on.
-    _runci_guarded_test C1ba 3 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" --test session_multilink_deploy_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_multilink_deploy_e2e
+    _runci_guarded_test C1ba 3 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R311y212 slice-2 — the per-link AUTO-RE-ADD e2e: A's production peer_loop
     # (max_links=2, dials B twice) re-dials + re-JOINs a link the harness kills
     # on B, so a dropped dialed link comes back onto the SAME session. The count
     # guard reddens the lane if a feature-set edit ever cfg-outs the
     # '#![cfg(all(...))]'-gated file to 0 tests (silent green).
-    _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet \
+    wz_test_args wz-runtime-tokio session_multilink_readd_e2e
+    _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
         || return 1
@@ -7990,21 +8031,27 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet -- -D warnings \
+        && wz_test_args wz-runtime-tokio session_multilink_e2e \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" "${WZ_TEST_TARGET[@]}" --quiet -- -D warnings \
         `# R311y218 — clippy the qos x multilink composition (entrypoint qos param,` \
         `# the demo --qos threading) under -D warnings, incl the wz-ap-demo bridge.` \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" --test session_multilink_e2e --quiet -- -D warnings \
+        && wz_test_args wz-runtime-tokio session_multilink_e2e \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" "${WZ_TEST_TARGET[@]}" --quiet -- -D warnings \
+        && wz_test_args wz-runtime-tokio session_multilink_e2e \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" "${WZ_TEST_TARGET[@]}" --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --features transport-qos,transport-multilink --quiet -- -D warnings \
         `# R311y218 scope boundary — transport-qos WITHOUT transport-multilink: the` \
         `# demo --qos wires WzConfig.qos but the single-link arms do not offer it;` \
         `# must still compile (the FaceSources.qos bridge cfg-elides cleanly).` \
         && cargo clippy -p wz-ap-demo --features transport-qos --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet -- -D warnings \
+        && wz_test_args wz-runtime-tokio session_multilink_deploy_e2e \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_TARGET[@]}" --quiet -- -D warnings \
         `# R311y219 — clippy the deploy e2e with qos on (the #[cfg(transport-qos)]` \
         `# priority-segregation test compiled) under -D warnings.` \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" --test session_multilink_deploy_e2e --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet -- -D warnings \
+        && wz_test_args wz-runtime-tokio session_multilink_deploy_e2e \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" "${WZ_TEST_TARGET[@]}" --quiet -- -D warnings \
+        && wz_test_args wz-runtime-tokio session_multilink_readd_e2e \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_TARGET[@]}" --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-multilink --quiet -- -D warnings \
         `# R311y205 whole-session F4 — the send_wire/select_link cfg-skew net: a` \
         `# transport-multilink build carrying ONLY a control codec (codec-close)` \
@@ -8419,8 +8466,9 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
     # SAME frame under NO policy and requiring that it DOES. That second arm is
     # load-bearing: it already caught this test passing while the frame was
     # being dropped for an unrelated reason. Still no routing feature.
+    wz_test_args wz-runtime-tokio session_ingress_acl_e2e
     _runci_guarded_test "C1AO session ingress acl e2e 2" 2 \
-        cargo test -p wz-runtime-tokio --no-default-features --features access-acl,declare-subscriber,pubsub-put --test session_ingress_acl_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --no-default-features --features access-acl,declare-subscriber,pubsub-put "${WZ_TEST_ARGS[@]}" --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)
@@ -9357,9 +9405,10 @@ layer_c1y_cargo_test_routing_peer() {
     # one link each, and no face of either goes up on a link that is then closed). It needs
     # `peer_loop`, so it is compiled by `routing-accept,routing-peer` and by no lane above that
     # names `routing-accept` alone: 1 = what that command PRINTED.
+    wz_test_args wz-runtime-tokio link_admission_mutual_dial_e2e
     _runci_guarded_test "C1y link admission mutual dial" 1 \
         cargo test -p wz-runtime-tokio --features routing-accept,routing-peer \
-        --test link_admission_mutual_dial_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
     # `routing-peer` as well as the access set below. Two pins for one plane is not
@@ -9600,9 +9649,10 @@ layer_c1y_cargo_test_routing_peer() {
     # credential), so the count is back. READ off the command, which printed 9.
     _runci_guarded_test "C1y auth_dispatch" 9 \
         cargo test -p wz-session-core --features session-extauth --lib auth_dispatch --quiet || return 1
+    wz_test_args wz-runtime-tokio usrpwd_handshake_e2e
     _runci_guarded_test "C1y usrpwd e2e" 6 \
         cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
-        --test usrpwd_handshake_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R311y581 — 7 -> 11: R311y576 added the four initiator-gate tests and left
     # the guard behind, and this lane has been RED on hosted CI ever since
     # (`5a8ad35b`, `e8af0d92`, and again on `0a0cf608` once R311y580's C1w fix
@@ -9629,18 +9679,20 @@ layer_c1y_cargo_test_routing_peer() {
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey:: --quiet || return 1
     _runci_guarded_test "C1y extauth_pubkey_store" 12 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey_store:: --quiet || return 1
+    wz_test_args wz-runtime-tokio pubkey_handshake_e2e
     _runci_guarded_test "C1y pubkey e2e" 2 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey \
-        --test pubkey_handshake_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2779 (open-debt item 803) — the witness that each auth method draws its
     # OWN challenge needs usrpwd AND pubkey on one responder, so it compiles
     # only with both features: the leg above builds pubkey alone and still
     # counts 1. It was red on the tree before the fix (the two challenges
     # byte-identical), so this is the leg that keeps the fan-out from coming
     # back. 2 = that witness + the pubkey-only test the file already had.
+    wz_test_args wz-runtime-tokio pubkey_handshake_e2e
     _runci_guarded_test "C1y pubkey+usrpwd e2e" 3 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey,access-extauth-usrpwd \
-        --test pubkey_handshake_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     (cd crates \
         && cargo test -p wz-routing-graph --quiet \
         && cargo clippy -p wz-routing-graph --all-targets --quiet -- -D warnings \
@@ -9820,8 +9872,9 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     # The manager through its public path, a peer's put captured over a loopback TCP
     # link and the storage ended by name: the witness outside the module.
+    wz_test_args wz-runtime-tokio storage_manager_hosts_a_storage_e2e
     _runci_guarded_test "C1z storage_manager_hosts_a_storage_e2e" 1 \
-        cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host --test storage_manager_hosts_a_storage_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host "${WZ_TEST_ARGS[@]}" --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-storage --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
     _runci_guarded_test "C1z storage" 56 \
@@ -9934,8 +9987,9 @@ layer_c1z_cargo_test_storage_driver() {
     # the loopback subscriber the tests observe it through.
     _runci_guarded_test "C1z storage" 41 \
         cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet || return 1
+    wz_test_args wz-runtime-tokio storage_aligner_convergence_e2e
     _runci_guarded_test "C1z storage_aligner_convergence_e2e" 1 \
-        cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet || return 1
+        cargo test -p wz-runtime-tokio --features storage-aligner "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2350 11 -> 13: the driver half of the same close — two reply-path cases
     # in `storage_service::tests::history` (a deleted key replies nothing at
     # all; a version above the tombstone still replies). The wz-session-core
@@ -10893,8 +10947,9 @@ layer_c1ca_cargo_test_derived_initial_sn() {
 layer_c1cb_cargo_test_init_ack_admission() {
     # 31 -> 34: three tests that landed without moving this guard (hosted run 41411911409
     # expected 31; the build host printed `34 passed`).
+    wz_test_args wz-runtime-tokio session_fsm_driver_loop
     _runci_guarded_test C1cb 34 \
-        cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
+        cargo test -p wz-runtime-tokio "${WZ_TEST_ARGS[@]}" --quiet || return 1
 }
 
 # ─── Layer C1cg — subsystem runtime partitioning (R311y825) ──
@@ -10941,8 +10996,9 @@ layer_c1cb_cargo_test_init_ack_admission() {
 # the stop behind `zc_stop_z_runtime`) joined the target without this line, and hosted run
 # 41974391826 printed `22 passed` against the 21 here.
 layer_c1cg_cargo_test_runtime_partition() {
+    wz_test_args wz-runtime-tokio runtime_partition
     _runci_guarded_test C1cg 22 \
-        cargo test -p wz-runtime-tokio --test runtime_partition --quiet || return 1
+        cargo test -p wz-runtime-tokio "${WZ_TEST_ARGS[@]}" --quiet || return 1
 }
 
 # ─── Layer C1ch — the LINKED library says which config keys it honours ──
@@ -11394,8 +11450,9 @@ layer_c1i_cargo_test_scouting() {
 layer_c1k_cargo_test_scouting_static() {
     _runci_guarded_test "C1k scout_static" 15 \
         cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet || return 1
+    wz_test_args wz-runtime-tokio static_scout_open
     _runci_guarded_test "C1k static_scout_open" 15 \
-        cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet || return 1
+        cargo test -p wz-runtime-tokio --features scouting-static "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2570 — the MULTI-PEER arm. Its feature pair is `scouting-static` PLUS
     # `routing-peer`, so neither of the two legs above can reach it: the module
     # and its test file are both `#[cfg]`'d out at `--features scouting-static`
@@ -11403,8 +11460,9 @@ layer_c1k_cargo_test_scouting_static() {
     # guard counts are what make that visible rather than green.
     _runci_guarded_test "C1k scouting_static" 6 \
         cargo test -p wz-runtime-tokio --features scouting-static,routing-peer --lib scouting_static --quiet || return 1
+    wz_test_args wz-runtime-tokio static_peer_faces
     _runci_guarded_test "C1k static_peer_faces" 2 \
-        cargo test -p wz-runtime-tokio --features scouting-static,routing-peer --test static_peer_faces --quiet || return 1
+        cargo test -p wz-runtime-tokio --features scouting-static,routing-peer "${WZ_TEST_ARGS[@]}" --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \
         && cargo build -p wz-runtime-coop --features scouting-static --quiet \
@@ -11549,7 +11607,8 @@ layer_c1l_reassembly() {
     # MEASURED under this feature set: `47 passed`.
     _runci_guarded_test C1l 47 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
         || return 1
-    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly --test layer3_reassembly_rx --quiet \
+    wz_test_args wz-runtime-tokio layer3_reassembly_rx
+    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R311y580 — the same eleven, on the sibling feature arm; 27 -> 37 with the
     # ten above, derived by `--list` under THIS feature set as well; 37 -> 42 with
@@ -11565,19 +11624,24 @@ layer_c1l_reassembly() {
     # device closed the session at the hole the refusal left).
     # 3 -> 4: two nodes configured with different rx bounds answer one message
     # apart (MEASURED: `4 passed`).
-    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
+    wz_test_args wz-runtime-tokio layer3_reassembly_tx
+    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_rx --quiet \
+    wz_test_args wz-runtime-tokio layer3_reassembly_rx
+    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test udp_frag_e2e --quiet \
+    wz_test_args wz-runtime-tokio udp_frag_e2e
+    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1l 3 cargo test -p wz-runtime-tokio --features transport-fragmentation --test udp_chaos_e2e --quiet \
+    wz_test_args wz-runtime-tokio udp_chaos_e2e
+    _runci_guarded_test C1l 3 cargo test -p wz-runtime-tokio --features transport-fragmentation "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R311y474 — the udp leg of the adminspace {src,dst} pairing proof. Only ONE
     # test selects here: the file's other four legs are gated on link features this
     # set does not arm, and each is guarded in ITS OWN transport lane (C1t serial,
     # the quic-datagram lane, the unixpipe lane) rather than all in one place.
-    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test link_endpoints_pairing --quiet \
+    wz_test_args wz-runtime-tokio link_endpoints_pairing
+    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R311y511 — wz-runtime-coop is the MCU sibling of the wz-runtime-tokio
     # drive above, and it was the one reassembly consumer this lane never
@@ -14538,16 +14602,18 @@ layer_c1bq_zero_copy_arena() {
     (( n > 0 )) || {
         echo "  C1bq FAIL: the stream_link filter matched no test"; echo "$out"; return 1; }
     tests=$((tests + n))
+    wz_test_args wz-runtime-tokio stream_tx_pool_allocations
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-zero-copy \
-        --test stream_tx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     n="$(_runci_passed_count <<<"$out")"
     (( n > 0 )) || {
         echo "  C1bq FAIL: the transmit allocation suite ran no test"; echo "$out"; return 1; }
     tests=$((tests + n))
     # The serial link's write half over the same pool (its own feature).
+    wz_test_args wz-runtime-tokio serial_tx_pool_allocations
     out="$(cd crates && cargo test -p wz-runtime-tokio \
         --features runtime-zero-copy,transport-link-serial \
-        --test serial_tx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     n="$(_runci_passed_count <<<"$out")"
     (( n > 0 )) || {
         echo "  C1bq FAIL: the serial transmit allocation suite ran no test"; echo "$out"; return 1; }
@@ -14555,9 +14621,10 @@ layer_c1bq_zero_copy_arena() {
     # The datagram links' write halves over their two-class pools (UDP end to
     # end, the quinn and tungstenite seams, and a multicast group's pipeline
     # with its fragmented residue), each its own feature.
+    wz_test_args wz-runtime-tokio datagram_tx_pool_allocations
     out="$(cd crates && cargo test -p wz-runtime-tokio \
         --features runtime-zero-copy,transport-link-udp,transport-link-ws,transport-link-quic-datagram,transport-multicast,transport-fragmentation \
-        --test datagram_tx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     n="$(_runci_passed_count <<<"$out")"
     (( n > 0 )) || {
         echo "  C1bq FAIL: the datagram transmit allocation suite ran no test"; echo "$out"; return 1; }
@@ -14576,9 +14643,10 @@ layer_c1bq_zero_copy_arena() {
     # R3255 -- the datagram RECEIVE over the node's pool (the dial, accept and
     # group reads over real loopback sockets). Its unit tests are in the
     # `link_rx_` filter above; this is the counting-allocator proof.
+    wz_test_args wz-runtime-tokio datagram_rx_pool_allocations
     out="$(cd crates && cargo test -p wz-runtime-tokio \
         --features runtime-zero-copy,transport-link-udp \
-        --test datagram_rx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     n="$(_runci_passed_count <<<"$out")"
     (( n > 0 )) || {
         echo "  C1bq FAIL: the datagram receive allocation suite ran no test"; echo "$out"; return 1; }
@@ -18868,9 +18936,10 @@ PY
     # nothing — the shape that reports green for a lane that did not run. 4 -> 6
     # in this round: the two legs that observe the initiator's ignore verdicts
     # from a REAL group rather than from a scripted link.
+    wz_test_args wz-runtime-tokio scouting_multicast_loopback
     _runci_guarded_test "M scouting multicast loopback" 6 \
         cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
-        --test scouting_multicast_loopback -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R311of — clippy-gate the scouting-active + transport-link-tls combo so the
     # round3_tls module (and round2) get clippy coverage, not only the rustc-deny
     # the test build above already applies (mirrors the C1u/C1v all-targets
@@ -18891,9 +18960,10 @@ PY
     # `net/runtime/orchestrator.rs:1113-1134`). It binds `127.0.0.2` and joins no
     # group, so it is `#[ignore]`d for a DIFFERENT environmental reason than its
     # two siblings and runs in the same lane.
+    wz_test_args wz-runtime-tokio scouting_responder_multicast
     _runci_guarded_test "M responder multicast" 3 \
         cargo test -p wz-runtime-tokio --features scouting-responder \
-        --test scouting_responder_multicast -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # And clippy over that feature, which no other lane builds — the same
     # gate-skew argument as the scouting-active clippy above.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
@@ -18915,9 +18985,10 @@ PY
     # whole binary and the binary is `#![cfg(all(..))]`-gated, so a build that
     # lost one of the three features would compile an EMPTY target and `cargo
     # test` would exit 0 having run nothing.
+    wz_test_args wz-runtime-tokio scouting_autoconnect_loopback
     _runci_guarded_test "M scout autoconnect dials what answered" 2 \
         cargo test -p wz-runtime-tokio --features scouting-active,scouting-responder,routing-peer \
-        --test scouting_autoconnect_loopback -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # Clippy over that combination, which no other lane builds — the same
     # gate-skew argument as the two clippy legs above.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
@@ -18946,9 +19017,10 @@ PY
     # binary and the binary is `#![cfg(all(..))]`-gated, so a build that lost a
     # feature would compile an EMPTY target and `cargo test` would exit 0 having
     # run nothing.
+    wz_test_args wz-runtime-tokio scouting_socket_move_loopback
     _runci_guarded_test "M moved scouting socket, both ends" 3 \
         cargo test -p wz-runtime-tokio --features scouting-active,scouting-responder \
-        --test scouting_socket_move_loopback -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # R2089 (open-debt item 222) — the RUN-MODE half of the same subsystem: a wz
     # `--router-hat` answers a Scout, and the Hello says `router`. y846 wired the
     # responder into `run_peer` alone, so the one role a stock client's
@@ -18989,46 +19061,51 @@ PY
     _runci_guarded_test "M zenohd->wz config-router scout" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
-        --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # `transport/multicast/compression/enabled` — a group whose members both carry
     # their datagrams as batches: the beacon admits, a compressible publish is read
     # back whole. The case is `transport-compression`-gated, which the build above
     # does not select, so it has a line of its own; 1 = the number to be printed.
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback compressing_group
     _runci_guarded_test "M compressing group" 1 \
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-compression \
-        --test multicast_pubsub_loopback compressing_group -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R2850 (open-debt item 821) — a router's GROUP face is one member: its
     # beacons and forwarded frames leave from one source address, its send
     # socket, and the same face reads what a member publishes. The face is
     # `routing-accept`-gated (its ingress is the accept loop's item), which the
     # line above does not compose, so these two need their own build.
     # 2 = the number this command PRINTED.
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback a_router_group_face
     _runci_guarded_test "M router group face" 2 \
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation,routing-accept \
-        --test multicast_pubsub_loopback a_router_group_face -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R2852 (`transport-stats`) — the same group face records its traffic into
     # the node registry it is handed: one opened transport labelled by the group,
     # the member's Put on the member, disconnected once the face stops. The
     # registry half is `transport-stats`-gated, which the leg above does not
     # compose, so the witness is compiled out there and counted here.
     # 1 = the number this command PRINTED.
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback a_router_group_face_counts
     _runci_guarded_test "M router group face stats" 1 \
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation,routing-accept,transport-stats \
-        --test multicast_pubsub_loopback a_router_group_face_counts -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # `resource-snapshot` (docs/observation-plane.md M4) — the same group face spaces the
     # transport messages its members send, on the same recorder seam the registry counts them on,
     # into a meter its host reads for the node's snapshot. The meter half is `resource-snapshot`-
     # gated, which the legs above do not compose, so the witness is compiled out there and counted
     # here. 1 = the number this command PRINTED.
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback a_router_group_face_spaces
     _runci_guarded_test "M router group face meter" 1 \
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation,routing-accept,resource-snapshot \
-        --test multicast_pubsub_loopback a_router_group_face_spaces -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R311y232/y234 — the transport-qos ARM of the multicast e2e (BOTH qos tests, the
     # `qos` filter): the POSITIVE arm (both-is_qos group, a direct
     # TokioMulticastSession::publish_qos prioritized publish delivers -- the composed
@@ -19039,9 +19116,10 @@ PY
     # isolated (opt-in) multicast lane so it never contends for the multicast route
     # under load (the --ignored no-flaky discipline). The deterministic per-priority
     # band-survival proof runs unconditionally in default CI via C1bc's qos_emit_tests.
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback qos
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-qos \
-        --test multicast_pubsub_loopback qos \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet) || return 1
     # R311y454 — the `locator-iface` MULTICAST honor arm (IP_MULTICAST_IF on the
     # sender + imr_interface on the join). Its own invocation because the multicast
@@ -19058,10 +19136,11 @@ PY
     # Count-guarded (`1 passed`): this leg carries a NAME FILTER, so a renamed test
     # selects 0, `cargo test` exits 0, and a bare invocation would report green having
     # run nothing. The sibling legs above select whole binaries and do not need it.
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback a_multicast_iface
     _runci_guarded_test "M multicast iface" 1 \
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,locator-iface \
-        --test multicast_pubsub_loopback a_multicast_iface \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet || return 1
     # R2584 — the IPv6 multicast group, on real sockets: a datagram arrives through
     # the group's membership and through a `#join=` membership, and a group nobody
@@ -19070,10 +19149,11 @@ PY
     # interface with IFF_MULTICAST and an IPv6 address, and PANICS without one
     # rather than skipping. Count-guarded for the same reason as the leg above: it
     # carries a name filter.
+    wz_test_args wz-runtime-tokio multicast_pubsub_loopback an_ipv6_group
     _runci_guarded_test "M v6 multicast membership" 1 \
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,locator-iface \
-        --test multicast_pubsub_loopback an_ipv6_group -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # R3014 — the HOST facets of multicast, with wz's own two drivers and no raw
     # socket: a datagram sent to the group reaches a member on the same host. It
     # is the one multicast witness the Platform lane runs on macOS and Windows
@@ -19086,10 +19166,11 @@ PY
     # The second is the `multicast-loopback` policy's `off` witness (unix only):
     # a sender whose loopback is off is not heard by a member on its own host.
     # 2 = the number this command PRINTED.
+    wz_test_args wz-runtime-tokio multicast_host_roundtrip
     _runci_guarded_test "M host multicast roundtrip" 2 \
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,locator-iface \
-        --test multicast_host_roundtrip -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R311y428 — ACTIVE SCOUTING cross-impl: a wz `--scout` discovers a
     # multicast-scouting zenohd on 224.0.0.224:7446 and opens a session on the
     # locator that router's HELLO advertised. The first cross-impl witness for

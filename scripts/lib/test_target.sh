@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# The `cargo test` arguments that run ONE test file of a crate, wherever the crate keeps the file.
+# R4296 (no register item) -- the `cargo test` arguments that run ONE test file of a crate,
+# wherever the crate keeps the file.
 #
 #   wz_test_args wz-integration-tests link_emitter_b6
 #   cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" --quiet
@@ -29,25 +30,32 @@
 _wz_tt_root="${repo_root:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 WZ_TEST_ARGS=()
+WZ_TEST_TARGET=()
 
+# `WZ_TEST_TARGET` is `--test <target>` alone: what a command that BUILDS a test target and runs
+# none (`cargo clippy`, `check`, `build`, `doc`) writes, since a filter is `cargo test`'s alone. A
+# merged target holds many files, so it is the whole target that such a command builds.
 wz_test_args() {
     local crate="$1" name="$2" within="${3:-}"
     local dir="$_wz_tt_root/crates/$crate/tests"
     local file target
     if [[ -f "$dir/$name.rs" ]]; then
-        WZ_TEST_ARGS=(--test "$name")
+        WZ_TEST_TARGET=(--test "$name")
+        WZ_TEST_ARGS=("${WZ_TEST_TARGET[@]}")
         [[ -n "$within" ]] && WZ_TEST_ARGS+=("$within")
         return 0
     fi
     for file in "$dir"/*/files/"$name".rs; do
         [[ -f "$file" ]] || continue
         target="$(basename "$(dirname "$(dirname "$file")")")"
+        WZ_TEST_TARGET=(--test "$target")
         WZ_TEST_ARGS=(--test "$target" "files::${name}::${within}")
         return 0
     done
     # A name that is not a file must not widen the command to the whole crate (the argument would
     # be gone and `cargo test -p <crate>` runs every target): it names a target cargo refuses.
     echo "wz_test_args: $crate has no test file named $name" >&2
-    WZ_TEST_ARGS=(--test "wz_test_args_found_no_file_${name}")
+    WZ_TEST_TARGET=(--test "wz_test_args_found_no_file_${name}")
+    WZ_TEST_ARGS=("${WZ_TEST_TARGET[@]}")
     return 1
 }

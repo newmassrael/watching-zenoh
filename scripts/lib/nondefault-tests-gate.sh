@@ -1515,6 +1515,26 @@ fi
 # Whitespace is what lets a feature list be written one name per line.
 leg_feats() { local f="${1}"; echo "${f//[[:space:]]/}"; }
 
+# The `cargo test` arguments of a leg's filter field, in the array `LEG_FILTER_ARGS`.
+#
+# `--test=<file>` names an integration test FILE of the package; it goes through `wz_test_args`, so
+# it is right wherever the package keeps the file (`tests/<file>.rs`, an executable of its own, or a
+# module of a merged executable, `--test <target> files::<file>::`: one filter, where `--test=`
+# was one argument). Anything else is one argument, as the row wrote it.
+# shellcheck source=scripts/lib/test_target.sh
+source "$here/test_target.sh"
+leg_filter_args() {
+    local pkg="$1" filter="$2"
+    LEG_FILTER_ARGS=()
+    [[ -z "$filter" ]] && return 0
+    if [[ "$filter" == --test=* ]]; then
+        wz_test_args "$pkg" "${filter#--test=}" || return 1
+        LEG_FILTER_ARGS=("${WZ_TEST_ARGS[@]}")
+    else
+        LEG_FILTER_ARGS=("$filter")
+    fi
+}
+
 # Delete the test executables a leg built, once the leg has run them.
 #
 # Every `tests/*.rs` file of a crate is its own executable that links the whole dependency tree,
@@ -1618,7 +1638,8 @@ if [[ "${1:-}" == "--census" ]]; then
         elif [[ -n "$feats" ]]; then
             argv+=(--features "$feats")
         fi
-        [[ -n "$filter" ]] && argv+=("$filter")
+        leg_filter_args "$pkg" "$filter" || return 1
+        argv+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
         if ! out="$(cd "$repo/crates" && cargo "${argv[@]}" -- --list 2>"$tmp/list.err")"; then
             echo "nondefault-tests: FAIL -- cargo ${argv[*]} -- --list did not list:" >&2
             echo "  a census that cannot list a build cannot say what it holds." >&2
@@ -1976,7 +1997,8 @@ for leg in "${LEGS[@]}"; do
     fi
 
     cargo_args=(test -p "$pkg" --features "$feats")
-    [[ -n "$filter" ]] && cargo_args+=("$filter")
+    leg_filter_args "$pkg" "$filter" || { rc=1; continue; }
+    cargo_args+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
     cargo_args+=(--quiet)
     [[ ${#skip_args[@]} -gt 0 ]] && cargo_args+=(-- "${skip_args[@]}")
 
