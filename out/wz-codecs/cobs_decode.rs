@@ -15,6 +15,7 @@ use sce_portable_bytes::{SceBytes, CapacityExceeded};
 pub fn cobs_decode(data: &[u8], out: &mut SceBytes<1507>) -> Result<(), CapacityExceeded> {
     let n: u32 = (data).len() as u32;
     out.clear();
+    out.reserve(1507);
     let mut i: u32 = 0;
     let mut prev: u16 = 255;
     let mut done: bool = false;
