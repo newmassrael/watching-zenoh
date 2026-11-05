@@ -25,7 +25,7 @@ use core::task::{Context, Poll};
 
 use wz_runtime_core::RuntimeError;
 
-use crate::executor::{SpawnRefused, TaskJoin};
+use crate::executor::{SpawnRefusal, SpawnRefused, TaskJoin};
 use crate::runtime_impl::CoopRuntime;
 use crate::time::ClockSource;
 
@@ -96,6 +96,23 @@ impl<C: ClockSource> CoopLocalSet<C> {
         F: Future + 'static,
     {
         let cell = self.runtime.inner.executor.spawn(fut)?;
+        Ok(CoopLocalJoinHandle {
+            join: TaskJoin::attached(cell),
+            local: PhantomData,
+        })
+    }
+
+    /// Spawn the task `make` builds, made in its cell: the way to spawn a future that is large,
+    /// since no frame holds it and a refusal gives nothing back but its reason. `make` runs only
+    /// when a cell is free; a refusal drops it with what it captured.
+    pub fn spawn_local_with<F>(
+        &self,
+        make: impl FnOnce() -> F,
+    ) -> Result<CoopLocalJoinHandle<F::Output>, SpawnRefusal>
+    where
+        F: Future + 'static,
+    {
+        let cell = self.runtime.inner.executor.spawn_with(make)?;
         Ok(CoopLocalJoinHandle {
             join: TaskJoin::attached(cell),
             local: PhantomData,

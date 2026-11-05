@@ -400,6 +400,58 @@ fn a_spawn_through_the_runtime_contract_runs_and_a_refused_one_answers_shutdown(
 }
 
 #[test]
+fn a_task_made_in_its_cell_runs_and_a_refused_one_is_never_made() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static MADE: AtomicU32 = AtomicU32::new(0);
+    static DROPPED: AtomicU32 = AtomicU32::new(0);
+    static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
+    let local = CoopLocalSet::new(&runtime);
+    let handle = local
+        .spawn_local_with(|| {
+            MADE.fetch_add(1, Ordering::SeqCst);
+            async { 31u32 }
+        })
+        .expect("a cell");
+    assert_eq!(MADE.load(Ordering::SeqCst), 1);
+    // The table is full: the offer is counted, what it captured is dropped, and the task is not
+    // made.
+    let held = Counted(&DROPPED);
+    let refused = local.spawn_local_with(move || {
+        MADE.fetch_add(1, Ordering::SeqCst);
+        let _held = &held;
+        async { 32u32 }
+    });
+    assert!(matches!(refused, Err(SpawnRefusal::NoTaskCell)));
+    assert_eq!(MADE.load(Ordering::SeqCst), 1);
+    assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.task_refusals().no_task_cell, 1);
+    local.run_until_idle();
+    assert_eq!(local.block_on_local(handle).expect("answered"), 31);
+}
+
+#[test]
+fn a_task_too_large_for_a_cell_is_refused_without_being_made() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static MADE: AtomicU32 = AtomicU32::new(0);
+    static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
+    let local = CoopLocalSet::new(&runtime);
+    let refused = local.spawn_local_with(|| {
+        MADE.fetch_add(1, Ordering::SeqCst);
+        let big = [7u8; 256];
+        async move { big.len() }
+    });
+    assert!(matches!(refused, Err(SpawnRefusal::TooLarge)));
+    assert_eq!(MADE.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.task_refusals().too_large, 1);
+}
+
+#[test]
 fn a_sleep_registers_in_the_table_and_wakes_at_its_deadline() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 2, 64, 2> = RuntimeCell::new();

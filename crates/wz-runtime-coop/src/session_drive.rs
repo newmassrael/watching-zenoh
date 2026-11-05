@@ -1594,21 +1594,33 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static, D: BoxedLinkDriver + ?Siz
 
 /// The session AS A TASK over a pump in a cell: awaits [`yield_now`] between
 /// iterations as `session_task` does, and ends with the same [`DriverOutcome`].
-/// The future is the pump's handle and the observer and a loop's state, a few dozen
-/// bytes, and the pump stays where its table put it.
+/// The future is the pump's handle and the observer and a loop's state, and the pump stays
+/// where its table put it.
+///
+/// An `async move` block and not an `async fn`: the arguments of an `async fn` are kept twice in
+/// its future (once as what it was given, once as the locals its body moved them into), and an
+/// observer's registries are kilobytes, so the future was twice what it holds. A block uses what
+/// it captured where it was put. (Clippy's `manual_async_fn` would write it back as an
+/// `async fn`, which is the form this one is written to avoid.)
 #[cfg(feature = "session-slot")]
-pub async fn pump_task<C, L, D, F>(mut pump: PumpRef<C, L, D>, mut on_event: F) -> DriverOutcome
+#[allow(clippy::manual_async_fn)]
+pub fn pump_task<C, L, D, F>(
+    mut pump: PumpRef<C, L, D>,
+    mut on_event: F,
+) -> impl core::future::Future<Output = DriverOutcome>
 where
     C: ClockSource,
     L: SessionDatagramLink + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
     F: EventSink,
 {
-    loop {
-        if let Some(outcome) = pump.step(&mut on_event) {
-            return outcome;
+    async move {
+        loop {
+            if let Some(outcome) = pump.step(&mut on_event) {
+                return outcome;
+            }
+            yield_now().await;
         }
-        yield_now().await;
     }
 }
 
@@ -1628,9 +1640,11 @@ where
     D: BoxedLinkDriver + ?Sized + 'static,
     F: EventSink + 'static,
 {
+    // Made in the cell: the task holds the observer, whose registries are kilobytes, and a
+    // future passed by value through the spawn is that size on the stack several times over.
     local
-        .spawn_local(pump_task(pump, on_event))
-        .map_err(|refused| SessionSpawnRefused::Task(refused.why))
+        .spawn_local_with(move || pump_task(pump, on_event))
+        .map_err(SessionSpawnRefused::Task)
 }
 
 #[cfg(all(

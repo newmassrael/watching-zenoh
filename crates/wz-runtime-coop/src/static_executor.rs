@@ -204,6 +204,13 @@ pub enum SpawnRefusal {
     TooLarge,
 }
 
+/// A cell taken for a task: the cell, where its future lies and where its output will.
+struct Claimed {
+    cell: &'static TaskCell,
+    buf: *mut u8,
+    out_off: usize,
+}
+
 /// A refused spawn, which hands the future back: the caller decides what the
 /// refusal means (a session that cannot be hosted gives its slot back).
 pub struct SpawnRefused<F> {
@@ -303,10 +310,37 @@ impl ExecutorState {
 
     /// Write `fut` into a free cell and mark it ready, or refuse it, counted, and
     /// hand it back.
+    ///
+    /// The future is a value passed through here and handed back in the refusal, so a future of
+    /// some size is copied through this frame and the caller's result: a large one is made in
+    /// the cell by [`Self::spawn_with`] instead.
     pub(crate) fn spawn<F: Future + 'static>(
         &self,
         fut: F,
     ) -> Result<&'static TaskCell, SpawnRefused<F>> {
+        match self.claim::<F>() {
+            Ok(claimed) => Ok(Self::start(claimed, fut)),
+            Err(why) => Err(SpawnRefused { future: fut, why }),
+        }
+    }
+
+    /// Make the future of a task IN a free cell and mark it ready, or refuse it, counted.
+    ///
+    /// `make` runs only once a cell is taken, and what it builds is written where the task will
+    /// poll it, so no frame of this call holds the future: a spawn that takes a future by value
+    /// and hands it back on a refusal puts it on the stack four times over (a session's task is
+    /// 4.7 KB, which was a 19 KB frame). A refusal drops `make` with what it captured.
+    pub(crate) fn spawn_with<F: Future + 'static>(
+        &self,
+        make: impl FnOnce() -> F,
+    ) -> Result<&'static TaskCell, SpawnRefusal> {
+        let claimed = self.claim::<F>()?;
+        Ok(Self::start(claimed, make()))
+    }
+
+    /// Take a free cell for a future of type `F`, or refuse, counted: the cell is `Spawning`,
+    /// held by this caller alone, and the offset its output will lie at comes with it.
+    fn claim<F: Future + 'static>(&self) -> Result<Claimed, SpawnRefusal> {
         let out_off = round_up(size_of::<F>(), align_of::<F::Output>());
         let cap = self
             .cells
@@ -317,10 +351,7 @@ impl ExecutorState {
             || out_off + size_of::<F::Output>() > cap
         {
             self.refuse(SpawnRefusal::TooLarge);
-            return Err(SpawnRefused {
-                future: fut,
-                why: SpawnRefusal::TooLarge,
-            });
+            return Err(SpawnRefusal::TooLarge);
         }
         let claimed = self.cells.iter().find_map(|cell| {
             cell.with_meta(|meta| {
@@ -335,10 +366,7 @@ impl ExecutorState {
         });
         let Some((cell, buf)) = claimed else {
             self.refuse(SpawnRefusal::NoTaskCell);
-            return Err(SpawnRefused {
-                future: fut,
-                why: SpawnRefusal::NoTaskCell,
-            });
+            return Err(SpawnRefusal::NoTaskCell);
         };
         // The cell is taken: the mark is what the table holds now, if that is the most so far.
         #[cfg(feature = "pool-monitor")]
@@ -351,8 +379,15 @@ impl ExecutorState {
                 high.set(mark);
             });
         }
-        // SAFETY: the cell is `Spawning`, which only this call holds, and its bytes
-        // are `cap` long and `CELL_ALIGN`-aligned, which the check above compared
+        Ok(Claimed { cell, buf, out_off })
+    }
+
+    /// Write `fut` into the cell `claimed` names and make the task live.
+    #[inline(always)]
+    fn start<F: Future + 'static>(claimed: Claimed, fut: F) -> &'static TaskCell {
+        let Claimed { cell, buf, out_off } = claimed;
+        // SAFETY: the cell is `Spawning`, which only the caller holds, and its bytes
+        // are `cap` long and `CELL_ALIGN`-aligned, which `claim` compared
         // against `F`'s size and alignment.
         unsafe { ptr::write(buf.cast::<F>(), fut) };
         cell.cancel.store(false, Ordering::Release);
@@ -370,7 +405,7 @@ impl ExecutorState {
             meta.join_waker = None;
             meta.state = State::Live;
         });
-        Ok(cell)
+        cell
     }
 
     /// The task at `cell` is over (`completed`: its future answered and left its
