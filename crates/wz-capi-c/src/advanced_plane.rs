@@ -213,6 +213,216 @@ impl AdvancedPublisherPlane for CPlane {
     }
 }
 
+/// The entity ids of the advanced publishers of every node, one counter for all: an id need only
+/// be unique within a session, and a process-wide counter is unique within each.
+#[cfg(feature = "router-node")]
+static NEXT_NODE_ENTITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// A node, as the plane an advanced publisher lives on.
+///
+/// The composite is the same one the registry hosts ([`AdvancedPublisherOn`]); what differs is
+/// that a node's declarations are the router data plane's own: the cache queryable is hosted on
+/// it, so that the queries of its faces and of its session reach the ring, the token is its own
+/// liveliness token, and a put is the node's publication, stamped by the node's one clock.
+#[cfg(feature = "router-node")]
+pub(crate) struct NodePlane {
+    node: Arc<wz_capi_core::drive::RouterState>,
+    /// The node's clock, shared with the node (never a second clock of the same identity).
+    hlc: NodeHlc,
+}
+
+#[cfg(feature = "router-node")]
+impl NodePlane {
+    /// The plane of `node`.
+    pub(crate) fn new(node: &Arc<wz_capi_core::drive::RouterState>) -> Self {
+        Self {
+            node: Arc::clone(node),
+            hlc: node.forwarder().node_hlc(),
+        }
+    }
+}
+
+/// A cache queryable the node hosts, retracted when this is dropped.
+#[cfg(feature = "router-node")]
+pub(crate) struct NodeCacheQueryable {
+    forwarder: Arc<wz_runtime_tokio::router_forward::RouterForwarder>,
+    id: u64,
+}
+
+#[cfg(feature = "router-node")]
+impl Drop for NodeCacheQueryable {
+    fn drop(&mut self) {
+        self.forwarder.unhost_queryable(self.id);
+    }
+}
+
+/// A liveliness token the node declared, retracted when this is dropped.
+#[cfg(feature = "router-node")]
+pub(crate) struct NodeToken {
+    node: Arc<wz_capi_core::drive::RouterState>,
+    id: u64,
+}
+
+#[cfg(feature = "router-node")]
+impl Drop for NodeToken {
+    fn drop(&mut self) {
+        self.node.undeclare_token(self.id);
+    }
+}
+
+/// The period of a heartbeat beacon: a thread that ticks until it is told to stop. Dropping it
+/// tells the thread, which ends at its next wake without being waited for (the tick may be what
+/// drops it).
+#[cfg(feature = "router-node")]
+pub(crate) struct NodeTimer {
+    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+#[cfg(feature = "router-node")]
+impl Drop for NodeTimer {
+    fn drop(&mut self) {
+        let (flag, wake) = &*self.stop;
+        *flag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        wake.notify_all();
+    }
+}
+
+#[cfg(feature = "router-node")]
+impl AdvancedPublisherPlane for NodePlane {
+    type Publisher = ();
+    type Queryable = NodeCacheQueryable;
+    type Token = NodeToken;
+    type Beacon = ();
+    type Timer = Option<NodeTimer>;
+
+    fn node_hlc(&self) -> &NodeHlc {
+        &self.hlc
+    }
+
+    fn declare_publisher(
+        &self,
+        _keyexpr: &str,
+        _options: PublishOptions,
+    ) -> Result<DeclaredPublisher<()>, AdvancedPublisherError> {
+        let eid = NEXT_NODE_ENTITY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(DeclaredPublisher { handle: (), eid })
+    }
+
+    fn declare_cache_queryable(
+        &self,
+        keyexpr: &str,
+        store: &CacheStore,
+    ) -> Result<NodeCacheQueryable, AdvancedPublisherError> {
+        // INCOMPLETE, as the registry's is: the only honest answer a bounded ring can give.
+        let id = self.node.forwarder().host_queryable_from(
+            keyexpr,
+            false,
+            Locality::Any,
+            Box::new(store.query_handler(wz_runtime_tokio::timestamp_source::wall_clock_ntp64)),
+        );
+        Ok(NodeCacheQueryable {
+            forwarder: self.node.shared_forwarder(),
+            id,
+        })
+    }
+
+    fn declare_token(&self, keyexpr: &str) -> Result<NodeToken, AdvancedPublisherError> {
+        Ok(NodeToken {
+            node: Arc::clone(&self.node),
+            id: self.node.declare_token(keyexpr),
+        })
+    }
+
+    fn declare_beacon(
+        &self,
+        _keyexpr: &str,
+        _sporadic: bool,
+    ) -> Result<(), AdvancedPublisherError> {
+        Ok(())
+    }
+
+    fn start_beacon_timer(
+        &self,
+        period: Duration,
+        tick: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Option<NodeTimer> {
+        let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let waiting = Arc::clone(&stop);
+        std::thread::Builder::new()
+            .name("wz-node-beacon".into())
+            .spawn(move || {
+                let (flag, wake) = &*waiting;
+                loop {
+                    let guard = flag
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let (guard, _) = wake
+                        .wait_timeout_while(guard, period, |stopped| !*stopped)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *guard {
+                        return;
+                    }
+                    drop(guard);
+                    if !tick() {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(NodeTimer { stop })
+    }
+
+    fn publish(
+        &self,
+        _publisher: &(),
+        keyexpr: &str,
+        payload: &[u8],
+        options: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        // The node's publication: its own subscribers and every face whose subscription matches.
+        self.node
+            .forwarder()
+            .publish_with(keyexpr, payload, &options)
+            .map(|()| payload.len())
+            .map_err(|_| PublishError::ExceedsCapacity)
+    }
+
+    #[cfg(feature = "zenoh-c-shared-memory")]
+    fn publish_shm(
+        &self,
+        publisher: &(),
+        keyexpr: &str,
+        payload: &Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk>,
+        options: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        match Arc::clone(payload)
+            .into_any()
+            .downcast::<wz_runtime_tokio::shm_provider::ShmBackedPayload>()
+        {
+            Ok(chunk) => self
+                .node
+                .publish_shm(keyexpr, chunk.send_handle(), &options)
+                .map(|()| payload.bytes().len())
+                .map_err(|_| PublishError::ExceedsCapacity),
+            Err(_) => self.publish(publisher, keyexpr, payload.bytes(), options),
+        }
+    }
+
+    fn publish_beacon(&self, _beacon: Option<&()>, keyexpr: &str, payload: &[u8], sporadic: bool) {
+        let _ = self.node.forwarder().publish_with(
+            keyexpr,
+            payload,
+            &wz_ext_pubsub::advanced_publisher::heartbeat_publish_options(sporadic),
+        );
+    }
+
+    fn retained_key(&self, _publisher: &()) -> Option<Retained> {
+        None
+    }
+}
+
 /// What a C advanced publisher's declaration answers, and whether a subscriber of the SAME session
 /// hears it, with no peer and no drive thread: every delivery here is one `drain_local_plane` made.
 /// The differential (`zenoh_c_advanced_publisher_declare_twice_and_diff`) is the proof against the

@@ -1132,7 +1132,13 @@ Each lands whole with its surface lines, tests and faults in one round.
       one coming and going, read off the node's own face table through the one `FaceSource`
       the registry shares (`SessionHandle::face_source`), then what is left (the resource
       snapshot, which counts the messages a session received and a node does not count, so
-      it answers unavailable and not a snapshot of nothing; the advanced pair, the group),
+      it answers unavailable and not a snapshot of nothing; the advanced subscriber, the
+      group), and the advanced publisher is carried: the composite is the registry's own
+      (`AdvancedPublisherOn`), hosted on a node by `NodePlane`, whose cache queryable is hosted
+      on the node's data plane, whose `@adv` token is the node's own liveliness token, whose
+      puts are the node's publications under the node's one clock (`RouterForwarder::node_hlc`,
+      so a node that does not stamp refuses a cache with no miss detection, as upstream's does),
+      and whose matching reads the node's tables beside the interest the publisher declared;
       and the node has the shared-memory provider of its own that the registry has
       (`RouterState` carries the one-shot extension slot a session has, and
       `z_obtain_shm_provider` reads it through `SessionHandle::shm`; with shared memory off

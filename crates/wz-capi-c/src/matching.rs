@@ -566,14 +566,30 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
         // SAFETY: as above.
         let closure = unsafe { adopt_matching_closure(callback) };
         // SAFETY: as above.
-        let Some((shared, keyexpr)) =
-            (unsafe { crate::advanced::adv_pub_shared_and_keyexpr(publisher) })
+        let Some((host, keyexpr)) =
+            (unsafe { crate::advanced::adv_pub_host_and_keyexpr(publisher) })
         else {
             return Z_ENULL;
         };
-        let id = shared.declare_matching_listener(keyexpr, matching_sink(closure));
+        let target = match host {
+            crate::advanced::AdvMatchHost::Registry(shared) => {
+                let id = shared.declare_matching_listener(keyexpr, matching_sink(closure));
+                MatchTarget::Registry { shared, id }
+            }
+            // A node's own face is told whether anything of the subscribers matches the key.
+            #[cfg(feature = "router-node")]
+            crate::advanced::AdvMatchHost::Node(node) => {
+                let id = watch_on_node(
+                    &node,
+                    wz_runtime_tokio::router_forward::MatchPlane::Subscribers,
+                    &keyexpr,
+                    matching_sink(closure),
+                );
+                MatchTarget::Node { node, id }
+            }
+        };
         // SAFETY: the slot was gravestoned above.
-        unsafe { install_listener(matching_listener, MatchTarget::Registry { shared, id }) };
+        unsafe { install_listener(matching_listener, target) };
         Z_OK
     })
 }
@@ -621,13 +637,21 @@ pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
         // SAFETY: the caller's contract.
         unsafe { (*matching_status).matching = false };
         // SAFETY: as above.
-        let Some((shared, keyexpr)) =
-            (unsafe { crate::advanced::adv_pub_shared_and_keyexpr(this_) })
+        let Some((host, keyexpr)) = (unsafe { crate::advanced::adv_pub_host_and_keyexpr(this_) })
         else {
             return Z_ENULL;
         };
+        let matching = match host {
+            crate::advanced::AdvMatchHost::Registry(shared) => shared.has_matching(&keyexpr),
+            #[cfg(feature = "router-node")]
+            crate::advanced::AdvMatchHost::Node(node) => node.matching_status(
+                wz_runtime_tokio::router_forward::MatchPlane::Subscribers,
+                &keyexpr,
+                wz_runtime_tokio::locality::Locality::Any,
+            ),
+        };
         // SAFETY: as above.
-        unsafe { (*matching_status).matching = shared.has_matching(&keyexpr) };
+        unsafe { (*matching_status).matching = matching };
         Z_OK
     })
 }

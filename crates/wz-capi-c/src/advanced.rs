@@ -88,7 +88,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{z_publisher_options_t, z_publisher_put_options_t};
 use crate::result::{ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{not_a_registry, session_handle, session_state, SessionHandle};
 use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
@@ -530,11 +530,92 @@ impl ze_owned_advanced_publisher_t {
 /// library does, so an implicit `z_drop` and an explicit
 /// `ze_undeclare_advanced_publisher` take the identical path.
 struct AdvPubState {
-    shared: Arc<SharedSession>,
-    publisher: AdvancedPublisherOn<crate::advanced_plane::CPlane>,
+    host: AdvPubHost,
     /// R311y568 — the keyexpr this publisher was declared under, so
     /// [`ze_advanced_publisher_keyexpr`] can answer.
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
+}
+
+/// The session an advanced publisher is declared on, with the composite hosted on it: the
+/// registry's plane, or, in a build with `router-node`, the plane of a node.
+enum AdvPubHost {
+    Registry {
+        shared: Arc<SharedSession>,
+        publisher: AdvancedPublisherOn<crate::advanced_plane::CPlane>,
+    },
+    #[cfg(feature = "router-node")]
+    Node(NodeAdvanced),
+}
+
+/// An advanced publisher on a node.
+#[cfg(feature = "router-node")]
+struct NodeAdvanced {
+    node: Arc<wz_capi_core::drive::RouterState>,
+    publisher: AdvancedPublisherOn<crate::advanced_plane::NodePlane>,
+    /// The interest the publisher declared on the node's data plane, which tells a node below a
+    /// router the subscribers beyond it: what its matching reads.
+    interest: u64,
+}
+
+#[cfg(feature = "router-node")]
+impl Drop for NodeAdvanced {
+    fn drop(&mut self) {
+        self.node
+            .forwarder()
+            .undeclare_local_interest(self.interest, false);
+    }
+}
+
+impl AdvPubState {
+    /// The identity of the session the publisher is declared on.
+    fn zid(&self) -> [u8; 16] {
+        match &self.host {
+            AdvPubHost::Registry { shared, .. } => shared.zid(),
+            #[cfg(feature = "router-node")]
+            AdvPubHost::Node(node) => crate::zid::z_id_t::from_wire(node.node.zid()).id,
+        }
+    }
+
+    /// The publisher's entity id.
+    fn eid(&self) -> u32 {
+        match &self.host {
+            AdvPubHost::Registry { publisher, .. } => publisher.eid(),
+            #[cfg(feature = "router-node")]
+            AdvPubHost::Node(node) => node.publisher.eid(),
+        }
+    }
+
+    /// Publish `bytes`, best-effort.
+    fn put(&self, bytes: &[u8]) {
+        let _ = match &self.host {
+            AdvPubHost::Registry { publisher, .. } => publisher.put(bytes),
+            #[cfg(feature = "router-node")]
+            AdvPubHost::Node(node) => node.publisher.put(bytes),
+        };
+    }
+
+    /// Publish a chunk of shared memory, best-effort.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    fn put_chunk(&self, chunk: &Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk>) {
+        let options = wz_ext_pubsub::advanced_publisher::AdvancedPutOptions::default();
+        let _ = match &self.host {
+            AdvPubHost::Registry { publisher, .. } => publisher.put_shm_with(chunk, options),
+            #[cfg(feature = "router-node")]
+            AdvPubHost::Node(node) => node.publisher.put_shm_with(chunk, options),
+        };
+    }
+
+    /// Publish a delete; whether the plane took it.
+    fn delete(&self) -> bool {
+        match &self.host {
+            AdvPubHost::Registry { publisher, .. } => publisher.delete().is_ok(),
+            #[cfg(feature = "router-node")]
+            AdvPubHost::Node(node) => node.publisher.delete().is_ok(),
+        }
+    }
 }
 
 /// Read the state behind a loaned advanced publisher.
@@ -566,12 +647,24 @@ unsafe fn adv_pub_state<'a>(
 ///
 /// # Safety
 /// As [`adv_pub_state`].
-pub(crate) unsafe fn adv_pub_shared_and_keyexpr(
+pub(crate) unsafe fn adv_pub_host_and_keyexpr(
     this_: *const ze_loaned_advanced_publisher_t,
-) -> Option<(Arc<SharedSession>, String)> {
+) -> Option<(AdvMatchHost, String)> {
     // SAFETY: the caller's contract, delegated.
     let state = unsafe { adv_pub_state(this_) }?;
-    Some((state.shared.clone(), state.keyexpr.literal().to_owned()))
+    let host = match &state.host {
+        AdvPubHost::Registry { shared, .. } => AdvMatchHost::Registry(shared.clone()),
+        #[cfg(feature = "router-node")]
+        AdvPubHost::Node(node) => AdvMatchHost::Node(node.node.clone()),
+    };
+    Some((host, state.keyexpr.literal().to_owned()))
+}
+
+/// What an advanced publisher's matching reads: the registry's sessions, or a node's tables.
+pub(crate) enum AdvMatchHost {
+    Registry(Arc<SharedSession>),
+    #[cfg(feature = "router-node")]
+    Node(Arc<wz_capi_core::drive::RouterState>),
 }
 
 /// The wz options one C `ze_advanced_publisher_options_t` maps to.
@@ -681,7 +774,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         unsafe { *publisher = ze_owned_advanced_publisher_t::null_value() };
 
         // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+        let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
         }) else {
             return unsafe { not_a_registry(session) };
@@ -710,24 +803,62 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         // SAFETY: the caller's contract.
         let opts = unsafe { advanced_publisher_options(options) };
         let declared = ke.clone();
-        // The publisher's source identity is the session's own zid, the one its peers see in the
-        // handshake.
-        let zid = state.shared.local_session().actions().params.zid.clone();
-        // R3064 -- a declaration the session refuses is REFUSED, with upstream's code: its
-        // `ze_declare_advanced_publisher` answers any construction error `Z_EGENERIC` (MEASURED:
-        // `-128` for a cache with no miss detection on a node that holds no clock, on the real
-        // library). The gravestone written above is what the caller is left holding.
-        let Ok(composite) = AdvancedPublisherOn::declare_on(
-            Arc::new(crate::advanced_plane::CPlane::new(&state.shared)),
-            ke,
-            opts,
-            zid,
-        ) else {
-            return Z_EGENERIC;
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let host = match held {
+            SessionHandle::Registry(state) => {
+                // The publisher's source identity is the session's own zid, the one its peers
+                // see in the handshake.
+                let zid = state.shared.local_session().actions().params.zid.clone();
+                // R3064 -- a declaration the session refuses is REFUSED, with upstream's code:
+                // its `ze_declare_advanced_publisher` answers any construction error
+                // `Z_EGENERIC` (MEASURED: `-128` for a cache with no miss detection on a node
+                // that holds no clock, on the real library). The gravestone written above is
+                // what the caller is left holding.
+                let Ok(composite) = AdvancedPublisherOn::declare_on(
+                    Arc::new(crate::advanced_plane::CPlane::new(&state.shared)),
+                    ke,
+                    opts,
+                    zid,
+                ) else {
+                    return Z_EGENERIC;
+                };
+                AdvPubHost::Registry {
+                    shared: state.shared.clone(),
+                    publisher: composite,
+                }
+            }
+            // A node hosts the composite on its data plane, with its own clock: where its role
+            // does not stamp, a cache with no miss detection is refused, as upstream's node
+            // that holds no clock refuses it.
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(node) => {
+                let key = ke.clone();
+                let Ok(composite) = AdvancedPublisherOn::declare_on(
+                    Arc::new(crate::advanced_plane::NodePlane::new(node)),
+                    ke,
+                    opts,
+                    node.zid().to_vec(),
+                ) else {
+                    return Z_EGENERIC;
+                };
+                // The interest a publisher of upstream sends, so that a node below a router
+                // learns of the subscribers beyond it.
+                let interest = crate::matching::next_interest_id();
+                node.forwarder()
+                    .declare_local_interest(interest, &key, false);
+                AdvPubHost::Node(NodeAdvanced {
+                    node: Arc::clone(node),
+                    publisher: composite,
+                    interest,
+                })
+            }
         };
         let mut boxed = Box::new(AdvPubState {
-            shared: state.shared.clone(),
-            publisher: composite,
+            host,
             keyexpr: crate::keyexpr::DeclaredKeyexpr::new(declared),
         });
         // Bind AFTER boxing — the state is at its final address only here.
@@ -771,9 +902,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         // Best-effort, as the ordinary publish is: a put no face took is not an error to a C
         // caller, which has no per-face handle to retry with.
         match buf {
-            Outbound::Bytes(bytes) => {
-                let _ = state.publisher.put(&bytes);
-            }
+            Outbound::Bytes(bytes) => state.put(&bytes),
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
                 not(feature = "zenoh-c-no-unstable-api")
@@ -783,10 +912,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
                 // the descriptor, and the cache holds the chunk so a recovery reply replays it
                 // as shared memory.
                 let chunk: Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk> = chunk;
-                let _ = state.publisher.put_shm_with(
-                    &chunk,
-                    wz_ext_pubsub::advanced_publisher::AdvancedPutOptions::default(),
-                );
+                state.put_chunk(&chunk);
             }
         }
         Z_OK
@@ -828,10 +954,8 @@ pub unsafe extern "C" fn ze_advanced_publisher_id(
             // The identity the samples and the token name: the session's zid and the
             // publisher's entity id.
             Some(state) => z_entity_global_id_t {
-                zid: z_id_t {
-                    id: state.shared.zid(),
-                },
-                eid: state.publisher.eid(),
+                zid: z_id_t { id: state.zid() },
+                eid: state.eid(),
             },
             None => z_entity_global_id_t::empty(),
         }
@@ -891,7 +1015,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete(
         let Some(state) = (unsafe { adv_pub_state(this_) }) else {
             return Z_ENULL;
         };
-        if state.publisher.delete().is_ok() {
+        if state.delete() {
             Z_OK
         } else {
             Z_EINVAL

@@ -3104,6 +3104,14 @@ impl Drop for HeldRouterQuery {
 }
 
 impl RouterForwarder {
+    /// The node's clock: the one every stamp of the node reads, shared and not copied (a second
+    /// clock with the node's identity would break the uniqueness of its stamps). It stamps only
+    /// where the node's role does, which is zenoh's own rule: a router by default, a peer or a
+    /// client not.
+    pub fn node_hlc(&self) -> crate::node_clock::NodeHlc {
+        self.node_hlc.clone()
+    }
+
     /// Keep the query the hosted queryable this thread is inside of was handed, so that it can be
     /// answered after the handler returns. `None` outside such a handler.
     pub fn hold_current_query(self: &Arc<Self>) -> Option<HeldRouterQuery> {
