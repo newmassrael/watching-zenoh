@@ -311738,6 +311738,44 @@
         "Open: merge each crate's integration test files into one test executable (`tests/it/main.rs` with the files as modules), the structural remedy for the size of a test build: 584 files make 584 executables that each link the dependency tree. The files that install a global allocator (35, in nine crates) stay their own executables; the scripts name 429 test files by `--test`, and the nondefault gate's census names tests by path, so the move carries a tool, a check that the set of test names is the same before and after, and a measurement of the size and the time on one crate before the rest. Layer C1bnl's size under the two measures of this round is to be read on its next run on pc2 (not pc3, whose disk is shared with the hosted runner). Hosted runs of rounds 4249, 4261, 4270, 4275 and Layers Qzk and Qzb are still unread."
       ]
     },
+    "Round 4286": {
+      "decision_summary": "Phase 0 of docs/router-table-snapshots.md: the instrument that measures what the faces' threads and the writers of the router's tables cost each other while both run, and its baseline under structure A, the reader-writer lock, before any structural change. Eight publisher faces route Puts to four subscribers without pause for three seconds while one writer declares and undeclares subscriptions and every 32 declarations brings a face up and takes it down. On the build machine of 22 cores and 30 GB, four release runs: every declaration and every face transition took 10.03 to 10.06 ms at the median, the TABLES_WRITER_FIRST_AFTER bound and the write's own tens of microseconds, and the faces routed 0.92 to 1.28 million Puts a second. Under A on a busy router a write costs the bound, whatever the write is. The design's section 5.3 is corrected: under B, nothing is sent to a face after it left because deregister waits for a grace period, since a direct send takes no lock of the face that a close could take.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the_faces_and_the_writers_of_the_tables_measured_together, ignored, a measurement that asserts only its population (every Put routed once and given to every subscriber, every write returned) and prints Puts per second and the writers' waits by kind.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the test module is declared under cfg(test).",
+        "docs/router-table-snapshots.md: section 5.3 holds the face that left by a grace period; section 6.1 records the four runs."
+      ],
+      "verification_bullets": [
+        "bx --host pc3 (22 cores, 30 GB, nothing else running): cargo test --release -p wz-runtime-tokio --features routing-router-hat --lib table_sharing -- --ignored --nocapture, four runs, each 1 passed (the population held); figures in section 6.1.",
+        "cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat -- -D warnings on pc3: rc 0. rustfmt --check on the new file: rc 0.",
+        "A first attempt on pc2 was refused by bx before it ran (the new file was not yet staged), and pc2 had one free core, so the reading was taken on pc3."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Phase 1 of docs/router-table-snapshots.md: the per-face runtime (held queues, gate waker, declaration numbering, the session's actions) out of RouterFaceState into one shared FaceRuntime per face, with no behaviour moved under A.",
+        "Phases 2 to 6 as filed in round 4281. The baseline compares against B only in phase 5; nothing here says what B costs."
+      ],
+      "publishable_decision_summary": "Phase 0 of docs/router-table-snapshots.md: the instrument that measures what the faces' threads and the writers of the router's tables cost each other while both run, and its baseline under structure A, the reader-writer lock, before any structural change. Eight publisher faces route Puts to four subscribers without pause for three seconds while one writer declares and undeclares subscriptions and every 32 declarations brings a face up and takes it down. On the build machine of 22 cores and 30 GB, four release runs: every declaration and every face transition took 10.03 to 10.06 ms at the median, the TABLES_WRITER_FIRST_AFTER bound and the write's own tens of microseconds, and the faces routed 0.92 to 1.28 million Puts a second. Under A on a busy router a write costs the bound, whatever the write is. The design's section 5.3 is corrected: under B, nothing is sent to a face after it left because deregister waits for a grace period, since a direct send takes no lock of the face that a close could take.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the_faces_and_the_writers_of_the_tables_measured_together, ignored, a measurement that asserts only its population (every Put routed once and given to every subscriber, every write returned) and prints Puts per second and the writers' waits by kind.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the test module is declared under cfg(test).",
+        "docs/router-table-snapshots.md: section 5.3 holds the face that left by a grace period; section 6.1 records the four runs."
+      ],
+      "publishable_verification_bullets": [
+        "bx --host pc3 (22 cores, 30 GB, nothing else running): cargo test --release -p wz-runtime-tokio --features routing-router-hat --lib table_sharing -- --ignored --nocapture, four runs, each 1 passed (the population held); figures in section 6.1.",
+        "cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat -- -D warnings on pc3: rc 0. rustfmt --check on the new file: rc 0.",
+        "A first attempt on pc2 was refused by bx before it ran (the new file was not yet staged), and pc2 had one free core, so the reading was taken on pc3."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 1 of docs/router-table-snapshots.md: the per-face runtime (held queues, gate waker, declaration numbering, the session's actions) out of RouterFaceState into one shared FaceRuntime per face, with no behaviour moved under A.",
+        "Phases 2 to 6 as filed in round 4281. The baseline compares against B only in phase 5; nothing here says what B costs."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
