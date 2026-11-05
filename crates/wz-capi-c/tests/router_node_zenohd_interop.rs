@@ -486,15 +486,15 @@ fn a_node_below_a_zenohd_learns_of_the_subscriber_and_queryable_beyond_it() {
         let (_heard, ctx) = count_samples(&beyond);
         let _queryable = declare_silent_queryable(&beyond);
         assert!(
-            eventually(&publisher_matches),
+            eventually(publisher_matches),
             "the node's publisher never learned of the subscriber beyond zenohd"
         );
         assert!(
-            eventually(&querier_matches),
+            eventually(querier_matches),
             "the node's querier never learned of the queryable beyond zenohd"
         );
         assert!(
-            never(&apart_matches),
+            never(apart_matches),
             "a publisher on a key nothing subscribes to matched"
         );
 

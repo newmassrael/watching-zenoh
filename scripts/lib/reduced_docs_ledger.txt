@@ -410,7 +410,6 @@ wz-session-core	wz-session-core/src/keyexpr_match.rs	1	error: unresolved link to
 wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_patterns`: no item named `keyexpr_includes_patterns` in scope
 wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_target`: no item named `keyexpr_includes_target` in scope
 wz-session-core	wz-session-core/src/keyexpr_prefix.rs	1	error: unresolved link to `crate::namespace`: no item named `namespace` in module `wz_session_core`
-wz-session-core	wz-session-core/src/keyexpr_prefix.rs	2	error: unresolved link to `crate::storage_strip_prefix`: no item named `storage_strip_prefix` in module `wz_session_core`
 wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::drive::check_keepalive_deadline`: no item named `check_keepalive_deadline` in module `drive`
 wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::drive::check_keepalive_deadline`: no item named `drive` in module `wz_session_core`
 wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::send_keep_alive`: no item named `session_actions` in module `wz_session_core`
