@@ -312130,6 +312130,40 @@
         "Open, in order: (1) the move of wz-integration-tests (317 files into 3 targets with `merge_tests.py --exclusive zenoh_pico_sys,wz_capi_pico`), run whole on a build host; the nondefault gate's census names tests by path and its legs name them by module, to be read on the moved tree; the guard counts of `_runci_guarded_test` hold when the lanes run. (2) The same two steps for wz-runtime-tokio (104 files, 10 with a global allocator), wz-capi-pico (42, 35 `[[test]]` tables), wz-capi-c (35, 28), wz-ap-demo (19), wz-session-lwip (15), wz-session-core (13): the helper and the readers are already per crate. (3) pc2's build sandbox failed on 2026-11-05 afternoon (`pasta: IPv6 is disabled`, bwrap could not create resolv.conf) for any bx run there; pc4 refuses a 14 GB reservation; the runs of this round went to pc3. Hosted runs of rounds 4249 to 4291 and Layers Qzk and Qzb are still unread."
       ]
     },
+    "Round 4297": {
+      "decision_summary": "Phase 2 of docs/router-table-snapshots.md: a route memo keeps the newest inputs it has served. A route is a function of the graph and the interest table, kept by the versions of both (RouteInputs) and served only at the inputs it was computed at. Until now a store or a refresh at any other inputs cleared the memo; once readers hold different versions of the tables at once (structure B), a reader of an older version would clear what a reader of a newer one stored, a loss of work and never of correctness. RouteInputs::precedes orders inputs: both members are counters a write of the tables moves forward and nothing moves back, living as long as the hat that owns the memo (verified: the tables and their memos are constructed together, and the counters are sums of Versioned counters). A store from inputs that precede the kept ones returns its route and keeps nothing; a refresh to them moves nothing and asks the table nothing, decided under the read lock. A pair where neither precedes the other (a wrapped counter) replaces the memo, as every move did before, so the cache cannot be held back by an unordered pair. Under structure A inputs never go back, so nothing changes there.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/route_cache.rs: RouteInputs::precedes; get_or_compute answers and does not keep a route computed at preceding inputs; refresh to preceding inputs is a no-op under the read lock; docs of RouteCache, get_or_compute and refresh say why.",
+        "Tests: inputs_precede_when_they_differ_and_neither_member_is_ahead, a_store_from_older_inputs_is_answered_and_keeps_the_newer_routes, a_refresh_to_older_inputs_moves_nothing_and_asks_nothing, inputs_that_neither_precede_replace_the_routes_as_newer_ones_do."
+      ],
+      "verification_bullets": [
+        "bx on hkl002 (8 cores): cargo clippy -p wz-runtime-tokio --all-targets -D warnings with routing-router-hat and with --all-features, both rc 0; cargo test -p wz-runtime-tokio --features routing-router-hat --lib, 1082 passed and 1 ignored (the phase 0 measurement), of which route_cache::tests 14 passed (10 before, 4 new). The same filter without the feature runs 0 tests, the module being the router hat's, so it is not counted.",
+        "A first attempt on pc2 failed before compiling this crate: a build script of rustls could not be executed (Text file busy, os error 26) in a target directory another run was writing; the re-run passed unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Phase 3 of docs/router-table-snapshots.md: Tables Clone by path copying at field granularity (Arc round the hats' graphs, interest tables and stores and round each face's routing facts; the two writer-only locks become plain fields).",
+        "Phases 4 to 6 as filed in round 4281; the baseline of round 4286 compares against B only in phase 5."
+      ],
+      "publishable_decision_summary": "Phase 2 of docs/router-table-snapshots.md: a route memo keeps the newest inputs it has served. A route is a function of the graph and the interest table, kept by the versions of both (RouteInputs) and served only at the inputs it was computed at. Until now a store or a refresh at any other inputs cleared the memo; once readers hold different versions of the tables at once (structure B), a reader of an older version would clear what a reader of a newer one stored, a loss of work and never of correctness. RouteInputs::precedes orders inputs: both members are counters a write of the tables moves forward and nothing moves back, living as long as the hat that owns the memo (verified: the tables and their memos are constructed together, and the counters are sums of Versioned counters). A store from inputs that precede the kept ones returns its route and keeps nothing; a refresh to them moves nothing and asks the table nothing, decided under the read lock. A pair where neither precedes the other (a wrapped counter) replaces the memo, as every move did before, so the cache cannot be held back by an unordered pair. Under structure A inputs never go back, so nothing changes there.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/route_cache.rs: RouteInputs::precedes; get_or_compute answers and does not keep a route computed at preceding inputs; refresh to preceding inputs is a no-op under the read lock; docs of RouteCache, get_or_compute and refresh say why.",
+        "Tests: inputs_precede_when_they_differ_and_neither_member_is_ahead, a_store_from_older_inputs_is_answered_and_keeps_the_newer_routes, a_refresh_to_older_inputs_moves_nothing_and_asks_nothing, inputs_that_neither_precede_replace_the_routes_as_newer_ones_do."
+      ],
+      "publishable_verification_bullets": [
+        "bx on hkl002 (8 cores): cargo clippy -p wz-runtime-tokio --all-targets -D warnings with routing-router-hat and with --all-features, both rc 0; cargo test -p wz-runtime-tokio --features routing-router-hat --lib, 1082 passed and 1 ignored (the phase 0 measurement), of which route_cache::tests 14 passed (10 before, 4 new). The same filter without the feature runs 0 tests, the module being the router hat's, so it is not counted.",
+        "A first attempt on pc2 failed before compiling this crate: a build script of rustls could not be executed (Text file busy, os error 26) in a target directory another run was writing; the re-run passed unchanged."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 3 of docs/router-table-snapshots.md: Tables Clone by path copying at field granularity (Arc round the hats' graphs, interest tables and stores and round each face's routing facts; the two writer-only locks become plain fields).",
+        "Phases 4 to 6 as filed in round 4281; the baseline of round 4286 compares against B only in phase 5."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
