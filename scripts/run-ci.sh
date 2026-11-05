@@ -25548,9 +25548,15 @@ layer_qzb_zephyr_board_matrix() {
             # overlay's CONFIG_MAIN_STACK_SIZE): the first boot of this image died on a
             # 69,040-byte frame on a 32,768-byte stack, and a load run did not see it.
             # The objdump is the SDK's own, named by the same cache the nm above is.
+            # The datagram node and the node over tcp/ are two images with a worst chain each,
+            # and the gate holds each to its own committed figure.
             if [[ "$overlay" == *t2g_fixed.conf* ]]; then
                 zfx_nm="$(grep -m1 '^CMAKE_NM:' "$build_dir/CMakeCache.txt" | cut -d= -f2)"
-                if ! python3 scripts/lib/stack_frame_gate.py --check zephyr-fixed \
+                zfx_key=zephyr-fixed
+                if [[ "$overlay" == *t2g_tcp.conf* ]]; then
+                    zfx_key=zephyr-fixed-tcp
+                fi
+                if ! python3 scripts/lib/stack_frame_gate.py --check "$zfx_key" \
                     --elf "$build_dir/zephyr/zephyr.elf" --objdump "${zfx_nm%nm}objdump"; then
                     fail=1
                 fi

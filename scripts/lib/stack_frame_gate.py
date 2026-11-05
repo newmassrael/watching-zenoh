@@ -171,6 +171,17 @@ IMAGES = (
     # not on the stack now, so what is left of it is inlined into `wz_app_main`, the thread's
     # entry symbol, as the client's `run` is. The entry is that symbol, which is the frame the
     # loop's own locals lie in whichever way `start` is compiled.
+    #
+    # `peak` is 13,624 bytes over 12 frames, read from the image of the datagram row (the node of
+    # `fixed_node.rs`, `overlays/t2g_fixed.conf` with both pools) built for the T2G board at tree
+    # ff6a235d9d: `wz_app_main` 40, the node's `start` 6,296 (the largest frame of the image; the
+    # session table, the dialer and the application layer are built in it as values), the connect
+    # manager's three frames (552, 264 and 176) and the slot dialer's `open` path, 4,952 in its
+    # first frame, with 16 calls through a register on the path not followed. It was 13,608 at the
+    # tree of the same morning before the engine's lent response became a view (the connect
+    # manager's first frame 544 and `start` 6,288 then), so the figure follows the code within
+    # a few frames' worth and the tolerance is the gate's. The chain is not a reading: no kit run
+    # reads this image's stack against it (see `deploy/resource_budget.json`).
     Image(
         key="zephyr-fixed",
         elf=None,
@@ -178,6 +189,25 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
+        peak=13624,
+    ),
+    # The same node over `tcp/` (`overlays/t2g_tcp.conf` after `overlays/t2g_fixed.conf`, the node of
+    # `fixed_tcp.rs`): the stack is the fixed-memory overlay's, which the TCP overlay does not state
+    # again, and the chain is its own. `peak` is 13,184 bytes over 6 frames, read at tree ff6a235d9d:
+    # `wz_app_main` 3,664 (the thread's entry, with the loop's set-up inlined), `fixed_tcp::start`
+    # 6,408, `install_observer` 1,904, `canonize_keyexpr_as` 1,112 and the two copies under it (16
+    # and 80), with 5 calls through a register not followed. The worst chain here is the observer's
+    # install and not the dial path the datagram node's is. The row exists so that each image is
+    # held to its own figure: one key for both held neither, since this chain sits 440 bytes under
+    # the datagram node's and the two move apart with each change.
+    Image(
+        key="zephyr-fixed-tcp",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_fixed.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="wz_app_main",
+        peak=13184,
     ),
     # The Zephyr CLIENT on the fixed-memory profile: the same rule, over the overlay of its own.
     # Its `run` is inlined into the board's `wz_app_main`, which is the thread's entry symbol.
@@ -533,7 +563,9 @@ IMAGES = (
         #
         # 2,976 bytes over 11 frames once the Response is read as its view (the reply's delivery
         # reads its chains where they lie): 16 more than before, in the frames the delivery's own
-        # reads took.
+        # reads took. The kit's reading, 2,872, is 104 under it, so the resource budget's row no
+        # longer carries `chain_misses`: the chain is a bound again, for as long as the reading stays
+        # under it.
         peak=2976,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
