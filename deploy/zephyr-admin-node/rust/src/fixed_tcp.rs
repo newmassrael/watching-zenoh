@@ -77,8 +77,11 @@ pub const CELLS: usize = SESSIONS + QUEUE;
 /// The receive ring of a connection: at least lwIP's receive window, which the port states
 /// (`TCP_WND`, two segments of 1,460 bytes); a connect refuses less.
 pub const CONN_RX: usize = 3072;
-/// The runtime's task table: a pump task per session, with room beside them.
-const TASKS: usize = SESSIONS + 1;
+/// The runtime's task table: a pump task per session and no other task. A session holds its task's
+/// cell until its handles are let go, which is the moment its slot is freed, so a node never holds
+/// more cells than sessions (`session_pool_exhaustion` fills a node's tables to exactly its sessions
+/// and readmits a peer into the cell a closed session freed).
+const TASKS: usize = SESSIONS;
 /// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
 /// image's types (the pump's handle and the application layer's state, the layer being most of it),
 /// and not a figure written beside it: a layer that grows grows the cell, and the cell is never one

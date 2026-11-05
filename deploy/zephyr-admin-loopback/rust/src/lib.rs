@@ -93,7 +93,9 @@ const ACCEPT_TIMEOUT_MS: u64 = 60_000;
 const SESSIONS: usize = 1;
 /// Sessions the admin node holds that a peer opened.
 const ACCEPTS: usize = 1;
-const TASKS: usize = SESSIONS + 1;
+/// Each node's task table: a pump task per session and no other task (a session holds its task's
+/// cell until its handles are let go, which is when its slot is freed).
+const TASKS: usize = SESSIONS;
 /// The admin node's session task, as the compiler lays it out for the node's types: the pump with
 /// the secure channel's stream driver and the application layer with its requesters, and not a
 /// figure written beside it. A layer that grows grows the cell.

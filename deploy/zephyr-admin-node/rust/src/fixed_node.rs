@@ -78,8 +78,11 @@ pub const SESSIONS: usize = 2;
 pub const SOCKETS: usize = SESSIONS + 1;
 /// Peers that may be admitted at once on the listening socket.
 const LANES: usize = 1;
-/// The runtime's task table: a pump task per session, with room beside them.
-const TASKS: usize = SESSIONS + 1;
+/// The runtime's task table: a pump task per session and no other task. A session holds its task's
+/// cell until its handles are let go, which is the moment its slot is freed, so a node never holds
+/// more cells than sessions (`session_pool_exhaustion` fills a node's tables to exactly its sessions
+/// and readmits a peer into the cell a closed session freed).
+const TASKS: usize = SESSIONS;
 /// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
 /// image's types (the pump's handle and the application layer's state, the layer being most of it:
 /// about 4.9 KB, its requesters 4.8 KB of them), and not a figure written beside it. A layer that
