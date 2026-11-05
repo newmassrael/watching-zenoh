@@ -312304,6 +312304,34 @@
         "The node over tcp/ (zephyr-fixed-tcp) has still never run on the kit: the program that holds the steps of HARDWARE_VERDICT.md reaches a node by a udp/ locator only (its board mode refuses another, and its steps read the link as a datagram's), so a run of that image is a procedure that does not exist yet, a verdict that speaks tcp/ and the lwIP TCP path on silicon with it; its budget declaration stays. The pool steps HW.26 to HW.35 are not in the lane. The row's reading is of a copy of the tree and of three plus one runs of one boot each."
       ]
     },
+    "Round 4301": {
+      "decision_summary": "The merge of the wz-integration-tests test files (rounds 4297 and 4298) moved every test source to a new path, and the round-fed pre-push gates keyed on the old one. A peer session reproduced seven reds on a clean main. This round makes each such gate read both layouts and keep its table keys, so a merge no longer moves a gate verdict, and prepares the wz-runtime-tokio merge with the same tooling.",
+      "changes_bullets": [
+        "The barrier needle, reason review pin, depth axis census and prose dependency graph gates list test sources through test_sources, and path-keyed tables use its canonical form, so a file keeps its key after a merge. The pre-push round-fed list gains the new scripts. The new scripts carry a provenance line. run-ci.sh spells the wz-runtime-tokio test calls through the target helper; WZ_TEST_TARGET names a whole target for clippy, check and build, and the retarget tool expands and verifies those forms."
+      ],
+      "verification_bullets": [
+        "The full round-fed gate list of the pre-push hook ran green on the changed tree (135 gates), as did the prose feature gate and the reason review pin gate. The selftests of test_sources, merge_tests and retarget_test_refs pass, and the retarget verify reads the run-ci.sh calls back unchanged. The tokio merge itself is not in this round."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Merge the wz-runtime-tokio test files next: platform_surface_matrix and released_port_gate must read the merged layout first. Then the other crates one round each, measured with test_build_size. Ignored legs of a merged crate still need a run under their own lanes."
+      ],
+      "publishable_decision_summary": "The merge of the wz-integration-tests test files (rounds 4297 and 4298) moved every test source to a new path, and the round-fed pre-push gates keyed on the old one. A peer session reproduced seven reds on a clean main. This round makes each such gate read both layouts and keep its table keys, so a merge no longer moves a gate verdict, and prepares the wz-runtime-tokio merge with the same tooling.",
+      "publishable_changes_bullets": [
+        "The barrier needle, reason review pin, depth axis census and prose dependency graph gates list test sources through test_sources, and path-keyed tables use its canonical form, so a file keeps its key after a merge. The pre-push round-fed list gains the new scripts. The new scripts carry a provenance line. run-ci.sh spells the wz-runtime-tokio test calls through the target helper; WZ_TEST_TARGET names a whole target for clippy, check and build, and the retarget tool expands and verifies those forms."
+      ],
+      "publishable_verification_bullets": [
+        "The full round-fed gate list of the pre-push hook ran green on the changed tree (135 gates), as did the prose feature gate and the reason review pin gate. The selftests of test_sources, merge_tests and retarget_test_refs pass, and the retarget verify reads the run-ci.sh calls back unchanged. The tokio merge itself is not in this round."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Merge the wz-runtime-tokio test files next: platform_surface_matrix and released_port_gate must read the merged layout first. Then the other crates one round each, measured with test_build_size. Ignored legs of a merged crate still need a run under their own lanes."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
