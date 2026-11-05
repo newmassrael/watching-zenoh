@@ -10920,8 +10920,12 @@ layer_c1cb_cargo_test_init_ack_admission() {
 # R3486 -- 20 -> 21. `saturated_tx_does_not_starve_control_when_partitioned` holds every
 # tx worker and asks that a task on the control runtime still runs, the property the
 # keepalive timers' move to that runtime rests on.
+#
+# R4272 -- 21 -> 22. `a_stopped_pool_ends_its_threads_and_runs_nothing_more` (round 4232,
+# the stop behind `zc_stop_z_runtime`) joined the target without this line, and hosted run
+# 41974391826 printed `22 passed` against the 21 here.
 layer_c1cg_cargo_test_runtime_partition() {
-    _runci_guarded_test C1cg 21 \
+    _runci_guarded_test C1cg 22 \
         cargo test -p wz-runtime-tokio --test runtime_partition --quiet || return 1
 }
 

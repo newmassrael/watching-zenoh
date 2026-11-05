@@ -1354,7 +1354,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
 
 /// Async writer task. Owns the [`WriteHalf`] and drains the outbound channel,
 /// writing + flushing the frames as they are: [`SerialWriteDriver`] has already
-/// COBS-framed each one through [`encode_frame_into`] (header
+/// COBS-framed each one through [`encode_frame_stuffing`] (header
 /// `SERIAL_DATA_HEADER` + len + payload + crc32 -> COBS -> `0x00` EOP) when it
 /// enqueued it (R3239). Exits when the queue is SEALED and drained, when every
 /// [`SerialWriteDriver`] clone has dropped, or when a write fails / stalls past
