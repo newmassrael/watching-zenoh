@@ -74,9 +74,26 @@ pub struct RouterState {
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
+    /// State of the ABI that holds the node, which the core cannot name (zenoh-c's shared-memory
+    /// provider is one): the one place the shim attaches it, as it does on a
+    /// [`SessionState`](super::SessionState). Set once, right after the open.
+    abi_extension: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl RouterState {
+    /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
+    /// was handed, so a shim cannot silently replace state a live handle already reads.
+    pub fn set_abi_extension<E: std::any::Any + Send + Sync>(&self, ext: E) -> Result<(), E> {
+        self.abi_extension
+            .set(Box::new(ext))
+            .map_err(|boxed| *boxed.downcast::<E>().expect("the value just boxed"))
+    }
+
+    /// This ABI's per-node state, if the shim attached one of type `E`.
+    pub fn abi_extension<E: std::any::Any>(&self) -> Option<&E> {
+        self.abi_extension.get()?.downcast_ref::<E>()
+    }
+
     /// The identity the node announces, as its wire form.
     pub fn zid(&self) -> &[u8] {
         &self.zid
@@ -691,6 +708,7 @@ pub(crate) fn open_router_blocking(
                 shutdown,
                 stop,
                 driver: StdMutex::new(Some(handle)),
+                abi_extension: std::sync::OnceLock::new(),
             })
         }
         Ok(Err(cause)) => {

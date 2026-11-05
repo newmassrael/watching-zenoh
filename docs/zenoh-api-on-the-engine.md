@@ -1132,8 +1132,11 @@ Each lands whole with its surface lines, tests and faults in one round.
       one coming and going, read off the node's own face table through the one `FaceSource`
       the registry shares (`SessionHandle::face_source`), then what is left (the resource
       snapshot, which counts the messages a session received and a node does not count, so
-      it answers unavailable and not a snapshot of nothing; the shared-memory provider, the
-      advanced pair, the group). In a build with `router-node` a router opened through the C ABI is the
+      it answers unavailable and not a snapshot of nothing; the advanced pair, the group),
+      and the node has the shared-memory provider of its own that the registry has
+      (`RouterState` carries the one-shot extension slot a session has, and
+      `z_obtain_shm_provider` reads it through `SessionHandle::shm`; with shared memory off
+      it answers disabled). In a build with `router-node` a router opened through the C ABI is the
       router data plane whatever it holds (`OpenPlan::node_role`), as the Rust API's is, and
       forwards between the clients that dial it; a peer or a client is a node there only where
       it keeps a south apart, and a build without `router-node` opens the registry of faces,

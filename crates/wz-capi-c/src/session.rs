@@ -89,6 +89,22 @@ impl SessionHandle {
         }
     }
 
+    /// The session's own shared-memory state, which the open attached to the registry or to the
+    /// node, or `None` for a session opened without it.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    pub(crate) fn shm(&self) -> Option<&std::sync::Arc<crate::shm::SessionShm>> {
+        match self {
+            Self::Registry(state) => {
+                state.abi_extension::<std::sync::Arc<crate::shm::SessionShm>>()
+            }
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.abi_extension::<std::sync::Arc<crate::shm::SessionShm>>(),
+        }
+    }
+
     /// Where the transports and links of this session are read, and their coming and going is
     /// watched.
     pub(crate) fn face_source(&self) -> FaceSource {
@@ -419,7 +435,16 @@ pub(crate) unsafe fn open_session(
     }
     #[cfg(feature = "router-node")]
     if let Some(role) = node {
-        return open_node(this_, arguments, role);
+        return open_node(
+            this_,
+            arguments,
+            role,
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            shm_keys,
+        );
     }
     match arguments.run() {
         Ok(state) => {
@@ -460,12 +485,28 @@ unsafe fn open_node(
     this_: *mut z_owned_session_t,
     arguments: wz_capi_core::open_plan::OpenArguments,
     role: NodeRole,
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    shm_keys: wz_capi_core::open_plan::ShmKeys,
 ) -> ZResult {
     if arguments.router_refusal().is_some() {
         return Z_EINVAL;
     }
     match arguments.run_node(role) {
         Ok(node) => {
+            // The node's own shared-memory provider, as its config states it and as the
+            // registry's is: built on first ask.
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            let _ = node.set_abi_extension(crate::shm::SessionShm::from_config(
+                shm_keys.enabled,
+                shm_keys.transport_optimization,
+                shm_keys.pool_size,
+            ));
             let h =
                 Box::into_raw(Box::new(SessionHandle::Node(std::sync::Arc::new(node)))) as Handle;
             // SAFETY: the caller's contract.

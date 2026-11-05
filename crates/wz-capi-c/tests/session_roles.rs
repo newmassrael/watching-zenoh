@@ -79,7 +79,18 @@ use wz_capi_c::querier::{
 use wz_capi_c::query::{
     z_closure_query, z_declare_queryable, z_query_reply, z_undeclare_queryable,
 };
-#[cfg(feature = "router-node")]
+// The tests that read what a node does not carry: the resource snapshot, and the provider of a
+// session opened with shared memory off.
+#[cfg(all(
+    feature = "router-node",
+    any(
+        feature = "resource-snapshot",
+        all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        )
+    )
+))]
 use wz_capi_c::result::Z_EUNAVAILABLE;
 use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
 #[cfg(feature = "router-node")]
@@ -913,6 +924,140 @@ fn a_put_of_shared_memory_on_a_node_reaches_a_peer_as_shared_memory() {
         );
         close_session(node);
         close_session(peer);
+    }
+}
+
+/// A node has a shared-memory provider of its own, as the registry has: `z_obtain_shm_provider`
+/// answers ready (it waits for the build), a chunk allocated from that provider and put by the
+/// node reaches a registry peer as a chunk of shared memory, and a session opened with shared
+/// memory off says the provider is disabled.
+#[cfg(all(
+    feature = "router-node",
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+#[test]
+fn a_node_obtains_its_own_shared_memory_provider() {
+    use wz_capi_c::shm::{
+        z_buf_layout_alloc_result_t, z_bytes_from_shm_mut, z_moved_shared_shm_provider_t,
+        z_moved_shm_mut_t, z_obtain_shm_provider, z_owned_shared_shm_provider_t,
+        z_shared_shm_provider_drop, z_shared_shm_provider_loan, z_shared_shm_provider_loan_as,
+        z_shm_mut_data_mut, z_shm_mut_loan_mut, z_shm_provider_alloc, z_shm_provider_state,
+        ZC_BUF_LAYOUT_ALLOC_STATUS_OK, Z_SHM_PROVIDER_STATE_DISABLED, Z_SHM_PROVIDER_STATE_READY,
+    };
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    let mut off_entries = stated("peer", Some(free_port()), None);
+    off_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    off_entries.push(("transport/shared_memory/enabled", "false".to_owned()));
+    // SAFETY: a fresh config and session.
+    let (rc, off) = unsafe { open_with(&off_entries) };
+    assert_eq!(rc, Z_OK, "a node with shared memory off opens");
+    // SAFETY: the sessions are live; the context is leaked rather than freed under a delivery.
+    unsafe {
+        let mut state: z_shm_provider_state = -1;
+        let mut obtained: z_owned_shared_shm_provider_t = std::mem::zeroed();
+        assert_eq!(
+            z_obtain_shm_provider(z_session_loan(&off), true, &mut obtained, &mut state),
+            Z_EUNAVAILABLE
+        );
+        assert_eq!(
+            state, Z_SHM_PROVIDER_STATE_DISABLED,
+            "shared memory off is a provider that is disabled"
+        );
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let in_shm = Arc::new(AtomicUsize::new(0));
+        let ctx = Box::into_raw(Box::new(ShmCtx {
+            seen: seen.clone(),
+            in_shm: in_shm.clone(),
+        }));
+        let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample_shm), None, ctx.cast());
+        let ke = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&peer),
+                &mut sub,
+                z_view_keyexpr_loan(&view),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+
+        assert_eq!(
+            z_obtain_shm_provider(z_session_loan(&node), true, &mut obtained, &mut state),
+            Z_OK
+        );
+        assert_eq!(
+            state, Z_SHM_PROVIDER_STATE_READY,
+            "the node's provider is ready"
+        );
+        let provider = z_shm_provider_loan_of(&obtained);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while in_shm.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            let mut alloc: z_buf_layout_alloc_result_t = std::mem::zeroed();
+            z_shm_provider_alloc(&mut alloc, provider, 5);
+            assert_eq!(alloc.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+            std::ptr::copy_nonoverlapping(
+                b"chunk".as_ptr(),
+                z_shm_mut_data_mut(z_shm_mut_loan_mut(&mut alloc.buf)),
+                5,
+            );
+            let mut payload: z_owned_bytes_t = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_from_shm_mut(
+                    &mut payload,
+                    (&mut alloc.buf as *mut wz_capi_c::shm::z_owned_shm_mut_t)
+                        .cast::<z_moved_shm_mut_t>(),
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                z_put(
+                    z_session_loan(&node),
+                    z_view_keyexpr_loan(&view),
+                    (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+                    std::ptr::null_mut(),
+                ),
+                Z_OK
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            in_shm.load(Ordering::SeqCst) > 0,
+            "a chunk of the node's own provider did not reach the peer as shared memory"
+        );
+        z_shared_shm_provider_drop(
+            (&mut obtained as *mut z_owned_shared_shm_provider_t)
+                .cast::<z_moved_shared_shm_provider_t>(),
+        );
+        close_session(node);
+        close_session(peer);
+        close_session(off);
+    }
+
+    /// The provider an owned shared provider is, loaned for an allocation.
+    unsafe fn z_shm_provider_loan_of(
+        owned: &z_owned_shared_shm_provider_t,
+    ) -> *const wz_capi_c::shm::z_loaned_shm_provider_t {
+        z_shared_shm_provider_loan_as(z_shared_shm_provider_loan(owned))
     }
 }
 
