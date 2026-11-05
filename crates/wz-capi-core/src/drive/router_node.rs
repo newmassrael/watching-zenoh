@@ -25,7 +25,9 @@ use wz_runtime_tokio::session_open::DialConfig;
 
 use super::*;
 
+mod engine;
 mod local_face;
+pub use engine::PeriodicJob;
 use local_face::QueryHold;
 pub use local_face::{
     FinalHandler, LivelinessHandler, LocalLiveliness, MatchHandler, ReplyHandler, ReplyIngress,
@@ -67,7 +69,13 @@ pub struct RouterState {
     listen_locators: Vec<String>,
     /// The node's own face, for liveliness: what the program is told of the tokens of the other
     /// faces, and where its own tokens are counted.
-    liveliness: LocalLiveliness,
+    ///
+    /// Counted, so that what ends a query of the node (the cancellation the port's `get_on_wire`
+    /// records) can hold the face on its own.
+    liveliness: Arc<LocalLiveliness>,
+    /// What the node keeps to be the port's engine (`SessionEngine`): its clock, its ids, the
+    /// subscriptions and the periodic jobs it holds for the program.
+    engine: engine::EngineState,
     /// The request ids the node's own face gives its queries, so that the replies the router
     /// tells the face find the query they answer.
     next_request: AtomicU64,
@@ -703,7 +711,8 @@ pub(crate) fn open_router_blocking(
                 zid: wire_zid,
                 forwarder,
                 listen_locators,
-                liveliness,
+                liveliness: Arc::new(liveliness),
+                engine: engine::EngineState::new(),
                 next_request: AtomicU64::new(1),
                 shutdown,
                 stop,

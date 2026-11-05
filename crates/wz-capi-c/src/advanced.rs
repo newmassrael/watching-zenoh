@@ -88,7 +88,7 @@ use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{z_publisher_options_t, z_publisher_put_options_t};
 use crate::result::{ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_handle, session_state, SessionHandle};
+use crate::session::{not_a_registry, session_handle, SessionHandle};
 use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
@@ -1289,7 +1289,9 @@ type MissSlot = Arc<ListenerSet<CMissClosure>>;
 
 /// Behind a `ze_owned_advanced_subscriber_t` handle.
 struct AdvSubState {
-    shared: Arc<SharedSession>,
+    /// The session the subscriber is declared on, for what the subscriber's own host does not
+    /// reach (the detection of publishers declares a liveliness subscriber beside it).
+    host: AdvSubHost,
     /// The subscriber the session's engine hosts. Dropping it retracts everything it declared, in the
     /// order the runtime's own subscriber does, so an implicit `z_drop` and an explicit
     /// `ze_undeclare_advanced_subscriber` take the identical path.
@@ -1300,6 +1302,15 @@ struct AdvSubState {
     /// R311y568 — the keyexpr this subscriber was declared under, so
     /// [`ze_advanced_subscriber_keyexpr`] can answer.
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
+}
+
+/// The session an advanced subscriber is declared on: the registry's, or, in a build with
+/// `router-node`, a node. The host of the subscriber itself is written over the port's engine, so
+/// it is the same on both.
+enum AdvSubHost {
+    Registry(Arc<SharedSession>),
+    #[cfg(feature = "router-node")]
+    Node(Arc<wz_capi_core::drive::RouterState>),
 }
 
 /// Read the state behind a loaned advanced subscriber.
@@ -1514,7 +1525,7 @@ unsafe fn declare_subscriber_state(
     *owned = z_owned_closure_sample_t::null_value();
 
     // SAFETY: the caller's contract for both handles.
-    let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+    let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
         keyexpr_str(key_expr)
     }) else {
         return Err(unsafe { not_a_registry(session) });
@@ -1526,7 +1537,21 @@ unsafe fn declare_subscriber_state(
     let miss: MissSlot = Arc::new(ListenerSet::new());
     // SAFETY: the caller's contract.
     let opts = unsafe { advanced_subscriber_options(options) };
-    let engine = state.shared.as_engine();
+    // A build without `router-node` holds the registry alone, and the match has the one arm.
+    #[cfg_attr(
+        not(feature = "router-node"),
+        allow(clippy::infallible_destructuring_match)
+    )]
+    let (host, engine) = match held {
+        SessionHandle::Registry(state) => (
+            AdvSubHost::Registry(state.shared.clone()),
+            state.shared.as_engine(),
+        ),
+        // A node is an engine of its own: its data plane hosts the subscription, its face the
+        // liveliness, and the history and the recovery are queries of its face.
+        #[cfg(feature = "router-node")]
+        SessionHandle::Node(node) => (AdvSubHost::Node(Arc::clone(node)), node.as_engine()),
+    };
     let subscriber = {
         let miss = miss.clone();
         let mut inner = crate::sub::make_subscriber_callback(cclosure);
@@ -1547,7 +1572,7 @@ unsafe fn declare_subscriber_state(
         _ => Z_EGENERIC,
     })?;
     let mut boxed = Box::new(AdvSubState {
-        shared: state.shared.clone(),
+        host,
         subscriber,
         miss,
         keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
@@ -1992,20 +2017,33 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         let mut opts = wz_runtime_tokio::session::LivelinessSubscriberOptions::default();
         opts.history = history;
         let declared = ke.clone();
-        let id = state.shared.declare_liveliness_subscriber(ke, opts, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || {
-                Box::new(crate::liveliness::make_liveliness_callback(closure.clone())) as Box<_>
-            })
-        });
-        // SAFETY: `liveliness_subscriber` was checked non-null above.
-        unsafe {
-            *liveliness_subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
-                &state.shared,
-                id,
-                declared,
-            ))
+        let handle = match &state.host {
+            AdvSubHost::Registry(shared) => {
+                let id = shared.declare_liveliness_subscriber(ke, opts, {
+                    let closure = Arc::new(cclosure);
+                    Arc::new(move || {
+                        Box::new(crate::liveliness::make_liveliness_callback(closure.clone()))
+                            as Box<_>
+                    })
+                });
+                subscriber_state_handle(shared, id, declared)
+            }
+            // A node's own face is told the tokens of the other faces; the subscription is hosted
+            // there and withdrawn there.
+            #[cfg(feature = "router-node")]
+            AdvSubHost::Node(node) => {
+                let id = node.liveliness().subscribe(
+                    &ke,
+                    opts.history,
+                    Box::new(crate::liveliness::make_liveliness_callback(Arc::new(
+                        cclosure,
+                    ))),
+                );
+                crate::sub::node_liveliness_state_handle(node, id, declared)
+            }
         };
+        // SAFETY: `liveliness_subscriber` was checked non-null above.
+        unsafe { *liveliness_subscriber = z_owned_subscriber_t::from_handle(handle) };
         Z_OK
     })
 }
@@ -2074,7 +2112,7 @@ mod tests {
         )
         .expect("a plain subscriber declares on a session with no face");
         let mut state = Box::new(AdvSubState {
-            shared,
+            host: AdvSubHost::Registry(shared),
             subscriber,
             miss: Arc::new(ListenerSet::new()),
             keyexpr: crate::keyexpr::DeclaredKeyexpr::new("demo/data".to_owned()),

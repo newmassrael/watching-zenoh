@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The advanced publisher on a node opened through the C ABI.
+//! The advanced publisher and subscriber on a node opened through the C ABI.
 //!
-//! The composite is the registry's own (cache ring, `@adv` liveliness token, sequence numbers);
-//! what is under test is that a node hosts it on its data plane: a put reaches a peer, the cache
-//! queryable answers the history of a subscriber that comes late, the publisher names the node it
-//! is declared on, and its matching reads the node's tables.
+//! The composites are the registry's own (cache ring, `@adv` liveliness token, sequence numbers,
+//! history and recovery queries); what is under test is that a node hosts them: a put reaches a
+//! peer, the cache queryable answers the history of a subscriber that comes late, the publisher
+//! names the node it is declared on, its matching reads the node's tables, and a subscriber the
+//! node holds is told the history of a peer's publisher, hears what follows, and detects the
+//! publisher.
 
 #![cfg(all(
     feature = "router-node",
@@ -27,7 +29,8 @@ use wz_capi_c::abi::{
 use wz_capi_c::advanced::{
     ze_advanced_publisher_delete, ze_advanced_publisher_id, ze_advanced_publisher_loan,
     ze_advanced_publisher_options_default, ze_advanced_publisher_options_t,
-    ze_advanced_publisher_put, ze_advanced_subscriber_loan, ze_advanced_subscriber_options_default,
+    ze_advanced_publisher_put, ze_advanced_subscriber_detect_publishers,
+    ze_advanced_subscriber_loan, ze_advanced_subscriber_options_default,
     ze_advanced_subscriber_options_t, ze_declare_advanced_publisher,
     ze_declare_advanced_subscriber, ze_moved_advanced_publisher_t, ze_moved_advanced_subscriber_t,
     ze_owned_advanced_publisher_t, ze_owned_advanced_subscriber_t, ze_undeclare_advanced_publisher,
@@ -40,7 +43,7 @@ use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::matching::{z_matching_status_t, ze_advanced_publisher_get_matching_status};
 use wz_capi_c::result::Z_OK;
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
-use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
+use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber, z_undeclare_subscriber};
 use wz_capi_c::zid::z_info_zid;
 use wz_runtime_tokio_test_support::free_port;
 
@@ -282,6 +285,146 @@ fn the_cache_of_an_advanced_publisher_on_a_node_answers_a_late_subscriber() {
         );
 
         let _ = ze_advanced_subscriber_loan(&subscriber);
+        assert_eq!(
+            ze_undeclare_advanced_subscriber(
+                (&mut subscriber as *mut ze_owned_advanced_subscriber_t)
+                    .cast::<ze_moved_advanced_subscriber_t>()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            ze_undeclare_advanced_publisher(
+                (&mut publisher as *mut ze_owned_advanced_publisher_t)
+                    .cast::<ze_moved_advanced_publisher_t>()
+            ),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
+    }
+}
+
+/// The advanced subscriber a node holds: a registry peer's advanced publisher put three samples
+/// before it existed, and the node's subscriber is told them as its history (a query of the node's
+/// own face, answered by the peer's cache), then hears what the peer puts after (a subscriber on
+/// the node's data plane).
+#[test]
+fn an_advanced_subscriber_on_a_node_replays_history_and_hears_what_follows() {
+    unsafe {
+        let (node, peer) = node_and_peer();
+        let mut publisher = declare_publisher(&peer, 8);
+        for n in 0..3 {
+            put(&publisher, &format!("sample {n}"));
+        }
+        // The peer's queryable is declared to the node over the link: let it arrive before the
+        // node's subscriber asks for its history.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let ctx = Arc::as_ptr(&seen).cast_mut().cast::<c_void>();
+        let key = view(KEY);
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample), None, ctx);
+        let mut options: ze_advanced_subscriber_options_t = std::mem::zeroed();
+        ze_advanced_subscriber_options_default(&mut options);
+        options.history.is_enabled = true;
+        options.history.detect_late_publishers = true;
+        let mut subscriber: ze_owned_advanced_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            ze_declare_advanced_subscriber(
+                z_session_loan(&node),
+                &mut subscriber,
+                z_view_keyexpr_loan(&key),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                &mut options,
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            wait_for(&seen, 3),
+            3,
+            "the node's subscriber is told the cached samples"
+        );
+
+        // What the peer puts now reaches the node's subscriber live.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.load(Ordering::SeqCst) < 4 && Instant::now() < deadline {
+            put(&publisher, "live");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            seen.load(Ordering::SeqCst) >= 4,
+            "a put after the subscriber never reached it"
+        );
+
+        assert_eq!(
+            ze_undeclare_advanced_subscriber(
+                (&mut subscriber as *mut ze_owned_advanced_subscriber_t)
+                    .cast::<ze_moved_advanced_subscriber_t>()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            ze_undeclare_advanced_publisher(
+                (&mut publisher as *mut ze_owned_advanced_publisher_t)
+                    .cast::<ze_moved_advanced_publisher_t>()
+            ),
+            Z_OK
+        );
+        close_session(node);
+        close_session(peer);
+    }
+}
+
+/// The node's advanced subscriber detects a publisher that declares itself on the peer: its
+/// liveliness subscriber, declared on the node's own face, is told the `@adv` token.
+#[test]
+fn an_advanced_subscriber_on_a_node_detects_the_publisher_of_a_peer() {
+    unsafe {
+        let (node, peer) = node_and_peer();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let ctx = Arc::as_ptr(&seen).cast_mut().cast::<c_void>();
+        let key = view(KEY);
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample), None, std::ptr::null_mut());
+        let mut subscriber: ze_owned_advanced_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            ze_declare_advanced_subscriber(
+                z_session_loan(&node),
+                &mut subscriber,
+                z_view_keyexpr_loan(&key),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        let mut detection: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut detection, Some(on_sample), None, ctx);
+        let mut detector: wz_capi_c::abi::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            ze_advanced_subscriber_detect_publishers(
+                ze_advanced_subscriber_loan(&subscriber),
+                &mut detector,
+                (&mut detection as *mut z_owned_closure_sample_t)
+                    .cast::<z_moved_closure_sample_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+
+        let mut publisher = declare_publisher(&peer, 4);
+        assert!(
+            wait_for(&seen, 1) >= 1,
+            "the node's subscriber never learned of the publisher"
+        );
+
+        assert_eq!(
+            z_undeclare_subscriber(
+                (&mut detector as *mut wz_capi_c::abi::z_owned_subscriber_t)
+                    .cast::<wz_capi_c::abi::z_moved_subscriber_t>()
+            ),
+            Z_OK
+        );
         assert_eq!(
             ze_undeclare_advanced_subscriber(
                 (&mut subscriber as *mut ze_owned_advanced_subscriber_t)

@@ -22,6 +22,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "router-node")]
+use wz_capi_core::drive::PeriodicJob;
 use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{
     QblId, QueryCallback, QueryHolder, QueryableSink, SessionEngine, Ticker, TokenId, WireKey,
@@ -270,32 +272,14 @@ impl Drop for NodeToken {
     }
 }
 
-/// The period of a heartbeat beacon: a thread that ticks until it is told to stop. Dropping it
-/// tells the thread, which ends at its next wake without being waited for (the tick may be what
-/// drops it).
-#[cfg(feature = "router-node")]
-pub(crate) struct NodeTimer {
-    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-}
-
-#[cfg(feature = "router-node")]
-impl Drop for NodeTimer {
-    fn drop(&mut self) {
-        let (flag, wake) = &*self.stop;
-        *flag
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
-        wake.notify_all();
-    }
-}
-
 #[cfg(feature = "router-node")]
 impl AdvancedPublisherPlane for NodePlane {
     type Publisher = ();
     type Queryable = NodeCacheQueryable;
     type Token = NodeToken;
     type Beacon = ();
-    type Timer = Option<NodeTimer>;
+    /// The period of the heartbeat beacon: a job that ticks until it is dropped.
+    type Timer = Option<PeriodicJob>;
 
     fn node_hlc(&self) -> &NodeHlc {
         &self.hlc
@@ -347,31 +331,9 @@ impl AdvancedPublisherPlane for NodePlane {
         &self,
         period: Duration,
         tick: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Option<NodeTimer> {
-        let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let waiting = Arc::clone(&stop);
-        std::thread::Builder::new()
-            .name("wz-node-beacon".into())
-            .spawn(move || {
-                let (flag, wake) = &*waiting;
-                loop {
-                    let guard = flag
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let (guard, _) = wake
-                        .wait_timeout_while(guard, period, |stopped| !*stopped)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if *guard {
-                        return;
-                    }
-                    drop(guard);
-                    if !tick() {
-                        return;
-                    }
-                }
-            })
-            .ok()?;
-        Some(NodeTimer { stop })
+    ) -> Option<PeriodicJob> {
+        // The node's own periodic job, the one its engine runs the advanced subscriber's with.
+        PeriodicJob::start(period, tick)
     }
 
     fn publish(

@@ -1132,8 +1132,12 @@ Each lands whole with its surface lines, tests and faults in one round.
       one coming and going, read off the node's own face table through the one `FaceSource`
       the registry shares (`SessionHandle::face_source`), then what is left (the resource
       snapshot, which counts the messages a session received and a node does not count, so
-      it answers unavailable and not a snapshot of nothing; the advanced subscriber, the
-      group), and the advanced publisher is carried: the composite is the registry's own
+      it answers unavailable and not a snapshot of nothing; the group), and the advanced
+      subscriber is carried: its host is written over the port's engine, and a node is one
+      (`RouterState` implements `SessionEngine`, so that the subscriber is hosted on the data
+      plane, its liveliness on the node's own face, its history and recovery are queries of
+      that face and its periodic jobs run on the node's own `PeriodicJob`, the one the
+      advanced publisher's heartbeat runs on); and the advanced publisher is carried: the composite is the registry's own
       (`AdvancedPublisherOn`), hosted on a node by `NodePlane`, whose cache queryable is hosted
       on the node's data plane, whose `@adv` token is the node's own liveliness token, whose
       puts are the node's publications under the node's one clock (`RouterForwarder::node_hlc`,
