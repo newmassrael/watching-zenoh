@@ -8,6 +8,11 @@ rules themselves stayed in `CLAUDE.md`.
 
 ## Local CI gates (read before a push or when a hook refuses)
 
+The whole gate is moving from hosted CI to the build fleet, judged before a
+commit lands; the structure and its stages are in `docs/verdicts-in-the-fleet.md`.
+Today `bx --checks ci` runs every lane of `scripts/run-ci.sh` as a fleet unit
+(`--` plus `python3 scripts/lib/runci_plan.py --only <ids>` runs a subset).
+
 `.githooks/` provides three hooks. One-time install per clone:
 
 ```

@@ -1115,6 +1115,12 @@ round_fed_gates=(
     # A sharded job's matrix lists exactly the shards its count names; static, a yaml read.
     "shard_matrix_binding.py"
     "unwired_lane_lint.py"
+    # R4268 — the planner of `[checks.ci]` (bx.toml): the dispatch table read as
+    # the fleet's units. A round that edits the table feeds it, and a table it
+    # cannot read is a gate the fleet can no longer run, so the push sees it.
+    # MEASURED: well under a second each, a text read with no build.
+    "runci_plan.py --selftest"
+    "runci_plan.py --check"
     # R2659 — the link BEFORE `unwired_lane_lint`'s. That one checks lane ->
     # ci.yml; this checks test -> lane, so the chain is test -> lane -> workflow
     # and this is its missing first link. Both exist for the same reason, stated

@@ -2220,6 +2220,10 @@ layer_c0_test_discipline() {
     # one of them created by the round that closed the sibling debt. See the
     # script's docstring for why this is a gate and not a fourth comment.
     python3 scripts/lib/unwired_lane_lint.py || return 1
+    # R4268 — the planner of bx.toml's `[checks.ci]`, which hands this table to
+    # the fleet as one unit per lane (docs/verdicts-in-the-fleet.md).
+    python3 scripts/lib/runci_plan.py --selftest || return 1
+    python3 scripts/lib/runci_plan.py --check || return 1
     # R311y922 — the GATE TEST-PIN lint, item 232's own round. Several lanes
     # pin a SET of test names that must be PRESENT in a feature build, and
     # that pin goes stale when the test is renamed or moved. It has cost two

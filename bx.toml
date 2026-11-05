@@ -157,3 +157,21 @@ verify = "bash scripts/run-ci.sh"
 run = "bash scripts/regen-codegen.sh"
 inputs = ["**"]
 outputs = ["out/**"]
+
+# THE WHOLE GATE AS A SET OF CHECKS the fleet judges unit by unit (bx RFC 0004): `bx --checks ci`.
+# A unit is one lane of `scripts/run-ci.sh`, run the way a hosted job runs it; the planner reads the
+# lanes from the script's dispatch table and its header says why each field of a unit is what it is
+# (`scripts/lib/runci_plan.py`). This is the first step of judging every commit before it enters
+# `main`, in the fleet, instead of in the hosted runner pool this account shares with its other
+# repositories (measured 2026-11-05: 20 of 20 slots taken for five hours, one run per seven pushes).
+#
+# NOT `cache = true` yet. A kept pass is only right when the verdict is a function of its key, and
+# the key holds the tree and the command but not the machine: a lane's oracles (zenohd, zenoh-c,
+# pico, the Zephyr SDK) are provisioned per machine today, so the same tree can pass on one machine
+# and decline on another. The verdicts are kept once the units run in an image the tree declares
+# (bx RFC 0034), which puts that environment in the key.
+#
+# `local = "never"`: the whole gate is not run on the machine a session types on.
+[checks.ci]
+plan = ["python3", "scripts/lib/runci_plan.py"]
+local = "never"
