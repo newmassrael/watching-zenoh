@@ -562,11 +562,12 @@ pub fn decode_responder_ext_body(body: &[u8]) -> Option<(&[u8], u32)> {
 /// a record read where its frame lies, so the two receive paths cannot disagree about which
 /// extension is the responder.
 #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
-pub(crate) fn response_responder<E: crate::ext_view::ExtEntryView>(
-    extensions: &[E],
-) -> Option<(&[u8], u32)> {
-    let ext = crate::ext_view::find_by_eid(extensions, crate::ext_header::network_eid::RESPONDER)?;
-    decode_responder_ext_body(ext.plain_zbuf()?)
+pub(crate) fn response_responder<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
+    extensions: impl IntoIterator<Item = T>,
+) -> Option<(&'c [u8], u32)> {
+    let ext =
+        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::network_eid::RESPONDER)?;
+    decode_responder_ext_body(ext.plain_zbuf_in()?)
 }
 
 /// A8b — gate a loopback Put reply's staged attachment on the SAME inner

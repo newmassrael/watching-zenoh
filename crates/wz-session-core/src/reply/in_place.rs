@@ -9,8 +9,10 @@
 //! [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace)
 //! instead of projecting it into a boxed owned message. This module is the
 //! pending-get side of that: the keyexpr is resolved without a `String`
-//! ([`resolve_wireexpr_view`]), the payload, the encodings and the attachment
-//! are read where they lie, and every pending get on the reply's rid is handed
+//! ([`resolve_wireexpr_viewed`]), the payload, the encodings and the attachment
+//! are read where they lie (the Response is read as its view, a few words and the
+//! bytes its chains occupy, so the walk holds no kilobyte-sized record on the
+//! stack), and every pending get on the reply's rid is handed
 //! a [`ReplyView`] over those bytes ([`LentReply`]) through the same matcher
 //! the owned path fires through ([`ReplyRegistry::fire_replies_for`]). A reply
 //! sink's contract was already a view borrowed for the call, so no sink
@@ -33,15 +35,33 @@
 #[cfg(feature = "alloc")]
 use core::cell::OnceCell;
 
-use wz_codecs::lent::{Response, ResponseVariant, Timestamp};
+#[cfg(any(
+    feature = "pubsub-put",
+    feature = "pubsub-delete",
+    feature = "query-reply"
+))]
+use wz_codecs::reply::ReplyViewVariant;
+use wz_codecs::response::{ResponseView, ResponseViewVariant};
+// The view's own timestamp and encoding: they hold their lists inline, where the lent record's
+// (`wz_codecs::lent`) are sized for the deployment's node.
+use wz_codecs::timestamp::Timestamp;
 
 use super::ReplyRegistry;
 use crate::bounded::Storage;
+use crate::ext_view::walked;
+#[cfg(any(
+    feature = "pubsub-put",
+    feature = "pubsub-delete",
+    feature = "query-reply"
+))]
+use crate::ext_view::ExtEntryBytes;
 use crate::reply_sink::{ReplyKind, ReplySink, ReplyView};
 use crate::sample::SourceInfo;
 #[cfg(feature = "alloc")]
 use crate::sample::TimestampHint;
-use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound, MappingSpaces};
+use crate::wireexpr_resolve::{
+    resolve_wireexpr_viewed, KeyexprBuf, KeyexprPastBound, MappingSpaces,
+};
 
 /// The reply a Response read in place is delivered as: every field a range of
 /// the frame or a value read off it, valid for the delivery call.
@@ -96,10 +116,10 @@ impl ReplyView for LentReply<'_, '_> {
     #[cfg(feature = "alloc")]
     fn timestamp(&self) -> Option<&TimestampHint> {
         let ts = self.timestamp?;
-        Some(
-            self.timestamp_hint
-                .get_or_init(|| TimestampHint::from_view(ts)),
-        )
+        Some(self.timestamp_hint.get_or_init(|| TimestampHint {
+            time: ts.time,
+            zid: ts.zid.into_inner().to_vec(),
+        }))
     }
     fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
         self.timestamp.map(|ts| crate::reply_stage::TimestampParts {
@@ -157,10 +177,12 @@ enum Fallback {
     feature = "pubsub-delete",
     feature = "query-reply"
 ))]
-fn lent_source_info(exts: &[wz_codecs::lent::ExtEntry<'_>]) -> Option<SourceInfo> {
+fn lent_source_info<'c, T: ExtEntryBytes<'c>>(
+    exts: impl IntoIterator<Item = T>,
+) -> Option<SourceInfo> {
     #[cfg(feature = "reply-source-info")]
     {
-        crate::sample::extract_source_info(exts)
+        crate::sample::extract_source_info_in(exts)
     }
     #[cfg(not(feature = "reply-source-info"))]
     {
@@ -190,10 +212,10 @@ enum AttachmentOf {
     feature = "pubsub-delete",
     feature = "query-reply"
 ))]
-fn lent_attachment<'r>(
-    exts: &'r [wz_codecs::lent::ExtEntry<'_>],
+fn lent_attachment<'c, T: ExtEntryBytes<'c>>(
+    exts: impl IntoIterator<Item = T>,
     of: AttachmentOf,
-) -> Option<&'r [u8]> {
+) -> Option<&'c [u8]> {
     #[cfg(feature = "pubsub-attachment")]
     {
         let ext_id = match of {
@@ -202,7 +224,7 @@ fn lent_attachment<'r>(
             #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
             AttachmentOf::Del => crate::attachment::ATTACHMENT_EXT_ID_DEL,
         };
-        crate::attachment::decode_attachment_ext(exts, ext_id)
+        crate::attachment::decode_attachment_ext_in(exts, ext_id)
     }
     #[cfg(not(feature = "pubsub-attachment"))]
     {
@@ -232,7 +254,7 @@ fn lent_timestamp<'r, 'f>(ts: Option<&'r Timestamp<'f>>) -> Option<&'r Timestamp
 
 /// An encoding read where its frame lies, as the id word and the schema text a lent reply
 /// carries.
-fn encoding_parts<'r>(encoding: &wz_codecs::lent::Encoding<'r>) -> (u32, Option<&'r str>) {
+fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Option<&'r str>) {
     (
         encoding.packed_id,
         encoding.schema.map(|schema| schema.into_inner()),
@@ -242,17 +264,27 @@ fn encoding_parts<'r>(encoding: &wz_codecs::lent::Encoding<'r>) -> (u32, Option<
 /// The body of `response` as a lent reply delivers it, `Ok(None)` for a body
 /// the owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
-fn lent_body<'r, 'f>(response: &'r Response<'f>) -> Result<Option<LentBody<'r, 'f>>, Fallback> {
+///
+/// The Response is read as its view, and each chain is walked where it lies, once for each
+/// field that reads it (the attachment and the source info each scan it for their own
+/// extension, as they scanned the held chain): the bytes they hand out stay in the frame.
+fn lent_body<'r, 'f>(response: &'r ResponseView<'f>) -> Result<Option<LentBody<'r, 'f>>, Fallback> {
     match &response.body {
-        ResponseVariant::CodecZenohReply(reply) => match &reply.body {
+        ResponseViewVariant::CodecZenohReply(reply) => match &reply.body {
             #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
-            wz_codecs::lent::ReplyVariant::CodecZenohMsgPut(put) => {
+            ReplyViewVariant::CodecZenohMsgPut(put) => {
                 let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
                     &put.extensions_has_0x12
                 else {
                     return Err(Fallback::Sliced);
                 };
-                let exts: &[wz_codecs::lent::ExtEntry<'f>] = crate::put_payload::chain(put);
+                // The whole chain of an inline Put: it carries no shared-memory marker.
+                let exts = || {
+                    crate::put_payload::view_chain(put)
+                        .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest))
+                        .into_iter()
+                        .flatten()
+                };
                 Ok(Some(LentBody {
                     kind: ReplyKind::Put,
                     payload: payload.into_inner(),
@@ -261,32 +293,26 @@ fn lent_body<'r, 'f>(response: &'r Response<'f>) -> Result<Option<LentBody<'r, '
                     put_encoding: put.encoding.as_ref().map(encoding_parts),
                     #[cfg(not(feature = "pubsub-encoding"))]
                     put_encoding: None,
-                    attachment: lent_attachment(exts, AttachmentOf::Put),
-                    source_info: lent_source_info(exts),
+                    attachment: lent_attachment(exts(), AttachmentOf::Put),
+                    source_info: lent_source_info(exts()),
                     timestamp: lent_timestamp(put.timestamp.as_ref()),
                 }))
             }
             #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
-            wz_codecs::lent::ReplyVariant::CodecZenohMsgDel(del) => {
-                let exts: &[wz_codecs::lent::ExtEntry<'f>] = del
-                    .extensions
-                    .as_ref()
-                    .map_or(&[][..], |chain| chain.as_slice());
-                Ok(Some(LentBody {
-                    kind: ReplyKind::Del,
-                    payload: &[],
-                    err_encoding: None,
-                    put_encoding: None,
-                    attachment: lent_attachment(exts, AttachmentOf::Del),
-                    source_info: lent_source_info(exts),
-                    timestamp: lent_timestamp(del.timestamp.as_ref()),
-                }))
-            }
+            ReplyViewVariant::CodecZenohMsgDel(del) => Ok(Some(LentBody {
+                kind: ReplyKind::Del,
+                payload: &[],
+                err_encoding: None,
+                put_encoding: None,
+                attachment: lent_attachment(walked(del.extensions.as_ref()), AttachmentOf::Del),
+                source_info: lent_source_info(walked(del.extensions.as_ref())),
+                timestamp: lent_timestamp(del.timestamp.as_ref()),
+            })),
             // An unknown inner body tag, or a kind this build does not deliver:
             // dropped, as the owned path drops it.
             _ => Ok(None),
         },
-        ResponseVariant::CodecZenohErr(err) => Ok(Some(LentBody {
+        ResponseViewVariant::CodecZenohErr(err) => Ok(Some(LentBody {
             kind: ReplyKind::Err,
             payload: err.payload.into_inner(),
             err_encoding: err.encoding.as_ref().map(encoding_parts),
@@ -295,7 +321,7 @@ fn lent_body<'r, 'f>(response: &'r Response<'f>) -> Result<Option<LentBody<'r, '
             source_info: None,
             timestamp: None,
         })),
-        ResponseVariant::Default { .. } => Ok(None),
+        ResponseViewVariant::Default { .. } => Ok(None),
     }
 }
 
@@ -306,7 +332,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// projection.
     pub(super) fn dispatch_response_in_place(
         &mut self,
-        response: &Response<'_>,
+        response: &ResponseView<'_>,
         spaces: MappingSpaces<'_>,
     ) {
         match self.deliver_lent(response, spaces) {
@@ -334,20 +360,17 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// fits, short of a timestamp hint a sink asks for.
     fn deliver_lent(
         &mut self,
-        response: &Response<'_>,
+        response: &ResponseView<'_>,
         spaces: MappingSpaces<'_>,
     ) -> Result<(), Fallback> {
         let Some(body) = lent_body(response)? else {
             return Ok(());
         };
-        let extensions: &[wz_codecs::lent::ExtEntry<'_>] = response
-            .extensions
-            .as_ref()
-            .map_or(&[][..], |chain| chain.as_slice());
+        // The Response's own chain is walked where it lies, once for each field that reads it.
         // A Response the nodes record on is delivered with a stack of its own to add to.
         #[cfg(feature = "pubsub-ts-stack")]
-        if crate::ext_view::find_by_eid(
-            extensions,
+        if crate::ext_view::find_by_eid_in(
+            walked(response.extensions.as_ref()),
             crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
         )
         .is_some()
@@ -355,7 +378,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             return Err(Fallback::Instrumented);
         }
         let mut composed = KeyexprBuf::new();
-        let keyexpr = match resolve_wireexpr_view(&response.keyexpr.body, spaces, &mut composed) {
+        let keyexpr = match resolve_wireexpr_viewed(&response.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
             // An error reply is not about a key: a node that expires a query it forwarded
             // (upstream's routing does) sends its `Timeout` with no key expression at all, and
@@ -378,8 +401,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             attachment: body.attachment,
             source_info: body.source_info,
             timestamp: body.timestamp,
-            responder: super::response_responder(extensions),
-            qos: crate::sample::extract_qos_in(extensions),
+            responder: super::response_responder(walked(response.extensions.as_ref())),
+            qos: crate::sample::extract_qos_in(walked(response.extensions.as_ref())),
             #[cfg(feature = "alloc")]
             timestamp_hint: OnceCell::new(),
         };
@@ -392,14 +415,21 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// lent form cannot represent is delivered exactly as it always was. Heap
     /// profile only.
     #[cfg(feature = "alloc")]
-    fn dispatch_owned_projection(&mut self, response: &Response<'_>, spaces: MappingSpaces<'_>) {
+    fn dispatch_owned_projection(
+        &mut self,
+        response: &ResponseView<'_>,
+        spaces: MappingSpaces<'_>,
+    ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
-        // ranges), so this projection cannot refuse a decoded Response. It
-        // consumes its view; the clone is of the view, not of the bytes.
-        if let Ok(owned) = response
-            .clone()
-            .try_into_owned_in::<crate::wire::WireStorage>()
-        {
+        // ranges), so this projection cannot refuse a decoded Response. The
+        // view is first filled into the codec's own record (the heap profile has the stack
+        // for its kilobyte, and this is the path of a Response the lent form cannot hold), and
+        // that record consumes itself into the owned one.
+        let mut record = wz_codecs::lent::Response::default();
+        if response.into_builder(&mut record).is_err() {
+            return;
+        }
+        if let Ok(owned) = record.try_into_owned_in::<crate::wire::WireStorage>() {
             self.dispatch_response(&owned, spaces);
         }
     }
@@ -505,7 +535,7 @@ mod tests {
         assert!(matches!(messages.as_slice(), [NetworkMessage::Response(_)]));
         owned.dispatch_messages(&messages, &peer);
         let (mut lent, lent_log) = recording();
-        let decoded = Response::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let decoded = ResponseView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         lent.dispatch_iteration_event(
             IterationEvent::InPlace(InPlaceRecord::response_of_frame(
                 &decoded,

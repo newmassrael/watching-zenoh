@@ -635,7 +635,7 @@ pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
 /// (`WireexprView`): the same two arms, which the view holds as the codec's own arm types (a
 /// wireexpr has no list, so each arm is its own view). The arm is copied into the codec's variant
 /// (an id and a reference to the suffix, a few words) and the rule is the one rule.
-#[cfg(feature = "codec-request")]
+#[cfg(any(feature = "codec-request", feature = "codec-response"))]
 pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
     body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
     spaces: MappingSpaces<'k>,

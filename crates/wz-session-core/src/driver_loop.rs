@@ -716,7 +716,7 @@ enum LentRecord<'a, 'f> {
         feature = "codec-response",
         any(feature = "alloc", feature = "rx-response")
     ))]
-    Response(&'a wz_codecs::lent::Response<'f>),
+    Response(&'a wz_codecs::response::ResponseView<'f>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-declare",
@@ -848,7 +848,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn response_of_frame(
-        response: &'a wz_codecs::lent::Response<'f>,
+        response: &'a wz_codecs::response::ResponseView<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -984,12 +984,12 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         }
     }
 
-    /// The Response, as it is decoded, its keyexpr, extensions and body ranges
-    /// of the frame. `None` when the record is of another kind.
+    /// The Response, read as its view where its frame lies: a few words and the bytes
+    /// its keyexpr, extensions and body occupy. `None` when the record is of another kind.
     ///
     /// Always `None` in a build that reads no Response off the wire (`rx-response`).
     #[cfg(feature = "codec-response")]
-    pub fn response(&self) -> Option<&'a wz_codecs::lent::Response<'f>> {
+    pub fn response(&self) -> Option<&'a wz_codecs::response::ResponseView<'f>> {
         match self.record {
             #[cfg(any(feature = "alloc", feature = "rx-response"))]
             LentRecord::Response(response) => Some(response),

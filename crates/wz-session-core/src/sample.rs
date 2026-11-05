@@ -930,7 +930,12 @@ pub fn extract_qos<S: ExtEntryStorage>(extensions: &[ExtEntryOwned<S>]) -> Optio
 /// chain of a record read where its frame lies, which is what the in-place
 /// receive path delivers a Put from. One predicate for both, so the two paths
 /// cannot disagree about which extension is the QoS.
-pub fn extract_qos_in<E: crate::ext_view::ExtEntryView>(extensions: &[E]) -> Option<QosLevel> {
+///
+/// It takes the entries the chain yields, by reference or by value (a chain walked where its
+/// frame lies), as [`extract_source_info_in`] does.
+pub fn extract_qos_in<E: crate::ext_view::ExtEntryView>(
+    extensions: impl IntoIterator<Item = E>,
+) -> Option<QosLevel> {
     for ext in extensions {
         if ext.eid() == crate::ext_header::network_eid::QOS {
             if let Some(value) = ext.zint() {

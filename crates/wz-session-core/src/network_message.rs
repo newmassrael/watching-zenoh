@@ -757,21 +757,10 @@ fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::Ex
 
 /// The chains a Response's body carries, for [`judge_response_chains`]: a
 /// Reply's own and its data body's (a Put's or a Del's), or an Err's.
-#[cfg(all(
-    feature = "codec-response",
-    any(
-        feature = "alloc",
-        all(
-            feature = "rx-response",
-            feature = "codec-frame",
-            any(
-                test,
-                feature = "session-unicast",
-                all(feature = "session-multicast", not(feature = "alloc"))
-            )
-        )
-    )
-))]
+///
+/// The owned message's only: a Response read where its frame lies walks its chains
+/// (`response_view_admission`) and holds none.
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
 enum ResponseBodyChain<'c, E> {
     /// A Reply's own chain, and the verdict on its data body's: a Put's is judged by
     /// [`judge_put_chain`], which reads its shared-memory marker at its place.
@@ -783,23 +772,9 @@ enum ResponseBodyChain<'c, E> {
 }
 
 /// The verdict on a Response: its own chain, then its body's, a Reply's own
-/// before its data's. One rule for the owned message and the Response read
-/// where its frame lies (`response_view_admission`).
-#[cfg(all(
-    feature = "codec-response",
-    any(
-        feature = "alloc",
-        all(
-            feature = "rx-response",
-            feature = "codec-frame",
-            any(
-                test,
-                feature = "session-unicast",
-                all(feature = "session-multicast", not(feature = "alloc"))
-            )
-        )
-    )
-))]
+/// before its data's. The rule of the owned message, which the Response read
+/// where its frame lies keeps over chains it walks (`response_view_admission`).
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
 fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
     body: ResponseBodyChain<'_, E>,
@@ -890,24 +865,65 @@ fn request_view_admission(
     )
 ))]
 fn response_view_admission(
-    response: &wz_codecs::lent::Response<'_>,
+    response: &wz_codecs::response::ResponseView<'_>,
 ) -> crate::ext_admit::ExtAdmission {
-    use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
-    use wz_codecs::lent::{ReplyVariant as R, ResponseVariant as B};
-    let body = match &response.body {
-        B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
-            let data = match &reply.body {
-                R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => judge_put_chain(put),
-                R::CodecZenohMsgDel(del) => judge_chain(C::Zenoh(Z::Del), del.extensions.entries()),
-            };
-            ResponseBodyChain::Reply {
-                reply: reply.extensions.entries(),
-                data,
-            }
-        }
-        B::CodecZenohErr(err) => ResponseBodyChain::Err(err.extensions.entries()),
-    };
-    judge_response_chains(response.extensions.entries(), body)
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
+    use crate::ext_view::walked;
+    use wz_codecs::reply::ReplyViewVariant as R;
+    use wz_codecs::response::ResponseViewVariant as B;
+    // The rule of [`judge_response_chains`] -- the envelope's chain, then a Reply's own before
+    // its data's, or an Err's -- over chains that are walked where the frame lies and not held,
+    // so no entry is decoded into a slot.
+    then_judge(
+        judge_headers(
+            C::Network(N::Response),
+            response
+                .extensions
+                .as_ref()
+                .map(|chain| walked(Some(chain)).map(|e| e.header)),
+        ),
+        || match &response.body {
+            B::CodecZenohReply(reply) | B::Default { body: reply, .. } => then_judge(
+                judge_headers(
+                    C::Zenoh(Z::Reply),
+                    reply
+                        .extensions
+                        .as_ref()
+                        .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                ),
+                || match &reply.body {
+                    // A Put holds its shared-memory marker as a place among its entries, so the
+                    // walk writes the marker's header at that place, as `judge_put_chain` reads a
+                    // held Put.
+                    R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => judge_headers(
+                        C::Zenoh(Z::Put),
+                        crate::put_payload::view_chain(put).map(|(rest, place)| {
+                            let entries = sce_forge_runtime::codec::Entries::entries(rest);
+                            let at = place.unwrap_or(usize::MAX);
+                            entries
+                                .clone()
+                                .take(at)
+                                .map(|e| e.header)
+                                .chain(place.map(|_| crate::put_payload::marker_header()))
+                                .chain(entries.skip(at).map(|e| e.header))
+                        }),
+                    ),
+                    R::CodecZenohMsgDel(del) => judge_headers(
+                        C::Zenoh(Z::Del),
+                        del.extensions
+                            .as_ref()
+                            .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                    ),
+                },
+            ),
+            B::CodecZenohErr(err) => judge_headers(
+                C::Zenoh(Z::Err),
+                err.extensions
+                    .as_ref()
+                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
+            ),
+        },
+    )
 }
 
 /// The batch a participant may act on: `messages` itself, or the refusal of the
@@ -1259,7 +1275,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         feature = "codec-response",
         any(feature = "alloc", feature = "rx-response")
     ))]
-    Response(&'r wz_codecs::lent::Response<'f>),
+    Response(&'r wz_codecs::response::ResponseView<'f>),
     /// A Declare decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
     #[cfg(all(
@@ -1575,9 +1591,13 @@ fn lend_response<'f>(
     cursor: &mut SceCursor<'f>,
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    // At the frame's lifetime, as `lend_push` decodes its record.
-    let mut response = wz_codecs::lent::Response::<'f>::default();
-    wz_codecs::lent::Response::decode_into(cursor, &mut response)
+    // Read as its view, as `lend_request` reads its record: a few words and the bytes its chains
+    // occupy, where the lent record is over a kilobyte (its extension lists are inline, sized for
+    // their declared maximum). `decode` refuses what `Response::decode` refuses, with the same
+    // error. It is decoded into the binding that lends it, at the frame's lifetime, in which a
+    // view is invariant.
+    let mut response = wz_codecs::response::ResponseView::<'f>::default();
+    wz_codecs::response::ResponseView::decode_into(cursor, &mut response)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(response_view_admission(&response))?;
     each(WalkedRecord::Response(&response))
