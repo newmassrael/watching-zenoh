@@ -69,17 +69,10 @@ const _: () = {
     );
 };
 
-/// Bytes of the session task's cell for a node that asks: what its state holds grows with the rows
-/// of the pending table (`CONFIG_WZ_LIMIT_MAX_PENDING_QUERIES`), each the key text and the sink.
-///
-/// Measured on the kit on 2026-10-23 by building the image with each size and running it: a table
-/// of 2 rows is refused at 512 bytes and held at 640, a table of 5 rows is refused at 1,152 and held
-/// at 1,216, so a row costs between about 170 and 235 bytes. A cell too small does not stop the
-/// build: the runtime refuses the session's task, counts it and says so on the console
-/// ("wz: FAIL - the runtime refused a task"), and the node never opens a session. `256` and `256` per
-/// row leave at least a fifth over the held sizes at both ends (768 for 2 rows, 1,536 for 5) and
-/// over the straight line between them, and are not a limit.
-pub const TASK_BYTES: usize = 256 + 256 * MAX_PENDING_QUERIES;
+/// The layer of the sessions of a node that asks, by its type: the session task's cell is derived
+/// from the events this layer makes (`fixed_client::TASK_BYTES`), so a row of the pending table
+/// (`CONFIG_WZ_LIMIT_MAX_PENDING_QUERIES`, each the key text and the sink) grows the cell with it.
+pub type Layer = GetterLayer<Clock, SAMPLES, INFLIGHT, ROWS>;
 
 /// What the node was asked to do and what has happened, in one `static`, all zero bytes.
 pub type KitPlan = Plan<Clock, SAMPLES, INFLIGHT, ROWS>;
@@ -97,7 +90,7 @@ pub const ASK: Ask = Ask {
 };
 
 /// The layer of the sessions of a node that asks.
-pub const fn layer() -> GetterLayer<Clock, SAMPLES, INFLIGHT, ROWS> {
+pub const fn layer() -> Layer {
     GetterLayer::new(&PLAN)
 }
 

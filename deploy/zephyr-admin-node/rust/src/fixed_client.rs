@@ -38,15 +38,17 @@ use wz::runtime_zephyr::net::await_board_ipv4;
 use wz::runtime_zephyr::net::{board_zid_fixed, ZephyrStack};
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
-use wz_runtime_coop::session_drive::SlotStack;
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, SlotStack};
 use wz_runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::text_out::LogPart;
 use wz_session_mcu::slot_client::Listening;
+use wz_session_mcu::slot_dial::EventsOf;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::NoPlane;
+use wz_session_mcu::slot_node::SessionLayer;
 use wz_session_mcu::slot_node::{
     ClientNode, Declared, Document, Entities, NodeIdentity, NodeLoop, NodePort, NodeStorage,
     SIGNING_KEY_BYTES,
@@ -62,17 +64,25 @@ use crate::{
 const SESSIONS: usize = 1;
 /// The runtime's task table: a pump task per session, and nothing else runs as a task.
 const TASKS: usize = SESSIONS;
-/// Bytes of one task cell: the pump's handle and the application layer's state. The layer is a
-/// few pointers, because a node that asks nothing keeps no table of requests (`Answering`, with
-/// the pending-query limits at 0), and an `async fn` holds a by-value argument twice. A task the
-/// cell cannot hold is refused and counted, and the loop says so on the console ("wz: FAIL - ...")
-/// rather than run a node that never starts a session. A node that asks (`get`) keeps the session's
-/// pending queries in that state, so its cell grows with the rows of that table
-/// (`fixed_get::TASK_BYTES`, from sizes measured on the kit).
+/// The application layer of the node's sessions: the node that asks nothing keeps no table of
+/// requests (`Answering`, with the pending-query limits at 0), and a node that asks (`get`) keeps
+/// the session's pending queries in it.
 #[cfg(not(feature = "get"))]
-const TASK_BYTES: usize = 384;
+type AskLayer = Answering;
 #[cfg(feature = "get")]
-const TASK_BYTES: usize = crate::fixed_get::TASK_BYTES;
+type AskLayer = crate::fixed_get::Layer;
+/// The link driver of the node's stack, which the session's pump is generic over.
+type Driver = <Stack as SlotStack>::Driver;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
+/// image's types (the pump's handle and the application layer's state, the layer being most of it,
+/// and growing with the rows of the pending table for a node that asks), and not a figure written
+/// beside it: a layer that grows grows the cell, and the cell is never one the spawn refuses.
+const TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    <Stack as SlotStack>::Pump,
+    Driver,
+    EventsOf<<AskLayer as SessionLayer<Clock, Driver>>::Events>,
+>();
 /// Timers the runtime holds: the handshake and lease deadlines of the session.
 const TIMERS: usize = 4;
 /// Extra bytes a link's receive buffer holds beyond one batch, so a datagram that carries a batch
