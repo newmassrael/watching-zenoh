@@ -11,12 +11,14 @@
 # It exists for the measurement that decides whether a crate's integration tests are merged into
 # one executable (`merge_tests.py`): run it before the move and after it, from the same host, and
 # read `AB build`, `AB debug_kb` and `AB executables`. The target directory is its own
-# (`target-ab-<label>` beside the crates), so the figures do not depend on what an earlier build
+# (`crates/target-ab-<label>`), so the figures do not depend on what an earlier build
 # left, and it is deleted at the end.
 set -u
 crate="${1:?crate}"
 label="${2:?label}"
 shift 2
+# The cargo workspace is `crates/`, wherever the caller stands (a build host starts at the root).
+cd "$(dirname "$0")/../../crates" || exit 1
 T="$PWD/target-ab-$label"
 rm -rf "$T"
 export CARGO_TARGET_DIR="$T"
