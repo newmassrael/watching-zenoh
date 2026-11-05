@@ -78,8 +78,8 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 #[cfg(test)]
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::sink::SampleView;
-use wz_session_core::storage_config::StorageConfig;
 use wz_storage::storage_backend::{MemoryStorage, StorageBackend, StorageReadError};
+use wz_storage::storage_config::StorageConfig;
 use wz_storage::storage_state::StorageState;
 
 use wz_runtime_core::TimeSource;

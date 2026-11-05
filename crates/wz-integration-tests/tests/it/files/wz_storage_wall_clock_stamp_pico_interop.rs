@@ -88,7 +88,7 @@ use wz_runtime_tokio::session_open::{accept_and_open_session, DialedLink, DEFAUL
 use wz_runtime_tokio::storage_service::StorageService;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::storage_config::StorageConfig;
+use wz_storage::storage_config::StorageConfig;
 
 const ITER_CAP: usize = 4096;
 /// The storage keyexpr the wz `StorageService` captures on; `demo/clock`

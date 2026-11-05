@@ -298,7 +298,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// is stored under `<rest>` (and `<prefix>` exactly under the `None`
     /// mount-root slot), and restored to its full keyexpr on a query reply.
     /// `None` is equivalent to [`new`](Self::new), hydration included. The
-    /// [`crate::storage_state`] driver / [`wz_session_core::storage_config::StorageConfig`]
+    /// [`crate::storage_state`] driver / [`crate::storage_config::StorageConfig`]
     /// supply the prefix.
     #[cfg(feature = "storage-mgr-strip-prefix")]
     pub fn with_strip_prefix(

@@ -53,8 +53,8 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
-use wz_session_core::storage_config::GarbageCollectionConfig;
 use wz_storage::storage_backend::StorageBackend;
+use wz_storage::storage_config::GarbageCollectionConfig;
 use wz_storage::storage_state::StorageState;
 
 use crate::session::{Session, Unicast};
@@ -187,8 +187,8 @@ mod tests {
     use crate::storage_service::StorageService;
     use core::time::Duration;
     use wz_session_core::sample::{Sample, TimestampHint};
-    use wz_session_core::storage_config::{GarbageCollectionConfig, StorageConfig};
     use wz_storage::storage_backend::MemoryStorage;
+    use wz_storage::storage_config::{GarbageCollectionConfig, StorageConfig};
 
     fn session() -> TokioSession {
         let (actions, _driver) = crate::test_fixtures::recording_actions();

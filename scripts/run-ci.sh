@@ -9729,9 +9729,10 @@ layer_c1y_cargo_test_routing_peer() {
 #   0. R311y55 — the wz-session-core storage KERNEL modules (storage_backend /
 #      storage_state / storage_volume) are gated on `storage-backend` (off-default),
 #      so `cargo test --workspace` never compiled their unit tests either; this lane
-#      now runs `-p wz-session-core --features storage-backend --lib storage` to
+#      ran `-p wz-session-core --features storage-backend --lib storage` to
 #      cover them — the §5.24 Volume/Capability/MemoryVolume (storage_volume) AND
-#      the previously-uncovered storage_backend/storage_state kernel tests.
+#      the previously-uncovered storage_backend/storage_state kernel tests. They are
+#      all the wz-storage crate's since the server-layer split (steps 2 to 4 and 9).
 #      R311y57 — a SECOND line covers the cfg-ACTIVE manager (+ clippy + a `wz`
 #      facade build). The manager is the wz-storage crate's since the server-layer
 #      split (step 2), so that line is `-p wz-storage --lib`; it ran as a core
@@ -9847,9 +9848,15 @@ layer_c1z_cargo_test_storage_driver() {
     # build compiles (45 -> 43, 58 -> 56, 74 -> 72, 62 -> 60, 76 -> 74,
     # 177 -> 175, 69 -> 67). PRINTED by the commands on hkl001, and the arithmetic
     # is the check that no test was left behind.
-    _runci_guarded_test "C1z storage_config" 10 \
-        cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 43 \
+    # Server-layer split, step 9: `storage_config` and its nine tests are the wz-storage
+    # crate's too, so the core has no storage leg left; each wz-storage `--lib storage` count
+    # below gained those nine (43 -> 52, 56 -> 65, 72 -> 81, 60 -> 69, 74 -> 83,
+    # 175 -> 184, 67 -> 76), and this leg names them alone. The core's old leg printed 10:
+    # its `storage` filter also selected one core test outside the module, which the core's
+    # default lanes still run. PRINTED by every command on pc3.
+    _runci_guarded_test "C1z storage_config" 9 \
+        cargo test -p wz-storage --lib storage_config --quiet || return 1
+    _runci_guarded_test "C1z storage" 52 \
         cargo test -p wz-storage --lib storage --quiet || return 1
     # The reader of the manager's `plugins` document and its diff followed it (step 3), with
     # its fifteen, which only `adminspace-config-hotreload` builds.
@@ -9877,7 +9884,7 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host "${WZ_TEST_ARGS[@]}" --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-storage --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
-    _runci_guarded_test "C1z storage" 56 \
+    _runci_guarded_test "C1z storage" 65 \
         cargo test -p wz-storage --features storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R2350 56 -> 62: the `storage-history` atom closed its named residual, so
     # its module gained five cases (a delete is now a versioned tombstone: the
@@ -9892,7 +9899,7 @@ layer_c1z_cargo_test_storage_driver() {
     # unify it in. The lane then re-measured the other seven at their old counts
     # (16 of 16 legs reached, all green) rather than assume them unaffected.
     # CONTROL: put 56 back and this leg alone reds — measured, not claimed.
-    _runci_guarded_test "C1z storage" 72 \
+    _runci_guarded_test "C1z storage" 81 \
         cargo test -p wz-storage --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R2352 45 -> 49 / 59 -> 63: the `storage-mgr-wildcard-updates` atom closed
     # its named residual (dispatch-on-override-kind), and the new
@@ -9909,9 +9916,9 @@ layer_c1z_cargo_test_storage_driver() {
     # re-measured at their old counts in the same run rather than assumed
     # unaffected, and the two `-p wz-runtime-tokio` gc/aligner guards do not
     # move because every new case lives in wz-session-core's storage_state.rs.
-    _runci_guarded_test "C1z storage" 60 \
+    _runci_guarded_test "C1z storage" 69 \
         cargo test -p wz-storage --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 74 \
+    _runci_guarded_test "C1z storage" 83 \
         cargo test -p wz-storage --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R311y829 128 -> 132: the four publication-schedule tests. This is the
     # ONLY `-p wz-session-core --lib storage` subset that moved — the schedule
@@ -9965,7 +9972,7 @@ layer_c1z_cargo_test_storage_driver() {
     # `storage-aligner,storage-mgr-garbage-collection`, which is not a guard
     # here. The two `-p wz-runtime-tokio` aligner guards do NOT move (40 and 1,
     # re-measured, not assumed): every new case lives in wz-session-core.
-    _runci_guarded_test "C1z storage" 175 \
+    _runci_guarded_test "C1z storage" 184 \
         cargo test -p wz-storage --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
@@ -9975,7 +9982,7 @@ layer_c1z_cargo_test_storage_driver() {
     # requires the wildcard registries it sweeps, so this subset compiles the
     # four `override_dispatch` cases too. It carries no aligner, so it does NOT
     # gain the fifth.
-    _runci_guarded_test "C1z storage" 67 \
+    _runci_guarded_test "C1z storage" 76 \
         cargo test -p wz-storage --features storage-mgr-garbage-collection --lib storage --quiet || return 1
     # R2801 3 -> 4: the collector holds its storage WEAKLY, so dropping the
     # storage's owner releases the backend while the collector still lives.
@@ -10007,7 +10014,6 @@ layer_c1z_cargo_test_storage_driver() {
         && cargo build -p wz --features storage-mgr-multi-storage-host --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --features storage-backend --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-storage --features storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-storage --features storage-history,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-strip-prefix --quiet \
@@ -15856,8 +15862,8 @@ layer_c1bnl_all_nondefault_test_legs() {
 #
 # R311y279: `storage-backend-filesystem` (OFF in the default set) is a durable,
 # filesystem-backed Volume/StorageBackend (the `filesystem_storage` module in
-# wz-runtime-tokio), forwarding ONLY the no_std storage seam
-# (wz-session-core/storage-backend), NOT the runtime storage driver. C1bf's
+# wz-runtime-tokio), forwarding ONLY the no_std storage seam (the wz-storage
+# crate since the server-layer split), NOT the runtime storage driver. C1bf's
 # `--all-features` clippy already COMPILES the module; what no lane does is
 # EXECUTE the durability tests (the atom's whole claim). This lane runs them:
 #   1. cargo TEST the module's unit tests under the feature (put/get/delete, the

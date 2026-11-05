@@ -93,8 +93,8 @@ use std::collections::BTreeMap;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
-use wz_session_core::storage_config::StorageConfig;
 use wz_storage::storage_backend::StorageBackend;
+use wz_storage::storage_config::StorageConfig;
 use wz_storage::storage_manager::{VolumeRegistry, VolumeRegistryError};
 use wz_storage::storage_volume::Volume;
 
@@ -559,7 +559,7 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     /// outliving its volume answers queries out of a backend nothing can
     /// re-create. wz holds no volume-keyed storage map — the ownership is
     /// recorded the other way round, in each hosted
-    /// [`StorageConfig::volume_id`](wz_session_core::storage_config::StorageConfig)
+    /// [`StorageConfig::volume_id`](wz_storage::storage_config::StorageConfig)
     /// — so the set is derived here rather than looked up, which is also why this
     /// cannot live on [`VolumeRegistry`]: the registry holds volumes and cannot
     /// see who resolved through it. This is the one layer holding both maps.

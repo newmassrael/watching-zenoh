@@ -2236,7 +2236,7 @@ pub use wz_storage::storage_volume;
 // A `storage_manager_service::RuntimeStorageManager` reuses the kernel
 // volume registry of `wz_storage::storage_manager` for volume
 // registration + backend creation, then declares one live StorageService per
-// `wz_session_core::storage_config::StorageConfig` and holds
+// `wz_storage::storage_config::StorageConfig` and holds
 // it by name — the live-service counterpart of the sync kernel manager (which
 // holds bare backends). Dropping the manager undeclares every hosted storage
 // (each StorageService's RAII Drop). Gated on `storage-mgr-multi-storage-host`

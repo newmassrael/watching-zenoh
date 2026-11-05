@@ -67,11 +67,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use wz_session_core::sample::{EncodingHint, TimestampHint};
-use wz_session_core::storage_config::StorageConfig;
 use wz_storage::storage_backend::{
     History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteError,
     StorageWriteResult, StoredData,
 };
+use wz_storage::storage_config::StorageConfig;
 use wz_storage::storage_volume::{Capability, Persistence, Volume, VolumeError};
 use wz_volume_abi::{
     Compatibility, EntryFn, StoreConfig, StoreHandle, StoredEntry, VolumeEntry, VolumeVTable,

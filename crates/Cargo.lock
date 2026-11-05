@@ -3796,6 +3796,7 @@ dependencies = [
  "serde_json",
  "wz-runtime-core",
  "wz-session-core",
+ "wz-storage",
 ]
 
 [[package]]

@@ -16,16 +16,16 @@
 //! grouping; storage names are unique within a manager, so a flat `name->storage`
 //! map is the simpler faithful shape).
 //!
-//! The backend, the volume and the config it composes are still the core's
-//! (`storage_backend`, `storage_volume`, `storage_config` under `storage-backend`);
-//! they join this crate in later steps of the server-layer split.
+//! The backend, the volume and the config it composes (`storage_backend`, `storage_volume`,
+//! `storage_config`) are this crate's too, the last of them since step 9 of the server-layer
+//! split.
 
 use crate::storage_backend::StorageBackend;
+use crate::storage_config::StorageConfig;
 use crate::storage_volume::{Volume, VolumeError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use wz_session_core::storage_config::StorageConfig;
 
 /// Why [`VolumeRegistry::create_backend`] could not resolve a config to a
 /// backend — the resolve+create error of the shared volume registry. The

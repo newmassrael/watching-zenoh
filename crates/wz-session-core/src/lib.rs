@@ -1649,22 +1649,12 @@ pub mod reply_stage;
 #[cfg(feature = "storage-profile")]
 pub mod peer_tables;
 
-/// R311y56 — the §5.24 storage manager *config* data model
-/// ([`storage_config::StorageConfig`] + [`storage_config::GarbageCollectionConfig`]):
-/// the declarative description of one named storage (name / key_expr / volume_id /
-/// complete / strip_prefix / GC) a storage MANAGER reads to create + drive it. The
-/// wz mirror of zenoh `zenoh-backend-traits` `StorageConfig`. FOUNDATIONAL: the
-/// typed model only; the behaviors that read each field (complete-flag /
-/// strip-prefix / garbage-collection) + the consumer (multi-storage-host) are
-/// their own atoms.
-#[cfg(feature = "storage-backend")]
-pub mod storage_config;
-
-// The rest of the storage plane is the server layer's, in the wz-storage crate: the
-// backend seam, the service gate, the volume, the history backend, the strip-prefix
-// transforms, replication and the aligner, the storage manager, and the reader of its
-// `plugins.storage_manager` document with the diff between two of them. It is built on
-// the config above, which stays here while the admin space's storage-add arm reads it.
+// The storage plane is the server layer's, in the wz-storage crate (server-layer split,
+// steps 2 to 4 and 9): the config data model (`storage_config`), the backend seam, the
+// service gate, the volume, the history backend, the strip-prefix transforms, replication
+// and the aligner, the storage manager, and the reader of its `plugins.storage_manager`
+// document with the diff between two of them. The admin space's storage-add arm reads the
+// config there, through the wz-admin crate's `adminspace-config-hotreload`.
 
 // R311y104 — the NTP64 timestamp-word SSOT (`ntp64::Ntp64`): the
 // `(unix_secs << 32) | fraction` layout uhlc / zenoh `Timestamp` carry, with

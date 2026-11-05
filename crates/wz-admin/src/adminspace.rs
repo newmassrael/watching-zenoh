@@ -3224,7 +3224,7 @@ pub enum AdminConfigWrite {
         /// and a host that maps storages onto its own volume still may.
         volume_id: Option<String>,
         /// R2571 — the PER-STORAGE volume payload the client sent, the wire half
-        /// of `StorageConfig::volume_cfg` (the core's `storage_config`, under `storage-backend`).
+        /// of `StorageConfig::volume_cfg` (the wz-storage crate's, under `adminspace-config-hotreload`).
         /// EMPTY is upstream's `Value::Null`: the client named a bare volume id.
         ///
         /// Upstream's `volume` field is a string OR an object carrying a
@@ -3354,13 +3354,13 @@ pub enum AdminConfigWrite {
 
 #[cfg(feature = "adminspace-config-hotreload")]
 impl AdminConfigWrite {
-    /// R311y239 — the intent → [`wz_session_core::storage_config::StorageConfig`] SSOT: an
+    /// R311y239 — the intent → [`wz_storage::storage_config::StorageConfig`] SSOT: an
     /// [`AddStorage`](Self::AddStorage) intent maps to a `StorageConfig` (zenoh-faithful
-    /// defaults, [`StorageConfig::new`](wz_session_core::storage_config::StorageConfig::new)) the
+    /// defaults, [`StorageConfig::new`](wz_storage::storage_config::StorageConfig::new)) the
     /// runtime storage manager spawns; any other
     /// intent yields `None`. Kept here (not at the runtime layer) because both the
     /// intent and `StorageConfig` sit below the runtime — one mapping, no drift.
-    pub fn to_storage_config(&self) -> Option<wz_session_core::storage_config::StorageConfig> {
+    pub fn to_storage_config(&self) -> Option<wz_storage::storage_config::StorageConfig> {
         match self {
             AdminConfigWrite::AddStorage {
                 name,
@@ -3368,7 +3368,7 @@ impl AdminConfigWrite {
                 volume_id,
                 volume_cfg,
             } => {
-                let mut config = wz_session_core::storage_config::StorageConfig::new(
+                let mut config = wz_storage::storage_config::StorageConfig::new(
                     name,
                     key_expr,
                     // A client that named NO volume resolves to the in-memory one,
@@ -3961,7 +3961,7 @@ fn parse_volume_cfg_pairs(cfg: &str) -> Option<Vec<(String, String)>> {
 /// at all -- a bare path like `/srv/a`, which is how every pre-R2802 client
 /// wrote one -- is the string it reads as. A storage payload's values are
 /// typed because the backends that read them are (see
-/// `StorageConfig::volume_cfg`, the core's `storage_config` under `storage-backend`);
+/// `StorageConfig::volume_cfg`, the wz-storage crate's under `adminspace-config-hotreload`);
 /// a VOLUME's `?k=v` stays text, since the one backend that reads those takes
 /// only a path.
 ///

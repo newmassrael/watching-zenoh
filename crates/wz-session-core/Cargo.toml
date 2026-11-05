@@ -969,13 +969,10 @@ deferred-fire = ["alloc"]
 # never see it. Off, `RxBytes` is exactly the `Vec` it replaced.
 rx-shared-bytes = ["alloc"]
 
-# R311uw — storage-backend (§5.11 storage domain). In the core it gates the one
-# storage type still here, the `storage_config` data model the admin space's
-# storage-add arm resolves an intent to. The backend seam, the service gate, the
-# volume and the rest of the storage plane are the wz-storage crate's since the
-# server-layer split (step 4); that crate depends on this feature, and
-# wz-runtime-tokio's feature of the same name pulls the crate.
-storage-backend = ["alloc"]
+# R311uw — storage-backend (§5.11 storage domain) is no feature of this crate since the
+# server-layer split, step 9: the last storage type it gated, the `storage_config` data model,
+# is the wz-storage crate's with the rest of the storage plane, and wz-runtime-tokio's feature
+# of that name pulls the crate.
 
 # The shared bincode-1.3 cursor and widths (`wire_bincode`), public: the storage
 # plane's replication digest and aligner codecs (wz-storage) and the core's

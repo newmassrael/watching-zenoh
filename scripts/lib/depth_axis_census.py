@@ -605,8 +605,9 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # PRODUCT change and each names a site it built or measured --
 # `crates/wz-ap-demo/src/args.rs` twice (the name-keyed binding and its test
 # module), `crates/wz-ap-demo/src/runner.rs` once (the duplicate-id refusal at the
-# load site), and `crates/wz-session-core/src/storage_config.rs` once, which is
-# the SEAM the atom stays PARTIAL on.
+# load site), and `crates/wz-session-core/src/storage_config.rs` once
+# (`crates/wz-storage/src/storage_config.rs` since the server-layer split, step 9),
+# which is the SEAM the atom stays PARTIAL on.
 #
 # AMBIGUOUS WAS MOVED AND THEN MOVED BACK, which is worth recording because the
 # first reason draft raised it 73 -> 74. The cause was a bare `lib.rs:124,220` in

@@ -59,7 +59,7 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::storage_service::StorageService;
 use wz_runtime_tokio_test_support::establish_capability_pair;
-use wz_session_core::storage_config::StorageConfig;
+use wz_storage::storage_config::StorageConfig;
 
 use zenoh_pico_sys::{
     _z_declaration_decode, _z_declaration_t, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf,

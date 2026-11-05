@@ -22,7 +22,9 @@ graph and a dev-dependency is not even a cycle.
    the server modules not yet moved. A server module that is not in the list is a
    new one written into the core: it belongs in its upper crate. A name in the list
    with no module behind it has moved: the list is a ratchet and only shrinks, so
-   the step that moves a module removes its name here in the same change. Stems
+   the step that moves a module removes its name here in the same change. The list
+   has been EMPTY since step 9 moved the last one, so the rule is strict: every
+   server-layer module in the core is a finding. Stems
    that stay are not server-layer by this rule: `auth_dispatch` and `extauth` are
    the transport handshake's sub-extension, demuxed per frame by the drive loop.
 2. THE GRAPH, as `cargo metadata` of the `crates/` workspace reads it (the
@@ -73,12 +75,10 @@ UPPER = {
 SERVER_STEM = re.compile(r"^(?:storage_\w+|admin\w*|extauth_\w+)$")
 
 # The server modules not yet moved. A ratchet: a step that moves a module
-# deletes its name here, and nothing is ever added.
-IN_CORE = frozenset(
-    {
-        "storage_config",
-    }
-)
+# deletes its name here, and nothing is ever added. EMPTY since the server-layer
+# split, step 9, moved `storage_config`, the last of them: the rule is strict now,
+# and every server-layer module in the core is a finding.
+IN_CORE: frozenset[str] = frozenset()
 
 UPPER_PATH = re.compile(
     r"\b(?:extern\s+crate\s+(?:" + "|".join(UPPER.values()) + r")\b|(?:"

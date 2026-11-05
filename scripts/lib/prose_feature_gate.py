@@ -48,6 +48,13 @@ is this workspace's own named anti-pattern, so an entry quoting a name that
 has since been retired is CORRECT and must stay. A gate that made the store a
 subject would demand exactly the edit the store forbids.
 
+`docs/hosted-red-acks.md` is out for the same reason. Each row records a push
+that went out over a red hosted run, and quotes the failing gate's own line as
+that run printed it. The server-layer split, step 9, retired the core's
+`storage-backend`, which the R2801 row quotes: the quote was the command as it ran,
+and rewriting it to today's spelling would make the record say something no run
+printed.
+
 ## What it does NOT cover, so the green is not read wider than it is
 
 The first measured case above. "A plain `cargo build` needs no libxml2" is a
@@ -204,8 +211,13 @@ def scan(
     unresolved: list[tuple[str, str, int]] = []
     for rel in files:
         path = root / rel
-        # The frozen ledger is not a subject; see the module doc.
-        if rel.startswith("docs/.atomic/") or not path.is_file():
+        # The frozen ledger and the record of acknowledged reds are not subjects; see
+        # the module doc.
+        if (
+            rel.startswith("docs/.atomic/")
+            or rel == "docs/hosted-red-acks.md"
+            or not path.is_file()
+        ):
             continue
         try:
             text = path.read_text(encoding="utf-8")

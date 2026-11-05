@@ -566,8 +566,7 @@ fn kept_reply(out: &str, tail: &str) -> Option<String> {
     out.lines()
         .filter(|line| line.starts_with(REPLY) && line.contains(tail))
         .filter_map(|line| line.split(" hex=").nth(1))
-        .filter(|hex| !hex.is_empty())
-        .last()
+        .rfind(|hex| !hex.is_empty())
         .map(|hex| {
             let bytes: Vec<u8> = (0..hex.len() / 2)
                 .map(|at| u8::from_str_radix(&hex[2 * at..2 * at + 2], 16).expect("hex"))

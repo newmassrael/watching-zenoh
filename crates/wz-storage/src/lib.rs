@@ -5,14 +5,14 @@
 //! `zenoh-plugin-storage-manager` and `zenoh-backend-traits`: the server layer that hosts
 //! named storages on the session.
 //!
-//! The backend seam ([`storage_backend`]), the service gate ([`storage_state`]) and the volume
-//! ([`storage_volume`]) are always here; the history backend, the strip-prefix transforms,
-//! replication and the aligner are each behind the feature of their name. [`storage_manager`]
-//! hosts N named storages over a registry of named volumes, and `storage_plugin_config` (under
-//! `adminspace-config-hotreload`) reads the manager's `plugins.storage_manager` document and the
-//! difference between two of them. The one storage type still in `wz-session-core` is the config
-//! (`storage_config`, under its `storage-backend`), which the admin space's storage-add arm reads
-//! and which joins this crate when the admin space leaves the core.
+//! The config data model ([`storage_config`]), the backend seam ([`storage_backend`]), the
+//! service gate ([`storage_state`]) and the volume ([`storage_volume`]) are always here; the
+//! history backend, the strip-prefix transforms, replication and the aligner are each behind the
+//! feature of their name. [`storage_manager`] hosts N named storages over a registry of named
+//! volumes, and `storage_plugin_config` (under `adminspace-config-hotreload`) reads the manager's
+//! `plugins.storage_manager` document and the difference between two of them. The config was the
+//! last storage type to leave `wz-session-core` (server-layer split, step 9); the admin space's
+//! storage-add arm (the wz-admin crate's) reads it here.
 //!
 //! A module keeps the name it had in the core, so a downstream path changes only its crate and a
 //! citation of the file still names one file. This crate is built on the core and the core never
@@ -24,6 +24,16 @@ extern crate alloc;
 
 #[cfg(test)]
 extern crate std;
+
+/// R311y56 — the §5.24 storage manager *config* data model
+/// ([`storage_config::StorageConfig`] + [`storage_config::GarbageCollectionConfig`]):
+/// the declarative description of one named storage (name / key_expr / volume_id /
+/// complete / strip_prefix / GC) a storage MANAGER reads to create + drive it. The
+/// wz mirror of zenoh `zenoh-backend-traits` `StorageConfig`. FOUNDATIONAL: the
+/// typed model only; the behaviors that read each field (complete-flag /
+/// strip-prefix / garbage-collection) + the consumer (multi-storage-host) are
+/// their own atoms.
+pub mod storage_config;
 
 // R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
 // `storage_backend::StorageBackend` seam + an in-memory backend

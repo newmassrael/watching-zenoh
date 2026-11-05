@@ -108,7 +108,6 @@
   <sce:feature name="session-unicast"/>
   <sce:feature name="session-unicast-accept" requires="rx-control rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
-  <sce:feature name="storage-backend" requires="alloc"/>
   <sce:feature name="storage-profile"/>
   <sce:feature name="supervision"/>
   <sce:feature name="switchboard" requires="codec-push"/>

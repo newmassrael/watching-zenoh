@@ -79,9 +79,9 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 
+use crate::storage_config::{GarbageCollectionConfig, StorageConfig};
 use wz_session_core::json5::Json5Value;
 use wz_session_core::keyexpr_canon::{canonize_keyexpr_in, KeyexprDialect};
-use wz_session_core::storage_config::{GarbageCollectionConfig, StorageConfig};
 
 /// The plugin name upstream's storage manager declares itself under, and so
 /// the key its document lives at below `plugins`.

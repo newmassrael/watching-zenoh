@@ -553,7 +553,7 @@ mod tests {
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
         use crate::storage_service::StorageService;
-        use wz_session_core::storage_config::StorageConfig;
+        use wz_storage::storage_config::StorageConfig;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));

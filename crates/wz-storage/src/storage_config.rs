@@ -51,7 +51,8 @@
 //! different axis and is unchanged: it configures a VOLUME by name, once; this
 //! configures a STORAGE's use of one.
 //!
-//! FOUNDATIONAL: always compiled under `storage-backend`, no own cfg toggle. The
+//! FOUNDATIONAL: always compiled with the storage plane (the wz-storage crate since the
+//! server-layer split, step 9; the core's `storage-backend` before it), no own cfg toggle. The
 //! field is the model; the BEHAVIOR that reads each field is its own atom
 //! (`complete` -> storage-mgr-complete-flag, `strip_prefix` -> storage-mgr-strip-prefix,
 //! `garbage_collection` -> storage-mgr-garbage-collection), and the consumer that
@@ -61,7 +62,7 @@
 
 // ⚠ EVERY intra-doc link in the `//!` block above is written as a FULL
 // `crate::…` path, and that is not a style choice. lib.rs carries an outer `///`
-// doc on `pub mod storage_config;` (`lib.rs:1196`), so rustdoc MERGES the two
+// doc on `pub mod storage_config;`, so rustdoc MERGES the two
 // and resolves the merged text against the CRATE ROOT — where `StorageConfig` is
 // not in scope, even though it is declared in this very file. R2571 wrote two
 // bare `[`StorageConfig::…`]` links here and Layer C1bz redded at 539 against a
@@ -72,7 +73,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use crate::json5::Json5Value;
+use wz_session_core::json5::Json5Value;
 
 /// Garbage-collection schedule for a storage's stale metadata — zenoh
 /// `GarbageCollectionConfig` (`backend-traits/config.rs:155`). The
@@ -215,15 +216,15 @@ impl StorageConfig {
     /// `wz-session-core` carries no `serde_json`.
     pub fn to_admin_json(&self) -> String {
         let mut out = String::from("{\"key_expr\":");
-        crate::json::escape_into(&self.key_expr, &mut out);
+        wz_session_core::json::escape_into(&self.key_expr, &mut out);
         if let Some(prefix) = &self.strip_prefix {
             out.push_str(",\"strip_prefix\":");
-            crate::json::escape_into(prefix, &mut out);
+            wz_session_core::json::escape_into(prefix, &mut out);
         }
         out.push_str(",\"volume\":");
         if self.volume_cfg.is_empty() {
             // Upstream's `Value::Null` arm — the bare volume id as a string.
-            crate::json::escape_into(&self.volume_id, &mut out);
+            wz_session_core::json::escape_into(&self.volume_id, &mut out);
         } else {
             // Upstream's `Value::Object` arm. It builds the payload's own map
             // and THEN inserts `id` into it (`config.rs` @
@@ -242,13 +243,13 @@ impl StorageConfig {
             // unparseable by the JSON readers the admin plane serves.
             out.push('{');
             for (key, value) in &self.volume_cfg {
-                crate::json::escape_into(key, &mut out);
+                wz_session_core::json::escape_into(key, &mut out);
                 out.push(':');
                 out.push_str(&value.to_json_text());
                 out.push(',');
             }
             out.push_str("\"id\":");
-            crate::json::escape_into(&self.volume_id, &mut out);
+            wz_session_core::json::escape_into(&self.volume_id, &mut out);
             out.push('}');
         }
         out.push('}');

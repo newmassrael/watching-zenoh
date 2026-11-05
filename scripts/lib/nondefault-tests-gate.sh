@@ -632,7 +632,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         session-unicast,\
         session-unicast-accept,\
         session-unicast-open,\
-        storage-backend,\
         supervision,\
         switchboard,\
         transport-batching,\

@@ -109,8 +109,10 @@ storage-mgr-wildcard-updates = [
 storage-mgr-garbage-collection = ["storage-mgr-wildcard-updates"]
 
 [dependencies]
-# The storage config, the sample types, the keyexpr matcher and the sinks the plane is built on.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["storage-backend"] }
+# The sample types, the keyexpr matcher, the JSON writers and the sinks the plane is built on,
+# on the heap profile (`alloc`), which every storage type here needs. The storage config is this
+# crate's since the server-layer split, step 9; the core had a `storage-backend` feature for it.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # The service gate's warnings (a backend that cannot list its keys, a refused write).
 log = "0.4"
 # Round 311vh — xxh3 hasher for the storage-replication digest primitives
@@ -123,7 +125,7 @@ xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], 
 
 [dev-dependencies]
 # The tests run over the core at its DEFAULT features, as they did while the modules were the
-# core's (`cargo test -p wz-session-core --features storage-backend` built the defaults): the
+# core's (`cargo test -p wz-session-core` with the storage feature built the defaults): the
 # keyexpr wildcard matcher among them, which a query such as `demo/**` needs to match more than
 # its literal. The normal dependency above leaves the matcher to the build, as the core did.
 wz-session-core = { path = "../wz-session-core" }

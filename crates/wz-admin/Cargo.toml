@@ -160,9 +160,10 @@ adminspace-plugins-handlers = ["adminspace-core"]
 # lifecycle: the `storage-add` / `storage-del` admin config-WRITE sub-key parse arms
 # in parse_admin_config_write (the wz-native superset of zenoh's config-hotreload,
 # which is dlopen plugin start/stop — no wz analogue). Composes adminspace-core (the
-# config-write decoder) + the core's storage-backend (the StorageConfig the decoded
-# AddStorage intent maps to; the storage subsystem it drives is the runtime's).
-adminspace-config-hotreload = ["adminspace-core", "wz-session-core/storage-backend"]
+# config-write decoder) + the wz-storage crate (the StorageConfig the decoded AddStorage
+# intent maps to, the core's `storage-backend` until the server-layer split, step 9; the
+# storage subsystem it drives is the runtime's).
+adminspace-config-hotreload = ["adminspace-core", "dep:wz-storage"]
 # adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
 # (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`)
 # inside `answer_router_admin_query` + the `admin_linkstate_*` / route-successor
@@ -188,6 +189,10 @@ heapless = { version = "0.8", default-features = false }
 # The line a refused admin reply is logged with, upstream's own wording (`adminspace::reply_leg`).
 # The no_std facade the core logs through; the host links the logger.
 log = "0.4"
+# The storage config a storage-add write maps to (`AdminConfigWrite::to_storage_config`), the
+# storage plane's: pulled by `adminspace-config-hotreload` alone. One server crate built on
+# another; the storage crate names nothing of this one.
+wz-storage = { path = "../wz-storage", optional = true }
 
 [dev-dependencies]
 # TEST-ONLY: the documents the admin space writes by hand are parsed back as JSON, and their key

@@ -87,11 +87,11 @@ use wz_session_core::encoding::encoding_from_mime;
 use wz_session_core::json5::Json5Value;
 use wz_session_core::ntp64::Ntp64;
 use wz_session_core::sample::{EncodingHint, TimestampHint};
-use wz_session_core::storage_config::StorageConfig;
 use wz_storage::storage_backend::{
     History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteError,
     StorageWriteResult, StoredData,
 };
+use wz_storage::storage_config::StorageConfig;
 use wz_storage::storage_volume::{Capability, Persistence, Volume, VolumeError};
 
 use crate::filesystem_datainfo::{self, DataInfo, DataInfoError, DataInfoStore, DB_FILENAME};
