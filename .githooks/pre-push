@@ -2044,7 +2044,21 @@ fi
 # "safe AND QUICK on a developer's machine" test, it is decided by measurement
 # per row, and the script PRINTS what it deferred so a leg missing from this gate
 # can never read as a leg nobody runs.
-if ! bash scripts/lib/nondefault-tests-gate.sh; then
+# ROUTED THROUGH THE BUILD-MACHINE WRAPPER WHEN ONE IS CONFIGURED (`$BX`), the
+# opt-in that gate 3 below documents, and for a reason of its own: this gate and
+# the census after it build every workspace crate at its legs' features and at
+# `--all-features`, test binaries included. MEASURED 2026-11-05: one local
+# census from a cold target wrote 109 GB into the 160 GB build-cache image that
+# every repository's `target/` shares, and every local cargo build on the
+# machine then failed with `No space left on device` until the image was swept.
+# Run through the wrapper it builds on a build machine's own disk. Without `$BX`
+# it is the old behaviour (here), and the wrapper's refusal is final (no second
+# fallback; see gate 3).
+nd_run=(bash)
+if [[ -n "${BX:-}" && -x "${BX}" ]]; then
+    nd_run=("${BX}" --label "pre-push-nondefault" -- bash)
+fi
+if ! "${nd_run[@]}" scripts/lib/nondefault-tests-gate.sh; then
     echo "" >&2
     echo "pre-push: [gate 2h] non-default-feature TESTS FAILED — a check that only a" >&2
     echo "          feature build can run is red, or a leg's filter matched no" >&2
@@ -2085,7 +2099,11 @@ fi
 # legs above have not already built -- it reads `cargo test -- --list` per crate
 # -- so it is the cheap half of what C1cn does hosted, and the half that catches
 # the population error rather than a code error.
-if ! bash scripts/lib/nondefault-tests-gate.sh --census; then
+census_run=(bash)
+if [[ -n "${BX:-}" && -x "${BX}" ]]; then
+    census_run=("${BX}" --label "pre-push-census" -- bash)
+fi
+if ! "${census_run[@]}" scripts/lib/nondefault-tests-gate.sh --census; then
     echo "" >&2
     echo "pre-push: [gate 2h2] a test only a FEATURE build reaches is claimed by" >&2
     echo "          no leg, so nothing runs it — it passes every gate by not being" >&2

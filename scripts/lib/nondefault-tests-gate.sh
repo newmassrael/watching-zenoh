@@ -1058,9 +1058,12 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # application that asks gives the node, so the tests run over that build too. `group` is the
     # node as a member of a multicast group (`slot_group`: what a publisher offers each period and the
     # members the pump reports); it implies `client-slot` and names `transport-multicast` and
-    # `codec-push`, which no row above selects together with the slot profile.
+    # `codec-push`, which no row above selects together with the slot profile. `client-verbs` is the
+    # node that binds the verbs it was declared with (`slot_node`'s test of their keys, which the
+    # census found claimed by no row: the module's other features do not imply it).
     "wz-session-mcu|hook|\
         client-slot,\
+        client-verbs,\
         group,\
         query-get\
         |"
