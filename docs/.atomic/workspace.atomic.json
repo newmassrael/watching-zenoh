@@ -311582,6 +311582,46 @@
         "The declared node's cell (TASK_BYTES_ACTIVE, 4,096) holds the session's pump task and the group tasks of a multicast node, and the group pump task (multicast_pump_task) may store a by-value argument twice, so its derivation needs the larger of the two and a look at that task first. The slot node's host tests, the session acceptor crate and the multicast end-to-end crate still write their cells by hand. The kit runs of the client images are still not done."
       ]
     },
+    "Round 4281": {
+      "decision_summary": "The router's tables get a design for the second value of the table-sharing axis that docs/router-task-per-face.md section 4 names and leaves undeclared: structure B, the tables as published snapshots (read-copy-update). Readers load an immutable version with no lock, a writer serialised by a mutex copies what it changes by path copying and publishes in WrittenTables::drop, the one place a write already ends. An inventory of Tables sorts what it holds three ways: routing state written only under the write guard (the snapshot), per-face runtime the data path writes under per-face locks (egress queues, gate waker, declaration numbering, the session; moved to one shared FaceRuntime per face), and the route memos (shared between versions, with a clear refused from older inputs). B is a policy value, routing-table-sharing, rwlock by default and in every upstream preset. A gate red on origin since round 4266 is repaid in the same landing.",
+      "changes_bullets": [
+        "docs/router-table-snapshots.md: why (the writer waits, the 10 ms bound, the write that stops every face, the callback inside a read guard), the textbook form with its literature, the three kinds Tables holds with the field list as of round 4279, the cell behind OnTables for both values, the contract B keeps of A's and the one ordering it does not, phases 0 to 6, and what is not decided.",
+        "docs/router-task-per-face.md section 4 points at the new note.",
+        "scripts/lib/wz_node.py: the comment on the secure channel's fork protection names mbedTLS's time option in plain text; the prose-name gate failed on it (a name spelled as code that this tree does not carry) since round 4266."
+      ],
+      "verification_bullets": [
+        "prose_named_identifier_gate.py --check: rc 0 after the wz_node.py change (rc 1 on origin before it, on MBEDTLS_HAVE_TIME).",
+        "prose_feature_gate, prose_build_closure_gate, prose_dep_graph_gate --check: rc 0. upstream_citation_anchor_gate --prose on the new note: 1 anchored citation, resolved.",
+        "The test the note cites (a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left) exists in router_forward.rs. No code changed; nothing was built or run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Phase 0 of docs/router-table-snapshots.md: the instrument (N faces forwarding while a writer churns, writers' waits and readers' messages per second) and its baseline under A on pc2, before any structural change.",
+        "Phases 1 to 4: FaceRuntime out of the routing state, the memos' monotone clear, Tables cloned by path copying, the policy routing-table-sharing with its pair of behaviour tests; the multicast ingress opens a DeliveryScope under both values.",
+        "Nothing in the note is measured: the gain of B over A is a phase 5 reading."
+      ],
+      "publishable_decision_summary": "The router's tables get a design for the second value of the table-sharing axis that docs/router-task-per-face.md section 4 names and leaves undeclared: structure B, the tables as published snapshots (read-copy-update). Readers load an immutable version with no lock, a writer serialised by a mutex copies what it changes by path copying and publishes in WrittenTables::drop, the one place a write already ends. An inventory of Tables sorts what it holds three ways: routing state written only under the write guard (the snapshot), per-face runtime the data path writes under per-face locks (egress queues, gate waker, declaration numbering, the session; moved to one shared FaceRuntime per face), and the route memos (shared between versions, with a clear refused from older inputs). B is a policy value, routing-table-sharing, rwlock by default and in every upstream preset. A gate red on origin since round 4266 is repaid in the same landing.",
+      "publishable_changes_bullets": [
+        "docs/router-table-snapshots.md: why (the writer waits, the 10 ms bound, the write that stops every face, the callback inside a read guard), the textbook form with its literature, the three kinds Tables holds with the field list as of round 4279, the cell behind OnTables for both values, the contract B keeps of A's and the one ordering it does not, phases 0 to 6, and what is not decided.",
+        "docs/router-task-per-face.md section 4 points at the new note.",
+        "scripts/lib/wz_node.py: the comment on the secure channel's fork protection names mbedTLS's time option in plain text; the prose-name gate failed on it (a name spelled as code that this tree does not carry) since round 4266."
+      ],
+      "publishable_verification_bullets": [
+        "prose_named_identifier_gate.py --check: rc 0 after the wz_node.py change (rc 1 on origin before it, on MBEDTLS_HAVE_TIME).",
+        "prose_feature_gate, prose_build_closure_gate, prose_dep_graph_gate --check: rc 0. upstream_citation_anchor_gate --prose on the new note: 1 anchored citation, resolved.",
+        "The test the note cites (a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left) exists in router_forward.rs. No code changed; nothing was built or run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 0 of docs/router-table-snapshots.md: the instrument (N faces forwarding while a writer churns, writers' waits and readers' messages per second) and its baseline under A on pc2, before any structural change.",
+        "Phases 1 to 4: FaceRuntime out of the routing state, the memos' monotone clear, Tables cloned by path copying, the policy routing-table-sharing with its pair of behaviour tests; the multicast ingress opens a DeliveryScope under both values.",
+        "Nothing in the note is measured: the gain of B over A is a phase 5 reading."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
