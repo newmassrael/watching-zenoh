@@ -310728,6 +310728,34 @@
         "Images that still write the figure by hand: fixed_admin (2,048 bytes, the TLS node), the client images, zephyr-admin-loopback (a 12,288-byte server cell and a 16,384-byte client cell, which sit behind the node storage of wz-session-mcu and need an events type named from its layer) and the host tests of the slot node. The spare cell of TASKS = SESSIONS + 1 is still unchecked."
       ]
     },
+    "Round 4257": {
+      "decision_summary": "The two task cells of the Zephyr secure-channel loopback witness (zephyr-admin-loopback) are sized by the tasks they hold, as the cells of the lwIP node images are. The server cell (12,288 bytes) and the client cell (16,384 bytes) were figures written beside the image; each is now pump_task_cell_bytes over its own node's clock, pump link, stream driver and the events of its layer (EventsOf of the admin node's factory events, and of the asking layer's events for the client, whose stream driver steps the admin node and so is another type). The image's static RAM falls by 38,208 bytes (.bss 457,092 to 418,884) and the witness still prints its pass sentinel on qemu mps2-an385.",
+      "changes_bullets": [
+        "zephyr-admin-loopback: rust/src/lib.rs declares SERVER_TASK_BYTES and CLIENT_TASK_BYTES as pump_task_cell_bytes of the server node's and the client node's own types."
+      ],
+      "verification_bullets": [
+        "On this host with west: deploy/zephyr-admin-loopback builds for mps2/an385 with the derived cells (text 313,612, bss 418,884 bytes; with the figures written by hand, the same tree otherwise: text 313,836, bss 457,092), and each of the two builds boots on qemu and prints ZEPHYR-WZ-ADMIN-TLS PASS (a status GET through the secure channel answered, a close GET refused by name). Not run: the lane Qz as run-ci.sh runs it, and the stack-frame gate on this image."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Images that still write the figure by hand: fixed_admin (2,048 bytes, the TLS node), the client images (fixed_client, fixed_get) and the host tests of the slot node. The spare cell of TASKS = SESSIONS + 1 in each node is still unchecked."
+      ],
+      "publishable_decision_summary": "The two task cells of the Zephyr secure-channel loopback witness (zephyr-admin-loopback) are sized by the tasks they hold, as the cells of the lwIP node images are. The server cell (12,288 bytes) and the client cell (16,384 bytes) were figures written beside the image; each is now pump_task_cell_bytes over its own node's clock, pump link, stream driver and the events of its layer (EventsOf of the admin node's factory events, and of the asking layer's events for the client, whose stream driver steps the admin node and so is another type). The image's static RAM falls by 38,208 bytes (.bss 457,092 to 418,884) and the witness still prints its pass sentinel on qemu mps2-an385.",
+      "publishable_changes_bullets": [
+        "zephyr-admin-loopback: rust/src/lib.rs declares SERVER_TASK_BYTES and CLIENT_TASK_BYTES as pump_task_cell_bytes of the server node's and the client node's own types."
+      ],
+      "publishable_verification_bullets": [
+        "On this host with west: deploy/zephyr-admin-loopback builds for mps2/an385 with the derived cells (text 313,612, bss 418,884 bytes; with the figures written by hand, the same tree otherwise: text 313,836, bss 457,092), and each of the two builds boots on qemu and prints ZEPHYR-WZ-ADMIN-TLS PASS (a status GET through the secure channel answered, a close GET refused by name). Not run: the lane Qz as run-ci.sh runs it, and the stack-frame gate on this image."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Images that still write the figure by hand: fixed_admin (2,048 bytes, the TLS node), the client images (fixed_client, fixed_get) and the host tests of the slot node. The spare cell of TASKS = SESSIONS + 1 in each node is still unchecked."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
