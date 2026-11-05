@@ -42,7 +42,7 @@ use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::stream::{ZephyrTcpDial, ZephyrTcpListener, ZephyrTcpSocket};
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_runtime_coop::ip_stack::IpTlsAcceptor;
-use wz_runtime_coop::session_drive::{PumpSlots, SlotStack};
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
@@ -66,7 +66,7 @@ use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
 use wz_session_mcu::connect_manager::{CommanderList, Commanders, PeerStore, StoreNode};
 use wz_session_mcu::run_arena::{run_bytes_needed, RunArena};
 use wz_session_mcu::slot_admin::AcceptingAdminNode;
-use wz_session_mcu::slot_dial::SessionFactory;
+use wz_session_mcu::slot_dial::{EventsOf, SessionFactory};
 use wz_session_mcu::slot_host::SessionHost;
 use wz_tls_mbedtls::stream::{AcceptBudget, TlsDial, TlsListener};
 
@@ -81,15 +81,22 @@ pub const SESSIONS: usize = 2;
 const ACCEPTS: usize = 1;
 /// Connections that may queue on the port before the node takes them off it.
 const BACKLOG: u8 = 2;
-/// The runtime's task table: a pump task per session, with room beside them.
-const TASKS: usize = SESSIONS + 1;
-/// Bytes of one task cell: the pump's handle and the application layer's state. The layer was about
-/// 4.9 KB while its requesters (the registries of pending queries) were 4.8 KB of them, and an `async
-/// fn` holds a by-value argument twice, so the cell was 12,288; with the limits this node does not use
-/// stated as zero (`overlays/qemu_admin_fixed_tls.conf`) the pump's future is under 1,024 bytes (a cell
-/// of 1,024 ran the whole witness on the kit, and a cell the future does not fit is refused at spawn,
-/// which the witness would show), and the cell is twice that.
-const TASK_BYTES: usize = 2048;
+/// The runtime's task table: a pump task per session and no other task. A session holds its task's
+/// cell until its handles are let go, which is the moment its slot is freed, so a node never holds
+/// more cells than sessions (`session_pool_exhaustion` fills a node's tables to exactly its sessions
+/// and readmits a peer into the cell a closed session freed).
+const TASKS: usize = SESSIONS;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
+/// image's types, and not a figure written beside it. With the limits this node does not use stated
+/// as zero (`overlays/qemu_admin_fixed_tls.conf`) the application layer is small (its requesters,
+/// the registries of pending queries, are 4.8 KB where the limits are not zero), and a layer that
+/// grows grows the cell, which is never one the spawn refuses.
+const TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    <Stack as SlotStack>::Pump,
+    Driver,
+    EventsOf<<Factory as SessionFactory<Clock, Driver>>::Events>,
+>();
 /// Timers the runtime holds: the handshake and lease deadlines of the sessions.
 const TIMERS: usize = 4;
 /// Extra bytes a link's receive buffer holds beyond one batch.
