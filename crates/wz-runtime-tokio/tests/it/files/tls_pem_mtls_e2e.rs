@@ -72,6 +72,7 @@ use wz_runtime_tokio_test_support::loopback_mtls_pems;
 // The wz<->wz TLS open-both-to-Established drive is shared with `tls_e2e` via
 // the per-binary `tests/tls_harness/` module (R311oi SSOT — see its docs for
 // why this is a subdir module, not the test-support crate).
+#[path = "../../tls_harness/mod.rs"]
 mod tls_harness;
 use tls_harness::{open_both_to_established, open_both_to_established_with_zids};
 

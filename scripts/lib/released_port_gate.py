@@ -99,6 +99,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rust_comments  # noqa: E402
+import test_sources  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -487,7 +488,8 @@ def population() -> list[tuple[str, int, str]]:
             continue
         if "local_addr" not in raw:
             continue
-        out.extend(sites(rel, raw))
+        # A merged test file keeps the key it had as tests/<name>.rs: the table above names it so.
+        out.extend(sites(test_sources.canonical(rel), raw))
     return out
 
 
