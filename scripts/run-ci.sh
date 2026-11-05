@@ -12442,7 +12442,7 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
         --test session_pump_allocations --quiet || return 1
-    _runci_guarded_test "C1m coop static runtime" 16 \
+    _runci_guarded_test "C1m coop static runtime" 19 \
         cargo test -p wz-runtime-coop --features alloc,session-slot \
         --lib static_tests:: --quiet || return 1
     # The links of the slot profile's IP stack (`ip_stack`): a dial opens the link of the protocol it
