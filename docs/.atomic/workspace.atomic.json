@@ -312644,6 +312644,52 @@
         "The node over tcp/ of the Zephyr image (zephyr-fixed-tcp, on the kit's own MAC) is still not run on the kit: that is the next step, with the verdict program's board mode over a tcp/ locator, which now exists. The failure modes only a stream has (a connection that resets, a listener that closes, a peer that reconnects, many requests on one connection) have no steps and no controls yet, and are the step after. The mps2 image over tcp/ has no stack gate row or budget row (it prints no stack line), and its slot size is not in the committed slot table."
       ]
     },
+    "Round 4310": {
+      "decision_summary": "The fixed-memory node over tcp/ (zephyr-fixed-tcp: the node of fixed_tcp.rs, slot_admin's AcceptingAdminNode over lwIP's streams, on the T2G kit's onboard RMII MAC) is run on the kit by the kit lane and held to the steps of HARDWARE_VERDICT.md, HW.0 to HW.7, by the program that is them in its stream transport, and to a row of the resource budget. It had never run on any board: the program reached a node by a udp/ locator only until the round that gave it a transport, and the node had its first run on any machine under QEMU the round after. The kit lane's node kind takes the locator an image is reached at from the image's table entry, and the program takes the transport from its scheme. The budget declared the image not measured on the kit; it is now a row.",
+      "changes_bullets": [
+        "scripts/kit-lane.sh: the image zephyr-fixed-tcp (overlays/t2g_fixed.conf and overlays/t2g_tcp.conf, KIND node, reached at tcp/192.168.100.10:7447), the node locator set by image_spec and used by run_node, NODE_IMAGES of two. deploy/resource_budget.json: a row for zephyr-fixed-tcp (chain 13,184, kit peak 13,240, tolerance 16, latency none, chain_misses) in place of its not_measured_on_the_kit declaration. scripts/lib/stack_frame_gate.py: the zephyr-fixed-tcp row's comment states the kit's reading."
+      ],
+      "verification_bullets": [
+        "The record of the run, as the hardware verdict grammar asks it. Date 2026-11-05; the board is the T2G kit (kit_t2g_b_h_lite, chip CYT4BF8CDS, the M7_0 core) with its CM0+ launcher in place; run by the repository's session on the lab account of the bench host the board is attached to, on the owner's instruction to use the kit; the image was built from the main line at its tip, fa2e29b3cc, by the kit lane's west build on a copy of the tree that carries the lane's change of this round (scripts/kit-lane.sh) and no change to a source of the image. The M7_0 image as it was flashed, the padded region file m7.bin the lane built, has sha256 1faec07a4817e4045065a617efa86ac1c25f4242da5d1ae6cfde9b9c2c8723f0, written to the region and read back by the lane. The CM0+ launcher image that board lists, zephyr-cm0p-launcher, has sha256 e3fb83c72f27a481889795d62194b83596475a226f7f4b26809be4ce26eb2c91; this lane writes the M7_0 region only, and the deep preflight read the CM0+ region back equal to the lab's record of it (region hash 7d85cf4584b02401 as the lane prints it). The program's board mode printed, on the first run:",
+        "HW.0 the node's console says who and where it is: READY 69974f62d90a tcp/192.168.100.10:7447 - OK",
+        "HW.1 GET before the write: the node reports A only - OK",
+        "HW.2 PUT connect/endpoints: the node dialled B, GET reports A and B - OK",
+        "HW.3 GET config names the written list - OK",
+        "HW.4 every session names its link src/dst; A reached tcp/192.168.100.10:7447 - OK",
+        "HW.5 status/connect: the write was replaced, B is live and established - OK",
+        "HW.6 a group of two is refused, and status/connect says multi_link_group - OK",
+        "HW.7 the main stack kept a quarter free: stack: peak 13240 of 65536 bytes - OK",
+        "Two more runs, each flashed and reset again, printed the same eight steps OK with the stack line at 13,240 of 65,536 bytes, so the reading is 3 of 3, 56 bytes over the static chain of 13,184 (the 5 calls through a register the stack gate does not follow), and the console held no 'wz: FAIL' line in any of the three. The routers were two stock zenohd 1.10.2 of the repository's pin on the bench host, A dialling the node's listener and B listening on the host's address on the cable, both by tcp/. What the run did not settle: the pool steps (they are the datagram transport's), the failure modes only a stream has (a connection that resets, a listener that closes, a peer that reconnects, many requests on one connection), which have no steps yet, and a run on a second board."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The row of the board table for this image (rmii-dp83825i-fixed-tcp) is still BUILT: it becomes HARDWARE in the next round, which cites this entry, with the steps HW.0 to HW.7 as its verdict_steps. The steps for what only a stream can do are to be designed with their controls, and the pool steps HW.26 to HW.35 are not in the kit lane."
+      ],
+      "publishable_decision_summary": "The fixed-memory node over tcp/ (zephyr-fixed-tcp: the node of fixed_tcp.rs, slot_admin's AcceptingAdminNode over lwIP's streams, on the T2G kit's onboard RMII MAC) is run on the kit by the kit lane and held to the steps of HARDWARE_VERDICT.md, HW.0 to HW.7, by the program that is them in its stream transport, and to a row of the resource budget. It had never run on any board: the program reached a node by a udp/ locator only until the round that gave it a transport, and the node had its first run on any machine under QEMU the round after. The kit lane's node kind takes the locator an image is reached at from the image's table entry, and the program takes the transport from its scheme. The budget declared the image not measured on the kit; it is now a row.",
+      "publishable_changes_bullets": [
+        "scripts/kit-lane.sh: the image zephyr-fixed-tcp (overlays/t2g_fixed.conf and overlays/t2g_tcp.conf, KIND node, reached at tcp/192.168.100.10:7447), the node locator set by image_spec and used by run_node, NODE_IMAGES of two. deploy/resource_budget.json: a row for zephyr-fixed-tcp (chain 13,184, kit peak 13,240, tolerance 16, latency none, chain_misses) in place of its not_measured_on_the_kit declaration. scripts/lib/stack_frame_gate.py: the zephyr-fixed-tcp row's comment states the kit's reading."
+      ],
+      "publishable_verification_bullets": [
+        "The record of the run, as the hardware verdict grammar asks it. Date 2026-11-05; the board is the T2G kit (kit_t2g_b_h_lite, chip CYT4BF8CDS, the M7_0 core) with its CM0+ launcher in place; run by the repository's session on the lab account of the bench host the board is attached to, on the owner's instruction to use the kit; the image was built from the main line at its tip, fa2e29b3cc, by the kit lane's west build on a copy of the tree that carries the lane's change of this round (scripts/kit-lane.sh) and no change to a source of the image. The M7_0 image as it was flashed, the padded region file m7.bin the lane built, has sha256 1faec07a4817e4045065a617efa86ac1c25f4242da5d1ae6cfde9b9c2c8723f0, written to the region and read back by the lane. The CM0+ launcher image that board lists, zephyr-cm0p-launcher, has sha256 e3fb83c72f27a481889795d62194b83596475a226f7f4b26809be4ce26eb2c91; this lane writes the M7_0 region only, and the deep preflight read the CM0+ region back equal to the lab's record of it (region hash 7d85cf4584b02401 as the lane prints it). The program's board mode printed, on the first run:",
+        "HW.0 the node's console says who and where it is: READY 69974f62d90a tcp/192.168.100.10:7447 - OK",
+        "HW.1 GET before the write: the node reports A only - OK",
+        "HW.2 PUT connect/endpoints: the node dialled B, GET reports A and B - OK",
+        "HW.3 GET config names the written list - OK",
+        "HW.4 every session names its link src/dst; A reached tcp/192.168.100.10:7447 - OK",
+        "HW.5 status/connect: the write was replaced, B is live and established - OK",
+        "HW.6 a group of two is refused, and status/connect says multi_link_group - OK",
+        "HW.7 the main stack kept a quarter free: stack: peak 13240 of 65536 bytes - OK",
+        "Two more runs, each flashed and reset again, printed the same eight steps OK with the stack line at 13,240 of 65,536 bytes, so the reading is 3 of 3, 56 bytes over the static chain of 13,184 (the 5 calls through a register the stack gate does not follow), and the console held no 'wz: FAIL' line in any of the three. The routers were two stock zenohd 1.10.2 of the repository's pin on the bench host, A dialling the node's listener and B listening on the host's address on the cable, both by tcp/. What the run did not settle: the pool steps (they are the datagram transport's), the failure modes only a stream has (a connection that resets, a listener that closes, a peer that reconnects, many requests on one connection), which have no steps yet, and a run on a second board."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The row of the board table for this image (rmii-dp83825i-fixed-tcp) is still BUILT: it becomes HARDWARE in the next round, which cites this entry, with the steps HW.0 to HW.7 as its verdict_steps. The steps for what only a stream can do are to be designed with their controls, and the pool steps HW.26 to HW.35 are not in the kit lane."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
