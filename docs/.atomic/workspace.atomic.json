@@ -312470,6 +312470,64 @@
         "The next nightly Fuzz run should read `selector_term` green with its new seed. The ADR 0084 size-fix carry of round 4290 stands unchanged."
       ]
     },
+    "Round 4305": {
+      "decision_summary": "Server-layer split, step 9, the last one: the storage config data model leaves the session core for the storage crate, the core's storage-backend feature goes with it, and the direction gate's list of server modules still in the core is empty, so the rule is strict: a server-layer module written into the core is refused. The module keeps its name, so a citation of the file still names one file. The admin space's storage-add arm maps its intent to that config, so the admin crate's config hot-reload feature now pulls the storage crate: one server crate built on another, and the storage crate names nothing of the admin crate. The prose feature gate leaves the record of acknowledged reds out of its population for the reason it leaves out the ledger: a row quotes what a run printed, and a quote of a feature that has since gone is correct.",
+      "changes_bullets": [
+        "crates/wz-storage: storage_config.rs moved from the core by name (its json and json5 paths now naming the core); declared at the crate root; the four internal uses read crate::storage_config; the core dependency names alloc in place of storage-backend.",
+        "crates/wz-session-core: the storage-backend feature and the storage_config declaration removed.",
+        "crates/wz-admin: adminspace-config-hotreload pulls the storage crate (an optional dependency) in place of the core's storage-backend; the to_storage_config paths name wz_storage.",
+        "crates/wz-runtime-tokio and wz-integration-tests: the three forwards to the core's storage-backend removed; nineteen files name wz_storage::storage_config.",
+        "sources/features/wz-session-core.scxml and out/wz-session-core regenerated: the core's storage-backend guard lines are gone.",
+        "scripts: layer_direction_gate IN_CORE empty and the rule stated strict; run-ci C1z's storage_config leg on wz-storage (9) and the seven wz-storage storage counts each up nine; the core's storage-backend clippy leg and nondefault feature removed; prose_feature_gate leaves docs/hosted-red-acks.md out of its population; depth_axis_census prose.",
+        "Store: the reasons of storage-backend-filesystem, storage-mgr-dynamic-volume-loading and storage-mgr-config re-cited to the storage crate.",
+        "crates/wz-integration-tests/tests/wz_declared_commander_zenohd_interop.rs: Layer C2's clippy (workspace, all targets) refused `.filter(..).last()` on a double-ended iterator in `kept_reply`, a red of another round's commit (87efa02610) the hosted C2 would print; now `.rfind(..)`, the same element read from the back.",
+        "The workspace lockfile."
+      ],
+      "verification_bullets": [
+        "pc3: every changed wz-storage guard printed its new count (storage_config 9; storage 52, 65, 81, 69, 83, 184, 76), and the unchanged neighbours their old ones (storage_plugin_config 15, storage_strip_prefix 6, zid_to_zenoh_hex 1); wz-admin's hot-reload legs 67 and 21; tokio storage_manager_service 20 and the manager e2e 1.",
+        "pc3: the core with and without its default features, clippy -D warnings on wz-storage (all features, all targets), wz-admin, the core and tokio's storage features; the facade built with the multi-storage host; rustdoc -D warnings on wz-storage; Layer C1bzr's measure of wz-storage and wz-admin with no finding the ledger does not carry.",
+        "pc3 and pc2: the integration tests build, and lint clean after the C2 repair.",
+        "Local: the feature model check, the direction gate (strict), the prose feature gate and its selftest, and the round-fed static gates.",
+        "validate-workspace: no new T1 orphan after the three re-citations."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "The server-layer split is complete; the direction gate is strict. What remains of the owner's framework goal is outside this split.",
+        "bx on pc2 refused two runs this round with exit 125 before running anything (the run's network view could not be made). The bx session attributed it to a view setting just applied there, which failed on pc2's absolute /etc/resolv.conf link, withdrawn on every machine and fixed in its own tree; pc3 ran the same command meanwhile."
+      ],
+      "publishable_decision_summary": "Server-layer split, step 9, the last one: the storage config data model leaves the session core for the storage crate, the core's storage-backend feature goes with it, and the direction gate's list of server modules still in the core is empty, so the rule is strict: a server-layer module written into the core is refused. The module keeps its name, so a citation of the file still names one file. The admin space's storage-add arm maps its intent to that config, so the admin crate's config hot-reload feature now pulls the storage crate: one server crate built on another, and the storage crate names nothing of the admin crate. The prose feature gate leaves the record of acknowledged reds out of its population for the reason it leaves out the ledger: a row quotes what a run printed, and a quote of a feature that has since gone is correct.",
+      "publishable_changes_bullets": [
+        "crates/wz-storage: storage_config.rs moved from the core by name (its json and json5 paths now naming the core); declared at the crate root; the four internal uses read crate::storage_config; the core dependency names alloc in place of storage-backend.",
+        "crates/wz-session-core: the storage-backend feature and the storage_config declaration removed.",
+        "crates/wz-admin: adminspace-config-hotreload pulls the storage crate (an optional dependency) in place of the core's storage-backend; the to_storage_config paths name wz_storage.",
+        "crates/wz-runtime-tokio and wz-integration-tests: the three forwards to the core's storage-backend removed; nineteen files name wz_storage::storage_config.",
+        "sources/features/wz-session-core.scxml and out/wz-session-core regenerated: the core's storage-backend guard lines are gone.",
+        "scripts: layer_direction_gate IN_CORE empty and the rule stated strict; run-ci C1z's storage_config leg on wz-storage (9) and the seven wz-storage storage counts each up nine; the core's storage-backend clippy leg and nondefault feature removed; prose_feature_gate leaves docs/hosted-red-acks.md out of its population; depth_axis_census prose.",
+        "Store: the reasons of storage-backend-filesystem, storage-mgr-dynamic-volume-loading and storage-mgr-config re-cited to the storage crate.",
+        "crates/wz-integration-tests/tests/wz_declared_commander_zenohd_interop.rs: Layer C2's clippy (workspace, all targets) refused `.filter(..).last()` on a double-ended iterator in `kept_reply`, a red of another round's commit (87efa02610) the hosted C2 would print; now `.rfind(..)`, the same element read from the back.",
+        "The workspace lockfile."
+      ],
+      "publishable_verification_bullets": [
+        "pc3: every changed wz-storage guard printed its new count (storage_config 9; storage 52, 65, 81, 69, 83, 184, 76), and the unchanged neighbours their old ones (storage_plugin_config 15, storage_strip_prefix 6, zid_to_zenoh_hex 1); wz-admin's hot-reload legs 67 and 21; tokio storage_manager_service 20 and the manager e2e 1.",
+        "pc3: the core with and without its default features, clippy -D warnings on wz-storage (all features, all targets), wz-admin, the core and tokio's storage features; the facade built with the multi-storage host; rustdoc -D warnings on wz-storage; Layer C1bzr's measure of wz-storage and wz-admin with no finding the ledger does not carry.",
+        "pc3 and pc2: the integration tests build, and lint clean after the C2 repair.",
+        "Local: the feature model check, the direction gate (strict), the prose feature gate and its selftest, and the round-fed static gates.",
+        "validate-workspace: no new T1 orphan after the three re-citations."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The server-layer split is complete; the direction gate is strict. What remains of the owner's framework goal is outside this split.",
+        "bx on pc2 refused two runs this round with exit 125 before running anything (the run's network view could not be made). The bx session attributed it to a view setting just applied there, which failed on pc2's absolute /etc/resolv.conf link, withdrawn on every machine and fixed in its own tree; pc3 ran the same command meanwhile."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
