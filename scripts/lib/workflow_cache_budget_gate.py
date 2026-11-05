@@ -44,7 +44,13 @@ that eviction never starts.
      other refs can read, so a save there is cost with no reader. A rust-cache use
      must state `save-if`, either that condition or `false` (a reader)
   5. a rust-cache reader names the key of a saver in its class: restoring from a key
-     nobody saves is the cache that never warms
+     nobody saves is the cache that never warms. It must also restore the same PATH
+     LIST as that saver -- the same `workspaces` in the same order and the same
+     `cache-targets`, `cache-bin` and `cache-directories`. `actions/cache` stamps an
+     entry with a hash of its path list and a restore only matches an entry of its
+     own stamp, so a reader whose list differs finds nothing under a key that does
+     match (R4253: twelve readers of `ci` listed `crates` alone while the saver
+     lists `crates` and `vendor/sce`, and every one of them built cold)
   6. the class budgets sum to at most `target_mb`, which is at most 85 percent of
      `cap_mb`, and no measured size exceeds its budget. The headroom is what keeps
      GitHub's eviction from ever running
@@ -140,6 +146,28 @@ def _job_steps(doc: dict, docs: dict[str, dict]) -> dict[str, list[dict]]:
     }
 
 
+def rust_cache_paths(w: dict) -> str:
+    """The inputs that decide a rust-cache entry's path list, in one comparable string.
+
+    `actions/cache` stamps an entry with a hash of the paths it holds, and a restore
+    matches only an entry of its own stamp; rust-cache derives those paths from its
+    workspaces (each `<dir> -> <target>`, `.` when none is given, in the order listed),
+    `cache-targets`, `cache-bin` and `cache-directories`. The defaults are rust-cache's.
+    """
+
+    def entries(value: object) -> list[str]:
+        return [ln.strip() for ln in str(value or "").splitlines() if ln.strip()]
+
+    workspaces = []
+    for entry in entries(w.get("workspaces")) or ["."]:
+        root, _, target = entry.partition("->")
+        workspaces.append(f"{root.strip()} -> {target.strip() or 'target'}")
+    targets = str(w.get("cache-targets", True)).lower()
+    cache_bin = str(w.get("cache-bin", True)).lower()
+    dirs = entries(w.get("cache-directories"))
+    return f"workspaces [{', '.join(workspaces)}]; cache-targets {targets}; cache-bin {cache_bin}; cache-directories {dirs}"
+
+
 def derive_uses(docs: dict[str, dict]) -> list[dict]:
     """One row per cache use: path, job, role (save|read), key template, condition."""
     rows: list[dict] = []
@@ -183,6 +211,7 @@ def derive_uses(docs: dict[str, dict]) -> list[dict]:
                         cond=cond,
                         role="read" if _is_false(save_if) else "save",
                         explicit=save_if is not None,
+                        paths=rust_cache_paths(w),
                     )
                 elif uses.startswith("actions/cache/save@"):
                     row.update(
@@ -308,6 +337,7 @@ def check_uses(rows: list[dict], reg: dict) -> list[str]:
     savers: dict[str, set[str]] = {c["id"]: set() for c in classes}
     readers: dict[str, set[str]] = {c["id"]: set() for c in classes}
     saver_prefix: dict[str, set[str]] = {c["id"]: set() for c in classes}
+    saver_paths: dict[str, set[str]] = {}
     used: set[str] = set()
     for r in rows:
         where = f"{r['file']} [{r['job']}] `{r['step']}`"
@@ -332,6 +362,8 @@ def check_uses(rows: list[dict], reg: dict) -> list[str]:
         if r["role"] == "save":
             savers[cid].add(r["owner"])
             saver_prefix[cid].add(literal_prefix(r["template"]))
+            if r["kind"] == "rust-cache":
+                saver_paths.setdefault(literal_prefix(r["template"]), set()).add(r["paths"])
             if r["kind"] == "rust-cache" and not r["explicit"]:
                 fails.append(
                     f"{where}: rust-cache without `save-if`; state `{MAIN_ONLY}` for a saver or "
@@ -372,6 +404,16 @@ def check_uses(rows: list[dict], reg: dict) -> list[str]:
                     f"{r['file']} [{r['job']}] `{r['step']}`: reads `{r['template']}`, which no saver "
                     f"of class `{cls['id']}` writes (savers write {sorted(saver_prefix[cls['id']])}); "
                     "a restore from a key nobody saves never warms"
+                )
+                continue
+            saved = saver_paths.get(literal_prefix(r["template"]), set())
+            if cls is not None and saved and r["paths"] not in saved:
+                fails.append(
+                    f"{r['file']} [{r['job']}] `{r['step']}`: restores `{r['template']}` with "
+                    f"{r['paths']}, but its savers write {sorted(saved)}. actions/cache stamps an "
+                    "entry with a hash of its path list and a restore matches only its own stamp, "
+                    "so this reader finds nothing under a key that matches; list the saver's "
+                    "workspaces, in its order"
                 )
     return fails
 
@@ -588,6 +630,21 @@ def selftest() -> int:
         r["classes"][2]["prefixes"].append("v0-rust-other-")
 
     case("a reader of a key nobody saves", reader_nowhere, "no saver")
+
+    def reader_other_paths(d, r, p):
+        d[".github/workflows/a.yml"]["jobs"]["j"]["steps"][4]["with"]["workspaces"] = (
+            "crates -> target\nvendor/sce -> target\n"
+        )
+        d[".github/workflows/a.yml"]["jobs"]["r"]["steps"][0]["with"]["workspaces"] = "crates -> target\n"
+
+    case("a reader whose path list differs from its saver's", reader_other_paths, "hash of its path list")
+
+    def reader_same_paths(d, r, p):
+        for job in ("j", "r"):
+            steps = d[".github/workflows/a.yml"]["jobs"][job]["steps"]
+            steps[4 if job == "j" else 0]["with"]["workspaces"] = "crates\nvendor/sce -> target"
+
+    case("a reader with the saver's path list, spelled with the default target, stays clean", reader_same_paths, None)
 
     def stale_class(d, r, p):
         r["classes"].append(

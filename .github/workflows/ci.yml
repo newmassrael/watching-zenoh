@@ -1696,7 +1696,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -1800,7 +1802,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -1956,7 +1960,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Layer C1cf — every crate builds with default features off
         # R311y821 — nothing local built a SHRUNKEN feature combination of a
@@ -2028,7 +2034,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Layer C0 — binary-dep test #[ignore] discipline
         # R235-hotfix — pre-flight scan: any wz-integration-tests
@@ -2109,7 +2117,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Layer C1cs — what a capability costs in the C ABI binaries
         run: bash scripts/run-ci.sh --layer C1cs
@@ -2151,7 +2161,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Layer C1co — the pico client-only build dials a listener
         run: bash scripts/run-ci.sh --layer C1co
@@ -2192,7 +2204,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       # The `shm` file creates POSIX shared-memory segments, and on a hosted run the creation
       # answered `OS error 12` seven times in a row where the build host answers none (the
@@ -2367,7 +2381,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -2547,7 +2563,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -5313,7 +5331,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Layer C1w — routing-accept multi-peer accept + quic/datagram mesh pins
         run: bash scripts/run-ci.sh --layer C1w
@@ -5399,7 +5419,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Layer C1am — adminspace handlers
         run: bash scripts/run-ci.sh --layer C1am
@@ -6107,7 +6129,9 @@ jobs:
           shared-key: ci
           add-job-id-key: "false"
           save-if: "false"
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine

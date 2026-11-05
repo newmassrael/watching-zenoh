@@ -169,12 +169,11 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "here, and this row is the CONTROL that keeps the gate from reading "
         "as `every narrow read is a bug`.",
     ),
-    # The generated rows below read in `decode_into` (the lent decode, in place)
-    # or in `store_into` (the storing decode, which since SCE ADR 0077 section 7
-    # reads the frame once into a profile's value and not through the lent one).
-    # A codec whose lent form still decodes in place reads in both, and each read
-    # is the same field at the same width against the same upstream codec.
-    "out/wz-codecs/encoding.rs::store_into::": (
+    # The generated rows below read in `decode_into`. Since the SCE pin 07cb8c5020
+    # (the one-pass lent decode, R4249) a codec reads the frame once there, into
+    # whatever the profile stores, and `store_into` reads nothing of its own; the
+    # `store_into` rows the two-pass decode needed left with it (R4253).
+    "out/wz-codecs/encoding.rs::decode_into::": (
         "REFUSE",
         "the generated sibling of `walk_encoding` above, and correct for the "
         "same reason: upstream's `Encoding` codec is `Zenoh080Bounded::<u32>` "
@@ -208,12 +207,7 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "the generated sibling of `walk_msg_put`'s `slice_count`, correct for "
         "the same reason: the count is `Zenoh080Bounded::<u32>` upstream.",
     ),
-    "out/wz-codecs/msg_put.rs::store_into::": (
-        "REFUSE",
-        "the storing decode's read of the same slice count as the row above, "
-        "`Zenoh080Bounded::<u32>` upstream.",
-    ),
-    "out/wz-codecs/zbuf_slice.rs::store_into::": (
+    "out/wz-codecs/zbuf_slice.rs::decode_into::": (
         "REFUSE",
         "the generated sibling of `walk_zbuf_slice`'s `kind`, correct for the "
         "same reason: the kind is `Zenoh080Bounded::<u32>` upstream.",
@@ -235,11 +229,6 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "`ValueType`'s reader hands its payload to `Zenoh080Sliced::<u32>`, "
         "whose count is `Zenoh080Bounded::<u32>`, so a varint past u32 is "
         "`DidntRead` upstream too.",
-    ),
-    "out/wz-codecs/query_value_zbuf.rs::store_into::": (
-        "REFUSE",
-        "the storing decode's read of the same slice count as the row above, "
-        "`Zenoh080Bounded::<u32>` upstream.",
     ),
 }
 
