@@ -2428,6 +2428,12 @@ pub mod linkstate_interest;
 /// Gated on `routing-router-hat`, with the forwarder that holds it.
 #[cfg(feature = "routing-router-hat")]
 pub(crate) mod client_sub_store;
+/// A persistent hash map (a hash array mapped trie with path copying), so that a copy of the
+/// router's tables shares its stores and a write copies only the path it changes
+/// (`docs/router-table-snapshots.md`, phase 6). Gated on `routing-peer`, with the stores that hold
+/// it.
+#[cfg(feature = "routing-peer")]
+pub(crate) mod persistent_map;
 /// R2908 — [`route_cache::RouteCache`]: the per-(source, keyexpr) route both
 /// mesh forwarders compute once and reuse until a table it was read from
 /// changes, upstream's `Routes<T>` on the routing `Resource`. Gated on
