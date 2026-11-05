@@ -310542,6 +310542,34 @@
         "repairs."
       ]
     },
+    "Round 4251": {
+      "decision_summary": "The task cells of the lwIP node images are sized by the task they hold. A runtime cell was a number written beside the image (12,288 bytes, two copies of the application layer and the handle, because the session's task was an async fn that kept its argument twice); with the task an async block it is about 4.9 KB and the number was stale. wz-runtime-coop now has cell_bytes_of, which names a future by the function that returns it and gives the cell it needs (the future rounded to its output's alignment, and the output), and pump_task_cell_bytes over a session's types. The udp image (fixed_node) and the tcp image (fixed_tcp) declare TASK_BYTES as that constant of their own types, so a layer that grows grows the cell and a spawn is never refused for size. Static RAM falls by 22,528 bytes in each: 721,308 to 698,780 (86.3 to 83.6 percent of 816 KB) and 656,604 to 634,076 (78.6 to 75.9 percent). The TLS admin image keeps its own figure.",
+      "changes_bullets": [
+        "wz-runtime-coop: static_executor.rs adds the const fn cell_bytes_of; session_drive.rs adds the const fn pump_task_cell_bytes (session-slot); static_tests.rs adds a test that a cell of exactly that many bytes takes the task and one byte less refuses it as too large. zephyr-admin-node: fixed_node.rs and fixed_tcp.rs declare TASK_BYTES as pump_task_cell_bytes over the image's clock, pump link, driver and the events of its factory (EventsOf of the factory's Events)."
+      ],
+      "verification_bullets": [
+        "On a build host through bx: wz-runtime-coop session-slot static_tests (19 pass, the new one holds the exact-fit and one-byte-short cases) and clippy with -D warnings on the library and all targets. On this host with west: both fixed rows of the board table build with the derived cells; FLASH 220,416 B (udp) and 225,188 B (tcp), RAM 698,780 B and 634,076 B (before: 721,308 and 656,604); the frame gate reads the same frames as before this change (largest 6,288 B udp and 6,408 B tcp, worst chain 13,608 B and 13,184 B). Not run: the node on a board or an emulator with the derived cell, Layer Qzb and Qzk as lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "The derived size is the task a session holds, and the cell the node holds of it is one of TASKS = SESSIONS + 1, so one cell has no session to hold; whether the spare cell is needed is a fact of the node's loop that was not looked at. Other images still write the figure by hand: fixed_admin (2,048 bytes, the TLS node), the client images, mcu-admin-node (12,288), zephyr-admin-loopback (12,288) and the host tests of the slot node; each of the node-shaped ones can take the same constant, and the client images need their own event types named. No run has put a session through a cell of the derived size on an emulator or the kit."
+      ],
+      "publishable_decision_summary": "The task cells of the lwIP node images are sized by the task they hold. A runtime cell was a number written beside the image (12,288 bytes, two copies of the application layer and the handle, because the session's task was an async fn that kept its argument twice); with the task an async block it is about 4.9 KB and the number was stale. wz-runtime-coop now has cell_bytes_of, which names a future by the function that returns it and gives the cell it needs (the future rounded to its output's alignment, and the output), and pump_task_cell_bytes over a session's types. The udp image (fixed_node) and the tcp image (fixed_tcp) declare TASK_BYTES as that constant of their own types, so a layer that grows grows the cell and a spawn is never refused for size. Static RAM falls by 22,528 bytes in each: 721,308 to 698,780 (86.3 to 83.6 percent of 816 KB) and 656,604 to 634,076 (78.6 to 75.9 percent). The TLS admin image keeps its own figure.",
+      "publishable_changes_bullets": [
+        "wz-runtime-coop: static_executor.rs adds the const fn cell_bytes_of; session_drive.rs adds the const fn pump_task_cell_bytes (session-slot); static_tests.rs adds a test that a cell of exactly that many bytes takes the task and one byte less refuses it as too large. zephyr-admin-node: fixed_node.rs and fixed_tcp.rs declare TASK_BYTES as pump_task_cell_bytes over the image's clock, pump link, driver and the events of its factory (EventsOf of the factory's Events)."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host through bx: wz-runtime-coop session-slot static_tests (19 pass, the new one holds the exact-fit and one-byte-short cases) and clippy with -D warnings on the library and all targets. On this host with west: both fixed rows of the board table build with the derived cells; FLASH 220,416 B (udp) and 225,188 B (tcp), RAM 698,780 B and 634,076 B (before: 721,308 and 656,604); the frame gate reads the same frames as before this change (largest 6,288 B udp and 6,408 B tcp, worst chain 13,608 B and 13,184 B). Not run: the node on a board or an emulator with the derived cell, Layer Qzb and Qzk as lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The derived size is the task a session holds, and the cell the node holds of it is one of TASKS = SESSIONS + 1, so one cell has no session to hold; whether the spare cell is needed is a fact of the node's loop that was not looked at. Other images still write the figure by hand: fixed_admin (2,048 bytes, the TLS node), the client images, mcu-admin-node (12,288), zephyr-admin-loopback (12,288) and the host tests of the slot node; each of the node-shaped ones can take the same constant, and the client images need their own event types named. No run has put a session through a cell of the derived size on an emulator or the kit."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
