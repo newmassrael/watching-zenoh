@@ -168,10 +168,10 @@
     },
     {
       "id": "engine-inbox",
-      "where": {"function": "engine::MainLoop>::drain_inbox$"},
+      "where": {"function": "engine::Engine>::drain_inbox$"},
       "callees": "NONE",
       "absent": "inbox::InboxSource>::(per_boundary|take)$",
-      "why": "the engine's boundary applies what other threads posted to an inbox attached to it (engine.rs, `drain_inbox`, SCE ADR 0084): its two calls through a register, in each machine's copy, are the attached inbox's `per_boundary` and `take` (a reference to InboxSource). Nothing attaches one: `attach_inbox` is called by no function of these images, and the premise is that no function of the image is an implementation of the two methods whose address it holds. Without this rule the file-wide `engine-host` below claimed the two as calls on the host and drew a cycle from `drain_inbox` to itself that no execution takes, since an input an inbox holds is queued by `apply_inbox_input` and run by the turn after it, not by a nested one"
+      "why": "the engine's boundary applies what other threads posted to an inbox attached to it (engine.rs, `Engine::drain_inbox`, SCE ADR 0084): its two calls through a register, in each machine's copy, are the attached inbox's `per_boundary` and `take` (a reference to InboxSource). Nothing attaches one: `attach_inbox` is called by no function of these images, and the premise is that no function of the image is an implementation of the two methods whose address it holds. Without this rule the file-wide `engine-host` below claimed the two as calls on the host and drew a cycle between the engine's `drain_inbox` and the host's, which calls it, that no execution takes: the drain holds a flag while it applies, a request made inside it returns at once, and an input an inbox holds is queued by `apply_inbox_input` and run by the turn after it, not by a nested one. The body lived in the host's own `drain_inbox` until the pin 0907db47a2, which moved it to the engine's"
     },
     {
       "id": "engine-host",
