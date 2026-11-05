@@ -14,6 +14,7 @@ move: it keeps its stem, which is its name in `--test <name>` and in every table
 
     files(tests_dir)           every test source, sorted by stem (then path)
     locate(tests_dir, stem)    the path of the file called `stem`, or None
+    resolve(root, rel)         the file a table names by `crates/<c>/tests/<name>.rs`, either layout
     require(tests_dir, what)   `files`, refusing an empty population
     test_sources.py --selftest
 """
@@ -76,6 +77,20 @@ def tracked_pathspecs(crate: str = "*") -> list[str]:
     return [f"crates/{crate}/tests/*.rs", f"crates/{crate}/tests/*/files/*.rs"]
 
 
+_PLAIN = re.compile(r"^(crates/[^/]+/tests)/([^/]+)\.rs$")
+
+
+def resolve(root: Path, rel_posix: str) -> Path | None:
+    """The file a table names by the path `rel_posix` (relative to `root`), in either layout: the
+    path itself when it is a file, and for a `crates/<c>/tests/<name>.rs` that has been merged the
+    module `tests/<target>/files/<name>.rs`. A table that cites a test file keeps its citation."""
+    direct = root / rel_posix
+    if direct.is_file():
+        return direct
+    m = _PLAIN.match(rel_posix)
+    return locate(root / m.group(1), m.group(2)) if m else None
+
+
 def locate(tests_dir: Path, stem: str) -> Path | None:
     """The path of the test file called `stem`, in whichever layout the crate is in."""
     direct = tests_dir / f"{stem}.rs"
@@ -122,6 +137,16 @@ def selftest() -> int:
         check("locate finds a merged file", locate(tests, "b") == tests / "it" / "files" / "b.rs")
         check("locate finds a plain file", locate(tests, "plain") == tests / "plain.rs")
         check("locate says none", locate(tests, "nope") is None)
+        root = Path(tmp) / "root"
+        (root / "crates" / "c" / "tests" / "it" / "files").mkdir(parents=True)
+        (root / "crates" / "c" / "tests" / "it" / "main.rs").write_text("")
+        (root / "crates" / "c" / "tests" / "it" / "files" / "m.rs").write_text("")
+        (root / "crates" / "c" / "tests" / "p.rs").write_text("")
+        check("resolve reads a merged file by its old path",
+              resolve(root, "crates/c/tests/m.rs") == root / "crates/c/tests/it/files/m.rs")
+        check("resolve reads a plain file", resolve(root, "crates/c/tests/p.rs") == root / "crates/c/tests/p.rs")
+        check("resolve says none for a missing file and for another kind of path",
+              resolve(root, "crates/c/tests/zz.rs") is None and resolve(root, "crates/c/src/x.rs") is None)
         check("a missing directory is empty", files(Path(tmp) / "absent") == [])
         check("a merged path keeps its old key",
               canonical("crates/c/tests/it/files/a.rs") == "crates/c/tests/a.rs"

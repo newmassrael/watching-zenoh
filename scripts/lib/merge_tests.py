@@ -27,8 +27,9 @@ A file is NOT merged when it must be its own process or cannot be a module:
 
   * it installs a `#[global_allocator]` (a binary has one, and an allocation count is read in a
     quiet process);
-  * it has a `[[test]]` table in the crate's `Cargo.toml` (a `required-features` list, `harness`,
-    a name the scripts use): the table names a file, and a table is the crate's own decision;
+  * it has a `[[test]]` table in the crate's `Cargo.toml` that sets more than a `name` and a
+    `required-features` list (a `path`, `harness`, `edition`): that table is the crate's own
+    decision about the file. A table of a name and its required features IS dissolved (below);
   * it has `harness = false` or an `fn main` (it is not a libtest target);
   * it sets or removes an environment variable or changes the working directory
     (`PROCESS_WRITE`): every other file of a shared executable would run under what it set, as
@@ -40,7 +41,16 @@ An inner attribute of a file (`#![cfg(feature = "x")]`, `#![allow(...)]`) is val
 module file and stays where it is: the file is then an empty module in a build without the feature,
 as it was an empty executable.
 
-    merge_tests.py --crate C --plan            what would move, what stays, and why
+A `[[test]]` table of a name and `required-features` is how a crate says "build this file only
+with these features", and it is what kept such a file an executable of its own: cargo gates a
+whole TARGET by that list, and a merged target holds files of every list. The same statement is a
+file-level gate, `#![cfg(all(feature = "a", feature = "b"))]` at the top of the module file, which
+removes the module (its tests, its imports, its helpers) from a build without those features. `--apply`
+writes that attribute (with the comment that stood above the table, as the table's reason) and
+deletes the table, so the crate builds ONE executable of the files its features enable, where it
+built one for each. Every feature set of a gate leg then costs one executable and not k.
+
+    merge_tests.py --crate C --plan           what would move, what stays, and why
     merge_tests.py --crate C --apply [--keep N]   `git mv` the files and write the two new ones
     merge_tests.py --compare BEFORE AFTER      the sets of (file, test) of two `cargo test -- --list`
                                                outputs are equal: the one invariant of the move
@@ -68,8 +78,9 @@ HEADER = """\
 //! Every file of `files/` was a test file of `tests/` and so an executable of its own,
 //! linked against the whole dependency tree; they are modules of this one now, and the test of a
 //! file is `files::<name>::<test>` (`cargo test --test it files::<name>::` runs one file). The
-//! files that must be their own process (a global allocator, a test table in the manifest) stay
-//! in `tests/`. See `scripts/lib/merge_tests.py`.
+//! files that must be their own process (a global allocator, a test table that sets more than the
+//! features a file requires) stay in `tests/`. A file that required features carries them as an
+//! inner `cfg` attribute at its top. See `scripts/lib/merge_tests.py`.
 
 mod files;
 """
@@ -109,6 +120,114 @@ def toml_tests(manifest: Path) -> set[str]:
     return names
 
 
+class TestTable:
+    """One `[[test]]` table of a manifest: the test it names, the features it requires, whether it
+    sets anything else (a path, `harness`, `test`, `edition`: such a table cannot be dissolved into
+    the file), and the lines it occupies, with the comment right above it."""
+
+    def __init__(self, name: str, features: list[str], simple: bool, first: int, last: int,
+                 comment: list[str]):
+        self.name = name
+        self.features = features
+        self.simple = simple
+        self.first = first      # index of the first line to remove (its comment, if any)
+        self.last = last        # index one past the last line to remove
+        self.comment = comment  # the comment lines above the table, without the leading `#`
+
+
+_KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=\s*(.*)$")
+
+
+def test_tables(text: str) -> list[TestTable]:
+    """The `[[test]]` tables of a manifest, in order. The table ends at the next line that opens a
+    table and takes the blank lines after it; its comment is the run of `#` lines right above it
+    (no blank line between). A value that opens an array and does not close it on its line is read
+    to its `]`; only `name` and `required-features` keep a table simple."""
+    lines = text.splitlines(keepends=True)
+    tables: list[TestTable] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() != "[[test]]":
+            i += 1
+            continue
+        first = i
+        while first > 0 and lines[first - 1].lstrip().startswith("#"):
+            first -= 1
+        comment = [ln.strip()[1:].strip() for ln in lines[first:i]]
+        j = i + 1
+        keys: dict[str, str] = {}
+        while j < len(lines) and not lines[j].lstrip().startswith("["):
+            m = _KEY.match(lines[j])
+            if m:
+                value = m.group(2)
+                depth = value.count("[") - value.count("]")
+                while depth > 0 and j + 1 < len(lines):
+                    j += 1
+                    value += lines[j]
+                    depth += lines[j].count("[") - lines[j].count("]")
+                keys[m.group(1)] = value
+            j += 1
+        last = j
+        while last > i + 1 and not lines[last - 1].strip():
+            last -= 1
+        end = j  # the blank lines after the table go with it
+        names = re.findall(r'"([^"]+)"', keys.get("name", ""))
+        feats = re.findall(r'"([^"]+)"', keys.get("required-features", ""))
+        simple = bool(names) and set(keys) <= {"name", "required-features"}
+        tables.append(TestTable(names[0] if names else "", feats, simple, first, end, comment))
+        i = j
+    return tables
+
+
+def remove_tables(text: str, names: set[str]) -> str:
+    """`text` without the `[[test]]` tables called `names` (each with its comment above)."""
+    lines = text.splitlines(keepends=True)
+    for table in sorted(test_tables(text), key=lambda t: -t.first):
+        if table.name in names:
+            del lines[table.first:table.last]
+    return "".join(lines)
+
+
+def feature_gate(features: list[str]) -> str:
+    """The inner attribute that makes a module file exist only when `features` are on."""
+    parts = [f'feature = "{f}"' for f in features]
+    return f"#![cfg({parts[0]})]" if len(parts) == 1 else f"#![cfg(all({', '.join(parts)}))]"
+
+
+def insert_gate(text: str, gate: str, comment: list[str]) -> str:
+    """`text` with `gate` (and `comment`, the manifest's words about the table) placed after the
+    file's own opening comments and inner attributes, where an inner attribute may stand."""
+    lines = text.splitlines(keepends=True)
+    at = 0
+    depth = 0
+    in_block = False
+    while at < len(lines):
+        s = lines[at].strip()
+        if in_block:
+            in_block = "*/" not in s
+        elif depth > 0:
+            depth += s.count("[") - s.count("]")
+        elif not s or s.startswith("//"):
+            pass
+        elif s.startswith("/*"):
+            in_block = "*/" not in s
+        elif s.startswith("#!["):
+            depth = max(s.count("[") - s.count("]"), 0)
+        else:
+            break
+        at += 1
+    while at > 0 and not lines[at - 1].strip():
+        at -= 1
+    head = "".join(lines[:at])
+    tail = "".join(lines[at:])
+    add = "\n" if head else ""
+    add += "".join(f"// {c}\n" if c else "//\n" for c in comment)
+    add += gate + "\n"
+    if tail and not tail.startswith("\n"):
+        add += "\n"
+    return head + add + tail
+
+
 def families_of(text: str, exclusive: list[str]) -> list[str]:
     """The exclusive crates a file uses by path (`token::...`, `use token`), not in prose."""
     return [t for t in exclusive if re.search(rf"(?<![\w`]){t}::|\buse\s+{t}\b", text)]
@@ -127,6 +246,10 @@ def classify(
     tests = crate / "tests"
     tabled = toml_tests(crate / "Cargo.toml")
     manifest = (crate / "Cargo.toml").read_text() if (crate / "Cargo.toml").exists() else ""
+    # A table of a name and the features it requires is dissolved into the file (a file-level
+    # `#![cfg]`, `apply`); a table that sets anything else cannot be, and its file stays.
+    dissolvable = {t.name for t in test_tables(manifest) if t.simple}
+    tabled = tabled - dissolvable
     harnessless = "harness = false" in manifest or "harness=false" in manifest
     merge: dict[str, list[str]] = {}
     stay: list[tuple[str, str]] = []
@@ -298,6 +421,10 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
                   f"by hand. Nothing done", file=sys.stderr)
             return 1
         shared_by[target] = shared
+    manifest_path = crate / "Cargo.toml"
+    manifest = manifest_path.read_text() if manifest_path.exists() else ""
+    dissolved = {t.name: t for t in test_tables(manifest) if t.simple}
+    gated: set[str] = set()
     for target, names in sorted(merge.items()):
         it = crate / "tests" / target
         (it / "files").mkdir(parents=True)
@@ -310,7 +437,12 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
             text, pointed = point_helper_modules(text, helpers, shared)
             if pointed:
                 print(f"  helper module pointed by #[path] in {name}")
-            if changed or pointed:
+            table = dissolved.get(name)
+            if table is not None:
+                gated.add(name)
+                if table.features:
+                    text = insert_gate(text, feature_gate(table.features), table.comment)
+            if changed or pointed or table is not None:
                 dst.write_text(text)
                 rebased += len(changed)
                 for line in changed:
@@ -322,6 +454,9 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
         git("add", str(it.relative_to(ROOT)))
         moved += len(names)
         print(f"  tests/{target}: {len(names)} file(s)")
+    if gated:
+        manifest_path.write_text(remove_tables(manifest, gated))
+        print(f"  {len(gated)} [[test]] table(s) of Cargo.toml became a file-level feature gate")
     print(f"{crate.name}: {moved} file(s) moved into {len(merge)} target(s), {len(stay)} stay, "
           f"{rebased} line(s) with a crate:: path rebased")
     return 0
@@ -459,6 +594,50 @@ def selftest() -> int:
               and bool(STATEFUL.search("thread_local! { }\n"))
               and not STATEFUL.search("pub fn h() {}\n// a static note\n"))
         check("a [[test]] name is read", toml_tests(crate / "Cargo.toml") == {"tabled"})
+    manifest = (
+        '[package]\nname = "c"\n\n'
+        "# `peer` selects no engine, so a test that reaches the tokio engine says so.\n"
+        "# Second line.\n"
+        '[[test]]\nname = "a"\nrequired-features = ["peer", "query"]\n\n'
+        '[[test]]\nname = "b"\nrequired-features = [\n    "x",\n    "y",\n]\n\n'
+        '[[test]]\nname = "c"\npath = "tests/c.rs"\n\n'
+        '[[test]]\nname = "d"\nharness = false\n\n'
+        '[features]\npeer = []\n'
+    )
+    tables = {t.name: t for t in test_tables(manifest)}
+    check("four tables are read", list(tables) == ["a", "b", "c", "d"])
+    check("features of a one-line array", tables["a"].features == ["peer", "query"])
+    check("features of a multi-line array", tables["b"].features == ["x", "y"])
+    check("a path or harness keeps a table from being dissolved",
+          tables["a"].simple and tables["b"].simple and not tables["c"].simple
+          and not tables["d"].simple)
+    check("the comment above a table goes with it", tables["a"].comment ==
+          ["`peer` selects no engine, so a test that reaches the tokio engine says so.", "Second line."])
+    gone = remove_tables(manifest, {"a", "b"})
+    check("a removed table takes its comment and nothing else",
+          "required-features" not in gone and "Second line" not in gone
+          and '[[test]]\nname = "c"' in gone and '[features]\npeer = []\n' in gone
+          and gone.startswith('[package]\nname = "c"\n\n[[test]]\nname = "c"'))
+    check("removing no table changes nothing", remove_tables(manifest, {"zzz"}) == manifest)
+    check("a one-feature gate", feature_gate(["peer"]) == '#![cfg(feature = "peer")]')
+    check("a gate of two features", feature_gate(["a", "b"]) == '#![cfg(all(feature = "a", feature = "b"))]')
+    opened = insert_gate(
+        "// SPDX\n\n//! Docs.\n#![allow(\n    dead_code,\n)]\n\nuse a::b;\n#[test] fn t() {}\n",
+        feature_gate(["x"]), ["why"])
+    check("the gate follows the file's own inner attributes",
+          opened == "// SPDX\n\n//! Docs.\n#![allow(\n    dead_code,\n)]\n\n// why\n"
+                    '#![cfg(feature = "x")]\n\nuse a::b;\n#[test] fn t() {}\n')
+    bare = insert_gate("use a::b;\n", feature_gate(["x"]), [])
+    check("a file with no header takes the gate first", bare == '#![cfg(feature = "x")]\n\nuse a::b;\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        crate = Path(tmp) / "c"
+        (crate / "tests").mkdir(parents=True)
+        (crate / "Cargo.toml").write_text(manifest)
+        for name in "abcd":
+            (crate / "tests" / f"{name}.rs").write_text("#[test] fn t() {}\n")
+        merge, stay = classify(crate, set())
+        check("a table of features is dissolved and any other table keeps its file",
+              merge == {"it": ["a", "b"]} and {n for n, _ in stay} == {"c", "d"})
     if failures == 0:
         print("merge_tests: selftest OK")
     return 1 if failures else 0

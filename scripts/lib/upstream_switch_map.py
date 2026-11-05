@@ -92,6 +92,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
+import test_sources  # noqa: E402
 import upstream_release_distance as urd  # noqa: E402
 import wz_config  # noqa: E402
 
@@ -202,7 +203,7 @@ def shape_arm(
             path = (anchor or "").split("::", 1)[0]
             if not path:
                 failures.append(f"{where} is `always` but names no file that shows it")
-            elif not (ROOT / path).is_file():
+            elif test_sources.resolve(ROOT, path) is None:
                 failures.append(f"{where} is `always` by `{anchor}`, and `{path}` is not a tracked file here")
         else:
             if anchor is not None:
