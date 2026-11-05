@@ -312772,6 +312772,34 @@
         "The steps for the failure modes of a stream (a connection that resets, a listener that closes, a peer that reconnects, many requests on one connection) are still to be designed, each with a control that passes first, in the verdict program and the grammar file; the pool steps HW.26 to HW.35 are not in the kit lane; the hosted runs of this series are unread."
       ]
     },
+    "Round 4313": {
+      "decision_summary": "The integration test files of wz-capi-pico and wz-capi-c are merged into one executable each, and the merge tool learns to do it for a file that a [[test]] table gates by required features: the table becomes an inner cfg at the top of the file and is deleted, so a build of one feature set links one executable of the files its features enable where it linked one for each. Seven pico files that keep process-wide state (the clock registry, the event log, the supervisor, the sampler) and one that installs a global allocator stay executables of their own.",
+      "changes_bullets": [
+        "70 test files moved to tests/it of the two crates; 57 [[test]] tables of the two manifests became file-level feature gates. The merge tool reads a manifest table structurally and dissolves one that sets only a name and required features. test_sources resolves a cited test path in either layout and the upstream switch map uses it. link_kinds_roundtrip is gated on a Unix host, which the platform surface matrix asked for once the gate was readable in the file. The platform workflow probe of a crate's integration tests also looks for a merged target."
+      ],
+      "verification_bullets": [
+        "Measured on one build host with the same feature set before and after: wz-capi-pico 42 executables, 1.98 GB of executables, 2.52 GB debug target, 80 s cold build, to 9 executables, 0.42 GB, 1.00 GB, 26 s; the 194 test names of that set are identical. wz-capi-c builds in 3 executables (216 MB) where the unmerged build was killed at the memory ceiling. The whole of both crates passed under the default and a wide feature set, clippy over their tests is clean, and the three client-only CI legs select 11, 8 and 11 tests of client_only_dials_a_listener on both engines as their guards require. The leg list of the nondefault gate is unchanged, and the round-fed gates ran green but for two reds that are the pin of a peer's change and are repaired by the rebase."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The measure that matters is still open: the largest size the debug target reaches in one full run of the CI script, which has not been taken. The remaining multiplier is feature sets, since every set a leg names builds the library and the dependencies again; the legs reap executables but not the rest. wz-session-lwip has no file to merge, and wz-ap-demo and wz-session-core gain too little to merge. The integration tests of the merged capi crates that need a router binary or a pico build were not run here."
+      ],
+      "publishable_decision_summary": "The integration test files of wz-capi-pico and wz-capi-c are merged into one executable each, and the merge tool learns to do it for a file that a [[test]] table gates by required features: the table becomes an inner cfg at the top of the file and is deleted, so a build of one feature set links one executable of the files its features enable where it linked one for each. Seven pico files that keep process-wide state (the clock registry, the event log, the supervisor, the sampler) and one that installs a global allocator stay executables of their own.",
+      "publishable_changes_bullets": [
+        "70 test files moved to tests/it of the two crates; 57 [[test]] tables of the two manifests became file-level feature gates. The merge tool reads a manifest table structurally and dissolves one that sets only a name and required features. test_sources resolves a cited test path in either layout and the upstream switch map uses it. link_kinds_roundtrip is gated on a Unix host, which the platform surface matrix asked for once the gate was readable in the file. The platform workflow probe of a crate's integration tests also looks for a merged target."
+      ],
+      "publishable_verification_bullets": [
+        "Measured on one build host with the same feature set before and after: wz-capi-pico 42 executables, 1.98 GB of executables, 2.52 GB debug target, 80 s cold build, to 9 executables, 0.42 GB, 1.00 GB, 26 s; the 194 test names of that set are identical. wz-capi-c builds in 3 executables (216 MB) where the unmerged build was killed at the memory ceiling. The whole of both crates passed under the default and a wide feature set, clippy over their tests is clean, and the three client-only CI legs select 11, 8 and 11 tests of client_only_dials_a_listener on both engines as their guards require. The leg list of the nondefault gate is unchanged, and the round-fed gates ran green but for two reds that are the pin of a peer's change and are repaired by the rebase."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The measure that matters is still open: the largest size the debug target reaches in one full run of the CI script, which has not been taken. The remaining multiplier is feature sets, since every set a leg names builds the library and the dependencies again; the legs reap executables but not the rest. wz-session-lwip has no file to merge, and wz-ap-demo and wz-session-core gain too little to merge. The integration tests of the merged capi crates that need a router binary or a pico build were not run here."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
