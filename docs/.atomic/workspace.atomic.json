@@ -310464,6 +310464,84 @@
         "Open: the asking client's bound (4,696) still joins lend_response (1,472 bytes, the lent reply decode) and the response writer's encode_generic (1,488) by registers, and the chain of direct calls no longer holds the decode of the lent reply; a frame of 1.4 KB in each is the next thing to measure on the kit. SCE's stated residual: a chain whose arm holds a list or a body after it still answers CapacityExceeded at the chain (no codec of the tree has that shape). A switchboard event payload keeps its text as the runtime's SceString until SCE ADR 0086 section 4.4 moves it, and the generator's string move then turns fallible as bytes already is. The reduced-feature lanes (Layers C1h, C1g, C1m, C1ax, C1cf, C1bnl) were not run here; a hosted reading of them and of Layers Qzk and Qzb."
       ]
     },
+    "Round 4250": {
+      "decision_summary": "Round 4248 filed the uring row as PARTIAL on the claim that wz\nhands the io_uring reactor TCP's links alone. That was wrong, and\nthe atom's own reason, which this session read only afterwards,\nsays so: R2750 put unix-domain streams and unixpipe on the ring and\nR2751/R2752 put vsock on it, each with an executed witness. Read\nagainst the pinned zenoh checkout, upstream answers get_fd with a\ndescriptor for tcp, unix-domain stream, unixpipe, vsock and the\nconnected variant of udp, and refuses for tls, quic, quic_datagram,\nws and serial. wz matches every one of those rows except udp.\n\nThe PARTIAL verdict stays, narrowed to its real residual: udp is a\ndatagram link with no length prefix for the stream body to frame by,\nand reaching it needs upstream's multishot, provided-buffer shape,\nwhich the atom's design row does not choose. Round 4248's entry is\nfrozen and stands; this is its correction. The census also stops\ngrading the table against a stale checkout when the pinned one sits\nbeside it.",
+      "changes_bullets": [
+        "scripts/lib/upstream_feature_census.py: the uring row and its",
+        "PARTIAL note name tcp, unix-domain stream, unixpipe and vsock as on",
+        "the ring and udp as the one that is not.",
+        "Same file: pick_anchor chooses the first present manifest that",
+        "declares the pinned version, where the first present one was taken",
+        "and a machine holding the previous pin's checkout read that one;",
+        "manifest_declares reads the version the way the anchor gate does,",
+        "and the selftest gains four cases on trees built in a temp dir.",
+        "crates/wz-runtime-tokio: the uring.rs and uring_reactor.rs headers",
+        "list the same four links and name udp as item 583's."
+      ],
+      "verification_bullets": [
+        "Read from the pinned 1.10.2 checkout: get_fd in tcp, vsock,",
+        "unixsock_stream, unixpipe and udp (connected variant only) answers a",
+        "descriptor; tls, quic, quic_datagram answer an error. Read from wz:",
+        "ring_fd answers Some for tcp, unix-domain, unixpipe and vsock.",
+        "Local: the census selftest passes (16 of 16 comparison cases plus 3",
+        "of 3 unusable-denominator cases) and the shape arm reports 19",
+        "answered, 2 PARTIAL, 0 UNANSWERED; with ZENOHD_SRC set to the pinned",
+        "checkout the upstream arm passes (rc 0). rustfmt --check passes.",
+        "Without it, this machine's upstream arm still refuses: the metadata",
+        "installed beside the 1.10.1 oracle outranks any checkout by design."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 583 is now udp alone (multishot / provided-buffer reader, a",
+        "different atom's work per the design row). Item 201 is unchanged.",
+        "The oracle and its metadata installed on the bench and local hosts",
+        "are 1.10.1 against the pin 1.10.2, so the census upstream arm and",
+        "Layer C1cc need install-zenoh-c.sh / build-zenohd.sh run at the pin.",
+        "Not done: the cargo form of the zenoh-c lane after round 4232's",
+        "repairs."
+      ],
+      "publishable_decision_summary": "Round 4248 filed the uring row as PARTIAL on the claim that wz\nhands the io_uring reactor TCP's links alone. That was wrong, and\nthe atom's own reason, which this session read only afterwards,\nsays so: R2750 put unix-domain streams and unixpipe on the ring and\nR2751/R2752 put vsock on it, each with an executed witness. Read\nagainst the pinned zenoh checkout, upstream answers get_fd with a\ndescriptor for tcp, unix-domain stream, unixpipe, vsock and the\nconnected variant of udp, and refuses for tls, quic, quic_datagram,\nws and serial. wz matches every one of those rows except udp.\n\nThe PARTIAL verdict stays, narrowed to its real residual: udp is a\ndatagram link with no length prefix for the stream body to frame by,\nand reaching it needs upstream's multishot, provided-buffer shape,\nwhich the atom's design row does not choose. Round 4248's entry is\nfrozen and stands; this is its correction. The census also stops\ngrading the table against a stale checkout when the pinned one sits\nbeside it.",
+      "publishable_changes_bullets": [
+        "scripts/lib/upstream_feature_census.py: the uring row and its",
+        "PARTIAL note name tcp, unix-domain stream, unixpipe and vsock as on",
+        "the ring and udp as the one that is not.",
+        "Same file: pick_anchor chooses the first present manifest that",
+        "declares the pinned version, where the first present one was taken",
+        "and a machine holding the previous pin's checkout read that one;",
+        "manifest_declares reads the version the way the anchor gate does,",
+        "and the selftest gains four cases on trees built in a temp dir.",
+        "crates/wz-runtime-tokio: the uring.rs and uring_reactor.rs headers",
+        "list the same four links and name udp as item 583's."
+      ],
+      "publishable_verification_bullets": [
+        "Read from the pinned 1.10.2 checkout: get_fd in tcp, vsock,",
+        "unixsock_stream, unixpipe and udp (connected variant only) answers a",
+        "descriptor; tls, quic, quic_datagram answer an error. Read from wz:",
+        "ring_fd answers Some for tcp, unix-domain, unixpipe and vsock.",
+        "Local: the census selftest passes (16 of 16 comparison cases plus 3",
+        "of 3 unusable-denominator cases) and the shape arm reports 19",
+        "answered, 2 PARTIAL, 0 UNANSWERED; with ZENOHD_SRC set to the pinned",
+        "checkout the upstream arm passes (rc 0). rustfmt --check passes.",
+        "Without it, this machine's upstream arm still refuses: the metadata",
+        "installed beside the 1.10.1 oracle outranks any checkout by design."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 583 is now udp alone (multishot / provided-buffer reader, a",
+        "different atom's work per the design row). Item 201 is unchanged.",
+        "The oracle and its metadata installed on the bench and local hosts",
+        "are 1.10.1 against the pin 1.10.2, so the census upstream arm and",
+        "Layer C1cc need install-zenoh-c.sh / build-zenohd.sh run at the pin.",
+        "Not done: the cargo form of the zenoh-c lane after round 4232's",
+        "repairs."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
