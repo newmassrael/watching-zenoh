@@ -545,3 +545,329 @@ fn a_peer_node_that_keeps_a_south_relays_between_its_client_and_zenohd() {
         "a put of the client of zenohd never reached the client of the wz peer"
     );
 }
+
+/// The advanced publisher, the advanced subscriber and the group of a node, below a real zenohd.
+///
+/// `node_advanced` and `node_group` hold a node and a wz peer that dials it: both ends are wz.
+/// Here a peer node dials a genuine zenohd and the other end is a wz client BEYOND the router, so
+/// everything that crosses (a put, the cache's query and its replies, the `@adv` token, the group's
+/// events and its member's record) goes through zenohd's routing tables. Each leg is run once with
+/// the node dialing zenohd and once with it not dialing, which must show nothing, so that what
+/// arrives in the first is the node's and not a path the harness left open.
+#[cfg(all(
+    feature = "advanced",
+    feature = "group",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+mod advanced_and_group {
+    use super::*;
+
+    use wz_capi_c::abi::z_owned_session_t as Session;
+    use wz_capi_c::advanced::{
+        ze_advanced_publisher_loan, ze_advanced_publisher_options_default,
+        ze_advanced_publisher_options_t, ze_advanced_publisher_put,
+        ze_advanced_subscriber_options_default, ze_advanced_subscriber_options_t,
+        ze_declare_advanced_publisher, ze_declare_advanced_subscriber,
+        ze_moved_advanced_publisher_t, ze_moved_advanced_subscriber_t,
+        ze_owned_advanced_publisher_t, ze_owned_advanced_subscriber_t,
+        ze_undeclare_advanced_publisher, ze_undeclare_advanced_subscriber,
+    };
+    use wz_capi_c::group::{
+        wz_capi_c_group_drop, wz_capi_c_group_join, wz_capi_c_group_loan,
+        wz_capi_c_group_wait_for_view_size, wz_capi_c_member_new, wz_capi_c_member_options_default,
+        wz_capi_c_member_options_t, wz_capi_c_moved_group_t, wz_capi_c_moved_member_t,
+        wz_capi_c_owned_group_t, wz_capi_c_owned_member_t,
+    };
+
+    const ADVANCED_KEY: &str = "wz/router-node/zenohd/advanced";
+    const GROUP: &str = "wz/router-node/zenohd/group";
+
+    /// A peer node that keeps a south apart on `own`, dialing `zenohd` only when `dial` says so.
+    unsafe fn node(own: u16, zenohd: u16, dial: bool) -> Session {
+        let south = [(
+            "gateway",
+            String::from(r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#),
+        )];
+        open(&node_entries("peer", own, dial.then_some(zenohd), &south))
+    }
+
+    /// A view of `key`. A view points at the text it was made from, so the text is leaked: it must
+    /// outlive the view, which a test holds to its end.
+    unsafe fn view(key: &str) -> z_view_keyexpr_t {
+        let key: &'static CString = Box::leak(Box::new(CString::new(key).unwrap()));
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        view
+    }
+
+    /// An advanced publisher of `session` with a cache of eight, the miss detection that numbers
+    /// the samples, and the token that names it.
+    unsafe fn advanced_publisher(session: &Session) -> ze_owned_advanced_publisher_t {
+        let key = view(ADVANCED_KEY);
+        let mut options: ze_advanced_publisher_options_t = std::mem::zeroed();
+        ze_advanced_publisher_options_default(&mut options);
+        options.cache.is_enabled = true;
+        options.cache.max_samples = 8;
+        options.sample_miss_detection.is_enabled = true;
+        options.publisher_detection = true;
+        let mut publisher: ze_owned_advanced_publisher_t = std::mem::zeroed();
+        assert_eq!(
+            ze_declare_advanced_publisher(
+                z_session_loan(session),
+                &mut publisher,
+                z_view_keyexpr_loan(&key),
+                &mut options,
+            ),
+            Z_OK
+        );
+        publisher
+    }
+
+    unsafe fn advanced_put(publisher: &ze_owned_advanced_publisher_t) {
+        let text = CString::new("advanced").unwrap();
+        let mut payload: z_owned_bytes_t = std::mem::zeroed();
+        assert_eq!(z_bytes_copy_from_str(&mut payload, text.as_ptr()), Z_OK);
+        // The code is not asserted: this file measures the ARRIVAL.
+        let _ = ze_advanced_publisher_put(
+            ze_advanced_publisher_loan(publisher),
+            (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    /// An advanced subscriber of `session` that asks for the history, counting its samples. The
+    /// returned context must be freed after `session` has closed.
+    unsafe fn advanced_subscriber(
+        session: &Session,
+    ) -> (
+        ze_owned_advanced_subscriber_t,
+        Arc<AtomicUsize>,
+        *mut CountCtx,
+    ) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let ctx = Box::into_raw(Box::new(CountCtx { hits: hits.clone() }));
+        let key = view(ADVANCED_KEY);
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample), None, ctx.cast());
+        let mut options: ze_advanced_subscriber_options_t = std::mem::zeroed();
+        ze_advanced_subscriber_options_default(&mut options);
+        options.history.is_enabled = true;
+        options.history.detect_late_publishers = true;
+        let mut subscriber: ze_owned_advanced_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            ze_declare_advanced_subscriber(
+                z_session_loan(session),
+                &mut subscriber,
+                z_view_keyexpr_loan(&key),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                &mut options,
+            ),
+            Z_OK
+        );
+        (subscriber, hits, ctx)
+    }
+
+    /// The history leg. `owner` holds the advanced publisher and has put three samples before the
+    /// advanced subscriber of `reader` exists; what the reader counts is returned, once three have
+    /// arrived or the budget has run out. Then a put after the subscriber is counted too.
+    unsafe fn history(owner: &Session, reader: &Session, expect_arrival: bool) -> (usize, usize) {
+        let mut publisher = advanced_publisher(owner);
+        for _ in 0..3 {
+            advanced_put(&publisher);
+        }
+        // The queryable of the cache reaches zenohd, and the reader's side of it, over the links.
+        std::thread::sleep(Duration::from_secs(1));
+        let (mut subscriber, hits, ctx) = advanced_subscriber(reader);
+        let replayed = if expect_arrival {
+            eventually(|| hits.load(Ordering::SeqCst) >= 3);
+            hits.load(Ordering::SeqCst)
+        } else {
+            never(|| hits.load(Ordering::SeqCst) > 0);
+            hits.load(Ordering::SeqCst)
+        };
+        let deadline = Instant::now() + DELIVERY_BUDGET;
+        while expect_arrival && hits.load(Ordering::SeqCst) < 4 && Instant::now() < deadline {
+            advanced_put(&publisher);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let live = hits.load(Ordering::SeqCst);
+        assert_eq!(
+            ze_undeclare_advanced_subscriber(
+                (&mut subscriber as *mut ze_owned_advanced_subscriber_t)
+                    .cast::<ze_moved_advanced_subscriber_t>()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            ze_undeclare_advanced_publisher(
+                (&mut publisher as *mut ze_owned_advanced_publisher_t)
+                    .cast::<ze_moved_advanced_publisher_t>()
+            ),
+            Z_OK
+        );
+        // The callback's context is leaked on purpose, as the file's other legs free theirs only
+        // after the session has closed, which a late delivery may still be under way until.
+        let _ = ctx;
+        (replayed, live)
+    }
+
+    /// A node's advanced publisher serves its cache to an advanced subscriber of a client beyond
+    /// zenohd, and the puts that follow arrive.
+    #[test]
+    #[ignore = "binary-dep e2e (a node's advanced publisher below a real zenohd); Layer Z runs via --ignored"]
+    fn the_cache_of_a_nodes_advanced_publisher_crosses_a_zenohd_to_a_client() {
+        let zenohd_port = free_port();
+        let _zenohd = spawn_zenohd(zenohd_port);
+        // SAFETY: fresh sessions closed below.
+        unsafe {
+            let (node_port, control_port) = (free_port(), free_port());
+            let alone = node(control_port, zenohd_port, false);
+            let beyond = open_client(zenohd_port);
+            let (replayed, _) = history(&alone, &beyond, false);
+            close_session(beyond);
+            close_session(alone);
+            assert_eq!(
+                replayed, 0,
+                "a sample crossed with no link between the node and zenohd: the harness joins \
+                 the two by some other path, so an arrival below proves nothing"
+            );
+
+            let node = node(node_port, zenohd_port, true);
+            let beyond = open_client(zenohd_port);
+            let (replayed, live) = history(&node, &beyond, true);
+            close_session(beyond);
+            close_session(node);
+            assert!(
+                replayed >= 3,
+                "the client beyond zenohd was told {replayed} of the 3 cached samples"
+            );
+            assert!(live >= 4, "a put after the subscriber never reached it");
+        }
+    }
+
+    /// An advanced subscriber of a node is told the history of the advanced publisher of a client
+    /// beyond zenohd (a query of the node's own face, routed by zenohd to the client's cache), and
+    /// hears what follows.
+    #[test]
+    #[ignore = "binary-dep e2e (a node's advanced subscriber below a real zenohd); Layer Z runs via --ignored"]
+    fn a_nodes_advanced_subscriber_replays_the_history_of_a_client_beyond_a_zenohd() {
+        let zenohd_port = free_port();
+        let _zenohd = spawn_zenohd(zenohd_port);
+        // SAFETY: fresh sessions closed below.
+        unsafe {
+            let (node_port, control_port) = (free_port(), free_port());
+            let alone = node(control_port, zenohd_port, false);
+            let beyond = open_client(zenohd_port);
+            let (replayed, _) = history(&beyond, &alone, false);
+            close_session(beyond);
+            close_session(alone);
+            assert_eq!(
+                replayed, 0,
+                "a sample crossed with no link between the node and zenohd: the harness joins \
+                 the two by some other path, so an arrival below proves nothing"
+            );
+
+            let node = node(node_port, zenohd_port, true);
+            let beyond = open_client(zenohd_port);
+            let (replayed, live) = history(&beyond, &node, true);
+            close_session(beyond);
+            close_session(node);
+            assert!(
+                replayed >= 3,
+                "the node was told {replayed} of the 3 cached samples of the client"
+            );
+            assert!(
+                live >= 4,
+                "a put after the node's subscriber never reached it"
+            );
+        }
+    }
+
+    /// Join [`GROUP`] as member `id` on `session`, with a lease of one second and a beacon every
+    /// half second.
+    unsafe fn join(session: &Session, id: &str) -> wz_capi_c_owned_group_t {
+        let id = view(id);
+        let mut options: wz_capi_c_member_options_t = std::mem::zeroed();
+        wz_capi_c_member_options_default(&mut options);
+        options.lease_ms = 1_000;
+        options.refresh_ratio = 0.5;
+        let mut member: wz_capi_c_owned_member_t = std::mem::zeroed();
+        assert_eq!(
+            wz_capi_c_member_new(&mut member, z_view_keyexpr_loan(&id), &mut options),
+            Z_OK
+        );
+        let group = view(GROUP);
+        let mut joined: wz_capi_c_owned_group_t = std::mem::zeroed();
+        assert_eq!(
+            wz_capi_c_group_join(
+                &mut joined,
+                z_session_loan(session),
+                z_view_keyexpr_loan(&group),
+                (&mut member as *mut wz_capi_c_owned_member_t).cast::<wz_capi_c_moved_member_t>(),
+            ),
+            Z_OK
+        );
+        joined
+    }
+
+    unsafe fn leave(mut group: wz_capi_c_owned_group_t) {
+        wz_capi_c_group_drop(
+            (&mut group as *mut wz_capi_c_owned_group_t).cast::<wz_capi_c_moved_group_t>(),
+        );
+    }
+
+    /// A node and a client beyond zenohd are members of one group and each finds the other: the
+    /// events travel on the group's key and the record of the member that joined first is asked
+    /// for, both through zenohd.
+    #[test]
+    #[ignore = "binary-dep e2e (a node's group below a real zenohd); Layer Z runs via --ignored"]
+    fn a_node_and_a_client_beyond_a_zenohd_find_each_other_in_a_group() {
+        let zenohd_port = free_port();
+        let _zenohd = spawn_zenohd(zenohd_port);
+        // SAFETY: fresh sessions closed below.
+        unsafe {
+            let (node_port, control_port) = (free_port(), free_port());
+            let alone = node(control_port, zenohd_port, false);
+            let beyond = open_client(zenohd_port);
+            let node_group = join(&alone, "a-node");
+            let client_group = join(&beyond, "z-client");
+            let met = wz_capi_c_group_wait_for_view_size(
+                wz_capi_c_group_loan(&node_group),
+                2,
+                ABSENCE_WINDOW.as_millis() as u64,
+            );
+            leave(client_group);
+            leave(node_group);
+            close_session(beyond);
+            close_session(alone);
+            assert!(
+                !met,
+                "the members met with no link between the node and zenohd: the harness joins \
+                 the two by some other path, so a meeting below proves nothing"
+            );
+
+            let node = node(node_port, zenohd_port, true);
+            let beyond = open_client(zenohd_port);
+            let node_group = join(&node, "a-node");
+            // The node's declarations reach zenohd and the client over the links.
+            std::thread::sleep(Duration::from_secs(1));
+            let client_group = join(&beyond, "z-client");
+            let node_sees = wz_capi_c_group_wait_for_view_size(
+                wz_capi_c_group_loan(&node_group),
+                2,
+                DELIVERY_BUDGET.as_millis() as u64,
+            );
+            let client_sees = wz_capi_c_group_wait_for_view_size(
+                wz_capi_c_group_loan(&client_group),
+                2,
+                DELIVERY_BUDGET.as_millis() as u64,
+            );
+            leave(client_group);
+            leave(node_group);
+            close_session(beyond);
+            close_session(node);
+            assert!(node_sees, "the node never found the client in the group");
+            assert!(client_sees, "the client never found the node in the group");
+        }
+    }
+}

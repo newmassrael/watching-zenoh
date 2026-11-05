@@ -20704,12 +20704,19 @@ layer_z_zenohd_interop() {
     # MEASURED, with the publisher's interest not declared ("never learned of the subscriber
     # beyond zenohd") and, separately, with the querier's. The interest is not witnessed where the
     # peer dials the node directly (the node then holds the peer's declarations whatever it
-    # asked), which is why this leg sits below a router. 3 passed against zenohd 1.10.2 (build
-    # machine hkl002). Built with `router-node`, which the lane above does not turn on. In this
-    # crate for the reason the legs above give.
-    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
-        --features router-node --test router_node_zenohd_interop -- --ignored --quiet \
-        --test-threads=1 \
+    # asked), which is why this leg sits below a router. Three more legs hold the advanced
+    # publisher, the advanced subscriber and the group of a node below zenohd, each with the other
+    # end a wz client BEYOND the router and each with its own control (the node not dialing zenohd:
+    # nothing arrives). The node's cache serves the history of a subscriber of the client (it fails,
+    # MEASURED, with the cache's queryable answering nothing: 0 of the 3 cached samples); the node's
+    # subscriber is told the history of the client's publisher (it fails with the node's get doing
+    # nothing: 0 of 3); the node and the client find each other in a group (it fails with the node's
+    # member record not served: "the client never found the node"). 6 passed against zenohd 1.10.2
+    # (build machine hkl002). Built with `router-node`, `advanced` and `group`, which the lane
+    # above does not turn on. In this crate for the reason the legs above give.
+    _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+        --features router-node,advanced,group --test router_node_zenohd_interop -- --ignored \
+        --quiet --test-threads=1 \
         || return 1
     # A C session whose config names a usrpwd dictionary authenticates a REAL zenohd's
     # credential. `listener_auth` (a default lane) proves the config reaches the session with a

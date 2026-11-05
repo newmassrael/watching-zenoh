@@ -1466,15 +1466,22 @@ the cooperative engine's test, run by lane C1co tls handshake drop event; this t
     "wz-capi-pico|a_client_that_never_speaks_is_dropped_as_a_stall_and_the_event_log_is_told|\
 the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
     # The C ABI's node beside a REAL zenohd (`tests/router_node_zenohd_interop.rs`, needs
-    # `router-node`): `#[ignore]` because it spawns `target/zenohd/zenohd`, which only Layer Z
-    # provisions, so a leg of this table, which never passes `--ignored`, would run none of them.
-    # Layer Z runs the three with `--ignored`, 3 passed guarded.
+    # `router-node`; the last three also need `advanced` and `group`): `#[ignore]` because it
+    # spawns `target/zenohd/zenohd`, which only Layer Z provisions, so a leg of this table, which
+    # never passes `--ignored`, would run none of them. Layer Z runs the six with `--ignored`,
+    # 6 passed guarded.
     "wz-capi-c|a_router_node_and_a_zenohd_forward_between_the_clients_of_each|\
-a test that spawns a real zenohd, run by Layer Z with --ignored (3 passed guarded); this table never passes --ignored"
+a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
     "wz-capi-c|a_peer_node_that_keeps_a_south_relays_between_its_client_and_zenohd|\
-a test that spawns a real zenohd, run by Layer Z with --ignored (3 passed guarded); this table never passes --ignored"
+a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
     "wz-capi-c|a_node_below_a_zenohd_learns_of_the_subscriber_and_queryable_beyond_it|\
-a test that spawns a real zenohd, run by Layer Z with --ignored (3 passed guarded); this table never passes --ignored"
+a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
+    "wz-capi-c|the_cache_of_a_nodes_advanced_publisher_crosses_a_zenohd_to_a_client|\
+a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
+    "wz-capi-c|a_nodes_advanced_subscriber_replays_the_history_of_a_client_beyond_a_zenohd|\
+a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
+    "wz-capi-c|a_node_and_a_client_beyond_a_zenohd_find_each_other_in_a_group|\
+a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then
