@@ -530,7 +530,11 @@ IMAGES = (
         # At the SCE pin 07cb8c5020 (the one-pass decode, ADR 0077 section 7) the generated decodes
         # write a chain's arm and its list into the message in place and read a frame once: the chain
         # is 2,960 bytes over 11 frames, and the decode of the lent reply is no longer in it.
-        peak=2960,
+        #
+        # 2,976 bytes over 11 frames once the Response is read as its view (the reply's delivery
+        # reads its chains where they lie): 16 more than before, in the frames the delivery's own
+        # reads took.
+        peak=2976,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
