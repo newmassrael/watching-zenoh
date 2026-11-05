@@ -527,7 +527,10 @@ IMAGES = (
         # their capacity (1,656 and 2,064 bytes), where the codec's parts form (references and a slice
         # of at most three entries) holds a few words. The largest frames of the chain are now the two
         # decodes of the lent reply, 1,432 (`lend_response`) and 1,416 (`MsgPutIn::decode_into`).
-        peak=4280,
+        # At the SCE pin 07cb8c5020 (the one-pass decode, ADR 0077 section 7) the generated decodes
+        # write a chain's arm and its list into the message in place and read a frame once: the chain
+        # is 2,960 bytes over 11 frames, and the decode of the lent reply is no longer in it.
+        peak=2960,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every

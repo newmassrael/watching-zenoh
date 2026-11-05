@@ -121,8 +121,8 @@ use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
-    encode_frame_into, pending_init_header, DecodedFrame, HandshakeStep, SerialFrameReader,
-    SerialHandshake, SerialRole, SERIAL_MAX_COBS_BUF, SERIAL_MTU,
+    encode_frame_stuffing, pending_init_header, DecodedFrame, HandshakeStep, SerialFrameError,
+    SerialFrameReader, SerialHandshake, SerialRole, StuffBuffer, SERIAL_MAX_COBS_BUF, SERIAL_MTU,
 };
 
 /// Steady-state data-frame header — no handshake flag set. The receiver
@@ -1129,7 +1129,7 @@ impl LinkDriver for SerialReadDriver {
 /// sync FSM action handler would trip the runtime-reentrancy check).
 ///
 /// R3239 — the channel carries the FRAMED wire: this driver COBS-frames each
-/// payload as it enqueues it ([`encode_frame_into`]), and the writer writes the
+/// payload as it enqueues it ([`encode_frame_stuffing`]), and the writer writes the
 /// bytes as they are. It used to carry the raw payload and leave the framing to
 /// the writer, which cost a copy of the payload into a vector of its own and
 /// two more vectors in the encoder for every frame. Under `runtime-zero-copy`
@@ -1137,8 +1137,18 @@ impl LinkDriver for SerialReadDriver {
 /// ([`serial_outbound_channel`]), back to back with the frames queued before it
 /// (COBS frames end at their `0x00`, so the concatenation is the wire), and a
 /// frame costs no allocation; otherwise it is one vector.
+///
+/// The generated COBS stuffer writes the stuffed body into a destination its
+/// caller holds (SCE ADR 0082 step 2), a list that grows as it is written on a
+/// build with an allocator. The driver holds one for the life of the link and
+/// every frame reuses it, so the stuffer allocates on the link's first frame
+/// and never after.
 pub struct SerialWriteDriver {
     tx: crate::writer_queue::OutboundTx,
+    /// The stuffer's destination, held for every frame this half frames. A
+    /// frame is framed under its lock, which no await crosses and under which
+    /// nothing takes another of the link's locks.
+    stuffer: std::sync::Mutex<StuffBuffer>,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
@@ -1174,9 +1184,19 @@ impl SerialWriteDriver {
     ) -> Self {
         Self {
             tx,
+            stuffer: std::sync::Mutex::new(StuffBuffer::new()),
             subject,
             endpoints,
         }
+    }
+
+    /// One data frame of `bytes` framed into `dst`, through the destination
+    /// this half keeps for the stuffer.
+    fn frame_into(&self, bytes: &[u8], dst: &mut [u8]) -> Result<usize, SerialFrameError> {
+        // A panic under this lock leaves a list that is emptied again by the
+        // next frame's own encode, so its poison says nothing worth refusing for.
+        let mut stuffer = self.stuffer.lock().unwrap_or_else(|e| e.into_inner());
+        encode_frame_stuffing(SERIAL_DATA_HEADER, bytes, dst, &mut stuffer)
     }
 }
 
@@ -1262,7 +1282,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
         {
             use crate::writer_queue::PooledSendError;
             match self.tx.send_encoded(priority, SERIAL_MAX_COBS_BUF, |dst| {
-                encode_frame_into(SERIAL_DATA_HEADER, bytes, dst).ok()
+                self.frame_into(bytes, dst).ok()
             }) {
                 Ok(()) => LinkSendOutcome::Sent,
                 Err(PooledSendError::Closed) => {
@@ -1281,7 +1301,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
         #[cfg(not(feature = "runtime-zero-copy"))]
         {
             let mut wire = vec![0u8; SERIAL_MAX_COBS_BUF];
-            match encode_frame_into(SERIAL_DATA_HEADER, bytes, &mut wire) {
+            match self.frame_into(bytes, &mut wire) {
                 Ok(len) => wire.truncate(len),
                 Err(e) => {
                     log::warn!(

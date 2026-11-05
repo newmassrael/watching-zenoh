@@ -24,7 +24,7 @@
        sce:event-name="temp_update">
   <datamodel>
     <data id="celsius_centi" sce:type="uint16" sce:direction="in"/>
-    <data id="sensor_id" sce:type="string" sce:direction="in"/>
-    <data id="raw" sce:type="bytes" sce:direction="in"/>
+    <data id="sensor_id" sce:type="string[64]" sce:direction="in"/>
+    <data id="raw" sce:type="bytes[64]" sce:direction="in"/>
   </datamodel>
 </scxml>

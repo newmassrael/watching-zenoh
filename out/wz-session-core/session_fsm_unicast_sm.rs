@@ -247,7 +247,7 @@ pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
             TransitionRow::new(Some(StateId(0)), Target::state(StateId(1)), false, false),
             // 1: Init, transition 1
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(0)), Target::state(StateId(5)), false, false),
-            // 1: LinkOpening, transition 0
+            // 2: LinkOpening, transition 0
             TransitionRow::new(Some(StateId(1)), Target::state(StateId(2)), false, false),
             // 3: LinkOpening, transition 1
             #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Target::state(StateId(6)), false, true),
@@ -319,11 +319,11 @@ pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Target::state(StateId(11)), false, false),
             // 28: Closing, transition 1
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Target::state(StateId(11)), false, false),
-            // 20: Opening, initial
+            // 29: Opening, initial
             TransitionRow::new(Some(StateId(2)), Target::state(StateId(3)), false, false),
             // 30: Accepting, initial
             #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, false),
-            // 21: the document's initial transition
+            // 31: the document's initial transition
             TransitionRow::new(None, Target::state(StateId(0)), false, false),
         ],
         targets: &[],
@@ -1370,3 +1370,268 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         self.session_id
     }
 }
+
+// The builds the feature model `wz-session-core` admits (docs/adr/0057 §6): a build
+// that turns a feature on and leaves out one it requires compiles none of this.
+#[cfg(all(feature = "adminspace-config-hotreload", not(feature = "adminspace-core")))]
+compile_error!("feature `adminspace-config-hotreload` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-config-hotreload", not(feature = "storage-backend")))]
+compile_error!("feature `adminspace-config-hotreload` requires `storage-backend`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-core", not(feature = "adminspace-fixed")))]
+compile_error!("feature `adminspace-core` requires `adminspace-fixed`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-core", not(feature = "alloc")))]
+compile_error!("feature `adminspace-core` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-fixed", not(feature = "keyexpr-wildcard-double")))]
+compile_error!("feature `adminspace-fixed` requires `keyexpr-wildcard-double`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-fixed", not(feature = "keyexpr-wildcard-single")))]
+compile_error!("feature `adminspace-fixed` requires `keyexpr-wildcard-single`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-fixed", not(feature = "pubsub-encoding")))]
+compile_error!("feature `adminspace-fixed` requires `pubsub-encoding`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-fixed", not(feature = "storage-profile")))]
+compile_error!("feature `adminspace-fixed` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-introspection-handlers", not(feature = "adminspace-core")))]
+compile_error!("feature `adminspace-introspection-handlers` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-metrics", not(feature = "adminspace-core")))]
+compile_error!("feature `adminspace-metrics` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-metrics", not(feature = "query-selector-parameters")))]
+compile_error!("feature `adminspace-metrics` requires `query-selector-parameters`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-plugins-handlers", not(feature = "adminspace-core")))]
+compile_error!("feature `adminspace-plugins-handlers` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-router-linkstate", not(feature = "adminspace-core")))]
+compile_error!("feature `adminspace-router-linkstate` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-write", not(feature = "keyexpr-wildcard-double")))]
+compile_error!("feature `adminspace-write` requires `keyexpr-wildcard-double`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-write", not(feature = "keyexpr-wildcard-single")))]
+compile_error!("feature `adminspace-write` requires `keyexpr-wildcard-single`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "adminspace-write", not(feature = "rx-push")))]
+compile_error!("feature `adminspace-write` requires `rx-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "alloc", not(feature = "storage-profile")))]
+compile_error!("feature `alloc` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "clock-source", not(feature = "clock-quality")))]
+compile_error!("feature `clock-source` requires `clock-quality`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "codec-declare", not(feature = "codec-frame")))]
+compile_error!("feature `codec-declare` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "codec-push", not(feature = "codec-frame")))]
+compile_error!("feature `codec-push` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "codec-request", not(feature = "codec-frame")))]
+compile_error!("feature `codec-request` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "codec-response", not(feature = "codec-frame")))]
+compile_error!("feature `codec-response` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declarations-synced-event", not(feature = "alloc")))]
+compile_error!("feature `declarations-synced-event` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-final", not(feature = "codec-declare")))]
+compile_error!("feature `declare-final` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-interest", not(feature = "codec-declare")))]
+compile_error!("feature `declare-interest` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-keyexpr", not(feature = "alloc")))]
+compile_error!("feature `declare-keyexpr` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-keyexpr", not(feature = "codec-declare")))]
+compile_error!("feature `declare-keyexpr` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-queryable", not(feature = "codec-declare")))]
+compile_error!("feature `declare-queryable` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-subscriber", not(feature = "codec-declare")))]
+compile_error!("feature `declare-subscriber` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-subscriber", not(feature = "declare-final")))]
+compile_error!("feature `declare-subscriber` requires `declare-final`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-subscriber", not(feature = "rx-control")))]
+compile_error!("feature `declare-subscriber` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-subscriber", not(feature = "rx-push")))]
+compile_error!("feature `declare-subscriber` requires `rx-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-token", not(feature = "codec-declare")))]
+compile_error!("feature `declare-token` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-token", not(feature = "rx-control")))]
+compile_error!("feature `declare-token` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-undeclare", not(feature = "codec-declare")))]
+compile_error!("feature `declare-undeclare` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "deferred-fire", not(feature = "alloc")))]
+compile_error!("feature `deferred-fire` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "alloc")))]
+compile_error!("feature `dissect` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-close")))]
+compile_error!("feature `dissect` requires `codec-close`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-declare")))]
+compile_error!("feature `dissect` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-fragment")))]
+compile_error!("feature `dissect` requires `codec-fragment`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-frame")))]
+compile_error!("feature `dissect` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-init-body")))]
+compile_error!("feature `dissect` requires `codec-init-body`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-join")))]
+compile_error!("feature `dissect` requires `codec-join`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-keep-alive")))]
+compile_error!("feature `dissect` requires `codec-keep-alive`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-open-body")))]
+compile_error!("feature `dissect` requires `codec-open-body`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-push")))]
+compile_error!("feature `dissect` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-request")))]
+compile_error!("feature `dissect` requires `codec-request`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-response")))]
+compile_error!("feature `dissect` requires `codec-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect", not(feature = "codec-response-final")))]
+compile_error!("feature `dissect` requires `codec-response-final`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "dissect-serde", not(feature = "dissect")))]
+compile_error!("feature `dissect-serde` requires `dissect`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "ext-pubsub-group-membership", not(feature = "alloc")))]
+compile_error!("feature `ext-pubsub-group-membership` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "ext-pubsub-group-membership", not(feature = "wire-bincode")))]
+compile_error!("feature `ext-pubsub-group-membership` requires `wire-bincode`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "ext-pubsub-serde-codec", not(feature = "alloc")))]
+compile_error!("feature `ext-pubsub-serde-codec` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "liveliness-get", not(feature = "codec-declare")))]
+compile_error!("feature `liveliness-get` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "liveliness-get", not(feature = "rx-control")))]
+compile_error!("feature `liveliness-get` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "liveliness-subscriber", not(feature = "codec-declare")))]
+compile_error!("feature `liveliness-subscriber` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "liveliness-subscriber", not(feature = "rx-control")))]
+compile_error!("feature `liveliness-subscriber` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "liveliness-token", not(feature = "codec-declare")))]
+compile_error!("feature `liveliness-token` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "liveliness-token", not(feature = "declare-final")))]
+compile_error!("feature `liveliness-token` requires `declare-final`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "liveliness-token", not(feature = "rx-control")))]
+compile_error!("feature `liveliness-token` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "multicast-declarations", not(feature = "alloc")))]
+compile_error!("feature `multicast-declarations` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "multicast-declarations", not(feature = "codec-declare")))]
+compile_error!("feature `multicast-declarations` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "multicast-declarations", not(feature = "codec-push")))]
+compile_error!("feature `multicast-declarations` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "multicast-declarations", not(feature = "session-multicast")))]
+compile_error!("feature `multicast-declarations` requires `session-multicast`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "multicast-ingress-gate", not(feature = "alloc")))]
+compile_error!("feature `multicast-ingress-gate` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "multicast-ingress-gate", not(feature = "session-multicast")))]
+compile_error!("feature `multicast-ingress-gate` requires `session-multicast`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "pubsub-attachment", not(feature = "attachment-bytes")))]
+compile_error!("feature `pubsub-attachment` requires `attachment-bytes`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "pubsub-congestion-control", not(feature = "pubsub-qos")))]
+compile_error!("feature `pubsub-congestion-control` requires `pubsub-qos`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "pubsub-delete", not(feature = "codec-push")))]
+compile_error!("feature `pubsub-delete` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "pubsub-express", not(feature = "pubsub-qos")))]
+compile_error!("feature `pubsub-express` requires `pubsub-qos`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "pubsub-priority", not(feature = "pubsub-qos")))]
+compile_error!("feature `pubsub-priority` requires `pubsub-qos`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "pubsub-put", not(feature = "codec-push")))]
+compile_error!("feature `pubsub-put` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "pubsub-ts-stack", not(feature = "alloc")))]
+compile_error!("feature `pubsub-ts-stack` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-attachment", not(feature = "attachment-bytes")))]
+compile_error!("feature `query-attachment` requires `attachment-bytes`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-consolidation", not(feature = "query-get")))]
+compile_error!("feature `query-consolidation` requires `query-get`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-get", not(feature = "rx-response")))]
+compile_error!("feature `query-get` requires `rx-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-queryable", not(feature = "codec-request")))]
+compile_error!("feature `query-queryable` requires `codec-request`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-queryable", not(feature = "codec-response")))]
+compile_error!("feature `query-queryable` requires `codec-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-reply", not(feature = "codec-response")))]
+compile_error!("feature `query-reply` requires `codec-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-target", not(feature = "query-get")))]
+compile_error!("feature `query-target` requires `query-get`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "query-timeout", not(feature = "query-get")))]
+compile_error!("feature `query-timeout` requires `query-get`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "reassembly", not(feature = "codec-frame")))]
+compile_error!("feature `reassembly` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "routing-namespace", not(feature = "alloc")))]
+compile_error!("feature `routing-namespace` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "routing-namespace", not(feature = "keyexpr-prefix")))]
+compile_error!("feature `routing-namespace` requires `keyexpr-prefix`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "rx-shared-bytes", not(feature = "alloc")))]
+compile_error!("feature `rx-shared-bytes` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-extauth", not(feature = "alloc")))]
+compile_error!("feature `session-extauth` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-extcompression", not(feature = "codec-frame")))]
+compile_error!("feature `session-extcompression` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-extcompression", not(feature = "session-unicast")))]
+compile_error!("feature `session-extcompression` requires `session-unicast`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-extcompression", not(feature = "transport-compression")))]
+compile_error!("feature `session-extcompression` requires `transport-compression`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-extqos", not(feature = "transport-qos")))]
+compile_error!("feature `session-extqos` requires `transport-qos`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-extshm", not(feature = "session-unicast")))]
+compile_error!("feature `session-extshm` requires `session-unicast`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-extshm", not(feature = "transport-shm")))]
+compile_error!("feature `session-extshm` requires `transport-shm`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-matching", not(feature = "alloc")))]
+compile_error!("feature `session-matching` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-matching", not(feature = "keyexpr-includes")))]
+compile_error!("feature `session-matching` requires `keyexpr-includes`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-multicast", not(feature = "rx-control")))]
+compile_error!("feature `session-multicast` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-multicast", not(feature = "rx-push")))]
+compile_error!("feature `session-multicast` requires `rx-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-multicast", not(feature = "rx-response")))]
+compile_error!("feature `session-multicast` requires `rx-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-reconnect", not(feature = "alloc")))]
+compile_error!("feature `session-reconnect` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-slot", not(feature = "bounded-heapless")))]
+compile_error!("feature `session-slot` requires `bounded-heapless`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-slot", not(feature = "storage-profile")))]
+compile_error!("feature `session-slot` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-slot", not(feature = "tx-lend-only")))]
+compile_error!("feature `session-slot` requires `tx-lend-only`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-unicast-accept", not(feature = "rx-control")))]
+compile_error!("feature `session-unicast-accept` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-unicast-accept", not(feature = "rx-push")))]
+compile_error!("feature `session-unicast-accept` requires `rx-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-unicast-accept", not(feature = "rx-response")))]
+compile_error!("feature `session-unicast-accept` requires `rx-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "storage-backend", not(feature = "alloc")))]
+compile_error!("feature `storage-backend` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "switchboard", not(feature = "codec-push")))]
+compile_error!("feature `switchboard` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "alloc")))]
+compile_error!("feature `transport-compose` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "codec-close")))]
+compile_error!("feature `transport-compose` requires `codec-close`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "codec-fragment")))]
+compile_error!("feature `transport-compose` requires `codec-fragment`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "codec-frame")))]
+compile_error!("feature `transport-compose` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "codec-init-body")))]
+compile_error!("feature `transport-compose` requires `codec-init-body`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "codec-keep-alive")))]
+compile_error!("feature `transport-compose` requires `codec-keep-alive`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "codec-open-body")))]
+compile_error!("feature `transport-compose` requires `codec-open-body`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "reassembly")))]
+compile_error!("feature `transport-compose` requires `reassembly`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compose", not(feature = "transport-qos")))]
+compile_error!("feature `transport-compose` requires `transport-qos`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-compression", not(feature = "alloc")))]
+compile_error!("feature `transport-compression` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-fragmentation", not(feature = "codec-fragment")))]
+compile_error!("feature `transport-fragmentation` requires `codec-fragment`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-fragmentation", not(feature = "reassembly")))]
+compile_error!("feature `transport-fragmentation` requires `reassembly`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-link-raweth", not(feature = "alloc")))]
+compile_error!("feature `transport-link-raweth` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-link-serial", not(feature = "alloc")))]
+compile_error!("feature `transport-link-serial` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-lowlatency", not(feature = "alloc")))]
+compile_error!("feature `transport-lowlatency` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-lowlatency", not(feature = "codec-frame")))]
+compile_error!("feature `transport-lowlatency` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-lowlatency", not(feature = "session-unicast")))]
+compile_error!("feature `transport-lowlatency` requires `session-unicast`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-multilink", not(feature = "session-extauth")))]
+compile_error!("feature `transport-multilink` requires `session-extauth`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-qos", not(feature = "alloc")))]
+compile_error!("feature `transport-qos` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-qos", not(feature = "codec-frame")))]
+compile_error!("feature `transport-qos` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-qos", not(feature = "session-unicast")))]
+compile_error!("feature `transport-qos` requires `session-unicast`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-shm", not(feature = "alloc")))]
+compile_error!("feature `transport-shm` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "transport-stats", not(feature = "alloc")))]
+compile_error!("feature `transport-stats` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "tx-lend-only", not(feature = "transport-tx-lend")))]
+compile_error!("feature `tx-lend-only` requires `transport-tx-lend`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "wire-bincode", not(feature = "alloc")))]
+compile_error!("feature `wire-bincode` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");

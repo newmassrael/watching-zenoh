@@ -89,8 +89,8 @@ pub enum RegionNameError {
 /// already been through upstream's rule and no caller can stage an entry the
 /// peer would refuse.
 ///
-/// ⚠ The carrier is this crate's PROFILE-AWARE [`SceString`] and not a plain
-/// `String`, because `wz-session-core` builds `no_std`. The first draft used
+/// ⚠ The carrier is the language's [`SceString`], hard-bounded on every
+/// profile and holding its bytes inline, and not a plain `String`, because `wz-session-core` builds `no_std`. The first draft used
 /// `alloc::string::String` and compiled fine at default features while
 /// BREAKING `--no-default-features` outright — a whole-crate compile error that
 /// the default lane is structurally unable to see. What caught it was the
@@ -122,7 +122,7 @@ impl RegionName {
         // own capacity check below can only fire on a name this function has
         // already admitted — it cannot. Mapped to `TooLong` rather than
         // unwrapped so a future capacity change is a refusal and not a panic.
-        <SceString<MAX_REGION_NAME_LEN> as sce_forge_runtime::codec::SceStr>::from_view(s)
+        SceString::<MAX_REGION_NAME_LEN>::from_text(s)
             .map(Self)
             .map_err(|_| RegionNameError::TooLong)
     }

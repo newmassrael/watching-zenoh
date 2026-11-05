@@ -57,7 +57,7 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{Bounded, SceCursor};
+use sce_forge_runtime::codec::{Bounded, SceBytes, SceCursor};
 use wz_codecs::cobs_decode::cobs_decode;
 use wz_codecs::cobs_encode::cobs_encode;
 use wz_codecs::crc32::crc32;
@@ -69,16 +69,18 @@ use wz_codecs::serial_envelope::SerialEnvelope;
 /// frame carries — `_Z_SERIAL_MTU_SIZE`.
 pub const SERIAL_MTU: usize = 1500;
 /// Maximum pre-COBS frame size — `_Z_SERIAL_MFS_SIZE`
-/// (MTU + 1 header + 2 len + 4 crc32 = 1507). MUST equal the generated
-/// `wz_codecs::cobs_decode` bound (it returns `SceBytes<1507>`): a
-/// destuffed frame cannot exceed it. No compile-time link to that `N`
-/// exists (the codegen does not emit a companion const), so the value is
-/// kept in sync by the pico header + the R311ns byte-parity tests.
+/// (MTU + 1 header + 2 len + 4 crc32 = 1507). It is the `N` of the
+/// destination `wz_codecs::cobs_decode` writes (`&mut SceBytes<1507>`), and
+/// [`decode_frame`] names the destination by this constant, so a generated
+/// bound that moves stops this crate compiling: a destuffed frame cannot
+/// exceed it. The pico header and the R311ns byte-parity tests hold the
+/// value itself.
 pub const SERIAL_MFS: usize = SERIAL_MTU + 1 + 2 + 4;
 /// Maximum on-the-wire (post-COBS, incl. EOP) buffer size —
 /// `_Z_SERIAL_MAX_COBS_BUF_SIZE` (1516). Bounds the read accumulator.
-/// MUST equal the generated `wz_codecs::cobs_encode` bound (it returns
-/// `SceBytes<1516>`); same hand-sync caveat as [`SERIAL_MFS`].
+/// It is the `N` of the destination `wz_codecs::cobs_encode` writes
+/// (`&mut SceBytes<1516>`), named by this constant in `encode_frame`, so a
+/// generated bound that moves stops this crate compiling (as [`SERIAL_MFS`]).
 pub const SERIAL_MAX_COBS_BUF: usize = 1516;
 
 // ─── header flags (definitions/serial.h:53-55) ───
@@ -141,10 +143,14 @@ pub fn encode_frame(header: u8, payload: &[u8]) -> Result<Vec<u8>, SerialFrameEr
 }
 
 /// R3239 — [`encode_frame`] into `out`, a buffer the caller owns, returning
-/// how many bytes of it the frame took. Allocates nothing: the pre-COBS frame
-/// is encoded on the stack by the codec's own encoder over a slice sink, and
-/// the COBS body is the generated stuffer's bounded return. This is what lets a
-/// link write a serial frame straight into a transmit slot.
+/// how many bytes of it the frame took. The pre-COBS frame is encoded on the
+/// stack by the codec's own encoder over a slice sink, and the COBS body is
+/// written by the generated stuffer into a [`StuffBuffer`], which this makes
+/// for the one frame: on a build without an allocator that is inline and the
+/// call allocates nothing, and on one with an allocator the buffer grows as the
+/// body is written, so a link that frames many takes
+/// [`encode_frame_stuffing`] and keeps one. This is what lets a link write a
+/// serial frame straight into a transmit slot.
 ///
 /// A frame is at most [`SERIAL_MAX_COBS_BUF`] bytes; an `out` too short for the
 /// one being encoded is refused as [`SerialFrameError::Cobs`] (the stuffed body
@@ -153,6 +159,29 @@ pub fn encode_frame_into(
     header: u8,
     payload: &[u8],
     out: &mut [u8],
+) -> Result<usize, SerialFrameError> {
+    encode_frame_stuffing(header, payload, out, &mut StuffBuffer::new())
+}
+
+/// The destination the generated COBS stuffer writes the stuffed body into
+/// (`wz_codecs::cobs_encode`, SCE ADR 0082 step 2): the caller holds it, so
+/// that is where the body lives. Its bound is [`SERIAL_MAX_COBS_BUF`], and on a
+/// build with an allocator it is a list that grows as it is written and keeps
+/// what it grew to when it is cleared; one a link keeps for every frame it
+/// writes grows once.
+pub type StuffBuffer = SceBytes<SERIAL_MAX_COBS_BUF>;
+
+/// [`encode_frame_into`] with the stuffer's destination `stuffed` held by the
+/// caller. It is emptied first and holds the stuffed body, without the EOP, when
+/// this returns `Ok`. A link that writes many frames keeps one and so allocates
+/// nothing for a frame after the first on a build with an allocator, where
+/// [`encode_frame_into`] makes a destination of its own for each; on a build
+/// without one the destination is inline and the two are the same.
+pub fn encode_frame_stuffing(
+    header: u8,
+    payload: &[u8],
+    out: &mut [u8],
+    stuffed: &mut StuffBuffer,
 ) -> Result<usize, SerialFrameError> {
     use sce_forge_runtime::codec::SliceSink;
     if payload.len() > SERIAL_MTU {
@@ -169,14 +198,14 @@ pub fn encode_frame_into(
     env.encode(&mut sink)
         .map_err(|_| SerialFrameError::TooLarge)?;
     let pre_len = sink.position();
-    let cobs = cobs_encode(&pre_cobs[..pre_len]).map_err(|_| SerialFrameError::Cobs)?;
-    let stuffed = cobs.as_slice();
-    let len = stuffed.len() + 1;
+    cobs_encode(&pre_cobs[..pre_len], stuffed).map_err(|_| SerialFrameError::Cobs)?;
+    let body = stuffed.as_slice();
+    let len = body.len() + 1;
     if out.len() < len {
         return Err(SerialFrameError::Cobs);
     }
-    out[..stuffed.len()].copy_from_slice(stuffed);
-    out[stuffed.len()] = SERIAL_EOP;
+    out[..body.len()].copy_from_slice(body);
+    out[body.len()] = SERIAL_EOP;
     Ok(len)
 }
 
@@ -197,7 +226,8 @@ pub fn encode_frame_into(
 /// the compiled pico codec is `wz_decode_frame_verdict_equals_pico_on_damaged_frames`
 /// in `wz-integration-tests`.
 pub fn decode_frame(wire: &[u8]) -> Result<DecodedFrame, SerialFrameError> {
-    let destuffed = cobs_decode(wire).map_err(|_| SerialFrameError::Cobs)?;
+    let mut destuffed = SceBytes::<SERIAL_MFS>::new();
+    cobs_decode(wire, &mut destuffed).map_err(|_| SerialFrameError::Cobs)?;
     let frame = destuffed.as_slice();
     if frame.len() > SERIAL_MFS {
         return Err(SerialFrameError::TooLarge);
@@ -561,6 +591,29 @@ mod tests {
         );
     }
 
+    /// A destination the caller keeps frames every frame the same as one made
+    /// for it, the longest frame after the shortest and the shortest after the
+    /// longest: the stuffer empties it before it writes, so what an earlier
+    /// frame left in it is not read.
+    #[test]
+    fn a_kept_stuffer_destination_frames_as_a_fresh_one_does() {
+        let zeroes = [0u8; SERIAL_MTU];
+        let frames: [(u8, &[u8]); 4] = [
+            (0x00, &[0xAB, 0xCD, 0xEF]),
+            (0x00, &zeroes),
+            (SERIAL_FLAG_INIT, &[]),
+            (0x00, &[0x11, 0x00, 0x22]),
+        ];
+        let mut kept = StuffBuffer::new();
+        for (header, payload) in frames {
+            let mut fresh = [0u8; SERIAL_MAX_COBS_BUF];
+            let mut reused = [0u8; SERIAL_MAX_COBS_BUF];
+            let n = encode_frame_into(header, payload, &mut fresh).expect("fresh");
+            let m = encode_frame_stuffing(header, payload, &mut reused, &mut kept).expect("kept");
+            assert_eq!(&fresh[..n], &reused[..m]);
+        }
+    }
+
     #[test]
     fn encode_frame_init_matches_pico() {
         // INIT frame: header 0x01, empty payload, crc 0x00000000.
@@ -635,7 +688,8 @@ mod tests {
         };
         let mut pre_cobs = env.encode_to_vec();
         pre_cobs.push(0x99); // trailing garbage after crc32
-        let cobs = cobs_encode(&pre_cobs).expect("cobs");
+        let mut cobs = SceBytes::<SERIAL_MAX_COBS_BUF>::new();
+        cobs_encode(&pre_cobs, &mut cobs).expect("cobs");
         let mut wire = cobs.as_slice().to_vec();
         wire.push(SERIAL_EOP);
         assert_eq!(decode_frame(&wire), Err(SerialFrameError::Malformed));

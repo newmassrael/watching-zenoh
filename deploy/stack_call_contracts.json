@@ -14,6 +14,7 @@
   },
   "site_pins": {
     "engine-turn": {"zephyr-client-fixed": 36, "zephyr-client-heap": 36, "zephyr-client-fixed-batching": 36, "zephyr-client-fixed-get": 36, "zephyr-admin-fixed-tls": 36, "zephyr-client-fixed-tls": 36},
+    "engine-inbox": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
     "engine-host": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
     "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
@@ -164,6 +165,13 @@
       "where": {"function": "engine::Turn>::run$"},
       "callees": "engine::MainLoop>::",
       "why": "the asks of the machine the engine drives (its host, behind a reference to MainLoop), made by `Turn::run` (the entry into the initial configuration and the main event loop it hands over to). `Turn` holds the machine as a `&mut dyn MainLoop` (engine.rs `struct Turn`), and its `core`, `behaviour`, `queue` and `start_pending_invokes` are the methods of that trait. The rule claims by the function and stands BEFORE the rules that claim by file: the file a line table gives a register call inside `Turn::run` is not the same in every build (the lab host, a workstation and the hosted runner gave three splits of the same sites among `engine-host`, this rule and `engine-behaviour`), and a count that depends on it is a pin that goes red on a machine that did not move it"
+    },
+    {
+      "id": "engine-inbox",
+      "where": {"function": "engine::MainLoop>::drain_inbox$"},
+      "callees": "NONE",
+      "absent": "inbox::InboxSource>::(per_boundary|take)$",
+      "why": "the engine's boundary applies what other threads posted to an inbox attached to it (engine.rs, `drain_inbox`, SCE ADR 0084): its two calls through a register, in each machine's copy, are the attached inbox's `per_boundary` and `take` (a reference to InboxSource). Nothing attaches one: `attach_inbox` is called by no function of these images, and the premise is that no function of the image is an implementation of the two methods whose address it holds. Without this rule the file-wide `engine-host` below claimed the two as calls on the host and drew a cycle from `drain_inbox` to itself that no execution takes, since an input an inbox holds is queued by `apply_inbox_input` and run by the turn after it, not by a nested one"
     },
     {
       "id": "engine-host",

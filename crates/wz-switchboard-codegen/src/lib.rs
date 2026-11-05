@@ -383,10 +383,13 @@ pub enum SceType {
 /// view itself. The native-lowered payload struct, by contrast, holds the field
 /// **owned** — `String` / `Vec<u8>`, no lifetime: it derives `Clone + Default`
 /// and the engine queues it past the buffer's life. For `string`, `.into()`
-/// bridges `<&str as Into<SceString<N>>>` — `SceString` is still a type alias,
-/// so the infallible `From` holds. `bytes` is NOT handled here: since SCE
-/// 1d439ea07 `SceBytes<N>` is an N-preserving newtype with only a fallible
-/// `from_slice` (no `From<&[u8]>`), so the caller threads a pre-conversion
+/// bridges `<&str as Into<SceString>>`: the payload struct's text is still the
+/// RUNTIME's `sce_rust_runtime::SceString` (`String` under std), not the
+/// language's bounded `SceString<N>`, until SCE ADR 0086 section 4.4 moves an
+/// event payload (the migration guide says so), so the infallible `From`
+/// holds. `bytes` is NOT handled here: `SceBytes<N>` holds its bound in the
+/// type and has only a fallible `from_slice` (no `From<&[u8]>`), so the caller
+/// threads a pre-conversion
 /// (`match SceBytes::from_slice(..) { .. Err => return false }`) instead. A
 /// primitive (`Copy`) field needs no conversion and moves verbatim, keeping the
 /// primitive-only golden byte-identical.
@@ -473,6 +476,23 @@ impl ForgeFieldRepr {
     fn into_fact(self) -> FieldFact {
         let sce_type = match self.sce_type {
             serde_json::Value::String(s) => SceType::Primitive(s),
+            // A schema or machine datamodel states a text or byte string's
+            // bound in its type (`string[64]`), which the AST writes as
+            // `{"string": 64}` / `{"bytes": 64}`. A codec field states it in
+            // `sce:max-size` and keeps the bare tag. Both are the same KIND of
+            // value, which is all the codec-superset-of-schema check and the
+            // field move compare; the bound is the payload field's type's, and
+            // the conversion into it is fallible.
+            serde_json::Value::Object(m)
+                if m.len() == 1 && (m.contains_key("string") || m.contains_key("bytes")) =>
+            {
+                let kind = if m.contains_key("string") {
+                    "string"
+                } else {
+                    "bytes"
+                };
+                SceType::Primitive(kind.to_string())
+            }
             _ => SceType::NonPrimitive,
         };
         FieldFact {
@@ -803,14 +823,14 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                     // Field moves in schema declaration order (each on its own
                     // line at 12-space indent inside the struct literal). A
                     // scalar string/bytes field decodes borrowed (`&str` /
-                    // `&[u8]`) but the payload struct holds it owned (`String` /
-                    // `Vec<u8>`), so `owned_field_move` threads the `.into()`;
-                    // primitive fields move verbatim.
-                    // `bytes` fields hold the N-preserving `SceBytes<N>` newtype
-                    // (SCE 1d439ea07): `&[u8]` -> owned is the FALLIBLE
-                    // `from_slice`, not an infallible `.into()`. Convert before
-                    // the struct literal and bail like a decode miss on the
-                    // (by-construction unreachable) capacity error — never panic.
+                    // `&[u8]`) but the payload struct holds it owned: a text in
+                    // the runtime's `SceString` (`.into()`), a byte string in
+                    // the bounded `SceBytes<N>`; primitive fields move
+                    // verbatim. A byte string's view -> owned copy is FALLIBLE
+                    // (`from_slice` refuses past `N`), not an infallible
+                    // `.into()`. Convert before the struct literal and bail
+                    // like a decode miss on a capacity error (the schema's
+                    // bound is narrower than the codec's) — never panic.
                     let mut pre_conversions = String::new();
                     let field_moves = schema
                         .fields
@@ -1139,6 +1159,23 @@ mod tests {
         format!(
             r#"{{"v":1,"ast":{{"document":{{"kind":"event-schema","name":"{event_name}_schema","event_name":"{event_name}","fields":[{fields_arr}]}}}}}}"#
         )
+    }
+
+    // A schema whose text and byte fields state their bound in the type
+    // (`string[64]`, `bytes[64]`) is written by the AST as `{"string": 64}` and
+    // `{"bytes": 64}`: the same KIND as the codec's bare `"string"` / `"bytes"`,
+    // so the field move and the superset check treat them alike.
+    #[test]
+    fn a_bounded_text_or_bytes_type_reads_as_its_kind() {
+        let json = r#"{"v":1,"ast":{"document":{"kind":"event-schema","name":"s","event_name":"e","fields":[
+            {"id":"a","sce_type":{"string":64},"direction":"in"},
+            {"id":"b","sce_type":{"bytes":64},"direction":"in"},
+            {"id":"c","sce_type":{"enum":"x"},"direction":"in"}]}}}"#;
+        let facts = parse_event_schema_facts(json).unwrap();
+        let kinds: Vec<&SceType> = facts.fields.iter().map(|f| &f.sce_type).collect();
+        assert_eq!(kinds[0], &SceType::Primitive("string".into()));
+        assert_eq!(kinds[1], &SceType::Primitive("bytes".into()));
+        assert_eq!(kinds[2], &SceType::NonPrimitive);
     }
 
     // A codec forge-ast document with the same field shape.
@@ -1957,7 +1994,8 @@ pub fn dispatch_switchboard(
         // Primitive moves verbatim (Copy out of the borrowed struct).
         assert!(out.contains("celsius_centi: decoded.celsius_centi,"));
         // Borrowed string view, out of its bound, is deep-copied via `.into()`
-        // (`&str -> SceString`, still a type alias so the infallible `From` holds).
+        // (`&str -> sce_rust_runtime::SceString`, the runtime's own text type,
+        // so the infallible `From` holds).
         assert!(out.contains("sensor_id: decoded.sensor_id.into_inner().into(),"));
         // Borrowed bytes view goes through the FALLIBLE `SceBytes::from_slice`
         // (N-preserving newtype since SCE 1d439ea07) in a pre-conversion that

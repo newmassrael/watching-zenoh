@@ -130,25 +130,17 @@ impl<S: QueryValueZbufStorage> QueryValueZbufIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, after_shm: u8) -> Result<(), CodecError> where S: QueryValueZbufFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out, after_shm) {
-            Err(CodecError::CapacityExceeded) => {
-                QueryValueZbufView::decode(&mut _frame, after_shm)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, after_shm: u8) -> Result<(), CodecError> where S: QueryValueZbufFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -181,12 +173,14 @@ impl<S: QueryValueZbufStorage> QueryValueZbufIn<S> {
             None
         };
         let value = value.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
-        let value = value.map(|_v| _v.store::<S, QueryValueZbufValueField>()).transpose()?;
-        let mut encoding: Option<EncodingOwned<S>> = None;
-        if (after_shm & 0x01u8) != 0 {
-            EncodingOwned::<S>::decode_into(cursor, encoding.insert(EncodingOwned::<S>::default()))?;
+        let value = ::sce_forge_runtime::codec::note_held(value.map(|_v| _v.store::<S, QueryValueZbufValueField>()).transpose(), &mut _over)?;
+        _out.after_shm = if (after_shm & 0x01u8) != 0 { QueryValueZbufAfterShm::AfterShm { encoding: Default::default(), slices: Default::default(), value_len: Default::default() } } else { QueryValueZbufAfterShm::NotAfterShm { value: Default::default() } };
+        if let QueryValueZbufAfterShm::AfterShm { encoding: _p, .. } = &mut _out.after_shm {
+            if (after_shm & 0x01u8) != 0 {
+            ::sce_forge_runtime::codec::note_capacity(EncodingOwned::<S>::decode_into(cursor, _p), &mut _over)?;
         } else {
-            encoding = None;
+            unreachable!("the arm its gates installed holds the field they read");
+        }
         }
         let slice_count = if (after_shm & 0x01u8) != 0 {
             let _v = cursor.read_vle_u32()?;
@@ -194,20 +188,37 @@ impl<S: QueryValueZbufStorage> QueryValueZbufIn<S> {
         } else {
             None
         };
-        let mut slices: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<QueryValueZbufSlicesField>>::List<ZbufSliceOwned<S>>, 4294967295>> = None;
-        if (after_shm & 0x01u8) != 0 {
+        if let QueryValueZbufAfterShm::AfterShm { slices: _p, .. } = &mut _out.after_shm {
+            if (after_shm & 0x01u8) != 0 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
-            slices.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_p.refill(|_vec| {
+                let mut _full = false;
                 for _ in 0.._n {
-                    ::sce_forge_runtime::codec::SceList::try_push(_vec, ZbufSliceOwned::<S>::decode(cursor)?)?;
+                    let mut _entry = ZbufSliceOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(ZbufSliceOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+                }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
                 }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
-            slices = None;
+            unreachable!("the arm its gates installed holds the field they read");
         }
-        _out.after_shm = if (after_shm & 0x01u8) != 0 { QueryValueZbufAfterShm::AfterShm { encoding: encoding.unwrap_or_default(), slices: slices.unwrap_or_default(), value_len } } else { QueryValueZbufAfterShm::NotAfterShm { value: value.unwrap_or_default() } };
+        }
+        match &mut _out.after_shm {
+            QueryValueZbufAfterShm::AfterShm { value_len: _p_value_len, .. } => {
+            *_p_value_len = value_len;
+            }
+            QueryValueZbufAfterShm::NotAfterShm { value: _p_value, .. } => {
+            *_p_value = value.unwrap_or_default();
+            }
+        }
         _out.slice_count = slice_count;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 

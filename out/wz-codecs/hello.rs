@@ -77,9 +77,10 @@ pub struct HelloIn<S: HelloStorage> {
     pub locators: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<HelloLocatorsField>>::List<LocatorOwned<S>>, { usize::MAX }>>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type Hello<'a> = HelloIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `HelloIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -131,25 +132,17 @@ impl<S: HelloStorage> HelloIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, l: u8) -> Result<(), CodecError> where S: HelloFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out, l) {
-            Err(CodecError::CapacityExceeded) => {
-                HelloView::decode(&mut _frame, l)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, l: u8) -> Result<(), CodecError> where S: HelloFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -188,7 +181,7 @@ impl<S: HelloStorage> HelloIn<S> {
             _v
         };
         let zid = ::sce_forge_runtime::codec::Bounded::new(zid).ok_or(CodecError::LengthOutOfRange)?;
-        let zid = zid.store::<S, HelloZidField>()?;
+        let zid = ::sce_forge_runtime::codec::note_held(zid.store::<S, HelloZidField>(), &mut _over)?;
         let num_locators = if (l & 0x01u8) != 0 {
             let _v = cursor.read_vle_u64()?;
             Some(_v)
@@ -197,12 +190,18 @@ impl<S: HelloStorage> HelloIn<S> {
         };
         if (l & 0x01u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            _out.locators.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.locators.insert(Default::default()).refill(|_vec| {
+                let mut _full = false;
                 for _ in 0.._n {
-                    ::sce_forge_runtime::codec::SceList::try_push(_vec, LocatorOwned::<S>::decode(cursor)?)?;
+                    let mut _entry = LocatorOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(LocatorOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+                }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
                 }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
             _out.locators = None;
         }
@@ -210,6 +209,9 @@ impl<S: HelloStorage> HelloIn<S> {
         _out.cbyte = cbyte;
         _out.zid = zid;
         _out.num_locators = num_locators;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -487,7 +489,7 @@ impl<'a> HelloView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`Hello::decode`], held as a view. On success the
+    /// errors of [`HelloIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>, l: u8) -> Result<Self, CodecError> {
         let mut _out = Self::default();

@@ -97,21 +97,9 @@ impl<S: StreamEnvelopeStorage> StreamEnvelopeIn<S> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: StreamEnvelopeFrom<'f> {
-        // Judged as [`Self::decode_into`] judges a frame past a capacity
-        // (docs/adr/0077 §7).
-        let mut _frame = *cursor;
-        match Self::stored(cursor) {
-            Err(CodecError::CapacityExceeded) => {
-                StreamEnvelope::stored(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode`], which stops where a field is past its
-    /// capacity.
-    fn stored<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: StreamEnvelopeFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Variable-length codec. RFC §synth-5-B B3 stream-correct shape:
         // a codec without `<sce:field sce:bit-size="tail">` consumes
         // only `min_bytes + length_value` rather than the entire
@@ -130,7 +118,8 @@ impl<S: StreamEnvelopeStorage> StreamEnvelopeIn<S> {
         let payload_len = raw[0] as u16 | ((raw[1] as u16) << 8);
         let payload = raw.get(2..2 + payload_len as usize).ok_or(CodecError::NeedMoreBytes)?;
         let payload = ::sce_forge_runtime::codec::Bounded::new(payload).ok_or(CodecError::LengthOutOfRange)?;
-        let payload = payload.store::<S, StreamEnvelopePayloadField>()?;
+        let _payload_read = payload.len();
+        let payload = ::sce_forge_runtime::codec::note_held(payload.store::<S, StreamEnvelopePayloadField>(), &mut _over)?;
         let value = Self {
             payload_len,
             payload,
@@ -142,13 +131,18 @@ impl<S: StreamEnvelopeStorage> StreamEnvelopeIn<S> {
         // lower bound.
         let mut _consumed: usize = 2;
         {
-            let _end = 2usize + value.payload.as_bytes().len();
+            // The bytes read, which a field past what the profile holds does
+            // not keep (docs/adr/0077 §7).
+            let _end = 2usize + _payload_read;
             if _end > _consumed { _consumed = _end; }
         }
         if _consumed > _frame_len {
             return Err(CodecError::NeedMoreBytes);
         }
         cursor.advance(_consumed)?;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(value)
     }
 

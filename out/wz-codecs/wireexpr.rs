@@ -140,25 +140,17 @@ impl<S: WireexprStorage> WireexprIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, n: u8, tag: u8) -> Result<(), CodecError> where S: WireexprFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out, n, tag) {
-            Err(CodecError::CapacityExceeded) => {
-                WireexprView::decode(&mut _frame, n, tag)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, n: u8, tag: u8) -> Result<(), CodecError> where S: WireexprFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -179,18 +171,21 @@ impl<S: WireexprStorage> WireexprIn<S> {
             0u8 => {
                 _out.body = WireexprVariantIn::WireexprNonlocal(WireexprNonlocalOwned::<S>::default());
                 if let WireexprVariantIn::WireexprNonlocal(_b) = &mut _out.body {
-                    WireexprNonlocalOwned::<S>::decode_into(cursor, _b, n)?;
+                    ::sce_forge_runtime::codec::note_capacity(WireexprNonlocalOwned::<S>::decode_into(cursor, _b, n), &mut _over)?;
                 }
             }
             1u8 => {
                 _out.body = WireexprVariantIn::WireexprLocal(WireexprLocalOwned::<S>::default());
                 if let WireexprVariantIn::WireexprLocal(_b) = &mut _out.body {
-                    WireexprLocalOwned::<S>::decode_into(cursor, _b, n)?;
+                    ::sce_forge_runtime::codec::note_capacity(WireexprLocalOwned::<S>::decode_into(cursor, _b, n), &mut _over)?;
                 }
             }
             // Build-time `codec/variant-arm-unreachable` proves the
             // arm set covers the tag domain without a default.
             _ => unreachable!("variant exhaustiveness gated by codec/variant-arm-unreachable at parse time"),
+        }
+        if _over {
+            return Err(CodecError::CapacityExceeded);
         }
         Ok(())
     }

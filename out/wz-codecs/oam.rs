@@ -113,9 +113,10 @@ pub struct OamIn<S: OamStorage> {
     pub body: OamVariantIn<S>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type Oam<'a> = OamIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `OamIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -158,8 +159,6 @@ pub enum OamVariantIn<S: OamStorage> {
     },
 }
 
-#[allow(dead_code)]
-pub type OamVariant<'a> = OamVariantIn<::sce_forge_runtime::codec::Lent<'a>>;
 
 #[allow(dead_code)]
 pub type OamOwnedVariant<S> = OamVariantIn<S>;
@@ -207,25 +206,17 @@ impl<S: OamStorage> OamIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: OamFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                OamView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: OamFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // RFC §synth-5-B peek-byte / streaming-prefix:
         // streaming prefix decode (variable-length fields supported via
         // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
@@ -241,22 +232,24 @@ impl<S: OamStorage> OamIn<S> {
         };
         let id = cursor.read_vle_u64()?;
         if (header & 0x80u8) != 0 {
-            _out.extensions.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill(|_vec| {
+                let mut _full = false;
                 let mut _more = false;
                 loop {
-                    let _entry = ExtEntryOwned::<S>::decode(cursor)?;
+                    let mut _entry = ExtEntryOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(ExtEntryOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
                     _more = _entry.z();
-                    // The loop walks the chain's depth and `_vec` holds the capacity, so
-                // this push fails only where the deployment holds fewer entries than
-                // the frame says. An over-long chain is refused after the loop.
-                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
                     if !_more { break; }
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
                 }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
+                }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
             _out.extensions = None;
         }
@@ -271,19 +264,19 @@ impl<S: OamStorage> OamIn<S> {
             0u8 => {
                 _out.body = OamVariantIn::CodecZenohExtUnit(ExtUnit::default());
                 if let OamVariantIn::CodecZenohExtUnit(_b) = &mut _out.body {
-                    ExtUnit::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtUnit::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             1u8 => {
                 _out.body = OamVariantIn::CodecZenohExtZint(ExtZint::default());
                 if let OamVariantIn::CodecZenohExtZint(_b) = &mut _out.body {
-                    ExtZint::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtZint::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             2u8 => {
                 _out.body = OamVariantIn::CodecZenohExtZbuf(ExtZbufOwned::<S>::default());
                 if let OamVariantIn::CodecZenohExtZbuf(_b) = &mut _out.body {
-                    ExtZbufOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtZbufOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             other => {
@@ -292,12 +285,15 @@ impl<S: OamStorage> OamIn<S> {
                     body: ExtUnit::default(),
                 };
                 if let OamVariantIn::Default { body: _b, .. } = &mut _out.body {
-                    ExtUnit::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtUnit::decode_into(cursor, _b), &mut _over)?;
                 }
             }
         }
         _out.header = header;
         _out.id = id;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -667,7 +663,7 @@ impl<'a> OamView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`Oam::decode`], held as a view. On success the
+    /// errors of [`OamIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();

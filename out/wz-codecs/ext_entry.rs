@@ -189,25 +189,17 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ExtEntryFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                ExtEntryView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ExtEntryFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Decode fixed prefix (RFC §synth-5-B variant primitive: fields
         // sit before the variant suffix on the wire).
         let raw = cursor.peek_slice(1)?;
@@ -224,19 +216,19 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
             0u8 => {
                 _out.body = ExtEntryVariantIn::CodecZenohExtUnit(ExtUnit::default());
                 if let ExtEntryVariantIn::CodecZenohExtUnit(_b) = &mut _out.body {
-                    ExtUnit::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtUnit::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             1u8 => {
                 _out.body = ExtEntryVariantIn::CodecZenohExtZint(ExtZint::default());
                 if let ExtEntryVariantIn::CodecZenohExtZint(_b) = &mut _out.body {
-                    ExtZint::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtZint::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             2u8 => {
                 _out.body = ExtEntryVariantIn::CodecZenohExtZbuf(ExtZbufOwned::<S>::default());
                 if let ExtEntryVariantIn::CodecZenohExtZbuf(_b) = &mut _out.body {
-                    ExtZbufOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtZbufOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             other => {
@@ -245,11 +237,14 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
                     body: ExtUnit::default(),
                 };
                 if let ExtEntryVariantIn::Default { body: _b, .. } = &mut _out.body {
-                    ExtUnit::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ExtUnit::decode_into(cursor, _b), &mut _over)?;
                 }
             }
         }
         _out.header = header;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 

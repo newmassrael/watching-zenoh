@@ -70,13 +70,31 @@
 //! (see Cargo.toml), so this runs under the Layer C1 `cargo test
 //! --workspace` lane with its sibling byte-parity tests.
 
-use wz_codecs::cobs_decode::cobs_decode;
-use wz_codecs::cobs_encode::cobs_encode;
+use sce_forge_runtime::codec::{CodecError, SceBytes};
+use wz_codecs::cobs_decode::cobs_decode as cobs_decode_into;
+use wz_codecs::cobs_encode::cobs_encode as cobs_encode_into;
 use wz_codecs::crc32::crc32;
-use wz_session_core::serial_link::{decode_frame, encode_frame, SerialFrameReader};
+use wz_session_core::serial_link::{
+    decode_frame, encode_frame, SerialFrameReader, SERIAL_MAX_COBS_BUF, SERIAL_MFS,
+};
 use zenoh_pico_sys::{
     _z_cobs_decode, _z_cobs_encode, _z_crc32, _z_serial_msg_deserialize, _z_serial_msg_serialize,
 };
+
+/// The generated stuffer writes into a destination its caller holds; the
+/// comparisons keep the value-returning shape they were written in.
+fn cobs_encode(data: &[u8]) -> Result<SceBytes<SERIAL_MAX_COBS_BUF>, CodecError> {
+    let mut out = SceBytes::<SERIAL_MAX_COBS_BUF>::new();
+    cobs_encode_into(data, &mut out).map_err(CodecError::from)?;
+    Ok(out)
+}
+
+/// As [`cobs_encode`], for the destuffer.
+fn cobs_decode(data: &[u8]) -> Result<SceBytes<SERIAL_MFS>, CodecError> {
+    let mut out = SceBytes::<SERIAL_MFS>::new();
+    cobs_decode_into(data, &mut out).map_err(CodecError::from)?;
+    Ok(out)
+}
 
 /// (header, payload) cases spanning: empty payload, single byte, embedded
 /// `0x00` runs (the case COBS exists for), the full 0..=255 byte range, a

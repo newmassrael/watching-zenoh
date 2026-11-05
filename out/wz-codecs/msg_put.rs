@@ -98,9 +98,10 @@ pub struct MsgPutIn<S: MsgPutStorage> {
     pub slice_count: Option<u32>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type MsgPut<'a> = MsgPutIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `MsgPutIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -153,25 +154,17 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: MsgPutFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                MsgPutView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: MsgPutFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -191,37 +184,67 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
             _v
         };
         if (header & 0x20u8) != 0 {
-            TimestampOwned::<S>::decode_into(cursor, _out.timestamp.insert(TimestampOwned::<S>::default()))?;
+            ::sce_forge_runtime::codec::note_capacity(TimestampOwned::<S>::decode_into(cursor, _out.timestamp.insert(TimestampOwned::<S>::default())), &mut _over)?;
         } else {
             _out.timestamp = None;
         }
         if (header & 0x40u8) != 0 {
-            EncodingOwned::<S>::decode_into(cursor, _out.encoding.insert(EncodingOwned::<S>::default()))?;
+            ::sce_forge_runtime::codec::note_capacity(EncodingOwned::<S>::decode_into(cursor, _out.encoding.insert(EncodingOwned::<S>::default())), &mut _over)?;
         } else {
             _out.encoding = None;
         }
-        let mut extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>> = None;
-        if (header & 0x80u8) != 0 {
-            extensions.insert(Default::default()).refill(|_vec| {
+        // The arm is installed before its chain is read, and the chain read
+        // where the arm holds it; a chain of other kinds is read again into
+        // the arm they name. Past what the profile holds the chain keeps an
+        // entry of each kind it read while it has room for one of each, and
+        // the decode reads on (docs/adr/0077 §7).
+        let _extensions_at = *cursor;
+        let mut _has_extensions_18 = false;
+        let mut _extensions_first = true;
+        loop {
+            let mut _found_extensions_18 = false;
+            let mut _extensions_fill = |_vec: &mut <S as ::sce_forge_runtime::codec::HoldsList<MsgPutExtensionsField>>::List<ExtEntryOwned<S>>| -> Result<(), CodecError> {
+                let mut _full = false;
                 let mut _more = false;
                 loop {
-                    let _entry = ExtEntryOwned::<S>::decode(cursor)?;
+                    let mut _entry = ExtEntryOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(ExtEntryOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
                     _more = _entry.z();
-                    // The loop walks the chain's depth and `_vec` holds the capacity, so
-                // this push fails only where the deployment holds fewer entries than
-                // the frame says. An over-long chain is refused after the loop.
-                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    _found_extensions_18 |= (u64::from(_entry.header) & 127u64) == 18u64;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[|_e| (u64::from(_e.header) & 127u64) == 18u64], &mut _full);
                     if !_more { break; }
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
                 }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
+                }
                 Ok(())
-            })?;
-        } else {
-            extensions = None;
+            };
+            let (_extensions_settled, _extensions_full) = if (header & 0x80u8) != 0 {
+                if _has_extensions_18 { ::sce_forge_runtime::codec::decode_placed_in(&mut _out.extensions_has_0x12, |_c| MsgPutExtensionsHas0x12::Has0x12 { extensions: _c, slices: Default::default() }, |_g| match _g { MsgPutExtensionsHas0x12::Has0x12 { extensions: _c, .. } => Some(_c), _ => None }, &mut _extensions_fill)? } else { ::sce_forge_runtime::codec::decode_chain_in(&mut _out.extensions_has_0x12, |_c| MsgPutExtensionsHas0x12::NotHas0x12 { extensions: Some(_c), payload: Default::default() }, |_g| match _g { MsgPutExtensionsHas0x12::NotHas0x12 { extensions: Some(_c), .. } => Some(_c), _ => None }, &mut _extensions_fill)? }
+            } else {
+                _out.extensions_has_0x12 = if _has_extensions_18 { unreachable!("an absent chain holds no entry of any kind") } else { MsgPutExtensionsHas0x12::NotHas0x12 { extensions: None, payload: Default::default() } };
+                (true, false)
+            };
+            _has_extensions_18 = _found_extensions_18;
+            if _extensions_settled {
+                _over |= _extensions_full;
+                break;
+            }
+            if !_extensions_first {
+                // Read again into the arm its kinds name, the chain holds them
+                // all unless it had no room for one of each: the value cannot
+                // hold the arm the frame names.
+                if _extensions_full {
+                    return Err(CodecError::CapacityExceeded);
+                }
+                unreachable!("a chain read again holds the kinds it was first read with");
+            }
+            _extensions_first = false;
+            *cursor = _extensions_at;
         }
-        let _has_extensions_18 = extensions.as_ref().is_some_and(|_c| _c.list_iter::<ExtEntryOwned<S>>().any(|_e| (u64::from(_e.header) & 127u64) == 18u64));
         let payload_len = if !_has_extensions_18 {
             let _v = cursor.read_vle_u64()?;
             Some(_v)
@@ -242,29 +265,41 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
             None
         };
         let payload = payload.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
-        let payload = payload.map(|_v| _v.store::<S, MsgPutPayloadField>()).transpose()?;
+        let payload = ::sce_forge_runtime::codec::note_held(payload.map(|_v| _v.store::<S, MsgPutPayloadField>()).transpose(), &mut _over)?;
         let slice_count = if _has_extensions_18 {
             let _v = cursor.read_vle_u32()?;
             Some(_v)
         } else {
             None
         };
-        let mut slices: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<MsgPutSlicesField>>::List<ZbufSliceOwned<S>>, 4294967295>> = None;
-        if _has_extensions_18 {
+        if let MsgPutExtensionsHas0x12::Has0x12 { slices: _p, .. } = &mut _out.extensions_has_0x12 {
+            if _has_extensions_18 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
-            slices.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_p.refill(|_vec| {
+                let mut _full = false;
                 for _ in 0.._n {
-                    ::sce_forge_runtime::codec::SceList::try_push(_vec, ZbufSliceOwned::<S>::decode(cursor)?)?;
+                    let mut _entry = ZbufSliceOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(ZbufSliceOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+                }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
                 }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
-            slices = None;
+            unreachable!("the arm its gates installed holds the field they read");
+        }
         }
         _out.header = header;
-        _out.extensions_has_0x12 = if _has_extensions_18 { MsgPutExtensionsHas0x12::Has0x12 { extensions: match ::sce_forge_runtime::codec::place_first::<_, MsgPutExtensionsHas0x12Key, { usize::MAX }>(extensions.expect("the gate found the chain").into_inner()) { Ok(_p) => _p, Err(_) => unreachable!("the gate found an entry of the kind") }, slices: slices.unwrap_or_default() } } else { MsgPutExtensionsHas0x12::NotHas0x12 { extensions: extensions.map(|_l| ::sce_forge_runtime::codec::Chain::new(_l.into_inner()).expect("the gates found the chain's kinds as the arm says")), payload: payload.unwrap_or_default() } };
+        if let MsgPutExtensionsHas0x12::NotHas0x12 { payload: _p_payload, .. } = &mut _out.extensions_has_0x12 {
+            *_p_payload = payload.unwrap_or_default();
+        }
         _out.payload_len = payload_len;
         _out.slice_count = slice_count;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -680,7 +715,7 @@ impl<'a> MsgPutView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`MsgPut::decode`], held as a view. On success the
+    /// errors of [`MsgPutIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();

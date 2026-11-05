@@ -110,9 +110,10 @@ pub struct LinkstateIn<S: LinkstateStorage> {
     pub options_h: LinkstateOptionsHOwned<S>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type Linkstate<'a> = LinkstateIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `LinkstateIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -169,25 +170,17 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LinkstateFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                LinkstateView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LinkstateFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -228,7 +221,7 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
             None
         };
         let zid = zid.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
-        let zid = zid.map(|_v| _v.store::<S, LinkstateZidField>()).transpose()?;
+        let zid = ::sce_forge_runtime::codec::note_held(zid.map(|_v| _v.store::<S, LinkstateZidField>()).transpose(), &mut _over)?;
         let whatami = if (options & 0x02u8) != 0 {
             let raw = cursor.peek_slice(1)?;
             let _v = raw[0];
@@ -245,34 +238,71 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
         };
         if (options & 0x04u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            _out.locators.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.locators.insert(Default::default()).refill(|_vec| {
+                let mut _full = false;
                 for _ in 0.._n {
-                    ::sce_forge_runtime::codec::SceList::try_push(_vec, LocatorOwned::<S>::decode(cursor)?)?;
+                    let mut _entry = LocatorOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(LocatorOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+                }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
                 }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
             _out.locators = None;
         }
         let links_len = cursor.read_vle_u64()?;
-        let mut links: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateLinksField>>::List<LinkstateLink>, { usize::MAX }> = Default::default();
-        links.refill(|_vec| {
+        _out.options_h = if (options & 0x08u8) != 0 { LinkstateOptionsH::H { links_weights: Default::default() } } else { LinkstateOptionsH::NotH { links: Default::default() } };
+        match &mut _out.options_h {
+            LinkstateOptionsH::NotH { links: _p, .. } => {
+            ::sce_forge_runtime::codec::note_capacity(_p.refill(|_vec| {
+            let mut _full = false;
             for _ in 0..links_len {
-                ::sce_forge_runtime::codec::SceList::try_push(_vec, LinkstateLink::decode(cursor)?)?;
+                let mut _entry = LinkstateLink::default();
+                ::sce_forge_runtime::codec::note_capacity(LinkstateLink::decode_into(cursor, &mut _entry), &mut _full)?;
+                ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+            }
+            if _full {
+                return Err(CodecError::CapacityExceeded);
             }
             Ok(())
-        })?;
-        let mut weights: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateWeightsField>>::List<LinkstateWeight>, { usize::MAX }>> = None;
-        if (options & 0x08u8) != 0 {
+        }), &mut _over)?;
+            }
+            LinkstateOptionsH::H { links_weights: _p, .. } => {
+            ::sce_forge_runtime::codec::note_capacity(_p.refill_first(|_vec| {
+            let mut _full = false;
+            for _ in 0..links_len {
+                let mut _entry = LinkstateLink::default();
+                ::sce_forge_runtime::codec::note_capacity(LinkstateLink::decode_into(cursor, &mut _entry), &mut _full)?;
+                ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+            }
+            if _full {
+                return Err(CodecError::CapacityExceeded);
+            }
+            Ok(())
+        }), &mut _over)?;
+            }
+        }
+        if let LinkstateOptionsH::H { links_weights: _p, .. } = &mut _out.options_h {
+            if (options & 0x08u8) != 0 {
             let _n = links_len;
-            weights.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_p.refill_second(|_vec| {
+                let mut _full = false;
                 for _ in 0.._n {
-                    ::sce_forge_runtime::codec::SceList::try_push(_vec, LinkstateWeight::decode(cursor)?)?;
+                    let mut _entry = LinkstateWeight::default();
+                    ::sce_forge_runtime::codec::note_capacity(LinkstateWeight::decode_into(cursor, &mut _entry), &mut _full)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+                }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
                 }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
-            weights = None;
+            unreachable!("the arm its gates installed holds the field they read");
+        }
         }
         _out.options = options;
         _out.psid = psid;
@@ -282,7 +312,9 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
         _out.whatami = whatami;
         _out.num_locators = num_locators;
         _out.links_len = links_len;
-        _out.options_h = if (options & 0x08u8) != 0 { LinkstateOptionsH::H { links_weights: ::sce_forge_runtime::codec::Aligned::new(links, weights.expect("the gate read the list")).expect("one count read both lists") } } else { LinkstateOptionsH::NotH { links } };
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -772,7 +804,7 @@ impl<'a> LinkstateView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`Linkstate::decode`], held as a view. On success the
+    /// errors of [`LinkstateIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();

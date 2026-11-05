@@ -124,9 +124,10 @@ pub struct DeclareIn<S: DeclareStorage> {
     pub body: DeclareVariantIn<S>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type Declare<'a> = DeclareIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `DeclareIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -175,8 +176,6 @@ pub enum DeclareVariantIn<S: DeclareStorage> {
     },
 }
 
-#[allow(dead_code)]
-pub type DeclareVariant<'a> = DeclareVariantIn<::sce_forge_runtime::codec::Lent<'a>>;
 
 #[allow(dead_code)]
 pub type DeclareOwnedVariant<S> = DeclareVariantIn<S>;
@@ -224,25 +223,17 @@ impl<S: DeclareStorage> DeclareIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: DeclareFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                DeclareView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: DeclareFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // RFC §synth-5-B peek-byte / streaming-prefix:
         // streaming prefix decode (variable-length fields supported via
         // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
@@ -263,22 +254,24 @@ impl<S: DeclareStorage> DeclareIn<S> {
             None
         };
         if (header & 0x80u8) != 0 {
-            _out.extensions.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill(|_vec| {
+                let mut _full = false;
                 let mut _more = false;
                 loop {
-                    let _entry = ExtEntryOwned::<S>::decode(cursor)?;
+                    let mut _entry = ExtEntryOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(ExtEntryOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
                     _more = _entry.z();
-                    // The loop walks the chain's depth and `_vec` holds the capacity, so
-                // this push fails only where the deployment holds fewer entries than
-                // the frame says. An over-long chain is refused after the loop.
-                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
                     if !_more { break; }
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
                 }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
+                }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
             _out.extensions = None;
         }
@@ -294,55 +287,55 @@ impl<S: DeclareStorage> DeclareIn<S> {
             0u8 => {
                 _out.body = DeclareVariantIn::CodecZenohDeclKexpr(DeclKexprOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclKexpr(_b) = &mut _out.body {
-                    DeclKexprOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(DeclKexprOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             1u8 => {
                 _out.body = DeclareVariantIn::CodecZenohUndeclKexpr(UndeclKexprOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclKexpr(_b) = &mut _out.body {
-                    UndeclKexprOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(UndeclKexprOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             2u8 => {
                 _out.body = DeclareVariantIn::CodecZenohDeclSubscriber(DeclSubscriberOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclSubscriber(_b) = &mut _out.body {
-                    DeclSubscriberOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(DeclSubscriberOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             3u8 => {
                 _out.body = DeclareVariantIn::CodecZenohUndeclSubscriber(UndeclSubscriberOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclSubscriber(_b) = &mut _out.body {
-                    UndeclSubscriberOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(UndeclSubscriberOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             4u8 => {
                 _out.body = DeclareVariantIn::CodecZenohDeclQueryable(DeclQueryableOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclQueryable(_b) = &mut _out.body {
-                    DeclQueryableOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(DeclQueryableOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             5u8 => {
                 _out.body = DeclareVariantIn::CodecZenohUndeclQueryable(UndeclQueryableOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclQueryable(_b) = &mut _out.body {
-                    UndeclQueryableOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(UndeclQueryableOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             6u8 => {
                 _out.body = DeclareVariantIn::CodecZenohDeclToken(DeclTokenOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclToken(_b) = &mut _out.body {
-                    DeclTokenOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(DeclTokenOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             7u8 => {
                 _out.body = DeclareVariantIn::CodecZenohUndeclToken(UndeclTokenOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclToken(_b) = &mut _out.body {
-                    UndeclTokenOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(UndeclTokenOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             26u8 => {
                 _out.body = DeclareVariantIn::CodecZenohDeclFinal(DeclFinalOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclFinal(_b) = &mut _out.body {
-                    DeclFinalOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(DeclFinalOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             other => {
@@ -351,12 +344,15 @@ impl<S: DeclareStorage> DeclareIn<S> {
                     body: DeclFinalOwned::<S>::default(),
                 };
                 if let DeclareVariantIn::Default { body: _b, .. } = &mut _out.body {
-                    DeclFinalOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(DeclFinalOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
         }
         _out.header = header;
         _out.interest_id = interest_id;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -780,7 +776,7 @@ impl<'a> DeclareView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`Declare::decode`], held as a view. On success the
+    /// errors of [`DeclareIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();

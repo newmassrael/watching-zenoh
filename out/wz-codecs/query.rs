@@ -77,9 +77,10 @@ pub struct QueryIn<S: QueryStorage> {
     pub extensions: Option<QueryExtensionsList<S>>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type Query<'a> = QueryIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `QueryIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -131,25 +132,17 @@ impl<S: QueryStorage> QueryIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: QueryFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                QueryView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: QueryFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -193,26 +186,28 @@ impl<S: QueryStorage> QueryIn<S> {
             None
         };
         let parameters = parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
-        let parameters = parameters.map(|_v| _v.store::<S, QueryParametersField>()).transpose()?;
+        let parameters = ::sce_forge_runtime::codec::note_held(parameters.map(|_v| _v.store::<S, QueryParametersField>()).transpose(), &mut _over)?;
         if (header & 0x80u8) != 0 {
-            _out.extensions.insert(Default::default()).refill_from((), |_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill_from((), |_vec| {
+                let mut _full = false;
                 let mut _prev_extensions_after_shm: u8 = 0;
                 let mut _more = false;
                 loop {
-                    let _entry = QueryExtEntryOwned::<S>::decode(cursor, _prev_extensions_after_shm)?;
+                    let mut _entry = QueryExtEntryOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(QueryExtEntryOwned::<S>::decode_into(cursor, &mut _entry, _prev_extensions_after_shm), &mut _full)?;
                     _more = _entry.z();
                     _prev_extensions_after_shm = u8::from((u64::from(_entry.header) & 127u64) == 4u64);
-                    // The loop walks the chain's depth and `_vec` holds the capacity, so
-                // this push fails only where the deployment holds fewer entries than
-                // the frame says. An over-long chain is refused after the loop.
-                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
                     if !_more { break; }
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
                 }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
+                }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
             _out.extensions = None;
         }
@@ -220,6 +215,9 @@ impl<S: QueryStorage> QueryIn<S> {
         _out.consolidation = consolidation;
         _out.parameters_len = parameters_len;
         _out.parameters = parameters;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -572,7 +570,7 @@ impl<'a> QueryView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`Query::decode`], held as a view. On success the
+    /// errors of [`QueryIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();

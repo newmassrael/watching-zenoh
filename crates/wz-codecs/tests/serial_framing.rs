@@ -29,12 +29,27 @@
 
 #![cfg(feature = "codec-serial")]
 
-use sce_forge_runtime::codec::SceCursor;
-use wz_codecs::cobs_decode::cobs_decode;
-use wz_codecs::cobs_encode::cobs_encode;
+use sce_forge_runtime::codec::{CodecError, SceBytes, SceCursor};
+use wz_codecs::cobs_decode::cobs_decode as cobs_decode_into;
+use wz_codecs::cobs_encode::cobs_encode as cobs_encode_into;
 use wz_codecs::crc32::crc32;
 use wz_codecs::serial_envelope::SerialEnvelope;
 use wz_codecs::Bounded;
+
+/// The generated stuffer writes into a destination its caller holds; the
+/// tests keep the value-returning shape they were written in.
+fn cobs_encode(data: &[u8]) -> Result<SceBytes<1516>, CodecError> {
+    let mut out = SceBytes::<1516>::new();
+    cobs_encode_into(data, &mut out).map_err(CodecError::from)?;
+    Ok(out)
+}
+
+/// As [`cobs_encode`], for the destuffer.
+fn cobs_decode(data: &[u8]) -> Result<SceBytes<1507>, CodecError> {
+    let mut out = SceBytes::<1507>::new();
+    cobs_decode_into(data, &mut out).map_err(CodecError::from)?;
+    Ok(out)
+}
 
 /// CRC32 vectors taken directly from zenoh-pico's `_z_crc32`.
 ///

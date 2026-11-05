@@ -4,17 +4,18 @@
 //! ARCHITECTURE section 9.1 on the AP serial link, counted by the allocator:
 //! under `runtime-zero-copy` the serial write half COBS-frames each payload
 //! straight into a slot of the link's transmit pool, the writer writes the slot,
-//! and the slot goes home through the pool's completion edge. The LINK adds no
+//! and the slot goes home through the pool's completion edge. The path adds no
 //! allocation to a frame, in a steady state, in a burst, or at the serial MTU:
-//! what remains is the generated COBS stuffer's own (see
-//! `stuffer_allocations`), which these tests subtract exactly and pin.
+//! the generated COBS stuffer writes into a destination its caller holds (SCE
+//! ADR 0082 step 2), so it allocates nothing either, and the count is zero
+//! outright.
 //!
 //! Before the pool the serial writer queue's item was an owned copy of the raw
 //! payload, and the writer framed it through `encode_to_vec` into a vector and
-//! copied the stuffed bytes into another, on top of the stuffer's own. Measured
-//! on that shape with this harness: 256 allocations for 32 small frames, 96 for
-//! a burst of 12, 48 for 4 frames at the MTU; the link's own share of those is
-//! now zero.
+//! copied the stuffed bytes into another, on top of the stuffer's own growable
+//! list. Measured on that shape with this harness: 256 allocations for 32 small
+//! frames, 96 for a burst of 12, 48 for 4 frames at the MTU, the stuffer's
+//! share counted in them; the count is now zero.
 //!
 //! The counter is per thread and the whole path runs on the test's thread (a
 //! current-thread runtime, with the writer spawned on it), so the writer's
@@ -191,44 +192,9 @@ async fn round(link: &Link, payload: &[u8], wire: usize, frames: usize, burst: b
     written(&link.device, start + frames * wire).await;
 }
 
-/// What the GENERATED COBS stuffer itself asks the allocator for, framing one
-/// `payload`: the pre-COBS frame built on the stack, then `cobs_encode` alone.
-///
-/// The stuffer is SCE's `sce:kind="algorithm"` emit of
-/// `sources/codecs/cobs_encode.scxml`, whose bounded `bytes` output is the
-/// build's default byte storage, a growable heap list on an allocating build,
-/// grown push by push. That is the codec's, not the link's, and wz does not
-/// re-implement the codec to avoid it; so these tests pin that the link adds
-/// NOTHING to it: the measured total is exactly this, frame for frame.
-fn stuffer_allocations(payload: &[u8]) -> usize {
-    use sce_forge_runtime::codec::SliceSink;
-    let env = wz_codecs::serial_envelope::SerialEnvelope {
-        header: 0x00,
-        payload_len: payload.len() as u16,
-        payload: wz_codecs::Bounded::new(payload).expect("a serial frame's payload"),
-        crc32: wz_codecs::crc32::crc32(payload),
-    };
-    let mut pre = [0u8; wz_session_core::serial_link::SERIAL_MFS];
-    let mut sink = SliceSink::new(&mut pre);
-    env.encode(&mut sink).expect("fits");
-    let len = sink.position();
-    let before = allocations();
-    let stuffed = wz_codecs::cobs_encode::cobs_encode(&pre[..len]).expect("stuffs");
-    let count = allocations() - before;
-    drop(stuffed);
-    count
-}
-
-/// Allocations of a measured round of `frames` frames of `payload`, after one
-/// unmeasured round, LESS what the generated stuffer itself allocates for
-/// them; and the bytes of both rounds are the codec's frames.
+/// Every allocation of a measured round of `frames` frames of `payload`, after
+/// one unmeasured round; and the bytes of both rounds are the codec's frames.
 async fn measure(payload: &[u8], frames: usize, burst: bool) -> usize {
-    let stuffer = frames * stuffer_allocations(payload);
-    measure_total(payload, frames, burst).await - stuffer
-}
-
-/// Every allocation of a measured round.
-async fn measure_total(payload: &[u8], frames: usize, burst: bool) -> usize {
     let expected = encode_frame(0x00, payload).expect("a serial frame");
     let link = link();
     round(&link, payload, expected.len(), frames, burst).await;
@@ -247,26 +213,17 @@ static SMALL: [u8; 64] = [0x5A; 64];
 static FULL: [u8; SERIAL_MTU] = [0x00; SERIAL_MTU];
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_steady_state_of_serial_frames_adds_nothing_to_the_stuffer() {
+async fn a_steady_state_of_serial_frames_allocates_nothing() {
     assert_eq!(measure(&SMALL, 32, false).await, 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_burst_of_serial_frames_adds_nothing_to_the_stuffer() {
+async fn a_burst_of_serial_frames_allocates_nothing() {
     assert_eq!(measure(&SMALL, 12, true).await, 0);
 }
 
 /// A payload of zeroes at the MTU is the COBS worst case: every byte stuffed.
 #[tokio::test(flavor = "current_thread")]
-async fn serial_frames_at_the_mtu_add_nothing_to_the_stuffer() {
+async fn serial_frames_at_the_mtu_allocate_nothing() {
     assert_eq!(measure(&FULL, 4, false).await, 0);
-}
-
-/// The residual, stated as a measurement so it cannot go stale silently: the
-/// generated stuffer DOES allocate on this build. When the SCE emit gives a
-/// bounded `bytes` variable fixed storage, this reds, and the three tests above
-/// become "allocates nothing" outright.
-#[test]
-fn the_generated_stuffer_still_allocates_on_an_allocating_build() {
-    assert!(stuffer_allocations(&SMALL) > 0);
 }

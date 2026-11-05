@@ -65,9 +65,10 @@ pub struct LinkstateListIn<S: LinkstateListStorage> {
     pub link_states: ::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<LinkstateListLinkStatesField>>::List<LinkstateOwned<S>>, { usize::MAX }>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type LinkstateList<'a> = LinkstateListIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `LinkstateListIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -116,25 +117,17 @@ impl<S: LinkstateListStorage> LinkstateListIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LinkstateListFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                LinkstateListView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LinkstateListFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -148,13 +141,22 @@ impl<S: LinkstateListStorage> LinkstateListIn<S> {
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let num_link_states = cursor.read_vle_u64()?;
-        _out.link_states.refill(|_vec| {
+        ::sce_forge_runtime::codec::note_capacity(_out.link_states.refill(|_vec| {
+            let mut _full = false;
             for _ in 0..num_link_states {
-                ::sce_forge_runtime::codec::SceList::try_push(_vec, LinkstateOwned::<S>::decode(cursor)?)?;
+                let mut _entry = LinkstateOwned::<S>::default();
+                ::sce_forge_runtime::codec::note_capacity(LinkstateOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
+                ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
+            }
+            if _full {
+                return Err(CodecError::CapacityExceeded);
             }
             Ok(())
-        })?;
+        }), &mut _over)?;
         _out.num_link_states = num_link_states;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -340,7 +342,7 @@ impl<'a> LinkstateListView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`LinkstateList::decode`], held as a view. On success the
+    /// errors of [`LinkstateListIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();

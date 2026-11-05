@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 5f022a56165663f26c0e7d7983a202d9d5b91e0660ad03f7dc126eb545df5985
+// source-hash: 4bd2cb96153da515e52537ee9ee25d369aa258c9b3bb328a8906219a6a345897
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -216,7 +216,7 @@ pub struct SensorMonitorHumidityUpdatePayload {
 pub struct SensorMonitorTempUpdatePayload {
     pub celsius_centi: u16,
     pub sensor_id: ::sce_rust_runtime::SceString,
-    pub raw: ::sce_rust_runtime::SceBytes<256>,
+    pub raw: ::sce_rust_runtime::SceBytes<64>,
 }
 
 /// NL→IR Item C1 Path A: typed `_event.data` payload sum for the EventSchema-imported events whose transition guards lowered natively.

@@ -113,9 +113,10 @@ pub struct ResponseIn<S: ResponseStorage> {
     pub body: ResponseVariantIn<S>,
 }
 
-/// The eager form: bytes and text borrowed from the frame, lists held inline.
-#[allow(dead_code)]
-pub type Response<'a> = ResponseIn<::sce_forge_runtime::codec::Lent<'a>>;
+// No eager form at the default profile: `Lent<'a>` holds each list as `Inline`
+// does, and `Inline` holds no list whose protocol states no bound
+// (docs/adr/0077 §7). Name the eager form at a profile that holds its lists,
+// `ResponseIn<Lent<'a, D>>`.
 
 /// The value at a profile that holds its bytes and text, named
 /// with the profile: the build's default on the heap-free tier is `Inline`, which
@@ -158,8 +159,6 @@ pub enum ResponseVariantIn<S: ResponseStorage> {
     },
 }
 
-#[allow(dead_code)]
-pub type ResponseVariant<'a> = ResponseVariantIn<::sce_forge_runtime::codec::Lent<'a>>;
 
 #[allow(dead_code)]
 pub type ResponseOwnedVariant<S> = ResponseVariantIn<S>;
@@ -207,25 +206,17 @@ impl<S: ResponseStorage> ResponseIn<S> {
     /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
     /// binding) copies the declared maximum however few entries the wire held.
     /// A caller on a path where that shows decodes into a destination it owns.
-    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ResponseFrom<'f> {
-        // A form past its capacity stopped where it could not store, so the
-        // frame is judged by what cannot run out, and only a frame that parses
-        // is one this node cannot hold (docs/adr/0077 §7). Any profile may hold
-        // less than a bound, so this stands on every codec that takes one.
-        let mut _frame = *cursor;
-        match Self::store_into(cursor, _out) {
-            Err(CodecError::CapacityExceeded) => {
-                ResponseView::decode(&mut _frame)?;
-                Err(CodecError::CapacityExceeded)
-            }
-            stored => stored,
-        }
-    }
-
-    /// The reading of [`Self::decode_into`], which stops where a field is past
-    /// its capacity.
-    fn store_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: ResponseFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // RFC §synth-5-B peek-byte / streaming-prefix:
         // streaming prefix decode (variable-length fields supported via
         // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
@@ -240,24 +231,26 @@ impl<S: ResponseStorage> ResponseIn<S> {
             _v
         };
         let request_id = cursor.read_vle_u64()?;
-        WireexprOwned::<S>::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
+        ::sce_forge_runtime::codec::note_capacity(WireexprOwned::<S>::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1), &mut _over)?;
         if (header & 0x80u8) != 0 {
-            _out.extensions.insert(Default::default()).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill(|_vec| {
+                let mut _full = false;
                 let mut _more = false;
                 loop {
-                    let _entry = ExtEntryOwned::<S>::decode(cursor)?;
+                    let mut _entry = ExtEntryOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(ExtEntryOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
                     _more = _entry.z();
-                    // The loop walks the chain's depth and `_vec` holds the capacity, so
-                // this push fails only where the deployment holds fewer entries than
-                // the frame says. An over-long chain is refused after the loop.
-                ::sce_forge_runtime::codec::SceList::try_push(_vec, _entry)?;
+                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
                     if !_more { break; }
                 }
                 if _more && cursor.remaining() == 0 {
                     return Err(CodecError::NeedMoreBytes);
                 }
+                if _full {
+                    return Err(CodecError::CapacityExceeded);
+                }
                 Ok(())
-            })?;
+            }), &mut _over)?;
         } else {
             _out.extensions = None;
         }
@@ -273,13 +266,13 @@ impl<S: ResponseStorage> ResponseIn<S> {
             4u8 => {
                 _out.body = ResponseVariantIn::CodecZenohReply(ReplyOwned::<S>::default());
                 if let ResponseVariantIn::CodecZenohReply(_b) = &mut _out.body {
-                    ReplyOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ReplyOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             5u8 => {
                 _out.body = ResponseVariantIn::CodecZenohErr(ErrOwned::<S>::default());
                 if let ResponseVariantIn::CodecZenohErr(_b) = &mut _out.body {
-                    ErrOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ErrOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             other => {
@@ -288,12 +281,15 @@ impl<S: ResponseStorage> ResponseIn<S> {
                     body: ReplyOwned::<S>::default(),
                 };
                 if let ResponseVariantIn::Default { body: _b, .. } = &mut _out.body {
-                    ReplyOwned::<S>::decode_into(cursor, _b)?;
+                    ::sce_forge_runtime::codec::note_capacity(ReplyOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
         }
         _out.header = header;
         _out.request_id = request_id;
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
         Ok(())
     }
 
@@ -692,7 +688,7 @@ impl<'a> ResponseView<'a> {
     }
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
-    /// errors of [`Response::decode`], held as a view. On success the
+    /// errors of [`ResponseIn::decode`], held as a view. On success the
     /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();

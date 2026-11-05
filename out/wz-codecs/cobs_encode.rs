@@ -12,9 +12,9 @@ use sce_portable_bytes::{SceBytes, CapacityExceeded};
 
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
-pub fn cobs_encode(data: &[u8]) -> Result<SceBytes<1516>, CapacityExceeded> {
+pub fn cobs_encode(data: &[u8], out: &mut SceBytes<1516>) -> Result<(), CapacityExceeded> {
     let n: u32 = (data).len() as u32;
-    let mut out: SceBytes<1516> = SceBytes::new();
+    out.clear();
     let mut p: u32 = 0;
     let mut done: bool = false;
     while done == false {
@@ -49,5 +49,5 @@ pub fn cobs_encode(data: &[u8]) -> Result<SceBytes<1516>, CapacityExceeded> {
             out.push(tail)?;
         }
     }
-    return Ok(out);
+    return Ok(());
 }
