@@ -313006,6 +313006,38 @@
         "Fleet units that land on hkl001 or hkl002 run shellcheck 0.9.0 and red Layer 0 with SC2317 false positives; the stage 2 image (or a 0.11.0 on the fleet account's PATH) is what makes that verdict the tree's."
       ]
     },
+    "Round 4320": {
+      "decision_summary": "The build-machine declaration names the shellcheck Layer 0 lints with at the version CI installs, read from the workflow's own pin, and installs it with the repository's own script, which reads that pin and checks the download's digest. Before it, the declaration asked only whether some shellcheck runs, and a fleet machine whose account found an older system copy answered yes and then redded Layer 0 on false positives the pinned version does not report. A plain run that names Layer 0 is steered by the declaration now; a fan-out check unit is not yet, because the fan-out matches a tool's scope against each machine's batch command rather than a unit's own, which the bx session confirmed is bx's to fix and is taking to its owner.",
+      "changes_bullets": [
+        "bx.toml: [tools.shellcheck], version from .github/workflows/ci.yml (SHELLCHECK_VERSION), path ~/.local/bin/shellcheck, install through scripts/install-shellcheck.sh into the tool store, needed by runs naming Layer 0; its comment states the fan-out limitation."
+      ],
+      "verification_bullets": [
+        "bx --explain-declaration reads the tool as version 0.11.0 from the workflow, with the install, its inputs and needed_by as written; bx-fleet decl validate: valid (it first refused a comment that named a fleet host, rewritten to the condition).",
+        "The same tree passes Layer 0 locally under shellcheck 0.11.0; the fleet's Layer 0 unit, placed on a machine with only 0.9.0, redded on SC2317 false positives before and after the declaration, which is the fan-out limitation the comment records."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "bx: a fan-out check unit should carry the tools its own argv needs (bx session taking it to bx's owner). Until then, or until the owner provisions shellcheck 0.11.0 into the fleet accounts' tool stores (bx-provision <host> --apply), a fleet Layer 0 unit on such a machine reds for the machine, not the tree.",
+        "Layer C0 in the fleet still stops at config_key_fixture_gate.py reading a test file at its pre-merge path, owned by the test-merge session."
+      ],
+      "publishable_decision_summary": "The build-machine declaration names the shellcheck Layer 0 lints with at the version CI installs, read from the workflow's own pin, and installs it with the repository's own script, which reads that pin and checks the download's digest. Before it, the declaration asked only whether some shellcheck runs, and a fleet machine whose account found an older system copy answered yes and then redded Layer 0 on false positives the pinned version does not report. A plain run that names Layer 0 is steered by the declaration now; a fan-out check unit is not yet, because the fan-out matches a tool's scope against each machine's batch command rather than a unit's own, which the bx session confirmed is bx's to fix and is taking to its owner.",
+      "publishable_changes_bullets": [
+        "bx.toml: [tools.shellcheck], version from .github/workflows/ci.yml (SHELLCHECK_VERSION), path ~/.local/bin/shellcheck, install through scripts/install-shellcheck.sh into the tool store, needed by runs naming Layer 0; its comment states the fan-out limitation."
+      ],
+      "publishable_verification_bullets": [
+        "bx --explain-declaration reads the tool as version 0.11.0 from the workflow, with the install, its inputs and needed_by as written; bx-fleet decl validate: valid (it first refused a comment that named a fleet host, rewritten to the condition).",
+        "The same tree passes Layer 0 locally under shellcheck 0.11.0; the fleet's Layer 0 unit, placed on a machine with only 0.9.0, redded on SC2317 false positives before and after the declaration, which is the fan-out limitation the comment records."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "bx: a fan-out check unit should carry the tools its own argv needs (bx session taking it to bx's owner). Until then, or until the owner provisions shellcheck 0.11.0 into the fleet accounts' tool stores (bx-provision <host> --apply), a fleet Layer 0 unit on such a machine reds for the machine, not the tree.",
+        "Layer C0 in the fleet still stops at config_key_fixture_gate.py reading a test file at its pre-merge path, owned by the test-merge session."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
