@@ -127,7 +127,17 @@ IMAGES = (
         # beneath it, the session's receive path. Which of the commits to that path since the
         # figure was read moved it (the Frame read in place, `c7afd33520` and `0a522369e2`, or the
         # SCE pin moves of the day) is not separated: the frames of the chain are not printed.
-        peak=7956,
+        #
+        # 2026-11-06 -- 7,436 bytes over 8 frames (-520), read by Layer Q on hosted run
+        # 42061671165 (main's 215e687827) and on this machine at 0d824e8d5c (SCE pin 06f8147241)
+        # alike, 5 calls through a register not followed. The receive path through
+        # `parse_frame_payload_out_of_line` is no longer the worst chain: the worst is now the
+        # handshake's, `wz_task` 5,368, `dispatch_unit` 80, `read_unit_in` 112, `decide_unit_in`
+        # 376, `decode_accept_cookie` 784 and `hmac::get_der_key` 352, and two frames beneath.
+        # The pin move to 06f8147241 did not move it (the same figure before and after it); which
+        # change since 0796630b67 shrank the receive path below this one is not separated, as no
+        # hosted Layer Q decided between the two readings.
+        peak=7436,
     ),
     Image(
         key="frt2",
