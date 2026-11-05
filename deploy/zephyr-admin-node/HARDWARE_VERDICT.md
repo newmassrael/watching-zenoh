@@ -58,6 +58,17 @@ HW.7 the main stack kept a quarter free: stack: peak <N> of <M> bytes
 HW.7 passes when `N * 4 <= M * 3`. It is a floor and not a target: a record
 that passes with the stack nearly full says so in what it did not settle.
 
+## The transport
+
+The steps are about the node and not about the link under it, so the same HW.0 to HW.7 are put to a
+node reached over `udp/` and to one reached over `tcp/`: the program takes the transport from the
+scheme of the locator the lab names (`--node tcp/<address>:<port>`), and what changes in the lines is
+the scheme of the locators they quote (HW.0's READY line, HW.4's listener and the links it reads, all
+`tcp/` for a stream node, and B is a `tcp/` listener the node is told to dial). The steps for the
+pool images (HW.26 to HW.35) read a packet capture frame by frame and are the datagram transport's;
+the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
+steps that hold them are not in this file yet.
+
 ## What the ledger entry holds
 
 The entry a row cites as its record must say, in its text:

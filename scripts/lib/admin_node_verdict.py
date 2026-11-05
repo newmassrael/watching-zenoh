@@ -39,6 +39,18 @@ This program IS the steps. The way it reaches the node is its argument:
 Both modes run the same judging code (`JUDGES` below); only the address book and
 the rendering differ.
 
+## The transport
+
+A node is reached over a transport, `udp/` or `tcp/`, and the steps judge the node and not the
+link: what a node reports of its sessions, dials when it is written, refuses by name and keeps of
+its stack does not depend on the datagram or the stream beneath it. What does is bound once, in a
+`Transport` (the scheme of the locators the node prints and reports, the protocol of QEMU's forward,
+and whether the steps that read a packet capture apply), and the board mode takes it from the scheme
+of `--node` (`--transport` names it for the QEMU mode, `udp` by default). The pool steps HW.26 to
+HW.35 read a capture frame by frame and are the datagram transport's: they are refused for a `tcp/`
+node, by name. A stream has failure modes a datagram has not (a connection that resets, a listener
+that closes, a peer that reconnects), and steps for them are not these eight.
+
 ## How a lab runs it against a board
 
   1. Start a capture of the board's console into a file, from BEFORE the reset
@@ -250,7 +262,56 @@ QEMU_GUEST = "10.0.2.15"
 QEMU_HOST = "10.0.2.2"
 NODE_PORT = 7447
 READY_PREFIX = "ZEPHYR-WZ-ADMIN "
-READY_LINE = re.compile(r"ZEPHYR-WZ-ADMIN READY ([0-9a-f]+)((?: udp/\S+)+)")
+
+
+@dataclass(frozen=True)
+class Transport:
+    """The transport a node is reached over: what a verdict binds to the way the node's links are
+    named, apart from what it judges of the node.
+
+    The steps say what a node does (it reports its sessions, dials what it is written, refuses a group
+    of two by name, keeps a quarter of its stack); none of that depends on the link. What does is the
+    scheme of the locators the node prints and reports (its READY line, the `src` and `dst` of every
+    link it names, the endpoints it is told to dial), how the host reaches it under an emulator (a
+    forward of that protocol), and whether the steps that read a packet capture apply: a capture of a
+    datagram transport is read frame by frame, and a stream is not, so the pool steps (HW.26 to HW.35)
+    belong to the datagram transport alone."""
+
+    scheme: str
+    datagram: bool
+
+    @property
+    def prefix(self) -> str:
+        return f"{self.scheme}/"
+
+    @property
+    def ready_line(self) -> re.Pattern:
+        """A READY line of the node: its zid and one locator or more of this transport."""
+        return re.compile(rf"ZEPHYR-WZ-ADMIN READY ([0-9a-f]+)((?: {self.scheme}/\S+)+)")
+
+    @property
+    def node_locator(self) -> re.Pattern:
+        """A locator of the form the node prints: <scheme>/<IPv4 address or name>:<port>, or
+        <scheme>/[<IPv6 address>]:<port>."""
+        return re.compile(rf"{self.scheme}/(\[[0-9a-fA-F:.]+\]|[^\s:/\[\]]+):[0-9]+")
+
+    def locator(self, host: str, port: int) -> str:
+        return f"{self.scheme}/[{host}]:{port}" if ":" in host else f"{self.scheme}/{host}:{port}"
+
+    @property
+    def other(self) -> "Transport":
+        """The transport a link of the wrong kind belongs to (the selftest's fault)."""
+        return TCP if self == UDP else UDP
+
+
+UDP = Transport("udp", datagram=True)
+TCP = Transport("tcp", datagram=False)
+TRANSPORTS = (UDP, TCP)
+
+
+def transport_of(locator: str) -> Transport | None:
+    """The transport a node locator names, or None where it is no locator of any."""
+    return next((t for t in TRANSPORTS if t.node_locator.fullmatch(locator)), None)
 STACK_PREFIX = "stack: peak "
 STACK_LINE = re.compile(r"stack: peak ([0-9]+) of ([0-9]+) bytes")
 LAST_STEP = 7
@@ -300,6 +361,7 @@ class Plan:
     node_listener: str  # the node's listener as the node itself sees it
     stack_verdict: bool
     a_extra: tuple[str, ...] = ()
+    transport: Transport = UDP
 
     def group_second(self) -> str:
         """The second locator of HW.6's group: B's host, a port nobody serves."""
@@ -341,7 +403,7 @@ def _judge_ready(found: list[str], plan: Plan) -> bool:
     if isinstance(plan.ready, BoardReady):
         if len(found) != 1:
             return False
-        m = READY_LINE.fullmatch(found[0])
+        m = plan.transport.ready_line.fullmatch(found[0])
         return bool(m) and m.group(2).split()[0] == plan.node_listener
     return bool(found)
 
@@ -402,16 +464,16 @@ def sessions_seen(body: bytes) -> str:
         return ""
 
 
-def links_report(body: bytes) -> tuple[list, object] | None:
-    """(links that are not udp at both ends, the src of A's link), or None."""
+def links_report(body: bytes, transport: Transport = UDP) -> tuple[list, object] | None:
+    """(links that are not of `transport` at both ends, the src of A's link), or None."""
     try:
         bad, accepted = [], None
         for r in _replies(body):
             for s in r["value"].get("sessions", []):
                 for link in s.get("links", []):
-                    if not link.get("src", "").startswith("udp/") or not link.get(
+                    if not link.get("src", "").startswith(transport.prefix) or not link.get(
                         "dst", ""
-                    ).startswith("udp/"):
+                    ).startswith(transport.prefix):
                         bad.append((s["peer"], link))
                     if s["peer"] == A_ID:
                         accepted = link.get("src")
@@ -437,9 +499,10 @@ def last_stack_line(raw: bytes) -> str:
     return lines[-1] if lines else ""
 
 
-def ready_lines(raw: bytes) -> list[str]:
-    """The console's READY lines, trailing white space (the carriage return) cut."""
-    return [ln.rstrip() for ln in console_lines(raw) if READY_LINE.fullmatch(ln.rstrip())]
+def ready_lines(raw: bytes, transport: Transport = UDP) -> list[str]:
+    """The console's READY lines of `transport`, trailing white space (the carriage return) cut."""
+    pattern = transport.ready_line
+    return [ln.rstrip() for ln in console_lines(raw) if pattern.fullmatch(ln.rstrip())]
 
 
 # ---------------------------------------------------------------- ready --
@@ -468,14 +531,18 @@ class EreReady:
 
 class BoardReady:
     """A board's READY line: `ZEPHYR-WZ-ADMIN READY <id> <locator>...`, once
-    in the capture, its first locator the one the lab named."""
+    in the capture, its first locator the one the lab named. Its locators are of the
+    transport the node is reached over."""
+
+    def __init__(self, transport: Transport = UDP) -> None:
+        self.transport = transport
 
     def find(self, console: Path) -> list[str]:
         try:
             raw = console.read_bytes()
         except OSError:
             return []
-        return ready_lines(raw)
+        return ready_lines(raw, self.transport)
 
     def fail_text(self, found: list[str], plan: Plan, timing: Timing) -> str:
         if not found:
@@ -581,7 +648,7 @@ def run_scenario(plan: Plan, env: "Env", timing: Timing, out: Renderer) -> int:
                 return 1
             quote = None
             if isinstance(plan.ready, BoardReady) and found:
-                m = READY_LINE.fullmatch(found[0])
+                m = plan.transport.ready_line.fullmatch(found[0])
                 if m:
                     node_id = node_id or m.group(1)
                 quote = found[0][len(READY_PREFIX):] if found[0].startswith(READY_PREFIX) else found[0]
@@ -624,7 +691,7 @@ def run_scenario(plan: Plan, env: "Env", timing: Timing, out: Renderer) -> int:
                 out.step(Verdict(3, False, plain[3], "GET config FAIL: the written endpoint is not in it"))
                 fail = True
             body = env.get("")
-            report = links_report(body)
+            report = links_report(body, plan.transport)
             if judge(4, report, plan):
                 out.step(Verdict(4, True, plain[4]))
             else:
@@ -1760,35 +1827,40 @@ def node_ipv4(locator: str) -> str | None:
 
 
 def qemu_plan(args: argparse.Namespace) -> Plan:
+    t = TRANSPORT_NAMED[getattr(args, "transport", UDP.scheme)]
     return Plan(
         label=args.label,
         grammar=False,
         node_id=args.node_id,
         ready=None if args.ready == "-" else EreReady(args.ready),
-        a_dial=f"udp/127.0.0.1:{args.fwd_port}",
-        b_listen=f"udp/127.0.0.1:{args.b_port}",
-        b_dial=f"udp/{QEMU_HOST}:{args.b_port}",
-        node_listener=f"udp/{QEMU_GUEST}:{NODE_PORT}",
+        a_dial=t.locator("127.0.0.1", args.fwd_port),
+        b_listen=t.locator("127.0.0.1", args.b_port),
+        b_dial=t.locator(QEMU_HOST, args.b_port),
+        node_listener=t.locator(QEMU_GUEST, NODE_PORT),
         stack_verdict=args.stack_verdict,
+        transport=t,
     )
 
 
-def _udp(host: str, port: int) -> str:
-    return f"udp/[{host}]:{port}" if ":" in host else f"udp/{host}:{port}"
+TRANSPORT_NAMED = {t.scheme: t for t in TRANSPORTS}
 
 
 def board_plan(args: argparse.Namespace) -> Plan:
+    t = transport_of(args.node)
+    if t is None:
+        raise ValueError(f"{args.node!r} is a locator of no transport the verdict knows")
     return Plan(
         label="HW",
         grammar=True,
         node_id=None,
-        ready=BoardReady(),
+        ready=BoardReady(t),
         a_dial=args.node,
-        b_listen=_udp(args.host, args.b_port),
-        b_dial=_udp(args.host, args.b_port),
+        b_listen=t.locator(args.host, args.b_port),
+        b_dial=t.locator(args.host, args.b_port),
         node_listener=args.node,
         stack_verdict=True,
         a_extra=("--cfg=listen/endpoints:[]",),
+        transport=t,
     )
 
 
@@ -1813,7 +1885,7 @@ DEFAULT_REST_PORT = 17800
 
 # A locator of the form the node prints: udp/<IPv4 address or name>:<port>, or
 # udp/[<IPv6 address>]:<port>.
-NODE_LOCATOR = re.compile(r"udp/(\[[0-9a-fA-F:.]+\]|[^\s:/\[\]]+):[0-9]+")
+NODE_LOCATOR = UDP.node_locator
 
 
 def pool_main(args: argparse.Namespace) -> int:
@@ -1831,6 +1903,12 @@ def pool_main(args: argparse.Namespace) -> int:
         return _refuse(f"--pool-image names {', '.join(repeated)} more than once")
     images = [image for key, image in IMAGES.items() if key in args.pool_image]
     capture = [image for image in images if image.capture_step is not None]
+    named = transport_of(args.node)
+    if named is not None and not named.datagram:
+        return _refuse(
+            f"--node {args.node!r} is a {named.scheme} locator: the pool steps (HW.26 to HW.35) "
+            "are the datagram transport's, and a capture of a stream is not read frame by frame"
+        )
     if not NODE_LOCATOR.fullmatch(args.node):
         return _refuse(f"--node {args.node!r} is not a locator of the form udp/<address>:<port>")
     address = node_ipv4(args.node)
@@ -1871,13 +1949,21 @@ def main(argv: list[str]) -> int:
     q.add_argument("--node-id", required=True)
     q.add_argument("--ready", required=True, help="extended regex of the READY line, or -")
     q.add_argument("--stack-verdict", action="store_true")
+    q.add_argument(
+        "--transport",
+        choices=tuple(TRANSPORT_NAMED),
+        default=UDP.scheme,
+        help="the transport the node is reached over under QEMU (the forward is of that protocol)",
+    )
     q.add_argument("--zenohd", default=None)
     q.add_argument("--fwd-port", type=int, required=True)
     q.add_argument("--b-port", type=int, required=True)
     q.add_argument("--rest-port", type=int, required=True)
     q.add_argument("qemu", nargs=argparse.REMAINDER)
     b = sub.add_parser("board", help="judge a node already running on a board")
-    b.add_argument("--node", required=True, help="the node's locator, udp/<address>:<port>")
+    b.add_argument(
+        "--node", required=True, help="the node's locator, udp/<address>:<port> or tcp/<address>:<port>"
+    )
     b.add_argument("--host", default=None, help="this host's address on the board's subnet")
     b.add_argument("--console", required=True, type=Path, help="the console capture file")
     b.add_argument("--zenohd", default=None)
@@ -1911,7 +1997,7 @@ def main(argv: list[str]) -> int:
         cmd = args.qemu[1:] if args.qemu[:1] == ["--"] else args.qemu
         if not cmd:
             return _refuse("no QEMU command after --")
-        fwd = f"hostfwd=udp:127.0.0.1:{args.fwd_port}-{QEMU_GUEST}:{NODE_PORT}"
+        fwd = f"hostfwd={args.transport}:127.0.0.1:{args.fwd_port}-{QEMU_GUEST}:{NODE_PORT}"
         if not any(fwd in a for a in cmd):
             return _refuse(
                 f"the QEMU command does not carry {fwd}: A would dial a port the node is not behind"
@@ -1919,8 +2005,10 @@ def main(argv: list[str]) -> int:
         plan = qemu_plan(args)
         env = HostEnv(zenohd, args.rest_port, timing, qemu=cmd)
     else:
-        if not NODE_LOCATOR.fullmatch(args.node):
-            return _refuse(f"--node {args.node!r} is not a locator of the form udp/<address>:<port>")
+        if transport_of(args.node) is None:
+            return _refuse(
+                f"--node {args.node!r} is not a locator of the form <{'|'.join(TRANSPORT_NAMED)}>/<address>:<port>"
+            )
         if not args.console.is_file():
             return _refuse(f"no console capture at {args.console}")
         if not os.access(zenohd, os.X_OK):
@@ -1965,12 +2053,13 @@ class FakeBoard:
     written: list = field(default_factory=list)
     status: dict | None = None
     dialled: bool = False
+    transport: Transport = UDP
 
     def console(self, stack_peak: int = 20080) -> bytes:
         lines = ["*** Booting Zephyr OS ***", "wz: core clock 25000000 Hz"]
         ready = f"ZEPHYR-WZ-ADMIN READY {self.zid} {self.node_listener}"
         if "ready_wrong_locator" in self.faults:
-            ready = f"ZEPHYR-WZ-ADMIN READY {self.zid} udp/198.51.100.7:7447"
+            ready = f"ZEPHYR-WZ-ADMIN READY {self.zid} {self.transport.prefix}198.51.100.7:7447"
         if "two_boots" in self.faults:
             lines += [ready, "stack: peak 3000 of 32768 bytes", "*** Booting Zephyr OS ***"]
         if "no_ready" not in self.faults:
@@ -1990,13 +2079,18 @@ class FakeBoard:
 
     def get(self, suffix: str) -> bytes:
         if suffix == "":
-            src = "udp/10.9.9.9:7447" if "link_src" in self.faults else self.node_listener
-            sessions = [{"peer": A_ID, "links": [{"src": src, "dst": "udp/127.0.0.1:40000"}]}]
+            p = self.transport.prefix
+            src = f"{p}10.9.9.9:7447" if "link_src" in self.faults else self.node_listener
+            sessions = [{"peer": A_ID, "links": [{"src": src, "dst": f"{p}127.0.0.1:40000"}]}]
             if "extra_before" in self.faults:
-                sessions.append({"peer": "c" * 16, "links": [{"src": src, "dst": "udp/127.0.0.1:40002"}]})
+                sessions.append({"peer": "c" * 16, "links": [{"src": src, "dst": f"{p}127.0.0.1:40002"}]})
             if self.dialled:
-                dst = self.b_dial.replace("udp/", "tcp/") if "link_proto" in self.faults else self.b_dial
-                sessions.append({"peer": B_ID, "links": [{"src": "udp/10.0.2.15:40001", "dst": dst}]})
+                dst = (
+                    self.b_dial.replace(p, self.transport.other.prefix)
+                    if "link_proto" in self.faults
+                    else self.b_dial
+                )
+                sessions.append({"peer": B_ID, "links": [{"src": f"{p}10.0.2.15:40001", "dst": dst}]})
             return self._reply("", {"zid": self.zid, "sessions": sessions})
         if suffix == "/config":
             eps = [] if "config_forgets" in self.faults else self.written
@@ -2140,13 +2234,21 @@ def _qa_plan() -> Plan:
     return qemu_plan(ns)
 
 
-def _board_plan() -> Plan:
-    ns = argparse.Namespace(node=BOARD_NODE, host=BOARD_HOST, b_port=17448)
+def _board_plan(transport: Transport = UDP) -> Plan:
+    ns = argparse.Namespace(
+        node=f"{transport.scheme}/192.0.2.10:7447", host=BOARD_HOST, b_port=17448
+    )
     return board_plan(ns)
 
 
 def _fake_run(plan: Plan, faults: tuple[str, ...], tmp: Path) -> tuple[int, bytes, bytes]:
-    board = FakeBoard(plan.node_id or "cfacc5282fa", plan.node_listener, plan.b_dial, frozenset(faults))
+    board = FakeBoard(
+        plan.node_id or "cfacc5282fa",
+        plan.node_listener,
+        plan.b_dial,
+        frozenset(faults),
+        transport=plan.transport,
+    )
     out, err = io.BytesIO(), io.BytesIO()
     rc = run_scenario(plan, FakeEnv(board, tmp), FAST, Renderer(plan, out, err))
     return rc, out.getvalue(), err.getvalue()
@@ -2796,6 +2898,92 @@ def selftest() -> int:
             finally:
                 JUDGES[step] = saved
 
+        # 5b. The stream transport. The steps judge the node and not the link, so a node reached by
+        #     tcp/ is held to the same eight steps, each fault reds the step it reds on the datagram
+        #     transport, and the controls are the transport's own: a link of the other kind is a
+        #     fault (`link_proto`, whose wrong link is udp/ here), a node judged as the wrong
+        #     transport fails, and the weakening pairs go green where the comparison is gone.
+        tcp_plan = _board_plan(TCP)
+        rc, tcp_out, tcp_err = _fake_run(tcp_plan, (), case_dir())
+        tcp_held = _grammar_steps(tcp_out)
+        check(
+            "tcp board healthy: rc 0, the eight steps held, nothing on standard error",
+            rc == 0 and sorted(tcp_held) == list(range(8)) and all(tcp_held.values()) and tcp_err == b"",
+            f"rc {rc} {tcp_out!r} {tcp_err!r}",
+        )
+        check(
+            "tcp board: HW.0 quotes the READY line with its tcp locator and HW.4 names the tcp listener",
+            b"HW.0 the node's console says who and where it is: READY cfacc5282fa tcp/192.0.2.10:7447 - OK\n"
+            in tcp_out
+            and b"HW.4 every session names its link src/dst; A reached tcp/192.0.2.10:7447 - OK\n" in tcp_out,
+            f"{tcp_out!r}",
+        )
+        for fault, (step, _) in LANE_FAIL.items():
+            rc, out, err = _fake_run(tcp_plan, (fault,), case_dir())
+            steps = _grammar_steps(out)
+            red = {k for k, v in steps.items() if not v}
+            want_red = {step}
+            if step == 0:
+                want_red = set(range(8))
+            elif step == 1:
+                want_red = set(range(1, 7))
+            check(f"tcp board {fault}: rc 1 and every step printed", rc == 1 and sorted(steps) == list(range(8)), f"{out!r}")
+            check(f"tcp board {fault}: red steps {sorted(want_red)}", red == want_red, f"{red} {out!r}")
+            check(f"tcp board {fault}: no stderr line names a step", not re.search(rb"HW\.\d+ ", err), f"{err!r}")
+        tcp_weak = {
+            0: ("ready_wrong_locator", "two_boots"),
+            1: ("extra_before",),
+            2: ("never_dials",),
+            3: ("config_forgets",),
+            4: ("link_src", "link_proto"),
+            5: ("status_not_live", "status_seq"),
+            6: ("group_accepted", "group_reason"),
+            7: ("stack_deep",),
+        }
+        for step, faults in tcp_weak.items():
+            saved = JUDGES[step]
+            JUDGES[step] = lambda *a: True
+            try:
+                for fault in faults:
+                    _, out, _ = _fake_run(tcp_plan, (fault,), case_dir())
+                    check(
+                        f"weakened step {step}: tcp board {fault} goes green there",
+                        _grammar_steps(out).get(step) is True,
+                        f"{out!r}",
+                    )
+            finally:
+                JUDGES[step] = saved
+        # The wrong transport is not a pass: a node whose links are tcp/ judged as a udp/ node (and the
+        # other way round) reds HW.4, and a READY line of the other transport reds HW.0.
+        for judged, node in ((UDP, TCP), (TCP, UDP)):
+            plan = _board_plan(judged)
+            board = FakeBoard(
+                "cfacc5282fa", plan.node_listener, plan.b_dial, frozenset(), transport=node
+            )
+            out, err = io.BytesIO(), io.BytesIO()
+            rc = run_scenario(plan, FakeEnv(board, case_dir()), FAST, Renderer(plan, out, err))
+            steps = _grammar_steps(out.getvalue())
+            check(
+                f"a {node.scheme} node judged as {judged.scheme}: HW.4 reds",
+                rc == 1 and steps.get(4) is False,
+                f"rc {rc} {out.getvalue()!r}",
+            )
+        check(
+            "a tcp READY line is not a udp node's: the udp reader finds none, the tcp reader one",
+            ready_lines(b"ZEPHYR-WZ-ADMIN READY cfacc5282fa tcp/192.0.2.10:7447\r\n", UDP) == []
+            and ready_lines(b"ZEPHYR-WZ-ADMIN READY cfacc5282fa tcp/192.0.2.10:7447\r\n", TCP)
+            == ["ZEPHYR-WZ-ADMIN READY cfacc5282fa tcp/192.0.2.10:7447"],
+            "",
+        )
+        check(
+            "a locator names its transport",
+            transport_of("udp/10.0.2.15:7447") == UDP
+            and transport_of("tcp/[2001:db8::1]:7447") == TCP
+            and transport_of("tls/10.0.2.15:7447") is None
+            and transport_of("tcp/10.0.2.15") is None,
+            "",
+        )
+
         # 6. End to end: the program as the lanes call it, with a fake QEMU
         #    and a fake zenohd, the REST plugin served by a fake node.
         for faults in ((), ("config_forgets",)):
@@ -2874,6 +3062,96 @@ def selftest() -> int:
             ),
             f"{argv}",
         )
+
+        # 6b. The program as a lab calls it for a node reached by tcp/, under QEMU and on a board: the
+        #     routers are told tcp/ locators, the forward is of that protocol, and the lines are the
+        #     datagram transport's with the locators named by their own scheme.
+        tcp_node = "tcp/192.0.2.10:7447"
+        d = case_dir()
+        board = FakeBoard("cfacc5282fa", tcp_node, f"tcp/{BOARD_HOST}:17448", transport=TCP)
+        zenohd, _ = _fake_tools(d, b"")
+        capture = d / "capture.log"
+        capture.write_bytes(board.console())
+        server = _serve(board)
+        try:
+            rc, out, err = _cli(
+                [
+                    "board", "--node", tcp_node, "--host", BOARD_HOST, "--console", str(capture),
+                    "--zenohd", str(zenohd), "--rest-port", str(server.server_address[1]),
+                ]
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+        check("cli tcp board healthy: the eight lines", rc == 0 and out == tcp_out and err == b"",
+              f"rc {rc} {out!r} {err!r}")
+        argv = (d / "bin" / "zenohd.argv").read_text().splitlines()
+        check(
+            "cli tcp board: B listens on tcp/ on the host's address only, A dials the node by tcp/",
+            sorted(argv)
+            == sorted(
+                [
+                    f'--no-multicast-scouting -l tcp/{BOARD_HOST}:17448 --cfg=id:"bbbbbbbbbbbbbbbb"',
+                    f"--no-multicast-scouting -e {tcp_node} --rest-http-port "
+                    f"127.0.0.1:{server.server_address[1]} --plugin-search-dir {d / 'bin'} "
+                    '--cfg=id:"aaaaaaaaaaaaaaaa" --cfg=listen/endpoints:[]',
+                ]
+            ),
+            f"{argv}",
+        )
+        d = case_dir()
+        tcp_ready = QZA_READY.replace("udp/", "tcp/")
+        board = FakeBoard(QZA_ID, f"tcp/{QEMU_GUEST}:7447", B_DIAL_QEMU.replace("udp/", "tcp/"), transport=TCP)
+        zenohd, qemu = _fake_tools(d, board.console())
+        server = _serve(board)
+        try:
+            rc, out, err = _cli(
+                [
+                    "qemu", "--label", "Qza", "--node-id", QZA_ID, "--ready", tcp_ready,
+                    "--stack-verdict", "--transport", "tcp", "--zenohd", str(zenohd),
+                    "--fwd-port", "17447", "--b-port", "17448", "--rest-port",
+                    str(server.server_address[1]), "--", sys.executable, str(qemu),
+                    "-nic", "user,model=lan9118,hostfwd=tcp:127.0.0.1:17447-10.0.2.15:7447",
+                ]
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+        check(
+            "cli tcp qemu healthy: the lane's lines with the tcp locators",
+            rc == 0 and out == EXPECTED_QZA.replace(b"udp/", b"tcp/") and err == b"",
+            f"rc {rc} {out!r} {err!r}",
+        )
+        argv = (d / "bin" / "zenohd.argv").read_text().splitlines()
+        check(
+            "cli tcp qemu: the routers' arguments are the lanes' with tcp/ locators",
+            sorted(argv)
+            == sorted(
+                [
+                    '--no-multicast-scouting -l tcp/127.0.0.1:17448 --cfg=id:"bbbbbbbbbbbbbbbb"',
+                    "--no-multicast-scouting -e tcp/127.0.0.1:17447 --rest-http-port "
+                    f"127.0.0.1:{server.server_address[1]} --plugin-search-dir {d / 'bin'} "
+                    '--cfg=id:"aaaaaaaaaaaaaaaa"',
+                ]
+            ),
+            f"{argv}",
+        )
+        rc, _, err = _cli(
+            ["qemu", "--label", "X", "--node-id", "1", "--ready", "-", "--transport", "tcp", "--fwd-port", "1",
+             "--b-port", "2", "--rest-port", "3", "--", "true", "-nic",
+             "user,hostfwd=udp:127.0.0.1:1-10.0.2.15:7447"]
+        )
+        check("a tcp run whose QEMU forwards udp only is refused", rc == 2 and b"hostfwd=tcp" in err, f"{rc} {err!r}")
+        rc, _, err = _cli(["board", "--pool-image", "tx", "--node", tcp_node, "--console", str(capture),
+                           "--onboard", str(capture), "--pcap", str(capture)])
+        check(
+            "the pool steps are refused for a tcp node, by name",
+            rc == 2 and b"datagram transport" in err,
+            f"{rc} {err!r}",
+        )
+        rc, _, err = _cli(["board", "--node", "tls/192.0.2.10:7447", "--host", "h", "--console", str(capture),
+                           "--zenohd", str(zenohd)])
+        check("a locator of no known transport is refused", rc == 2 and b"udp|tcp" in err, f"{rc} {err!r}")
 
         # 7. What it refuses to run on.
         rc, _, err = _cli(["qemu", "--label", "X", "--node-id", "1", "--ready", "-", "--fwd-port", "1",
