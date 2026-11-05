@@ -266,6 +266,7 @@ class StreamProxy:
         self._commands: list[tuple[str, threading.Event]] = []
         self._cmd_r, self._cmd_w = os.pipe()
         self._stopping = False
+        self._stopped = False
         self._thread: threading.Thread | None = None
         self._bound = threading.Event()
 
@@ -279,6 +280,14 @@ class StreamProxy:
         return self
 
     def stop(self) -> None:
+        """End the proxy: its listener, its pairs and its pipe. Idempotent: a caller that stops it twice (the
+        verdict stops its environment on the way out and again from its `finally`) must not write to a pipe
+        the first stop closed, which is an error where the descriptor is still closed and a byte into some
+        other file where the number has been reused."""
+        with self._cv:
+            if self._stopped:
+                return
+            self._stopped = True
         self._stopping = True
         os.write(self._cmd_w, b"x")
         if self._thread is not None:
@@ -744,6 +753,10 @@ def _run_once() -> list[str]:
         failures.append(f"an unexpected error ended the cases early: {e!r}")
     finally:
         proxy.stop()
+        try:
+            proxy.stop()  # a second stop is a no-op: it must not touch the pipe the first one closed
+        except OSError as e:
+            failures.append(f"stop: a second stop failed: {e!r}")
         server.close()
     return failures
 
