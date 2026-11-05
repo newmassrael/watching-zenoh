@@ -312068,6 +312068,40 @@
         "Open from round 4286: phase 1 of docs/router-table-snapshots.md (FaceRuntime) is verified apart and lands as its own round."
       ]
     },
+    "Round 4295": {
+      "decision_summary": "Phase 1 of docs/router-table-snapshots.md: a face's runtime is kept apart from the routing facts the tables hold about it. The session's actions, the messages held for the face's link, the waker of its gate and the numbers of the declarations sent to it are not a version of the tables: the data path writes each under a lock of the face's own while it holds the read guard, and a face has one of each whichever version of the tables routed a message to it. They now live in one FaceRuntime per face, which RouterFaceState holds as an Arc, so that a later copy of the tables (phase 3) shares a face's runtime instead of duplicating it. Under structure A nothing moves: no change of logic, of the order of sends, or of which lock is taken where.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/face_runtime.rs: FaceRuntime (actions, held, gate_wake, declaration_ids) and its constructor for a face that has just registered.",
+        "crates/wz-runtime-tokio/src/router_forward.rs, egress.rs, declaration_ids.rs: RouterFaceState holds runtime: Arc<FaceRuntime>; every use of the four members reads it through the runtime."
+      ],
+      "verification_bullets": [
+        "bx on hkl001 (22 cores), on the tree rebased onto round 4293 (which carries the admin space's move into wz-admin, a change to router_forward.rs): cargo clippy -p wz-runtime-tokio --all-targets -D warnings with routing-router-hat and with --all-features, both rc 0; cargo test -p wz-runtime-tokio --lib router_forward with routing-router-hat, 297 passed and 1 ignored (the phase 0 measurement), and with routing-router-hat,transport-qos, 302 passed and 1 ignored.",
+        "The same four steps on the tree before the rebase gave the same counts. A first attempt on pc3 sent nothing: its disk was held by other runs for the hour the run waited."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Phase 2 of docs/router-table-snapshots.md: a route memo is cleared only by inputs at least as new as the ones it was computed from.",
+        "Phases 3 to 6 as filed in round 4281; the baseline of round 4286 compares against B only in phase 5."
+      ],
+      "publishable_decision_summary": "Phase 1 of docs/router-table-snapshots.md: a face's runtime is kept apart from the routing facts the tables hold about it. The session's actions, the messages held for the face's link, the waker of its gate and the numbers of the declarations sent to it are not a version of the tables: the data path writes each under a lock of the face's own while it holds the read guard, and a face has one of each whichever version of the tables routed a message to it. They now live in one FaceRuntime per face, which RouterFaceState holds as an Arc, so that a later copy of the tables (phase 3) shares a face's runtime instead of duplicating it. Under structure A nothing moves: no change of logic, of the order of sends, or of which lock is taken where.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/face_runtime.rs: FaceRuntime (actions, held, gate_wake, declaration_ids) and its constructor for a face that has just registered.",
+        "crates/wz-runtime-tokio/src/router_forward.rs, egress.rs, declaration_ids.rs: RouterFaceState holds runtime: Arc<FaceRuntime>; every use of the four members reads it through the runtime."
+      ],
+      "publishable_verification_bullets": [
+        "bx on hkl001 (22 cores), on the tree rebased onto round 4293 (which carries the admin space's move into wz-admin, a change to router_forward.rs): cargo clippy -p wz-runtime-tokio --all-targets -D warnings with routing-router-hat and with --all-features, both rc 0; cargo test -p wz-runtime-tokio --lib router_forward with routing-router-hat, 297 passed and 1 ignored (the phase 0 measurement), and with routing-router-hat,transport-qos, 302 passed and 1 ignored.",
+        "The same four steps on the tree before the rebase gave the same counts. A first attempt on pc3 sent nothing: its disk was held by other runs for the hour the run waited."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 2 of docs/router-table-snapshots.md: a route memo is cleared only by inputs at least as new as the ones it was computed from.",
+        "Phases 3 to 6 as filed in round 4281; the baseline of round 4286 compares against B only in phase 5."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
