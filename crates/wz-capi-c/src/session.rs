@@ -17,7 +17,9 @@ use std::ffi::c_void;
 use wz_capi_core::drive::{FaceDrive, OpenError, SessionState};
 #[cfg(feature = "router-node")]
 use wz_capi_core::drive::{NodeRole, RouterState};
-use wz_capi_core::faces::{no_shm_clients, FaceEventSink, FaceSnapshot, OpenShmClients};
+use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+use wz_capi_core::faces::{FaceEventSink, FaceSnapshot};
 use wz_capi_core::open_plan::{dial_role, AbiChoices, OpenPlan, OpenRefusal, StatedEndpoints};
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::TxQueueConf;
@@ -106,7 +108,9 @@ impl SessionHandle {
     }
 
     /// Where the transports and links of this session are read, and their coming and going is
-    /// watched.
+    /// watched. Compiled where its one reader is (`events`, which the `nounstable` arms do not
+    /// export).
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     pub(crate) fn face_source(&self) -> FaceSource {
         match self {
             Self::Registry(state) => FaceSource::Registry(state.shared.clone()),
@@ -117,7 +121,9 @@ impl SessionHandle {
 }
 
 /// The faces of a session as the transports and links a program lists and listens for. A
-/// listener holds its own copy, so that it can unwatch after the session handle is gone.
+/// listener holds its own copy, so that it can unwatch after the session handle is gone. Gated as
+/// its one reader, `events`, is.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 #[derive(Clone)]
 pub(crate) enum FaceSource {
     Registry(std::sync::Arc<wz_capi_core::faces::SharedSession>),
@@ -125,6 +131,7 @@ pub(crate) enum FaceSource {
     Node(std::sync::Arc<RouterState>),
 }
 
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 impl FaceSource {
     /// Every transport zenoh reports: each unicast face, then, on the registry, each member of
     /// each group the session joined, a multicast transport of its own
@@ -193,6 +200,19 @@ pub(crate) unsafe fn session_handle<'a>(
 ///
 /// # Safety
 /// As [`session_handle`].
+///
+/// Compiled where an operation written over the registry is: the modules that call it carry these
+/// gates (`group`, `snapshot`, `zenoh_ext` in `lib.rs`), and a build with none of them (the fuzz
+/// targets' `e2e-sender` alone) has no caller.
+#[cfg(any(
+    all(feature = "group", not(feature = "zenoh-c-no-unstable-api")),
+    feature = "resource-snapshot",
+    all(
+        feature = "query",
+        feature = "queryable",
+        not(feature = "zenoh-c-no-unstable-api")
+    )
+))]
 pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
     // SAFETY: the caller's contract.
     match unsafe { session_handle(zs) }? {
