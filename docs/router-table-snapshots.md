@@ -208,7 +208,7 @@ above 10 000. Under A on a busy router a write therefore costs the bound, about 
 from one writer, whatever the write is. This is the figure phase 5 compares B against; it says what A pays
 and not yet what B would.
 
-### 6.2 The phase 5 reading (round 4312)
+### 6.2 The phase 5 reading (round 4316)
 
 Both values built from the tree of round 4311 (release, `routing-router-hat`; the value set by
 `WZ_POLICY_ROUTING_TABLE_SHARING` at build time, each value in a target directory of its own), run on one
