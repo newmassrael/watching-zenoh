@@ -128,6 +128,7 @@ import sys
 import tempfile
 
 import cargo_workspaces
+import test_sources
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -333,7 +334,9 @@ def scan(
                 # would report on function and type names by the hundred.
                 if subject not in names and obj not in names:
                     continue
-                key = (arm, rel, f"{subject}->{obj}")
+                # A merged test file (scripts/lib/merge_tests.py) is declared by the path it had
+                # as `tests/<name>.rs`; the finding says where the line is.
+                key = (arm, test_sources.canonical(rel), f"{subject}->{obj}")
                 if why is None and (subject not in names or obj not in names):
                     why = "one side is not a package this workspace graph carries"
                 if why is not None:

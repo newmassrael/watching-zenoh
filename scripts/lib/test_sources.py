@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""The test source files of a crate, wherever the crate keeps them.
+"""R4296 (no register item) -- the test source files of a crate, wherever the crate keeps them.
 
 A crate's integration tests are `tests/<name>.rs`, one executable each, or, once
 `scripts/lib/merge_tests.py` has merged them, `tests/<target>/files/<name>.rs`, modules of one

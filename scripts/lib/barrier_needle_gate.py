@@ -455,6 +455,12 @@ def scope_of(path):
     if len(parts) == 4 and parts[0] == "crates" and parts[2] == "tests" \
             and parts[3].endswith(".rs"):
         return parts[1] + "|" + path
+    # A file of a merged test executable (`tests/<target>/files/<name>.rs`, see
+    # scripts/lib/merge_tests.py) is a module of it, and what it defines is named in that module:
+    # the same scope the file had as an executable of its own.
+    if len(parts) == 6 and parts[0] == "crates" and parts[2] == "tests" \
+            and parts[4] == "files" and parts[5].endswith(".rs") and parts[5] != "mod.rs":
+        return parts[1] + "|" + path
     return crate_of(path)
 
 

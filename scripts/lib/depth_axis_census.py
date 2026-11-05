@@ -99,6 +99,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import atom_test_graph  # noqa: E402
+import test_sources  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STORE = "docs/.atomic/workspace.atomic.json"
@@ -3052,7 +3053,12 @@ def resolve_citation(cited: str, paths: list[str]) -> list[str]:
     """
     if cited in paths:
         return [cited]
-    return [p for p in paths if p.endswith("/" + cited)]
+    found = [p for p in paths if p.endswith("/" + cited)]
+    if found:
+        return found
+    # A test file cited by the path it had as `tests/<name>.rs` (frozen text cites it so) and
+    # tracked now as a module of a merged executable (scripts/lib/merge_tests.py).
+    return [p for p in paths if test_sources.canonical(p) == cited]
 
 
 def citation_audit(

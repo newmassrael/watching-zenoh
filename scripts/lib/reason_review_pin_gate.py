@@ -90,6 +90,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 import depth_axis_census as dc  # noqa: E402
+import test_sources  # noqa: E402
 
 PINS_DOC = "docs/reason-review-pins.md"
 
@@ -258,7 +259,16 @@ def live() -> tuple[dict[tuple[str, str], int], int, int, int, dict[str, str]]:
     pairs, citations, ambiguous, upstream = population(
         remaining_reasons(entries), dc.tracked()
     )
-    return pairs, citations, ambiguous, upstream, blobs_of(sorted({p for _a, p in pairs}))
+    # A test file is keyed by the path it had as `tests/<name>.rs`, so a row survives the merge of
+    # a crate's test files into one executable (scripts/lib/merge_tests.py, which moves each file
+    # to `tests/<target>/files/<name>.rs`); the blob is read from where the file is.
+    by_file = blobs_of(sorted({p for _a, p in pairs}))
+    keyed: dict[tuple[str, str], int] = {}
+    for (atom, path), count in pairs.items():
+        key = (atom, test_sources.canonical(path))
+        keyed[key] = keyed.get(key, 0) + count
+    blobs = {test_sources.canonical(p): blob for p, blob in by_file.items()}
+    return keyed, citations, ambiguous, upstream, blobs
 
 
 def read_doc() -> str:

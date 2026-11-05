@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# What one crate's test build costs: the time to build every test executable into a FRESH target
+# R4291 (no register item) -- what one crate's test build costs: the time to build every test
+# executable into a FRESH target
 # directory, the size of what it wrote, how many executables there are and how large, and the list
 # of the crate's tests (for `scripts/lib/merge_tests.py --compare`).
 #
-#   test_build_size.sh <crate> <label> [cargo test args after --no-run, e.g. --features a,b]
+#   test_build_size.sh <crate> <label> [more cargo test arguments, such as a feature selection]
 #
 # It exists for the measurement that decides whether a crate's integration tests are merged into
 # one executable (`merge_tests.py`): run it before the move and after it, from the same host, and

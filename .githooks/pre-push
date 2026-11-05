@@ -938,6 +938,15 @@ round_fed_gates=(
     "store_reasons_resolve.py"
     "token_plane_parity_gate.py"
     "upstream_feature_census.py"
+    # The reader of a crate's test sources, in either layout (`tests/<name>.rs`, or the modules of
+    # a merged executable), and the two tools that move a crate's test files and rewrite the
+    # `--test` of a script. Round-fed because they walk the tracked corpus; their own check is a
+    # selftest of 0.01 to 0.03 s each, and `armed_oracle_census.py` (0.08 s) reads the files they
+    # find, so the commit that moves a test file sees what it moved.
+    "test_sources.py --selftest"
+    "merge_tests.py --selftest"
+    "retarget_test_refs.py --selftest"
+    "armed_oracle_census.py --check"
     # R3406 -- the zenoh-pico and zenoh-c switch tables. Round-fed by the drop-in crates'
     # manifests, deploy/wz-config.toml and the pico submodule's CMakeLists. A text read
     # plus one `cargo metadata --no-deps`, no build.

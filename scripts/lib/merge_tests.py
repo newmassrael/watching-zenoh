@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""Merge a crate's integration test files into ONE test executable.
+"""R4291 (no register item) -- merge a crate's integration test files into ONE test executable.
 
 Cargo builds every `tests/<name>.rs` as a crate of its own and links it against the whole
 dependency tree. The workspace holds 584 such files; one executable was 125 MB with the full debug
@@ -61,11 +61,11 @@ HEADER = """\
 
 //! The integration tests of this crate, as ONE test executable.
 //!
-//! Every file of `files/` was a `tests/<name>.rs` of its own and so an executable of its own,
+//! Every file of `files/` was a test file of `tests/` and so an executable of its own,
 //! linked against the whole dependency tree; they are modules of this one now, and the test of a
 //! file is `files::<name>::<test>` (`cargo test --test it files::<name>::` runs one file). The
-//! files that must be their own process (a global allocator, a `[[test]]` table) stay in `tests/`.
-//! See `scripts/lib/merge_tests.py`.
+//! files that must be their own process (a global allocator, a test table in the manifest) stay
+//! in `tests/`. See `scripts/lib/merge_tests.py`.
 
 mod files;
 """
