@@ -60,11 +60,10 @@ use host_slot_node_glue::fresh_zid;
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
-    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN, RX, SESSIONS, TASKS,
-    TASK_BYTES_ANSWERING, TASK_BYTES_ASKING, TIMERS, TX,
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN, RX, SESSIONS, TASKS, TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
-use wz_runtime_coop::session_drive::{IpEndpoint, Locator};
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, IpEndpoint, Locator, SlotStack};
 use wz_runtime_posix::glue::{log, log_args};
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
@@ -76,9 +75,11 @@ use wz_session_core::credential_identity::{zid_from_key_text, CREDENTIAL_ZID_BYT
 use wz_session_mcu::connect_manager::DeclaredPeer;
 use wz_session_mcu::dial::parse_locator;
 use wz_session_mcu::slot_client::Listening;
+use wz_session_mcu::slot_dial::EventsOf;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::NoPlane;
+use wz_session_mcu::slot_node::SessionLayer;
 use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, LaunchedPeers, NodeIdentity,
     NodeStorage, SingleEndpoint,
@@ -89,13 +90,6 @@ wz_runtime_posix::posix_image_no_heap!();
 #[cfg(feature = "get")]
 mod getter;
 
-/// Bytes of one task cell: the answering node's, or the asking node's when it can `get`
-/// (`host_slot_node_glue::tuning` holds the measurements).
-const TASK_BYTES: usize = if cfg!(feature = "get") {
-    TASK_BYTES_ASKING
-} else {
-    TASK_BYTES_ANSWERING
-};
 /// The queryables the node declares: as many as the image's limit says (`.cargo/config.toml`).
 const DOCS: usize = 2;
 
@@ -104,6 +98,24 @@ type Clock = PosixClock;
 type Stack = PosixStack;
 #[cfg(feature = "tls")]
 type Stack = tls::Stack;
+/// The application layer of the node's sessions: the node that only answers keeps no table of
+/// pending queries, and one that can `get` keeps them in it.
+#[cfg(not(feature = "get"))]
+type AskLayer = Answering;
+#[cfg(feature = "get")]
+type AskLayer = getter::Layer;
+/// The link driver of the node's stack, which the session's pump is generic over.
+type Driver = <Stack as SlotStack>::Driver;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
+/// build's types (the pump's handle and the application layer's state), and not a figure found by
+/// building the node with each size: a layer that grows grows the cell, and the cell is never one
+/// the spawn refuses.
+const TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    <Stack as SlotStack>::Pump,
+    Driver,
+    EventsOf<<AskLayer as SessionLayer<Clock, Driver>>::Events>,
+>();
 
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` and not in `.data` (`wz_session_mcu::slot_node`, shared with the kit).

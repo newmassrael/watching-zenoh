@@ -35,22 +35,6 @@ pub mod tuning {
     pub const SESSIONS: usize = 1;
     /// The runtime's task table: a pump task per session, and nothing else runs as a task.
     pub const TASKS: usize = SESSIONS;
-    /// Bytes of one task cell of a node that only ANSWERS: the pump's handle and the application
-    /// layer's state. A task the cell cannot hold is refused and counted, and the loop says so on
-    /// the console rather than run a node that never starts a session.
-    ///
-    /// Measured on 2026-10-23 by building the node with each size and running it against a port
-    /// nobody listens on, which spawns the session's task and says whether the cell held it: the
-    /// answering node is refused at 2,112 bytes and held at 2,176. The cell is the next step up with
-    /// about a fifth to spare. The 1,024 bytes the answering node had before refused its task, and
-    /// so did the revision before `slot_node` (so it is not that change's doing). The kit's cell is
-    /// 384 bytes (`fixed_client.rs`) and holds the session there.
-    pub const TASK_BYTES_ANSWERING: usize = 2560;
-    /// Bytes of one task cell of a node that also ASKS (`get`): it keeps the session's pending
-    /// queries in that state, nine rows of the key text and the sink each, which is what the larger
-    /// cell is for. Measured the same day: the asking node is refused at 2,304 bytes and held at
-    /// 2,560; the cell is the next step up with about a fifth to spare.
-    pub const TASK_BYTES_ASKING: usize = 3072;
     /// Bytes of one task cell of a node that PUBLISHES and ASKS on its own (a declared node): what the
     /// answering node keeps, a handle to its own session, the schedules and the publications of at
     /// most four publishers and four queriers (a declaration holds no more, `wz_node.py`), and the

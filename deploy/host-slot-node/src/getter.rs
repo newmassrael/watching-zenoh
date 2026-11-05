@@ -31,8 +31,12 @@ pub type HostPlan = Plan<Clock, SAMPLES, MAX_INFLIGHT, MAILBOX_ROWS>;
 
 pub static PLAN: HostPlan = Plan::new();
 
+/// The layer of a getter's sessions, by its type: the session task's cell is derived from the
+/// events this layer makes (`TASK_BYTES` of `main.rs`).
+pub type Layer = GetterLayer<Clock, SAMPLES, MAX_INFLIGHT, MAILBOX_ROWS>;
+
 /// The layer of a getter's sessions.
-pub const fn layer() -> GetterLayer<Clock, SAMPLES, MAX_INFLIGHT, MAILBOX_ROWS> {
+pub const fn layer() -> Layer {
     GetterLayer::new(&PLAN)
 }
 

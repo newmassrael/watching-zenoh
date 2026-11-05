@@ -746,7 +746,9 @@ warm-up:
   B refused its session task on every revision tried (`2b360e763`, `f4b566cae`, `864d052a1`,
   `a256cf133`), so it never opened a session; it is refused at 2,112 B and held at 2,176, and the
   asking node is refused at 2,304 and held at 2,560. The cells are 2,560 and 3,072 B now. Why
-  the state grew beyond 1,024 B was not looked into.
+  the state grew beyond 1,024 B was not looked into. (Since 2026-11-05 the cells of the node
+  images, the kit's and the host's, are the compiler's figure for the session's task
+  (`pump_task_cell_bytes`), and no figure above is written in any image any more.)
 - **Where the kit's images were built.** pc2, where the kit is attached, lost its Zephyr
   workspace (`~/zephyrproject` was gone, and a search for the SDK found none; they were installed
   there on 2026-10-11), so the images measured after the afternoon were built on the development
