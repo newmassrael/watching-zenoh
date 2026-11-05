@@ -130,6 +130,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
 import crossimpl_corpus  # noqa: E402
 import feature_closure  # noqa: E402
+import test_sources  # noqa: E402
 
 TESTS_DIR = ROOT / "crates/wz-integration-tests/tests"
 RUN_CI = ROOT / "scripts/run-ci.sh"
@@ -208,7 +209,7 @@ def ignored_tests(tests_dir=TESTS_DIR, packages=None):
     if packages is None:
         packages = set(workspace_packages().values())
     rows = []
-    for path in sorted(Path(tests_dir).glob("*.rs")):
+    for path in test_sources.files(Path(tests_dir)):
         text = _strip_line_comments(path.read_text(), "//")
         for m in IGNORE_ATTR.finditer(text):
             note = m.group(1)

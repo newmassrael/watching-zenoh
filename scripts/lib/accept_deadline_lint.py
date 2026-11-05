@@ -49,6 +49,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import test_sources
+
 WINDOW = 6
 SPAWN_MARKERS = ("Command::new", "CARGO_BIN_EXE")
 DEADLINE_MARKERS = ("timeout", "deadline")
@@ -67,7 +69,7 @@ def has_deadline(lines: list[str], index: int) -> bool:
 
 
 def scan(root: pathlib.Path):
-    files = sorted(root.glob("crates/**/tests/*.rs"))
+    files = test_sources.under(root, "crates/**/tests")
     total_sites = 0
     in_scope = 0
     out_of_scope = 0

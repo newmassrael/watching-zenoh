@@ -69,6 +69,8 @@ import re
 import sys
 from pathlib import Path
 
+import test_sources
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TESTS_DIR = REPO_ROOT / "crates" / "wz-integration-tests" / "tests"
 LIB_RS = REPO_ROOT / "crates" / "wz-integration-tests" / "src" / "lib.rs"
@@ -1006,7 +1008,7 @@ def scan_all() -> list[CorpusFile]:
     by_helper, pkgs_by_helper = helper_classes()
     return [
         scan_file(p, by_helper, pkgs_by_helper)
-        for p in sorted(TESTS_DIR.glob("*.rs"))
+        for p in test_sources.require(TESTS_DIR, "the cross-implementation corpus")
     ]
 
 

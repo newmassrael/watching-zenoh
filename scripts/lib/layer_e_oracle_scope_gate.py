@@ -51,6 +51,8 @@ import pathlib
 import re
 import sys
 
+import test_sources
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TEST_DIR = pathlib.Path("crates/wz-integration-tests/tests")
 RUN_CI = pathlib.Path("scripts/run-ci.sh")
@@ -143,7 +145,7 @@ def scan(root: pathlib.Path):
     tokens = sweep_tokens(root)
     selected: list[tuple[str, str]] = []
     offenders: list[tuple[str, str, str]] = []
-    for path in sorted((root / TEST_DIR).glob("*.rs")):
+    for path in test_sources.files(root / TEST_DIR):
         text = path.read_text(errors="replace")
         needs = [h for h in UNPROVISIONED_HELPERS if h in text]
         for m in FN.finditer(text):

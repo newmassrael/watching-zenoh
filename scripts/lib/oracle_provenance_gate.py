@@ -106,6 +106,8 @@ import sys
 import tempfile
 import typing
 
+import test_sources
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # The resolver layer: the crate whose `common` module every fixture reaches a
@@ -241,7 +243,7 @@ def resolved_routes(root: pathlib.Path) -> list["Route"]:
     the places that could do that, not only the places meant to.
     """
     sources = [root / RESOLVER_LIB]
-    sources.extend(sorted((root / RESOLVER_TESTS).glob("*.rs")))
+    sources.extend(test_sources.files(root / RESOLVER_TESTS))
     routes: list[Route] = []
     for path in sources:
         if not path.is_file():

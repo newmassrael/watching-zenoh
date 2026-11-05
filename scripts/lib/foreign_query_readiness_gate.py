@@ -55,6 +55,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import test_sources
+
 # The two roles. A file needs one of each to be able to have the window at all.
 #
 # The declarer list is the QUERY-answering side only. A subscriber or a
@@ -81,7 +83,7 @@ HELPER = "run_query_until_answered"
 
 def tracked_tests(root: Path) -> list[Path]:
     out = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "crates/wz-integration-tests/tests/*.rs"],
+        ["git", "-C", str(root), "ls-files", *test_sources.tracked_pathspecs("wz-integration-tests")],
         capture_output=True,
         text=True,
         check=True,

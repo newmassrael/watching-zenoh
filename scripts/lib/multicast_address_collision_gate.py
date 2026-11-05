@@ -56,6 +56,8 @@ import pathlib
 import re
 import sys
 
+import test_sources
+
 BIND = re.compile(r"bind_multicast\(\s*([A-Za-z_][\w:]*|Ipv4Addr::new\([^)]*\))\s*,\s*([A-Za-z_]\w*|\d+)\s*,")
 FN = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)")
 MOD = re.compile(r"^\s*(?:pub\s+)?mod\s+\w+\s*\{")
@@ -66,7 +68,7 @@ IP_LITERAL = re.compile(r"Ipv4Addr::new\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*
 
 def test_files(root: pathlib.Path) -> list[pathlib.Path]:
     """Every integration-test source in the workspace. Derived, not listed."""
-    return sorted(p for p in root.glob("crates/*/tests/*.rs") if p.is_file())
+    return [p for p in test_sources.workspace_files(root) if p.is_file()]
 
 
 def resolve(

@@ -79,6 +79,8 @@ import pathlib
 import re
 import sys
 
+import test_sources
+
 # ── the two vocabulary tiers ──────────────────────────────────────────────
 #
 # `token` phrases match case-sensitively on a word boundary: `HACK` is a marker,
@@ -221,7 +223,8 @@ def main() -> int:
                 cited_blocks += len(hits)
                 continue
             for phrase in hits:
-                key = f"{rel}::{phrase}"
+                # Keyed by the path the file had as `tests/<name>.rs`, so a merged file keeps its row.
+                key = f"{test_sources.canonical(rel)}::{phrase}"
                 fired[key] = fired.get(key, 0) + 1
                 if fired[key] > BASELINE.get(key, 0):
                     findings.append(

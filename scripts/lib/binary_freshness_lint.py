@@ -116,6 +116,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import crossimpl_corpus as corpus  # noqa: E402
+import test_sources  # noqa: E402
 
 # The binary whose staleness has actually cost a wrong diagnosis. The other wz
 # e2e binaries (`wz-e2e-*`) have the same hole and are deliberately NOT counted
@@ -333,7 +334,7 @@ def triage(tests_dir: Path | None = None) -> Triage:
 
     out = Triage()
     root = tests_dir if tests_dir is not None else corpus.TESTS_DIR
-    for path in sorted(root.glob("*.rs")):
+    for path in test_sources.files(root):
         cf = corpus.scan_file(path, by_helper, pkgs_by_helper)
         if WATCHED_BINARY not in cf.binaries:
             continue
@@ -385,7 +386,7 @@ def retired_file_count(tests_dir: Path | None = None) -> tuple[int, int]:
     files = [
         cf for cf in (
             corpus.scan_file(p, by_helper, pkgs_by_helper)
-            for p in sorted(root.glob("*.rs"))
+            for p in test_sources.files(root)
         )
         if WATCHED_BINARY in cf.binaries
     ]

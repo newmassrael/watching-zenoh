@@ -91,6 +91,8 @@ import re
 import sys
 import tempfile
 
+import test_sources
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
 TESTS_REL = "crates/wz-integration-tests/tests"
@@ -188,7 +190,7 @@ def unreachable(root):
 
     population = []
     dead = []
-    for path in sorted((root / TESTS_REL).glob("*.rs")):
+    for path in test_sources.files(root / TESTS_REL):
         fns = test_fns(path.read_text(encoding="utf-8"))
         if not fns:
             continue
