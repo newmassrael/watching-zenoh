@@ -988,14 +988,24 @@ class HostStreamEnv:
         self.env = env
 
     def sessions(self, via: str) -> set[str] | None:
-        if via != "B":
-            raise ValueError(f"the steps read the node through B, not {via!r}")
+        """The node's sessions as router `via` reports them: B's answer does not cross the leg to A, A's
+        crosses it both ways (the framing step reads it there on purpose)."""
+        read = {"A": self.env.get, "B": self.env.get_via_b}.get(via)
+        if read is None:
+            raise ValueError(f"the steps read the node through A or B, not {via!r}")
         try:
-            return {
-                s["peer"] for r in _replies(self.env.get_via_b("")) for s in r["value"].get("sessions", [])
-            }
+            return {s["peer"] for r in _replies(read("")) for s in r["value"].get("sessions", [])}
         except (ValueError, KeyError, TypeError, AttributeError):
             return None
+
+    def small_writes(self, leg: str, size: int) -> tuple[int, int]:
+        """Writes of at most `size` bytes the proxy on `leg` has made towards the node and from it: the
+        proof that a cut landed, from the proxy's own log of what it wrote."""
+        writes = self._proxy_of(leg).stats().writes
+        return (
+            sum(1 for d, n in writes if d == "up" and n <= size),
+            sum(1 for d, n in writes if d == "down" and n <= size),
+        )
 
     @property
     def b_dial(self) -> str:
@@ -1028,6 +1038,10 @@ class HostStreamEnv:
                 proxy.reject(action == "reject")
                 return 1
             return {"reset": proxy.reset_all}[action]()
+        if action.startswith("segment:"):
+            size = int(action.split(":", 1)[1])
+            proxy.segment(size or None)
+            return proxy.live()
         if action in ("refuse", "admit"):
             proxy.refuse(action == "refuse")
             return 1
@@ -3193,18 +3207,20 @@ def selftest() -> int:
         for fault, want in {
             # A step that was not run prints as a failure too, so each fault reds what it breaks and what
             # needed it.
-            "leak_on_reset": {38, 39, 40},
-            "leak_on_close": {38, 39, 40},
+            "leak_on_reset": {38, 39, 40, 41},
+            "leak_on_close": {38, 39, 40, 41},
             "fin_ignored": {36},
             "reset_ignored": {37},
-            "accept_stuck": {37, 38, 39, 40},
-            "kills_other": {36, 37, 38, 39, 40},
+            "accept_stuck": {37, 38, 39, 40, 41},
+            "kills_other": {36, 37, 38, 39, 40, 41},
             "silence_never_detected": {39},
             "silence_premature": {39},
             "redial_no_wait": {40},
             "redial_no_backoff": {40},
             "redial_no_restart": {40},
-            "redial_never": {40},
+            "redial_never": {40, 41},
+            "framing_no_reassembly": {41},
+            "framing_cut_not_applied": {41},
         }.items():
             rc, so, se = stream_case((fault,))
             steps = _grammar_steps(so)

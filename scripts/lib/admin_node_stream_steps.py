@@ -99,6 +99,10 @@ class StreamSpec:
     #: the early allowance covers the host's clock against the node's at the moment of the loss.
     redial_early_ms: int = 100
     redial_late_ms: int = 500
+    #: One-byte writes each way that prove the segmentation landed: a handshake alone is tens of bytes each
+    #: way (Init, Open and their acknowledgements), so a run that made fewer did not segment what it was
+    #: asked to, and a node that read it whole proved nothing.
+    framing_min_writes: int = 20
 
     def retry_waits(self, n: int) -> list[int]:
         """The first `n` waits of an outage: the policy's initial wait, grown by its factor, held at its
@@ -131,10 +135,16 @@ SENTENCES = {
     39: "a peer that falls silent is detected by the lease and only its session ends, and it is taken back",
 }
 SENTENCES[40] = "the node re-dials a lost peer on upstream's schedule of waits, and a new outage restarts it"
-STEPS = (36, 37, 38, 39, 40)
+SENTENCES[41] = "a message is read whole whatever the segmentation: the peer is taken back and answers, a byte at a time"
+STEPS = (36, 37, 38, 39, 40, 41)
 #: What the grammar's `<...>` is for a step that was not run or could not be judged (the printed sentence
 #: is an instance of the grammar either way).
-UNRUN_TAIL = {38: ": 0 of 0 returned", 39: ": after 0 ms", 40: ": waits 0 ms, restart 0 ms"}
+UNRUN_TAIL = {
+    38: ": 0 of 0 returned",
+    39: ": after 0 ms",
+    40: ": waits 0 ms, restart 0 ms",
+    41: ": 0 one-byte writes towards the node and 0 from it",
+}
 
 
 def unrun_sentence(step: int) -> str:
@@ -158,6 +168,24 @@ def judge_silence(
         sessions == {B_ID}
         and spec.earliest_lease_detection_ms <= elapsed_ms <= spec.silence_bound_ms
         and back
+    )
+
+
+def judge_framing(
+    back: bool,
+    answered: set[str] | None,
+    small_up: int,
+    small_down: int,
+    spec: StreamSpec = SPEC,
+) -> bool:
+    """With every write cut to one byte, the peer was taken back (its handshake read whole), a query
+    through that leg was answered with both sessions (a request and a reply read whole), and the cut
+    really happened: enough one-byte writes in each direction."""
+    return (
+        back
+        and answered == {A_ID, B_ID}
+        and small_up >= spec.framing_min_writes
+        and small_down >= spec.framing_min_writes
     )
 
 
@@ -194,6 +222,7 @@ class StreamEnv(Protocol):
     def fault(self, leg: str, action: str) -> int: ...
     def attempt_count(self, leg: str) -> int: ...
     def await_attempts(self, leg: str, since: int, count: int, guard_s: float) -> list[float] | None: ...
+    def small_writes(self, leg: str, size: int) -> tuple[int, int]: ...
     def sleep(self, seconds: float) -> None: ...
     def now(self) -> float: ...
 
@@ -310,6 +339,35 @@ def _redialled(
     _, again = outage(1)
     back2, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
     return landed, gaps, again[0] if again else None, back2
+
+
+def _segmented(
+    env: StreamEnv, spec: StreamSpec, interval_s: float
+) -> tuple[int, bool, set[str] | None, int, int]:
+    """Cut every write on the leg to A to one byte, make the peer redial through it, and ask through it.
+
+    The handshake of the peer's return crosses the leg a byte at a time (the node must read each message
+    whole across as many reads as the bytes arrive in), and a query through router A crosses it both ways
+    (a request to the node and its reply). The leg is closed to new connections while the old one is
+    released, as in `_released`, so the return is a new connection made under the cut. Returns (connections
+    the release landed on, whether the peer was back, the sessions the query through A reported, and the
+    one-byte writes the proxy made towards the node and from it while the cut was on)."""
+    both = {A_ID, B_ID}
+    up0, down0 = env.small_writes("A", 1)
+    env.fault("A", "segment:1")
+    try:
+        landed, _, _, _ = _released(env, "close", spec, interval_s)
+        back, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
+        answered: set[str] | None = None
+        if landed and back:
+            _, _ = _await(
+                env, lambda: env.sessions("A") == both, spec.return_guard_ms / 1000, interval_s
+            )
+            answered = env.sessions("A")
+    finally:
+        env.fault("A", "segment:0")
+    up1, down1 = env.small_writes("A", 1)
+    return landed, back, answered, up1 - up0, down1 - down0
 
 
 def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float = 0.2) -> list[Result]:
@@ -449,6 +507,32 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
                     )
                 why = "; ".join(off)
             out[40] = Result(40, False, said, f"re-dial FAIL: {why}")
+
+    if not conserved or env.sessions("B") != both:
+        out[41] = Result(
+            41, None, unrun_sentence(41), "not run: the node does not hold A and B after the steps before it"
+        )
+    else:
+        landed, back_ok, answered, small_up, small_down = _segmented(env, spec, interval_s)
+        said = f"{SENTENCES[41]}: {small_up} one-byte writes towards the node and {small_down} from it"
+        if landed == 0:
+            out[41] = Result(41, False, said, "the release landed on no connection: the leg to A held none")
+        elif judge_framing(back_ok, answered, small_up, small_down, spec):
+            out[41] = Result(41, True, said)
+        else:
+            if small_up < spec.framing_min_writes or small_down < spec.framing_min_writes:
+                why = (
+                    f"the cut did not land: {small_up} one-byte writes towards the node and {small_down} from it, "
+                    f"under the {spec.framing_min_writes} a handshake alone makes"
+                )
+            elif not back_ok:
+                why = "the peer was not taken back when its handshake arrived a byte at a time"
+            else:
+                why = (
+                    f"a query through the cut leg was not answered with both sessions: "
+                    f"{sorted(answered) if answered is not None else None}"
+                )
+            out[41] = Result(41, False, said, f"framing FAIL: {why}")
     return [out[s] for s in STEPS]
 
 
@@ -468,6 +552,8 @@ FAULTS = (
     "redial_no_backoff",  # every wait is the first one: the schedule never grows
     "redial_no_restart",  # a new outage continues the last one's schedule instead of starting again
     "redial_never",  # a lost peer is never dialled again
+    "framing_no_reassembly",  # a message that arrives in pieces is not read: the handshake and the replies stall
+    "framing_cut_not_applied",  # the cut never lands, so the node was shown whole messages and proved nothing
 )
 
 
@@ -490,6 +576,12 @@ class StreamModel:
         self.b_rejecting = False
         self.b_attempts: list[float] = []
         self.b_index = 0  # the position in the outage's schedule: the next wait to take
+        self.seg = 0  # the size the proxy on the leg to A cuts every write to (0: as read)
+        self.small = [0, 0]  # one-byte writes the proxy made towards the node and from it
+
+    def _cut(self) -> bool:
+        """The cut is in force on the leg and really made the writes small."""
+        return self.seg == 1 and "framing_cut_not_applied" not in self.faults
 
     def _b_wait_s(self) -> float:
         waits = self.spec.retry_waits(self.b_index + 1)
@@ -530,20 +622,37 @@ class StreamModel:
                         self.b_index = 0  # a session that is up ends the outage, and the schedule with it
             elif kind == "back":
                 stuck = "accept_stuck" in self.faults and self.released > 0
+                unread = self.seg > 0 and "framing_no_reassembly" in self.faults  # a handshake in pieces
                 if self.sess.get(peer):
                     pass  # the node never lost this peer, so there is nothing to take back
-                elif self.refusing or stuck or self.cells_used >= self.spec.cells:
+                elif self.refusing or stuck or unread or self.cells_used >= self.spec.cells:
                     self.events.append((self.t + self.A_REDIAL_S, "back", peer))  # the peer tries again
                 else:
                     self.cells_used += 1
                     self.sess[peer] = True
+                    if self._cut():
+                        self.small[0] += 60  # the handshake, a byte at a time, each way
+                        self.small[1] += 60
         self.t = end
 
     # StreamEnv
     def sessions(self, via: str) -> set[str] | None:
+        if via == "A":
+            # A query through router A crosses the leg to A, the cut leg, both ways.
+            if self.seg > 0 and "framing_no_reassembly" in self.faults:
+                return None
+            if self._cut():
+                self.small[0] += 10
+                self.small[1] += 10
         return {p for p, up in self.sess.items() if up}
 
+    def small_writes(self, leg: str, size: int) -> tuple[int, int]:
+        return self.small[0], self.small[1]
+
     def fault(self, leg: str, action: str) -> int:
+        if leg == "A" and action.startswith("segment:"):
+            self.seg = int(action.split(":", 1)[1])
+            return 1
         if leg == "A" and action in ("refuse", "admit"):
             self.refusing = action == "refuse"
             return 1
@@ -678,8 +787,8 @@ def selftest() -> int:
     # A node that keeps its contract holds all four.
     healthy = run_stream_steps(StreamModel())
     check(
-        "healthy: HW.36 to HW.40 held",
-        _held(healthy) == {36: True, 37: True, 38: True, 39: True, 40: True},
+        "healthy: HW.36 to HW.41 held",
+        _held(healthy) == {36: True, 37: True, 38: True, 39: True, 40: True, 41: True},
         str([(r.step, r.held, r.fail_text) for r in healthy]),
     )
     check(
@@ -695,18 +804,20 @@ def selftest() -> int:
 
     # Each way a node breaks a property is caught by the step that holds it, and by no other.
     expect: dict[str, dict[int, bool | None]] = {
-        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None},
-        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None},
-        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True},
-        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True},
-        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None},
-        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None},
-        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True},
-        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True},
-        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False},
-        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False},
-        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False},
-        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False},
+        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None},
+        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None},
+        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True, 41: True},
+        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True, 41: True},
+        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None, 41: None},
+        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None, 41: None},
+        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True},
+        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True},
+        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True},
+        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True},
+        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True},
+        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False, 41: None},
+        "framing_no_reassembly": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False},
+        "framing_cut_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False},
     }
     check("every fault has an expectation", set(expect) == set(FAULTS), str(set(expect) ^ set(FAULTS)))
     for fault, want in expect.items():
@@ -714,9 +825,14 @@ def selftest() -> int:
         check(f"{fault}: the steps red exactly where the property is", got == want, f"{got} want {want}")
 
     # The comparisons weakened let their fault through: the faults are red for the comparison's own sake.
-    global judge_release, judge_conservation, judge_silence, judge_redial
-    saved = (judge_release, judge_conservation, judge_silence, judge_redial)
+    global judge_release, judge_conservation, judge_silence, judge_redial, judge_framing
+    saved = (judge_release, judge_conservation, judge_silence, judge_redial, judge_framing)
     try:
+        # No count of the cut: a cut that never landed shows the node whole messages, and goes green.
+        judge_framing = lambda back, answered, up, down, spec=SPEC: back and answered == {A_ID, B_ID}
+        got = _held(run_stream_steps(StreamModel(faults=("framing_cut_not_applied",))))
+        check("weakened HW.41: a cut that never landed goes green there", got.get(41) is True, str(got))
+        judge_framing = saved[4]
         judge_redial = lambda waits, restart, back, spec=SPEC: len(waits) >= 2 and back  # no schedule
         got = _held(run_stream_steps(StreamModel(faults=("redial_no_backoff",))))
         check("weakened HW.40: a schedule that never grows goes green there", got.get(40) is True, str(got))
@@ -736,9 +852,17 @@ def selftest() -> int:
         got = _held(run_stream_steps(StreamModel(faults=("leak_on_reset",))))
         check("weakened HW.38: a cell lost on a reset goes green there", got.get(38) is True, str(got))
     finally:
-        judge_release, judge_conservation, judge_silence, judge_redial = saved
+        judge_release, judge_conservation, judge_silence, judge_redial, judge_framing = saved
 
     # The comparisons themselves.
+    n = SPEC.framing_min_writes
+    both_ids = {A_ID, B_ID}
+    check("judge_framing: back, answered, and cut enough each way", judge_framing(True, both_ids, n, n))
+    check("judge_framing: one write short towards the node is no cut", not judge_framing(True, both_ids, n - 1, n))
+    check("judge_framing: one write short from the node is no cut", not judge_framing(True, both_ids, n, n - 1))
+    check("judge_framing: a peer not taken back is not held", not judge_framing(False, both_ids, n, n))
+    check("judge_framing: an unanswered query is not held", not judge_framing(True, None, n, n))
+    check("judge_framing: a query answered with one session is not held", not judge_framing(True, {B_ID}, n, n))
     sched = SPEC.retry_waits(4)
     check("the schedule is upstream's 1, 2, 4, 4 seconds", sched == [1000, 2000, 4000, 4000], str(sched))
     e, l = SPEC.redial_early_ms, SPEC.redial_late_ms

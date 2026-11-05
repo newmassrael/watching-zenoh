@@ -69,9 +69,9 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
-### The steps for what only a stream suffers (HW.36 to HW.40 are built; the rest is design)
+### The steps for what only a stream suffers (HW.36 to HW.41 are built; the rest is design)
 
-The steps built so far are the release, conservation, silence and re-establishment properties, run with `--stream-steps` on a
+The steps built so far are the release, conservation, silence, re-establishment and framing properties, run with `--stream-steps` on a
 `tcp/` node (the base HW.0 to HW.7 are unchanged without it). The leg to A runs through the program's
 proxy and B carries a REST port of its own, so a release on A's leg is read through B:
 
@@ -81,7 +81,17 @@ HW.37 an abortive release by the peer ends its session and no other, at once
 HW.38 the node takes its peer back after every release and holds one session for it: <N> of <N> returned
 HW.39 a peer that falls silent is detected by the lease and only its session ends, and it is taken back: after <N> ms
 HW.40 the node re-dials a lost peer on upstream's schedule of waits, and a new outage restarts it: waits <W> ms, restart <R> ms
+HW.41 a message is read whole whatever the segmentation: the peer is taken back and answers, a byte at a time: <N> one-byte writes towards the node and <M> from it
 ```
+
+HW.41 cuts every write on the leg to A to one byte (the proxy's `segment`, on the connection that exists and
+on the one the peer makes next), releases A's connection with the leg closed to new ones, opens the leg, and
+awaits the peer's return: its handshake, Init and Open and their acknowledgements, crosses the leg a byte at
+a time, so the node must read each message whole across as many reads as the bytes arrive in. It then asks
+through router A, which crosses the cut leg both ways (a request to the node, its reply), and the answer
+must list both sessions. The cut is proved by the proxy's own log of what it wrote: at least 20 one-byte
+writes towards the node and 20 from it (a handshake alone makes more), so a run in which the cut never
+landed fails instead of showing the node whole messages and calling that a pass.
 
 HW.40 puts a second proxy on the leg the node dials B over. The node is told to dial that proxy, which
 stamps each connection it takes on its own clock, so the gaps between the node's dials are read from events
