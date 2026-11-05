@@ -313280,6 +313280,34 @@
         "Next: the volume run of the stream steps on a build host (the 20-run job on pc2 is queued behind other runs and was sent before HW.39 and HW.40, so it grades HW.36 to HW.38; a fresh one is needed for the five) and the kit run; the steps for framing (segment, hold and flush, large replies, a burst), admission (a second inbound beyond the accepts) and a sustained run of 2,000 queries; then a board table row for the stream steps after an evidence round. The tolerances of HW.40 (100 ms early, 500 ms late) are the host's and are not held to the node's source by the drift check; the first real reading is within 3 ms of the schedule, so they are loose, and a kit reading may tighten them."
       ]
     },
+    "Round 4327": {
+      "decision_summary": "The first volume run of the stream steps on a build host, 20 runs of the real node under QEMU, ended every run with a traceback at teardown while every step had printed its verdict: the verdict program stops its environment on the way out of the scenario and again from the finally that guards it, and the proxy's stop wrote a byte to a pipe the first stop had closed. The write failed with a bad file descriptor on the build host; on the developer's machine the same write succeeded, because the closed descriptor's number had been taken by another file, so the byte went into a file that was not the proxy's and the run exited 0. Both are the one defect, and the machine where it was silent was the worse one. The proxy's stop is now idempotent: a flag, taken under the proxy's lock, makes a second stop return before it touches the pipe. The case that holds it stops the proxy twice at the end of every run of the selftest and fails on any error, and the old behaviour is shown to be caught by it.",
+      "changes_bullets": [
+        "scripts/lib/stream_fault.py: stop() returns at once when the proxy has been stopped (a flag under the proxy's lock), with its docstring saying why, and the selftest's run stops the proxy a second time and fails on an error."
+      ],
+      "verification_bullets": [
+        "The proxy's selftest passes, and the same selftest with the old stop restored fails with the bad file descriptor error, so the new case holds the defect. The 20-run job on the build host that found it had every step OK in every run (the base steps and HW.36 to HW.39 as printed) and exit 1 in all 20 with the traceback at teardown; it was sent before HW.40 and the fix, so it is repeated on the fixed tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Next: the 20-run volume job on the build host at the fixed tip, for HW.36 to HW.40; then the kit run, framing, admission and the sustained run of 2,000 queries. Any other place that stops a resource twice on the way out of a scenario (the environment's own stop is called twice by the scenario and is safe for processes) should be read for the same shape."
+      ],
+      "publishable_decision_summary": "The first volume run of the stream steps on a build host, 20 runs of the real node under QEMU, ended every run with a traceback at teardown while every step had printed its verdict: the verdict program stops its environment on the way out of the scenario and again from the finally that guards it, and the proxy's stop wrote a byte to a pipe the first stop had closed. The write failed with a bad file descriptor on the build host; on the developer's machine the same write succeeded, because the closed descriptor's number had been taken by another file, so the byte went into a file that was not the proxy's and the run exited 0. Both are the one defect, and the machine where it was silent was the worse one. The proxy's stop is now idempotent: a flag, taken under the proxy's lock, makes a second stop return before it touches the pipe. The case that holds it stops the proxy twice at the end of every run of the selftest and fails on any error, and the old behaviour is shown to be caught by it.",
+      "publishable_changes_bullets": [
+        "scripts/lib/stream_fault.py: stop() returns at once when the proxy has been stopped (a flag under the proxy's lock), with its docstring saying why, and the selftest's run stops the proxy a second time and fails on an error."
+      ],
+      "publishable_verification_bullets": [
+        "The proxy's selftest passes, and the same selftest with the old stop restored fails with the bad file descriptor error, so the new case holds the defect. The 20-run job on the build host that found it had every step OK in every run (the base steps and HW.36 to HW.39 as printed) and exit 1 in all 20 with the traceback at teardown; it was sent before HW.40 and the fix, so it is repeated on the fixed tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: the 20-run volume job on the build host at the fixed tip, for HW.36 to HW.40; then the kit run, framing, admission and the sustained run of 2,000 queries. Any other place that stops a resource twice on the way out of a scenario (the environment's own stop is called twice by the scenario and is safe for processes) should be read for the same shape."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
