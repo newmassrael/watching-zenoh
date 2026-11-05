@@ -118,7 +118,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let NetworkMessage::Declare(declare) = &mut msg else {
             return msg;
         };
-        let mut ids = state.declaration_ids.guard();
+        let mut ids = state.runtime.declaration_ids.guard();
         match &mut declare.body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(s)
                 if numbered.covers(Plane::Subscriber) =>

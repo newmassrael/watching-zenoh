@@ -454,6 +454,7 @@ mod declaration_ids;
 mod egress;
 #[cfg(test)]
 mod egress_tests;
+mod face_runtime;
 #[cfg(all(test, feature = "transport-multilink"))]
 mod joined_link_tests;
 mod local_publish;
@@ -1670,7 +1671,9 @@ impl GroupMember {
 /// the face joined, without re-deriving it from the (possibly since-changed)
 /// handshake.
 struct RouterFaceState {
-    actions: Arc<SessionLinkActions>,
+    /// What the face is at run time, shared by every version of the tables that holds it (see
+    /// [`FaceRuntime`](face_runtime::FaceRuntime)).
+    runtime: Arc<face_runtime::FaceRuntime>,
     tier: Region,
     /// R2685 — the peer's routing zid, kept for EVERY face that has one,
     /// independently of whether the face joined a graph.
@@ -1707,14 +1710,6 @@ struct RouterFaceState {
     /// shape the retired single-net forwarder's face state had
     /// (`hashbrown` to match `resolve_wireexpr`'s table type).
     keyexpr_table: hashbrown::HashMap<u64, String>,
-    /// The messages this face, as a DESTINATION, has not taken yet: held in order until its link
-    /// has room, so that a face that stopped reading costs the faces that do not feed it
-    /// nothing (see [`egress`]).
-    held: egress::Queues,
-    /// What this face, as a SOURCE, waits on while it is gated ([`FaceForwarder::read_gate`]): the
-    /// pass that takes its last gate away wakes it, once, with a stored permit, and no other
-    /// face's release or link's room does.
-    gate_wake: Arc<tokio::sync::Notify>,
     /// Whether the face has ended its initial declarations: the `DeclareFinal` of
     /// [`INITIAL_INTEREST_ID`] came in from it. Two peers that meet north-bound each push what
     /// they hold when a face comes up and end it with that message (`zenoh/src/net/routing/hat/peer/mod.rs`
@@ -1723,9 +1718,6 @@ struct RouterFaceState {
     /// the link came up is held when the program can declare anything
     /// ([`RouterForwarder::initial_declares_pending`]). Set by the arrival, never by a timer.
     initial_final: bool,
-    /// The ids this node gave the declarations it sent to the face, when the face keeps them by
-    /// id ([`declaration_ids`]).
-    declaration_ids: PlainMutex<declaration_ids::DeclarationIds>,
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -1791,7 +1783,7 @@ const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
 /// zid, the link, the per-peer alias table -- and the only way wz had to get
 /// them was `self.tables.faces.get(&inbound)`, which is the DESTINATION table. A face
 /// that can SOURCE a message but can never be sent to has no entry there, and
-/// cannot have one: [`RouterFaceState`] requires `actions:
+/// cannot have one: [`RouterFaceState`] requires (through its runtime) `actions:
 /// Arc<SessionLinkActions>`, and that type owns a live `SessionCore` and
 /// `LinkState` with no null constructor. The type refuses a fabricated entry,
 /// which is the design saying these are two different questions.
@@ -1873,7 +1865,7 @@ impl RouterMessagesView {
             tables
                 .faces
                 .values()
-                .map(|face| face.actions.message_reading()),
+                .map(|face| face.runtime.actions.message_reading()),
         )
     }
 }
@@ -1927,14 +1919,16 @@ impl RouterSessionsView {
             .faces
             .values()
             .map(|face| {
-                let zid = peer_zid_routing(&face.actions);
+                let zid = peer_zid_routing(&face.runtime.actions);
                 // R2860 — `links`, `shm` and `region` are the face's own, read by
                 // `admin_session`; the router supplies the identity it filed the
                 // face under and the one value only its graph holds.
-                face.actions.admin_session(
+                face.runtime.actions.admin_session(
                     zid.map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
                         .unwrap_or_default(),
-                    Some(String::from(peer_whatami_routing(&face.actions).to_str())),
+                    Some(String::from(
+                        peer_whatami_routing(&face.runtime.actions).to_str(),
+                    )),
                     // A face whose zid is absent from the ROUTERS-tier map reports
                     // `None`, and that covers three real cases with one rule: a
                     // Peer/Client-tier face, a Router face that has not
@@ -2008,7 +2002,7 @@ impl RouterSessionDirectory {
         f(tables
             .faces
             .values()
-            .map(|face| &*face.actions)
+            .map(|face| &*face.runtime.actions)
             .chain(tables.joined_links.values().map(|link| &*link.actions))
             .collect())
     }
@@ -4095,7 +4089,7 @@ impl RouterForwarder {
             .read()
             .faces
             .values()
-            .any(|face| face.actions.shm_admits(0))
+            .any(|face| face.runtime.actions.shm_admits(0))
     }
 
     /// A router driver seeded with the local node (`self_zid`), using the
@@ -4660,7 +4654,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .tables
                     .faces
                     .values()
-                    .any(|state| peer_zid_routing(&state.actions) == Some(*zid))
+                    .any(|state| peer_zid_routing(&state.runtime.actions) == Some(*zid))
             {
                 continue;
             }
@@ -4907,9 +4901,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 !state.initial_final
                     && self.tables.face_based(state.tier)
                     && sends_initial_interest_final(
-                        peer_whatami_routing(&state.actions),
+                        peer_whatami_routing(&state.runtime.actions),
                         self.tables.node_mode,
-                        state.actions.peer_remote_bound(),
+                        state.runtime.actions.peer_remote_bound(),
                     )
             })
             .count()
@@ -4997,7 +4991,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.tables
                 .faces
                 .get(&inbound)
-                .map(|state| Arc::clone(&state.actions))
+                .map(|state| Arc::clone(&state.runtime.actions))
         });
         let pass = self
             .shm_relay
@@ -5904,7 +5898,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // attribution: charge the drop to the DESTINATION face's own
             // session on upstream's per-reason counter.
             crate::linkstate_forward::charge_interceptor_drop(
-                &state.actions,
+                &state.runtime.actions,
                 &msg,
                 kind,
                 InterceptorFlow::Egress,
@@ -5946,8 +5940,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // A put of the node's own session that would wait for room does not wait here, with the
         // tables held: it is owed to the publisher, who sends it once they are released
         // ([`local_publish`]). Anything else is sent as it always was.
-        let msg = match local_publish::send_or_owe(&state.actions, msg, reliable, express, priority)
-        {
+        let msg = match local_publish::send_or_owe(
+            &state.runtime.actions,
+            msg,
+            reliable,
+            express,
+            priority,
+        ) {
             Ok(sent) => {
                 if sent {
                     self.note_sent(was_push);
@@ -5956,7 +5955,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             }
             Err(msg) => msg,
         };
-        let sent = self.send_to_face_actions(&state.actions, msg, reliable, express, priority);
+        let sent =
+            self.send_to_face_actions(&state.runtime.actions, msg, reliable, express, priority);
         if sent {
             self.note_sent(was_push);
         }
@@ -7333,7 +7333,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .tables
             .faces
             .iter()
-            .filter(|(_, state)| peer_whatami_routing(&state.actions) == WhatAmI::Router)
+            .filter(|(_, state)| peer_whatami_routing(&state.runtime.actions) == WhatAmI::Router)
             .map(|(id, _)| *id)
             .collect();
         faces.sort_unstable();
@@ -10998,7 +10998,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         faces.sort_by_key(|(id, _)| **id);
         faces
             .into_iter()
-            .filter_map(|(_, state)| FaceSnapshot::of_actions(&state.actions))
+            .filter_map(|(_, state)| FaceSnapshot::of_actions(&state.runtime.actions))
             .collect()
     }
 
@@ -12332,11 +12332,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(state) = self.tables.faces.get(&face) else {
             return;
         };
-        let remote = peer_whatami_routing(&state.actions);
+        let remote = peer_whatami_routing(&state.runtime.actions);
         if !sends_initial_interest_final(
             self.tables.node_mode,
             remote,
-            state.actions.peer_remote_bound(),
+            state.runtime.actions.peer_remote_bound(),
         ) {
             return;
         }
@@ -12377,7 +12377,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.interceptor_dropped.bump();
             if let Some(face) = self.tables.faces.get(&id) {
                 crate::linkstate_forward::charge_interceptor_drop(
-                    &face.actions,
+                    &face.runtime.actions,
                     message,
                     kind,
                     InterceptorFlow::Ingress,
@@ -12554,7 +12554,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.faces.insert(
             id,
             RouterFaceState {
-                actions: actions.clone(),
+                runtime: Arc::new(face_runtime::FaceRuntime::new(actions.clone())),
                 tier,
                 // R2685 — read UNCONDITIONALLY, not from `added`. The graph arm
                 // above resolves a zid only when the face joins a net, so taking
@@ -12564,10 +12564,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 peer_zid: peer_zid_routing(actions),
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
-                held: egress::Queues::default(),
-                gate_wake: Arc::new(tokio::sync::Notify::new()),
                 initial_final: false,
-                declaration_ids: PlainMutex::new(declaration_ids::DeclarationIds::default()),
             },
         );
         self.shed_registry.add(id, actions.clone());
@@ -12631,7 +12628,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         // Read before the face is dropped from the tables, while its links are still known.
         if let Some(state) = self.tables.faces.get(&id) {
-            self.queue_face_event(FaceEventKind::Down, &state.actions);
+            self.queue_face_event(FaceEventKind::Down, &state.runtime.actions);
             log::info!(
                 "router: node={} face={} down peer={} region={:?}",
                 self.own_zid,
@@ -12645,7 +12642,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // session.
         #[cfg(feature = "routing-accept")]
         if let Some(state) = self.tables.faces.get(&id) {
-            state.actions.release_link_admission();
+            state.runtime.actions.release_link_admission();
         }
         self.shed_registry.remove(id);
         self.tables.mesh_ids.forget_face(id);
@@ -12806,7 +12803,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         #[cfg(feature = "resource-snapshot")]
         self.tables
             .receive_ledger
-            .retire(&state.actions.message_reading());
+            .retire(&state.runtime.actions.message_reading());
         // What it held for its link goes with it, and no face waits on it or for it.
         self.forget_egress_and_release(id, &state);
         let tier = state.tier;
@@ -13138,7 +13135,7 @@ impl RouterForwarder {
         // decides which way the interest protocol may flow ([`InterestFlow`]).
         // Read once, under the guard the drain above took.
         let (tier, whatami) = match on.tables.faces.get(&id) {
-            Some(s) => (s.tier, peer_whatami_routing(&s.actions)),
+            Some(s) => (s.tier, peer_whatami_routing(&s.runtime.actions)),
             None => {
                 log::debug!(
                     "router forward: DROP {} inbound message(s) from unregistered face {id:?}",
@@ -13464,13 +13461,13 @@ impl InterceptorContext for RouterFaceContext<'_> {
     // holds. Same one-liner as the single-net twin: both forwarders read the
     // subject from the same place, so the two cannot drift.
     fn link_subject(&self) -> Option<&LinkSubject> {
-        self.face.actions.link_subject()
+        self.face.runtime.actions.link_subject()
     }
 
     // R2631 — the authenticated name, through the reader the single-net twin
     // uses, so both forwarders answer the username axis identically.
     fn username(&self) -> Option<String> {
-        peer_acl_username(&self.face.actions)
+        peer_acl_username(&self.face.runtime.actions)
     }
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {

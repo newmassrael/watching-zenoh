@@ -276,7 +276,7 @@ impl Queues {
 /// phase 3), so each field is a lock or an atomic of its own. The locks are taken in ONE order, and
 /// no thread holds one while it waits for another that comes before it:
 ///
-/// 1. a destination's queues (`RouterFaceState::held`), the outermost; a pass that needs both of
+/// 1. a destination's queues (`FaceRuntime::held`), the outermost; a pass that needs both of
 ///    one destination's takes the data queue first and the control queue second;
 /// 2. [`holding`](Self::holding), a leaf under a queue;
 /// 3. [`gated`](Self::gated), which no thread holds while it takes a queue: a pass that has to read
@@ -532,11 +532,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // Behind what the destination already holds in the message's lane, whatever room it has
         // now: a message that went past its predecessors would put one source's messages out of
         // order.
-        if !state.held.lane(Lane::of(&msg)).guard().is_empty() {
+        if !state.runtime.held.lane(Lane::of(&msg)).guard().is_empty() {
             self.hold_and_recheck(dest, state, msg, reliable, express, priority);
             return Credited::Held;
         }
         match state
+            .runtime
             .actions
             .try_send_network_message_qos(msg, reliable, express, priority)
         {
@@ -549,7 +550,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // fragments, so it is sent as it was before anything was held back: waiting inside
             // the send. This is the one message the stage does not isolate a stopped reader from.
             Err(Unsent::Chain(msg)) => {
-                if self.send_to_face_actions(&state.actions, msg, reliable, express, priority) {
+                if self.send_to_face_actions(
+                    &state.runtime.actions,
+                    msg,
+                    reliable,
+                    express,
+                    priority,
+                ) {
                     Credited::Sent
                 } else {
                     Credited::Refused
@@ -598,7 +605,7 @@ impl RouterForwarder {
         let cost = message_cost(&msg);
         let lane = Lane::of(&msg);
         let (destination_bytes, pool_bytes) = {
-            let mut queue = state.held.lane(lane).guard();
+            let mut queue = state.runtime.held.lane(lane).guard();
             let first = queue.is_empty();
             // Counted before the message can be taken out by a pass that drains this queue, which
             // cannot start until the queue is let go: a gauge is never subtracted from before the
@@ -625,6 +632,7 @@ impl RouterForwarder {
                 // Room may have been made between the probe that found none and this call, which
                 // the link cannot have told it of, so the loop is woken once to look.
                 state
+                    .runtime
                     .actions
                     .watch_link_room(Some(Arc::clone(&self.credit.room_waker)));
                 self.credit.loop_wake.notify_one();
@@ -707,8 +715,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // Both lanes, data first (see [`Credit`]), and both taken until the face is let go of
             // below: a message held for it between a check of one lane and a check of the other
             // would otherwise find the face gone from `holding` and never be offered room.
-            let mut data = state.held.data.guard();
-            let mut control = state.held.control.guard();
+            let mut data = state.runtime.held.data.guard();
+            let mut control = state.runtime.held.control.guard();
             took |= self.drain_queue(state, &mut data);
             took |= self.drain_queue(state, &mut control);
             if data.is_empty() && control.is_empty() {
@@ -720,7 +728,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 );
                 self.credit.holding.guard().remove(&id);
                 // Nothing held, so nothing to be told: the writer stops paying for the call.
-                state.actions.watch_link_room(None);
+                state.runtime.actions.watch_link_room(None);
             }
         }
         // Only a pass that moved something can have brought a destination under its threshold.
@@ -744,6 +752,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             } = held;
             let was_push = matches!(msg, NetworkMessage::Push(_));
             match state
+                .runtime
                 .actions
                 .try_send_network_message_qos(msg, reliable, express, priority)
             {
@@ -772,7 +781,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 Err(Unsent::Chain(msg)) => {
                     self.credit.held.sub(1);
                     self.credit.held_bytes.sub(cost);
-                    if self.send_to_face_actions(&state.actions, msg, reliable, express, priority) {
+                    if self.send_to_face_actions(
+                        &state.runtime.actions,
+                        msg,
+                        reliable,
+                        express,
+                        priority,
+                    ) {
                         self.credit.released.bump();
                         self.note_sent(was_push);
                         took = true;
@@ -810,14 +825,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let Some(state) = faces.get(&id) else {
                 continue;
             };
-            let mut data = state.held.data.guard();
-            let mut control = state.held.control.guard();
+            let mut data = state.runtime.held.data.guard();
+            let mut control = state.runtime.held.control.guard();
             let oldest = match (data.oldest(), control.oldest()) {
                 (Some(a), Some(b)) => a.min(b),
                 (Some(a), None) | (None, Some(a)) => a,
                 (None, None) => continue,
             };
-            if now.saturating_duration_since(oldest) < state.actions.wait_before_close() {
+            if now.saturating_duration_since(oldest) < state.runtime.actions.wait_before_close() {
                 continue;
             }
             let ((data_dropped, data_bytes), (control_dropped, control_bytes)) =
@@ -831,15 +846,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 id.0,
                 peer_label(state.peer_zid),
                 now.saturating_duration_since(oldest),
-                state.actions.wait_before_close()
+                state.runtime.actions.wait_before_close()
             );
             self.credit.held.sub(dropped);
             self.credit.held_bytes.sub(bytes);
             self.credit.abandoned.add(dropped);
             self.credit.closed.bump();
             self.credit.holding.guard().remove(&id);
-            state.actions.watch_link_room(None);
-            let _ = state.actions.settle_blocking_expiry();
+            state.runtime.actions.watch_link_room(None);
+            let _ = state.runtime.actions.settle_blocking_expiry();
             closed_any = true;
         }
         if closed_any {
@@ -850,10 +865,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Release every gated face whose destinations are down to half their budget or gone, and,
     /// when the pool is down to half, the faces gated on it; and wake each face released, once.
     ///
-    /// The wake is the face's own ([`RouterFaceState::gate_wake`]) and carries a permit, so a face
-    /// whose drive has not started to wait yet finds it when it does. A face still gated is not
-    /// woken: a notice that a destination it does not wait on drained, or that a link made room the
-    /// loop has not offered yet, would only have it ask again and wait again.
+    /// The wake is the face's own
+    /// ([`FaceRuntime::gate_wake`](super::face_runtime::FaceRuntime::gate_wake)) and carries a
+    /// permit, so a face whose drive has not started to wait yet finds it when it does. A face
+    /// still gated is not woken: a notice that a destination it does not wait on drained, or that
+    /// a link made room the loop has not offered yet, would only have it ask again and wait again.
     fn release_gates(&self) {
         let faces = &self.tables.faces;
         let budget = self.credit.budget;
@@ -881,7 +897,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // messages that come from faces, and control gates none.
                 let bytes = faces
                     .get(&dest)
-                    .map(|state| state.held.data.guard().bytes());
+                    .map(|state| state.runtime.held.data.guard().bytes());
                 (dest, bytes)
             })
             .collect();
@@ -908,7 +924,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn wake_released(&self, released: &[FaceId]) {
         for face in released {
             if let Some(state) = self.tables.faces.get(face) {
-                state.gate_wake.notify_one();
+                state.runtime.gate_wake.notify_one();
             }
         }
     }
@@ -926,7 +942,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .faces
             .get(&id)
-            .map(|state| Arc::clone(&state.gate_wake))
+            .map(|state| Arc::clone(&state.runtime.gate_wake))
     }
 
     /// Face `id`, already taken out of the table, left: drop what it held, and release and wake
@@ -954,8 +970,8 @@ impl RouterForwarder {
     /// it are released by the caller's next [`OnTables::release_gates`], which reads a destination
     /// no longer in the table as gone ([`OnTables::forget_egress_and_release`]).
     fn forget_egress_of(&self, id: FaceId, state: &RouterFaceState) {
-        let (data_dropped, data_bytes) = state.held.data.guard().clear();
-        let (control_dropped, control_bytes) = state.held.control.guard().clear();
+        let (data_dropped, data_bytes) = state.runtime.held.data.guard().clear();
+        let (control_dropped, control_bytes) = state.runtime.held.control.guard().clear();
         let (dropped, bytes) = (data_dropped + control_dropped, data_bytes + control_bytes);
         if dropped > 0 {
             log::warn!(
