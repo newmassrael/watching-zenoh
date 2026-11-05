@@ -22,7 +22,7 @@ use wz_link_lwip::tcp::LwipTcpListener;
 use wz_link_lwip::tcp::TcpSocketPool;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::ip_stack::IpAcceptor;
-use wz_runtime_coop::session_drive::{PumpSlots, SlotStack};
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::stream_link::NoStream;
 use wz_runtime_coop::udp_link::NoDatagram;
@@ -43,7 +43,7 @@ use wz_session_mcu::admin_host::{host_connect_writes_fixed, ConfigWriteBody, Con
 use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
 use wz_session_mcu::connect_manager::{PeerStore, SlotState};
 use wz_session_mcu::slot_admin::AcceptingAdminNode;
-use wz_session_mcu::slot_dial::SessionFactory;
+use wz_session_mcu::slot_dial::{EventsOf, SessionFactory};
 use wz_session_mcu::slot_host::SessionHost;
 
 /// A clock that never moves: no deadline fires, so a dial nobody answers waits its period for ever
@@ -74,10 +74,9 @@ impl wz_session_core::entropy::EntropySource for Counting {
 /// Sessions a node holds at most (dialled and accepted), and the accepted ones among them.
 const N: usize = 2;
 const ACCEPTED: usize = 1;
-/// The runtime's task table and the bytes of one cell: a pump task per session, holding the
-/// application layer (4,904 bytes, held twice by an `async fn`) and the pump's handle.
-const TASKS: usize = 8;
-const TASK_BYTES: usize = 12_288;
+/// The runtime's task table: a pump task per session, and nothing else runs as a task (a cell
+/// stays in use until the session's last handle drops, which is when its slot is freed).
+const TASKS: usize = N;
 /// The receive buffer of a connection: the port's window is four segments of 536 bytes.
 const RX: usize = 4_096;
 
@@ -139,6 +138,15 @@ fn listen(
 type Node<const S: usize> =
     AcceptingAdminNode<'static, Frozen, Stack, Stack, Factory<S>, Acceptor, S, S, ACCEPTED>;
 type Sinks<const S: usize> = AdminSinks<1024, S>;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
+/// file's types (the pump's handle and the application layer's state), and not a figure written
+/// beside it.
+const TASK_BYTES: usize = pump_task_cell_bytes::<
+    Frozen,
+    Pump,
+    Driver,
+    EventsOf<<Factory<N> as SessionFactory<Frozen, Driver>>::Events>,
+>();
 
 /// Everything one node declares, as an image would in its statics.
 struct Statics<const S: usize> {

@@ -42,7 +42,7 @@ use std::cell::RefCell;
 
 use wz_link_lwip::rx_sockets::SessionRxPool;
 use wz_link_lwip::LwipLink;
-use wz_runtime_coop::session_drive::PumpSlots;
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::adminspace::SessionAdminRow;
@@ -55,7 +55,7 @@ use wz_session_core::WhatAmI;
 use wz_session_lwip::driver::LwipUdpDriver;
 use wz_session_lwip::listener::SessionListener;
 use wz_session_lwip::session_host::SessionHost;
-use wz_session_lwip::slot_node::{SessionFactory, SlotAdminNode};
+use wz_session_lwip::slot_node::{EventsOf, SessionFactory, SlotAdminNode};
 use wz_session_lwip::{LwipLinks, LwipSessionLink};
 use wz_session_mcu::admin_fixed::{
     host_admin_queryable_fixed, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
@@ -99,15 +99,24 @@ impl wz_session_core::entropy::EntropySource for Counting {
 /// Sessions a node holds at most, and the listener's lanes.
 const N: usize = 3;
 const LANES: usize = 2;
-/// The runtime's task table: a pump task per session, with room beside them.
-const TASKS: usize = 8;
-/// Bytes of one task cell: the pump's handle and the application layer's state. The
-/// layer is 4904 B (its requesters, which a node that asks nothing still has, are 4872
-/// of them) and an `async fn` holds a by-value argument twice (as the captured
-/// argument and as the local it is moved into), so the cell is sized for two of them
-/// and the handle. `the_task_cell_holds_the_application_layer_of_a_session` holds the
-/// number to the measured size.
-const TASK_BYTES: usize = 12288;
+/// The runtime's task table: a pump task per session, and nothing else runs as a task (a cell
+/// stays in use until the session's last handle drops, which is when its slot is freed).
+const TASKS: usize = N;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for the
+/// types of a table of `S` sessions (the pump's handle and the application layer's state), and not
+/// a figure written beside it.
+const fn task_bytes<const S: usize>() -> usize {
+    pump_task_cell_bytes::<
+        Frozen,
+        LwipSessionLink<LinkRef>,
+        LwipUdpDriver,
+        EventsOf<<Factory<S> as SessionFactory<Frozen, LwipUdpDriver>>::Events>,
+    >()
+}
+/// The cell the file's runtimes are declared with: the cell of the largest table it declares
+/// (`N`), which the smaller one's (`2`) is held under.
+const TASK_BYTES: usize = task_bytes::<N>();
+const _: () = assert!(task_bytes::<2>() <= TASK_BYTES);
 
 type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
 type LinkRef = &'static LwipLink;
@@ -603,17 +612,18 @@ fn a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported() {
 }
 
 #[test]
-fn the_task_cell_holds_the_application_layer_of_a_session() {
+fn the_task_cell_is_derived_from_the_application_layer_of_a_session() {
     let events =
         std::mem::size_of::<SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<N>, LwipUdpDriver>>();
     let requesters = std::mem::size_of::<Requesters<NoReplies, NoReplies>>();
     println!(
         "application layer {events} B, of which requesters {requesters} B; cell {TASK_BYTES} B"
     );
+    // The task holds the layer once: a cell that is a layer and a handle and not two layers is
+    // what an `async` block gives and an `async fn` does not.
     assert!(
-        2 * events + 256 <= TASK_BYTES,
-        "the cell ({TASK_BYTES} B) is smaller than two layers ({events} B each) and the \
-         pump's handle"
+        events <= TASK_BYTES && TASK_BYTES < 2 * events,
+        "the cell ({TASK_BYTES} B) is not one layer ({events} B) and the pump's handle"
     );
 }
 
