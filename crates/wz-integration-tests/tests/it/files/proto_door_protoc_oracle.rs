@@ -3280,7 +3280,7 @@ fn the_value_comparison_reports_a_door_that_disagrees() {
                          door: &[u8],
                          protoc: &[u8],
                          decode: &dyn Fn(&[u8]) -> Result<String, String>| {
-        crate::compare_bytes(case, door, protoc, true, decode)
+        crate::files::proto_door_protoc_oracle::compare_bytes(case, door, protoc, true, decode)
     };
     let good = [0x08, 0x96, 0x01];
     assert_eq!(compare_bytes(&case(false), &good, &good, &nothing), None);
