@@ -310242,6 +310242,44 @@
         "The task cells of the fixed images are still 12,288 bytes (TASK_BYTES in fixed_node, fixed_tcp, fixed_admin) and a session's future is about half of what it was, so the cells can come down; that needs the future's size measured (a build-time assertion on it) and the refusal counters read on a run, and it is a RAM gain of kilobytes per cell. The frame gate's chain figure for the fixed image is still not committed: udp and tcp share the row and read 13,616 B and 13,184 B, so committing one needs a row each and a reading from the hosted image. Other async fns that take a large value by argument and are spawned (the multicast pump task, the image's application tasks) keep it twice in the same way and have not been looked at. The largest frame is now the node's start function (6.3 KB)."
       ]
     },
+    "Round 4245": {
+      "decision_summary": "Two hosted jobs that reach their 30-minute limit in run after run, and so are cancelled and grade nothing, are split by their work rather than given a larger number.\n\nThe isolated-crate lanes were cancelled in every run read from 41732702195 to 41884918361: C3 to C1bx took 25 minutes, C1bz was cancelled three minutes in, and C1by, the replay engine's lane, was never reached. The five lanes whose subject is the analyzer's crates (C1bt wz-capture without defaults, C1bw the wz-analyze command line, C1bx the TLS decryptor against rustls, C1bz the analyzer crates' docs, C1by the replay engine) run in a job of their own, `analyzer-crates`, with the isolated job's preparation and a reader of the `ci` job's cargo cache.\n\nThe verdict-leg mutation gate (C0mut) read 26 to 28 minutes when it finished and was cancelled at 30 in three of the runs read. Each mutant is a build and a run of its leg's crates. The sweep takes WZ_MUTANTS_SHARDS and WZ_MUTANTS_SHARD, and each shard asks the legs and the predicate thresholds whose position is congruent to it, while every check of the population runs in each shard; unset, one shard asks everything. The job is a matrix of two, which the shard matrix binding holds to its count.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: the job `analyzer-crates` runs Layers C1bt, C1bw, C1bx, C1bz and C1by, which leave `isolated-crates`; the `verdict-legs` job is a matrix of two shards (WZ_MUTANTS_SHARDS 2).",
+        "scripts/lib/verdict_leg_mutation.py: WZ_MUTANTS_SHARDS / WZ_MUTANTS_SHARD select the legs and predicate thresholds a shard asks, its headline and OK line name the shard, and `--only` is not sharded.",
+        "scripts/lib/apt_package_census.py: `analyzer-crates` takes the rows of the job its lanes came from (libclang-dev, clang, perl, pkg-config; cmake derived, since Layer C1bz documents every member). .github/cache-classes.json: `analyzer-crates` owns its apt archive and reads the `ci` job's cargo cache."
+      ],
+      "verification_bullets": [
+        "The mutation gate ran as two shards on a build host, one after the other: shard 0 asked 14 legs and 17 predicate thresholds (55 mutants, 4 not applicable), shard 1 asked 13 legs and 16 thresholds (50 mutants, 5 not applicable); both printed OK with every mutant killed, both exited 0, and 17 + 16 equals the 33 entries of PREDICATES, so the two shards together cover the whole population.",
+        "The static gate array (130 gates, the hosted Layer C0 set including the shard matrix binding, the apt package census and the workflow cache budget gate) passed 130 of 130 on the tree of this round.",
+        "The apt package census derives cmake for `analyzer-crates` and holds its four declared packages; the cache budget gate accepts the new job as an apt-archive owner and a reader of the `ci` cargo cache."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the next hosted run per job: the two `verdict-legs` shards and the new `analyzer-crates` job must each finish inside their timeouts, and `isolated-crates` must finish below its limit without the five lanes.",
+        "The same run settles the round 4239 repayments: the three nondefault-legs shards, the valgrind step of capi-c-arms, the capability cost budgets and the storage plane move of round 4240."
+      ],
+      "publishable_decision_summary": "Two hosted jobs that reach their 30-minute limit in run after run, and so are cancelled and grade nothing, are split by their work rather than given a larger number.\n\nThe isolated-crate lanes were cancelled in every run read from 41732702195 to 41884918361: C3 to C1bx took 25 minutes, C1bz was cancelled three minutes in, and C1by, the replay engine's lane, was never reached. The five lanes whose subject is the analyzer's crates (C1bt wz-capture without defaults, C1bw the wz-analyze command line, C1bx the TLS decryptor against rustls, C1bz the analyzer crates' docs, C1by the replay engine) run in a job of their own, `analyzer-crates`, with the isolated job's preparation and a reader of the `ci` job's cargo cache.\n\nThe verdict-leg mutation gate (C0mut) read 26 to 28 minutes when it finished and was cancelled at 30 in three of the runs read. Each mutant is a build and a run of its leg's crates. The sweep takes WZ_MUTANTS_SHARDS and WZ_MUTANTS_SHARD, and each shard asks the legs and the predicate thresholds whose position is congruent to it, while every check of the population runs in each shard; unset, one shard asks everything. The job is a matrix of two, which the shard matrix binding holds to its count.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: the job `analyzer-crates` runs Layers C1bt, C1bw, C1bx, C1bz and C1by, which leave `isolated-crates`; the `verdict-legs` job is a matrix of two shards (WZ_MUTANTS_SHARDS 2).",
+        "scripts/lib/verdict_leg_mutation.py: WZ_MUTANTS_SHARDS / WZ_MUTANTS_SHARD select the legs and predicate thresholds a shard asks, its headline and OK line name the shard, and `--only` is not sharded.",
+        "scripts/lib/apt_package_census.py: `analyzer-crates` takes the rows of the job its lanes came from (libclang-dev, clang, perl, pkg-config; cmake derived, since Layer C1bz documents every member). .github/cache-classes.json: `analyzer-crates` owns its apt archive and reads the `ci` job's cargo cache."
+      ],
+      "publishable_verification_bullets": [
+        "The mutation gate ran as two shards on a build host, one after the other: shard 0 asked 14 legs and 17 predicate thresholds (55 mutants, 4 not applicable), shard 1 asked 13 legs and 16 thresholds (50 mutants, 5 not applicable); both printed OK with every mutant killed, both exited 0, and 17 + 16 equals the 33 entries of PREDICATES, so the two shards together cover the whole population.",
+        "The static gate array (130 gates, the hosted Layer C0 set including the shard matrix binding, the apt package census and the workflow cache budget gate) passed 130 of 130 on the tree of this round.",
+        "The apt package census derives cmake for `analyzer-crates` and holds its four declared packages; the cache budget gate accepts the new job as an apt-archive owner and a reader of the `ci` cargo cache."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the next hosted run per job: the two `verdict-legs` shards and the new `analyzer-crates` job must each finish inside their timeouts, and `isolated-crates` must finish below its limit without the five lanes.",
+        "The same run settles the round 4239 repayments: the three nondefault-legs shards, the valgrind step of capi-c-arms, the capability cost budgets and the storage plane move of round 4240."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
