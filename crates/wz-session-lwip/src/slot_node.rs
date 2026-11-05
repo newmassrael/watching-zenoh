@@ -62,7 +62,7 @@ use crate::listener::{Admission, SessionListener};
 use crate::session_host::{LwipStack, OpenRefused, SessionHost};
 
 pub use wz_session_mcu::slot_admin::NodeRefused;
-pub use wz_session_mcu::slot_dial::{SessionFactory, SlotSession};
+pub use wz_session_mcu::slot_dial::{EventsOf, SessionFactory, SlotSession};
 
 /// How a dial opens its socket on lwIP: out of the pool the image declared, on a port the stack
 /// picks.

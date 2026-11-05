@@ -24,7 +24,7 @@ use core::cell::RefCell;
 use wz::link_lwip::ethernet::{EthernetIf, EthernetPool, Ipv4Config};
 use wz::link_lwip::rx_sockets::SessionRxPool;
 use wz::link_lwip::LwipLink;
-use wz::runtime_coop::session_drive::PumpSlots;
+use wz::runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots};
 use wz::runtime_coop::session_runtime::SessionHandle;
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz::session_lwip::admin_fixed::{
@@ -36,7 +36,7 @@ use wz::session_lwip::connect_manager::{ControlledOpener, PeerStore};
 use wz::session_lwip::driver::LwipUdpDriver;
 use wz::session_lwip::listener::SessionListener;
 use wz::session_lwip::session_host::SessionHost;
-use wz::session_lwip::slot_node::{SessionFactory, SlotAdminNode};
+use wz::session_lwip::slot_node::{EventsOf, SessionFactory, SlotAdminNode};
 use wz::session_lwip::{LwipLinks, LwipSessionLink};
 use wz_eth_mac_lan9118::{Lan9118, MPS2_BASE};
 use wz_session_core::entropy::EntropySource;
@@ -58,12 +58,17 @@ const SESSIONS: usize = 2;
 const LANES: usize = 1;
 /// The runtime's task table: a pump task per session, with room beside them.
 const TASKS: usize = SESSIONS + 1;
-/// Bytes of one task cell: the pump's handle and the application layer's state. The
-/// layer is about 4.9 KB (its requesters, which a node that asks nothing still has,
-/// are 4.8 KB of them) and an `async fn` holds a by-value argument twice, so the cell
-/// is sized for two of them and the handle; the same number the host test of the slot
-/// node holds to the measured size.
-const TASK_BYTES: usize = 12288;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
+/// image's types (the pump's handle and the application layer's state, the layer being most of it:
+/// about 4.9 KB, its requesters 4.8 KB of them), and not a figure written beside it. A layer that
+/// grows grows the cell, and the cell is never one the spawn refuses. (The cell was 12,288 bytes
+/// while the task was an `async fn`, which holds a by-value argument twice.)
+const TASK_BYTES: usize = pump_task_cell_bytes::<
+    SystickClockRef,
+    LwipSessionLink<&'static LwipLink>,
+    LwipUdpDriver,
+    EventsOf<<Factory as SessionFactory<SystickClockRef, LwipUdpDriver>>::Events>,
+>();
 /// Timers the runtime holds: the handshake and lease deadlines of the sessions.
 const TIMERS: usize = 4;
 
