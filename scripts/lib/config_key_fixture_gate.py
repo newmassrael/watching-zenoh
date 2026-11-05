@@ -80,7 +80,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import retarget_test_refs  # noqa: E402
 import rust_comments  # noqa: E402  -- after the path insert that finds it
+import test_sources  # noqa: E402
 
 # `rust_const` is IMPORTED rather than copied. It is the one definition that was
 # repaired after R2083's miscount, and a second copy would be a second thing to
@@ -92,13 +94,13 @@ import feature_closure  # noqa: E402  -- the one reader of run-ci.sh's builds
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KEY_SOURCE = REPO_ROOT / "crates" / "wz-runtime-tokio" / "src" / "zenoh_config.rs"
-FIXTURE_TEST = (
-    REPO_ROOT
-    / "crates"
-    / "wz-integration-tests"
-    / "tests"
-    / "wz_reads_a_stock_zenohd_config.rs"
-)
+# The fixture test, wherever its crate keeps its test files (`tests/<name>.rs` or, once merged, a
+# module of `tests/<target>/files/`): `scripts/lib/test_sources.py`. A file that is in neither
+# place keeps the plain path, which the reads below report as missing.
+_FIXTURE_TESTS_DIR = REPO_ROOT / "crates" / "wz-integration-tests" / "tests"
+FIXTURE_TEST = test_sources.locate(
+    _FIXTURE_TESTS_DIR, "wz_reads_a_stock_zenohd_config"
+) or (_FIXTURE_TESTS_DIR / "wz_reads_a_stock_zenohd_config.rs")
 CRATES = REPO_ROOT / "crates"
 # ── the FOURTH site's inputs (R2202, open-debt item 220) ──
 DEMO_ARGS = CRATES / "wz-ap-demo" / "src" / "args.rs"
@@ -435,7 +437,10 @@ def wire_leg_lane_features() -> tuple[frozenset[str], list[str]]:
     OTHER lane passes says nothing about the binary this leg spawns, and a union
     would let one lane's feature satisfy another lane's claim.
     """
-    txt = RUN_CI.read_text()
+    # The call is `wz_test_args <crate> <name>` and `"${WZ_TEST_ARGS[@]}"` in the script, and
+    # `--test <name>` once read back (scripts/lib/retarget_test_refs.py): the same text, so the
+    # offsets below are the offsets of the one `txt`.
+    txt = retarget_test_refs.expand(RUN_CI.read_text())
     invocation = txt.find(f"--test {WIRE_LEG_TEST} ")
     if invocation < 0:
         return frozenset(), [
