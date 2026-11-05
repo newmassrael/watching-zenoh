@@ -347,8 +347,14 @@ enum Engine {
     /// A router node, which forwards between the sessions that dial it. What a program does
     /// through it is owed (the router session of `docs/zenoh-api-on-the-engine.md`), and each
     /// operation that is not carried says so by name.
+    ///
+    /// Boxed because a node is several times the size of a session's state (352 bytes against
+    /// 104 when the node took an ABI extension and its own engine state), and the enum is as
+    /// large as its largest variant: every peer and client session would carry the node's size
+    /// for a variant it never holds. A node is opened once, so the one allocation is its whole
+    /// cost.
     #[cfg(feature = "engine-tokio")]
-    Router(RouterEngine),
+    Router(Box<RouterEngine>),
 }
 
 /// The router node and the counter of the entity ids it hands out.
@@ -590,11 +596,11 @@ impl Engine {
             let node = arguments
                 .run_node(role)
                 .map_err(|error| tokio_engine::open_error(error, scope))?;
-            let engine = Engine::Router(RouterEngine {
+            let engine = Engine::Router(Box::new(RouterEngine {
                 node,
                 ids: AtomicU64::new(0),
                 keys: std::sync::Mutex::new(RouterKeys::default()),
-            });
+            }));
             return Ok((engine, zid));
         }
         let state = arguments
