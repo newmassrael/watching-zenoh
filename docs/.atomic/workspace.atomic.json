@@ -310600,6 +310600,44 @@
         "Stage seven continues. Still Z_EUNAVAILABLE on a node: the routers and peers of a session (the node has no list of the identities it holds a face to; the core has to give one), the transport and link events, the resource snapshot (the node keeps no message reading), the shared-memory provider state, the advanced publisher and subscriber and their matching and liveliness, the group. A remote the node dials and places in its own south has no stock witness yet (it needs a zenohd that is a gateway). The C ABI default does not have router-node (capic-router-node is 5,729,813 bytes of text against capic-default's 9,467,100 budget), a peer that listens and keeps no south is the registry in the C ABI, and the value of a get in shared memory goes out as bytes on a node. The hosted runs of rounds 4242 and 4243 and this one are unread; the C1cn clippy red of 4243 is the peer session's to land."
       ]
     },
+    "Round 4253": {
+      "decision_summary": "Hosted run 41939089182 cut five jobs at their 30-minute limit, and one cause under several of them is that twelve readers of the `ci` cargo cache never restored it: they list `crates` as their only workspace while the saver lists `crates` and `vendor/sce`, and actions/cache stamps an entry with a hash of its path list, so a restore under a matching key found nothing (C1bnl shard 2 missed at 01:35 while transport-modes, whose list matches, restored the same entry at 01:36). Each reader now lists the saver's workspaces, and the cache budget gate holds a reader's path list to its saver's.\nThe same tree carried two static reds that hosted Layer C0 would stop on: the narrow-vle census still adjudicated `store_into` reads that the one-pass lent decode of the SCE pin 07cb8c5020 moved into `decode_into`, and the reason pin of `session-close-ingress` on the coop runtime's session_drive.rs was older than that file. Both are repaired here.\nThe other two reds of that run (the clippy borrows of the capi-c node test and the stale reduced-docs ledger line) are repaid by the session that owns them, by agreement.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: the rust-cache readers of `ci` in adminspace-lanes, capability-cost, defaults-off, dissect, gate-provenance, nondefault, nondefault-builds, nondefault-legs, pico-client-only, reduced-docs, routing-adminspace and z8-upstream list `crates -> target` then `vendor/sce -> target`, the saver's list.",
+        "scripts/lib/workflow_cache_budget_gate.py: rule 5 also holds a rust-cache reader's path list (workspaces in order, cache-targets, cache-bin, cache-directories) to its saver's; `rust_cache_paths` derives it; the selftest adds a differing reader (fails) and an equal one spelled with the default target (clean).",
+        "scripts/lib/narrow_vle_read_census.py: the encoding and zbuf_slice rows name `decode_into`, the msg_put and query_value_zbuf `store_into` rows are gone, and the comment says why. docs/reason-review-pins.md: the session_drive.rs row of `session-close-ingress` is re-read and pinned at 677ef5edac."
+      ],
+      "verification_bullets": [
+        "The cache budget gate failed on the tree before the workflow edit with exactly the twelve readers named above, and passes after it (145 cache uses, 15 classes); its selftest passes, including the two new cases.",
+        "The narrow-vle census passes with 10 narrow reads, every one adjudicated; the reason pin gate passes after `SessionPump::step` was read and still raises `check_out_of_band` before it services the link, as the reason says.",
+        "The static gate array (130 gates, the hosted Layer C0 set) passed 130 of 130 on this tree with vendor/sce at the recorded commit."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the next hosted run per job: the twelve readers must print a restore of `v0-rust-ci-`, and the jobs cut at 30 minutes in run 41939089182 (validate, validate + verify + test, C1bnl shard 0, isolated-crates, the mutation gate) must be read again with a warm cache before any is split further.",
+        "The C1cn clippy borrows and the C1bzr ledger line of that run are the peer session's repayment and are read in the same run."
+      ],
+      "publishable_decision_summary": "Hosted run 41939089182 cut five jobs at their 30-minute limit, and one cause under several of them is that twelve readers of the `ci` cargo cache never restored it: they list `crates` as their only workspace while the saver lists `crates` and `vendor/sce`, and actions/cache stamps an entry with a hash of its path list, so a restore under a matching key found nothing (C1bnl shard 2 missed at 01:35 while transport-modes, whose list matches, restored the same entry at 01:36). Each reader now lists the saver's workspaces, and the cache budget gate holds a reader's path list to its saver's.\nThe same tree carried two static reds that hosted Layer C0 would stop on: the narrow-vle census still adjudicated `store_into` reads that the one-pass lent decode of the SCE pin 07cb8c5020 moved into `decode_into`, and the reason pin of `session-close-ingress` on the coop runtime's session_drive.rs was older than that file. Both are repaired here.\nThe other two reds of that run (the clippy borrows of the capi-c node test and the stale reduced-docs ledger line) are repaid by the session that owns them, by agreement.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: the rust-cache readers of `ci` in adminspace-lanes, capability-cost, defaults-off, dissect, gate-provenance, nondefault, nondefault-builds, nondefault-legs, pico-client-only, reduced-docs, routing-adminspace and z8-upstream list `crates -> target` then `vendor/sce -> target`, the saver's list.",
+        "scripts/lib/workflow_cache_budget_gate.py: rule 5 also holds a rust-cache reader's path list (workspaces in order, cache-targets, cache-bin, cache-directories) to its saver's; `rust_cache_paths` derives it; the selftest adds a differing reader (fails) and an equal one spelled with the default target (clean).",
+        "scripts/lib/narrow_vle_read_census.py: the encoding and zbuf_slice rows name `decode_into`, the msg_put and query_value_zbuf `store_into` rows are gone, and the comment says why. docs/reason-review-pins.md: the session_drive.rs row of `session-close-ingress` is re-read and pinned at 677ef5edac."
+      ],
+      "publishable_verification_bullets": [
+        "The cache budget gate failed on the tree before the workflow edit with exactly the twelve readers named above, and passes after it (145 cache uses, 15 classes); its selftest passes, including the two new cases.",
+        "The narrow-vle census passes with 10 narrow reads, every one adjudicated; the reason pin gate passes after `SessionPump::step` was read and still raises `check_out_of_band` before it services the link, as the reason says.",
+        "The static gate array (130 gates, the hosted Layer C0 set) passed 130 of 130 on this tree with vendor/sce at the recorded commit."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the next hosted run per job: the twelve readers must print a restore of `v0-rust-ci-`, and the jobs cut at 30 minutes in run 41939089182 (validate, validate + verify + test, C1bnl shard 0, isolated-crates, the mutation gate) must be read again with a warm cache before any is split further.",
+        "The C1cn clippy borrows and the C1bzr ledger line of that run are the peer session's repayment and are read in the same run."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
