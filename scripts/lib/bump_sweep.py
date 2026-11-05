@@ -96,9 +96,21 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
+import test_sources  # noqa: E402
 import upstream_release_distance as urd  # noqa: E402
 import zenoh_c_archive_arm as zca  # noqa: E402
 import zenoh_c_census_arm_reach as zcr  # noqa: E402
+
+
+def census_source() -> pathlib.Path:
+    """The zenoh-c symbol census test file, wherever its crate keeps its test files (a merged
+    crate holds it as a module, `scripts/lib/test_sources.py`). Absent is an error, not a pass."""
+    found = test_sources.locate(ROOT / "crates" / "wz-integration-tests" / "tests",
+                                "zenoh_c_abi_symbol_census")
+    if found is None:
+        raise SystemExit("bump_sweep: the zenoh-c symbol census test file is not in "
+                         "crates/wz-integration-tests/tests")
+    return found
 
 # The modes a gate is asked for, when its own argparse declares them. Not a
 # per-gate table: the file says which it has and this reads that.
@@ -223,9 +235,7 @@ def census_version_probe(census_rs: str | None = None,
     owns it. A second copy here is the drift item 47 is made of.
     """
     text = (census_rs if census_rs is not None
-            else (ROOT / "crates" / "wz-integration-tests" / "tests"
-                  / "zenoh_c_abi_symbol_census.rs").read_text(
-                      encoding="utf-8", errors="replace"))
+            else census_source().read_text(encoding="utf-8", errors="replace"))
     want = pin if pin is not None else zca.installer_pin()
 
     start = text.find("const BASELINES")
@@ -373,8 +383,7 @@ def selftest() -> int:
     #
     # The subject is the LIVE census source with its real rows, damaged in
     # memory — no copy, so nothing here can pass on a path error.
-    live_rs = (ROOT / "crates" / "wz-integration-tests" / "tests"
-               / "zenoh_c_abi_symbol_census.rs").read_text(encoding="utf-8")
+    live_rs = census_source().read_text(encoding="utf-8")
     live_pin = zca.installer_pin()
     ok, details, graded = census_version_probe(live_rs, live_pin)
     case("the shipped tree passes this probe", ok and not details)

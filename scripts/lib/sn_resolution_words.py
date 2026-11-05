@@ -313,11 +313,15 @@ def check_all(dissect_text: str, interop_text: str,
     return rc, report, fail
 
 
+def interop_path() -> pathlib.Path:
+    """The interop test file, wherever the crate keeps it (`tests/<name>.rs`, or a merged module)."""
+    return (test_sources.locate(ROOT / pathlib.PurePosixPath(INTEROP).parent,
+                                pathlib.PurePosixPath(INTEROP).stem)
+            or ROOT / INTEROP)
+
+
 def cmd_check() -> int:
-    # The interop test file, wherever the crate keeps it (`tests/<name>.rs`, or a merged module).
-    interop = (test_sources.locate(ROOT / pathlib.PurePosixPath(INTEROP).parent,
-                                   pathlib.PurePosixPath(INTEROP).stem)
-               or ROOT / INTEROP)
+    interop = interop_path()
     rc, report, fail = check_all(
         (ROOT / DISSECT).read_text(encoding="utf-8"),
         interop.read_text(encoding="utf-8"),
@@ -464,7 +468,7 @@ def selftest(tmp: pathlib.Path) -> int:
     # could plausibly make, and each case pins the phrase its own arm produces:
     # a case that reds for a neighbour's reason is not a control.
     dis = (ROOT / DISSECT).read_text(encoding="utf-8")
-    inter = (ROOT / INTEROP).read_text(encoding="utf-8")
+    inter = interop_path().read_text(encoding="utf-8")
     pin = (ROOT / BUILD_ZENOHD).read_text(encoding="utf-8")
 
     def verdict(d: str, i: str, p: str) -> tuple[int, str]:
