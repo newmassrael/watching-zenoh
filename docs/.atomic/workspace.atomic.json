@@ -313136,6 +313136,66 @@
         "Budgets with wide headroom that this round does not touch: capic-client (79 percent), capic-scout (78 percent) and capic-peer (84 percent)."
       ]
     },
+    "Round 4323": {
+      "decision_summary": "Round 4322's carry is read: CI run 42061671165 (at 215e687827) has finished, and run 42087308054 (at 0d824e8d5c) is partly done. Their reds fall into ten causes. Two of them are repaid here. The other causes have owners or lie outside the code.\n\nRepaid here:\n- Layer C1bnl shard 1. `api::session::tests::shm_provider::a_session_with_the_default_configuration_has_a_provider_that_is_there_a_moment_later` reported \"the provider was never made\" (`wz-zenoh/src/api/session.rs:6536`).\n  - The default pool is 16 MiB, and the shm crate `mlock`s a segment whole (`wz-zenoh-shm/src/shm/unix.rs`, upstream's own call).\n  - A hosted runner's `RLIMIT_MEMLOCK` is 8192 KB, so the provider is refused and stays in `Error`. The test read `Error` as \"not yet\" and waited out its five seconds.\n  - The Z8 job raises the limit for the same reason. The C1bnl step now raises it the same way.\n  - The test now fails at once on a state other than `Initializing` or `Ready`, and its message names the refused pool.\n- Layer Q (`frt`). `stack-chain` read 7,436 bytes against the committed 7,956.\n  - The worst chain is no longer the receive path through `parse_frame_payload_out_of_line`. It is the handshake's: `decide_unit_in`, `decode_accept_cookie`, `hmac::get_der_key`.\n  - The figure moves to the reading. It is the same on hosted at 215e687827 and locally at 0d824e8d5c, so the SCE pin move of round 4322 did not change it.\n\nOwned by other sessions, told and agreed:\n- The test-merge leftovers of the wz-capi-pico and wz-capi-c test files (ee04534e95, 7f555d4ac6):\n  - C1cn: `link_roundtrip/mod.rs` is loaded twice through `#[path]`.\n  - C1cf: wz-capi-pico does not build under `--no-default-features`.\n  - C1cn census: SKIPS rows name the old `tls_coop_roundtrip` path.\n  - C1bm: `--test unixpipe_listen_multiclient` is no longer a target.\n  - E5 and C1cd: a module filter and a test name together became two OR filters.\n- C1bz and C1bzr: a public doc links a private item at `wz-session-mcu/src/slot_group.rs:282` (216f4d83ea).\n- C1bf: `wz-admin` is missing from the COVERED list.\n- Z8 regions: scenario7 order1_pubsub saw 3 of 4 subscriber registrations at peer 71ab9330, the last member to open in its multicast region. The regions session took it with the trace data.\n\nOutside the code:\n- The Platform macOS leg was cancelled because no hosted runner was acquired.\n- Qza's apt install was killed at 900 s.\n- The `validate + verify + test` job used 90 percent of its budget once; it passed in the next run.\n- C1cs at 215e687827 graded the budgets before round 4322 moved them, after 8c8a9c08b0 had turned router-node on in the default C ABI build. Round 4322's readings include that growth.",
+      "changes_bullets": [
+        "`.github/workflows/ci.yml`: the C1bnl step of `nondefault-legs` raises `RLIMIT_MEMLOCK` with `sudo prlimit` before `run-ci.sh --layer C1bnl`, as the Z8 job does, and a comment states why.",
+        "`crates/wz-zenoh/src/api/session.rs`: the default-configuration provider test fails at once on a state other than `Initializing` or `Ready`. The message says that a memlock limit below the pool size refuses the pool.",
+        "`scripts/lib/stack_frame_gate.py`: `frt`'s `peak` moves from 7,956 to 7,436. The note names the new chain's frames and the two readings."
+      ],
+      "verification_bullets": [
+        "Runs 42061671165 and 42087308054 were read per job from the API logs. Each red is attributed above by the gate's own line.",
+        "On pc2, `cargo test -p zenoh --features shared-memory,unstable --lib api::session::tests::shm_provider` passes 4 of 4 (ran=4).",
+        "Under `ulimit -l 8192`, the same command fails the default-configuration test with the new message, naming the `Error` state. That is the runner's limit reproduced.",
+        "On pc2, `cargo clippy -p zenoh --features shared-memory,unstable --lib --tests -D warnings` passes; the only warnings are from the vendored `ring`. `cargo fmt --check -p zenoh` passes.",
+        "The edited workflow passes `actionlint`. The eleven gates that read `ci.yml` pass: apt_package_census, armed_oracle_census, c1cn_part_binding, decline_arming_gate, gate_provenance_lint, job_budget_binding, lane_locality_claim_gate, runci_plan, shard_matrix_binding, store_reader_lane_lint and unwired_lane_lint.",
+        "Locally, `mcu-freertos-demo` was built for thumbv7m-none-eabi at 0d824e8d5c.",
+        "`stack_frame_gate.py --check frt` read 7,436 over 8 frames, the hosted reading; it passes against the new figure.",
+        "`--selftest` and `--population` pass.",
+        "The S7 peer count came from the z8-suite-report artifact. The 9 peers' `register_subscriber{self=north res=test}` events were tabulated; 71ab9330 had 3, the rest had 4."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "At the next round, read per job:",
+        "C1bnl shard 1 with the raised limit.",
+        "Layer Q's frt chain against 7,436.",
+        "C1cs, which grades round 4322's nine budgets for the first time on hosted. It was still queued in run 42087308054 when this round was filed.",
+        "C1cc's shared-memory arm.",
+        "The test-merge leftovers, C1bz/C1bzr, C1bf and the S7 registration count belong to the sessions that took them. Read their landings before repaying any of those again.",
+        "Which change since 0796630b67 shrank frt's receive-path chain below the handshake's is not separated."
+      ],
+      "publishable_decision_summary": "Round 4322's carry is read: CI run 42061671165 (at 215e687827) has finished, and run 42087308054 (at 0d824e8d5c) is partly done. Their reds fall into ten causes. Two of them are repaid here. The other causes have owners or lie outside the code.\n\nRepaid here:\n- Layer C1bnl shard 1. `api::session::tests::shm_provider::a_session_with_the_default_configuration_has_a_provider_that_is_there_a_moment_later` reported \"the provider was never made\" (`wz-zenoh/src/api/session.rs:6536`).\n  - The default pool is 16 MiB, and the shm crate `mlock`s a segment whole (`wz-zenoh-shm/src/shm/unix.rs`, upstream's own call).\n  - A hosted runner's `RLIMIT_MEMLOCK` is 8192 KB, so the provider is refused and stays in `Error`. The test read `Error` as \"not yet\" and waited out its five seconds.\n  - The Z8 job raises the limit for the same reason. The C1bnl step now raises it the same way.\n  - The test now fails at once on a state other than `Initializing` or `Ready`, and its message names the refused pool.\n- Layer Q (`frt`). `stack-chain` read 7,436 bytes against the committed 7,956.\n  - The worst chain is no longer the receive path through `parse_frame_payload_out_of_line`. It is the handshake's: `decide_unit_in`, `decode_accept_cookie`, `hmac::get_der_key`.\n  - The figure moves to the reading. It is the same on hosted at 215e687827 and locally at 0d824e8d5c, so the SCE pin move of round 4322 did not change it.\n\nOwned by other sessions, told and agreed:\n- The test-merge leftovers of the wz-capi-pico and wz-capi-c test files (ee04534e95, 7f555d4ac6):\n  - C1cn: `link_roundtrip/mod.rs` is loaded twice through `#[path]`.\n  - C1cf: wz-capi-pico does not build under `--no-default-features`.\n  - C1cn census: SKIPS rows name the old `tls_coop_roundtrip` path.\n  - C1bm: `--test unixpipe_listen_multiclient` is no longer a target.\n  - E5 and C1cd: a module filter and a test name together became two OR filters.\n- C1bz and C1bzr: a public doc links a private item at `wz-session-mcu/src/slot_group.rs:282` (216f4d83ea).\n- C1bf: `wz-admin` is missing from the COVERED list.\n- Z8 regions: scenario7 order1_pubsub saw 3 of 4 subscriber registrations at peer 71ab9330, the last member to open in its multicast region. The regions session took it with the trace data.\n\nOutside the code:\n- The Platform macOS leg was cancelled because no hosted runner was acquired.\n- Qza's apt install was killed at 900 s.\n- The `validate + verify + test` job used 90 percent of its budget once; it passed in the next run.\n- C1cs at 215e687827 graded the budgets before round 4322 moved them, after 8c8a9c08b0 had turned router-node on in the default C ABI build. Round 4322's readings include that growth.",
+      "publishable_changes_bullets": [
+        "`.github/workflows/ci.yml`: the C1bnl step of `nondefault-legs` raises `RLIMIT_MEMLOCK` with `sudo prlimit` before `run-ci.sh --layer C1bnl`, as the Z8 job does, and a comment states why.",
+        "`crates/wz-zenoh/src/api/session.rs`: the default-configuration provider test fails at once on a state other than `Initializing` or `Ready`. The message says that a memlock limit below the pool size refuses the pool.",
+        "`scripts/lib/stack_frame_gate.py`: `frt`'s `peak` moves from 7,956 to 7,436. The note names the new chain's frames and the two readings."
+      ],
+      "publishable_verification_bullets": [
+        "Runs 42061671165 and 42087308054 were read per job from the API logs. Each red is attributed above by the gate's own line.",
+        "On pc2, `cargo test -p zenoh --features shared-memory,unstable --lib api::session::tests::shm_provider` passes 4 of 4 (ran=4).",
+        "Under `ulimit -l 8192`, the same command fails the default-configuration test with the new message, naming the `Error` state. That is the runner's limit reproduced.",
+        "On pc2, `cargo clippy -p zenoh --features shared-memory,unstable --lib --tests -D warnings` passes; the only warnings are from the vendored `ring`. `cargo fmt --check -p zenoh` passes.",
+        "The edited workflow passes `actionlint`. The eleven gates that read `ci.yml` pass: apt_package_census, armed_oracle_census, c1cn_part_binding, decline_arming_gate, gate_provenance_lint, job_budget_binding, lane_locality_claim_gate, runci_plan, shard_matrix_binding, store_reader_lane_lint and unwired_lane_lint.",
+        "Locally, `mcu-freertos-demo` was built for thumbv7m-none-eabi at 0d824e8d5c.",
+        "`stack_frame_gate.py --check frt` read 7,436 over 8 frames, the hosted reading; it passes against the new figure.",
+        "`--selftest` and `--population` pass.",
+        "The S7 peer count came from the z8-suite-report artifact. The 9 peers' `register_subscriber{self=north res=test}` events were tabulated; 71ab9330 had 3, the rest had 4."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "At the next round, read per job:",
+        "C1bnl shard 1 with the raised limit.",
+        "Layer Q's frt chain against 7,436.",
+        "C1cs, which grades round 4322's nine budgets for the first time on hosted. It was still queued in run 42087308054 when this round was filed.",
+        "C1cc's shared-memory arm.",
+        "The test-merge leftovers, C1bz/C1bzr, C1bf and the S7 registration count belong to the sessions that took them. Read their landings before repaying any of those again.",
+        "Which change since 0796630b67 shrank frt's receive-path chain below the handshake's is not separated."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
