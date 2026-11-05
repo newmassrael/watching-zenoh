@@ -88,6 +88,12 @@ unstable = [
     "zenoh-protocol/unstable",
     "wz-runtime-tokio?/pubsub-ts-stack",
 ]
+# Upstream's `tracing-instrument` forwards to `zenoh-runtime` and to `zenoh-task`. It carries the
+# caller's tracing span onto the runtime a future is handed to (`ZRuntime::spawn` and
+# `block_in_place`), which is every spawn this facade makes. The family has no `zenoh-task`, and the
+# engine's own tasks run on `wz-runtime-tokio`, which carries no span, so the half that is upstream's
+# task controller and transport is not here: open-debt item 201.
+tracing-instrument = ["zenoh-runtime/tracing-instrument"]
 
 [dependencies]
 async-trait = "0.1.89"

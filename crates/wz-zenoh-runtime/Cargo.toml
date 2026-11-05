@@ -62,5 +62,10 @@ tokio = { version = "1.47.1", default-features = false, features = [
 tracing = "0.1.41"
 zenoh-result = { path = "../wz-zenoh-result", features = ["std"] }
 
+# The test of `tracing-instrument` needs a subscriber that gives spans ids: the registry is the
+# smallest one.
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
 [lints]
 workspace = true

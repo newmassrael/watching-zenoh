@@ -4785,6 +4785,7 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "zenoh-result",
 ]
 

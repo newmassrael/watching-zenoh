@@ -60,7 +60,19 @@
 //!   across completions is still copied — out of the window's carry, since it
 //!   lies in no one slot.
 //!
-//! ## What this module does NOT do
+//! ## What selects this body, and what does not
+//!
+//! ⚠ THIS PARAGRAPH SAID, FROM R2748, THAT NO LINK SELECTS THIS BODY, AND IT
+//! WENT STALE: `StreamReadDriver::choose_ring` (`stream_link.rs`) attaches a
+//! link whose reader can name a raw descriptor
+//! (`crate::link_ring_fd::RingReadable`), which is upstream's dispatch on
+//! `get_fd`, and a TCP stream link on Linux with `runtime-tokio-uring` on is
+//! one. A reader that cannot name one (a TLS stream, QUIC, an in-memory
+//! duplex that is not a witness) stays on the framed body. Of the four links
+//! whose descriptor the pinned upstream hands its ring (TCP, unix-domain
+//! stream, UDP and vsock) wz hands this reactor TCP's alone, which is what
+//! open-debt item 583 owns now. What follows is what the paragraph said when
+//! it was written, kept because the argument in it still holds:
 //!
 //! Nothing here SELECTS this body for a production link. A link reaches it by
 //! being [`attach`](UringReactor::attach)ed, and no `wire_*` constructor calls

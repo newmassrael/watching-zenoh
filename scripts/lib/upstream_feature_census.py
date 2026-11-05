@@ -242,37 +242,66 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
     ("transport_vsock", "transport-link-vsock", "the AF_VSOCK link"),
     (
         "tracing-instrument",
-        None,
-        "UNANSWERED -- open-debt item 201. An instrumentation axis, not a "
-        "protocol capability: it decorates zenoh-task / zenoh-runtime futures "
-        "with tracing spans. Named rather than excused, because the one gap in "
-        "an otherwise closed surface is the whole value of counting it",
+        "tracing-instrument",
+        "the facade's forwarding feature, to `zenoh-runtime`'s: the caller's "
+        "tracing span rides onto the runtime a future is spawned on. An "
+        "instrumentation axis, not a protocol capability, and the one the "
+        "family crates carried before the facade did: `zenoh-runtime`'s own "
+        "test runs the spawn with the feature on and off, so a feature that "
+        "toggles nothing would red there",
     ),
     (
         "unstable",
-        None,
-        "UNANSWERED -- open-debt item 910. R3406: until this round an exclusion, "
-        "on the reading that wz's drop-in claim is the two C ABIs and the wire and "
-        "that the Rust API was not a replacement axis (item 199, Round 2162). The "
-        "owner put the zenoh crate's public Rust API in scope on 2026-10-22 "
-        "(docs/build-configuration.md C13), and this feature gates part of that "
-        "API, so it is a capability wz owes: the compatibility crate of item 910 "
-        "answers it under the same name",
+        "unstable",
+        "the facade's `unstable`, which opens the unstable half of the zenoh "
+        "crate's public API and forwards to the config, keyexpr and protocol "
+        "crates' own. R3406 had it UNANSWERED until the compatibility crate "
+        "(open-debt item 910) existed; the surface gate "
+        "(`rust_api_surface.py`) now holds the facade's `unstable` arm to "
+        "upstream's line for line, as it does the default arm",
     ),
     (
         "uring",
-        None,
-        "UNANSWERED -- open-debt item 583. R2230: ARRIVED in 1.10.0 and this "
-        "direction is the only one that could see it. An io_uring submission "
-        "backend for the link layer (`zenoh-uring` + `zenoh-link-*/uring`, "
-        "Linux and five architectures), so it adds no link SCHEME and moves no "
-        "byte on the wire -- it changes how the bytes are moved. Judged a "
-        "capability and not an exclusion on this table's own precedent: `stats` "
-        "and `tracing-instrument` are rows though neither touches the wire, "
-        "while every PINNED_NON_CAPABILITY entry is a VISIBILITY toggle. wz has "
-        "no io_uring path at all, so the honest answer is a named gap",
+        "runtime-tokio-uring",
+        "the io_uring fixed-buffer read adapter (`uring.rs`) and the reactor "
+        "that drives it (`uring_reactor.rs`); on Linux a TCP stream link "
+        "picks the ring body when the feature is on (`StreamReadDriver::"
+        "choose_ring`), as upstream's `rx_task_uring` dispatch picks it for a "
+        "link whose `get_fd` answers. ARRIVED in 1.10.0 and was judged "
+        "UNANSWERED at R2230 on the belief that wz had no io_uring path and "
+        "that `uring.rs` shared only a name with it; both were wrong, and the "
+        "module headers that said no link selects it were stale too. It adds "
+        "no link scheme and moves no byte on the wire, so it is a row and not "
+        "an exclusion on this table's own precedent: `stats` and "
+        "`tracing-instrument` are rows though neither touches the wire, while "
+        "every PINNED_NON_CAPABILITY entry is a VISIBILITY toggle",
     ),
 )
+
+# The rows whose wz feature answers PART of the upstream capability, and what is owed.
+#
+# Two verdicts could not say "the feature exists and is narrower than upstream's", and rows sat
+# UNANSWERED after wz had grown a counterpart because the only other word was a claim of equality
+# nobody had checked: the labels outlived the code. A PARTIAL row names the wz feature that gives
+# the part (it is in `ANSWERS` with a feature, held against cargo like every answered row) and
+# states the part that is not, citing the register item that owns it. This is not the depth axis
+# (open-debt item 200), which says of EVERY answered row that wz's counterpart may be shallower
+# than upstream's: a PARTIAL row is one whose missing part is KNOWN and named.
+PARTIAL: dict[str, str] = {
+    "tracing-instrument": (
+        "open-debt item 201 owns the half that is not here: upstream's feature "
+        "also forwards to `zenoh-task`, which the family has no crate for, and "
+        "its transport and routing tasks run on the engine, whose spawns on "
+        "`wz-runtime-tokio` carry no span. What is here is the spawns the "
+        "facade makes through `ZRuntime`"
+    ),
+    "uring": (
+        "open-debt item 583 owns the links that are not on the ring: upstream "
+        "hands it the fd of its TCP, unix-domain stream, UDP and vsock links "
+        "(the TLS, QUIC, serial and WebSocket links answer `get_fd` with an "
+        "error), and wz hands it TCP's alone"
+    ),
+}
 
 # The shape a note must have to hand a row's residue to the register. Checked,
 # not trusted: an UNANSWERED row whose note cites nothing is a gap with no owner.
@@ -507,19 +536,29 @@ def classify_upstream(pkg: dict) -> tuple[set[str], dict[str, str]]:
     return set(features) - set(derived), derived
 
 
-def shape_arm(owners: dict[str, list[str]]) -> tuple[list[str], list[tuple]]:
-    """Is the table well formed, and does every anchor it names exist in wz?"""
+def shape_arm(
+    owners: dict[str, list[str]],
+    answers: tuple[tuple[str, str | None, str], ...] | None = None,
+    partial: dict[str, str] | None = None,
+    quiet: bool = False,
+) -> tuple[list[str], list[tuple]]:
+    """Is the table well formed, and does every anchor it names exist in wz?
+
+    `answers` and `partial` default to the table; the selftest hands it fixtures.
+    """
+    answers = ANSWERS if answers is None else answers
+    partial = PARTIAL if partial is None else partial
     failures: list[str] = []
     rows: list[tuple] = []
 
-    if not ANSWERS:
+    if not answers:
         failures.append(
             "ANSWERS is empty -- a census with no population reports green about "
             "nothing"
         )
 
     seen: dict[str, int] = {}
-    for upstream, wz, note in ANSWERS:
+    for upstream, wz, note in answers:
         seen[upstream] = seen.get(upstream, 0) + 1
         if wz is None:
             if DEBT_CITATION not in note:
@@ -549,14 +588,40 @@ def shape_arm(owners: dict[str, list[str]]) -> tuple[list[str], list[tuple]]:
             f"excluded feature that also carries a row is two verdicts"
         )
 
+    by_name = {r[0]: r for r in rows}
+    for upstream, owed in sorted(partial.items()):
+        row = by_name.get(upstream)
+        if row is None:
+            failures.append(
+                f"`{upstream}` is marked PARTIAL but no row judges it -- the mark "
+                f"outlived its row"
+            )
+        elif row[1] is None:
+            failures.append(
+                f"`{upstream}` is marked PARTIAL but is UNANSWERED: a partial "
+                f"answer names the wz feature that gives the part, and a row "
+                f"with none is the other verdict"
+            )
+        if DEBT_CITATION not in owed:
+            failures.append(
+                f"`{upstream}` is PARTIAL and says what is not there without "
+                f"citing the register item that owns it -- a known gap with no "
+                f"owner. Write `{DEBT_CITATION}<n>` into it"
+            )
+
     answered = [r for r in rows if r[1] is not None]
     if not answered:
         failures.append("no row is ANSWERED -- the numerator emptied")
     unanswered = [r for r in rows if r[1] is None]
+    partly = [r for r in answered if r[0] in partial]
+    in_full = [r for r in answered if r[0] not in partial]
 
+    if quiet:
+        return failures, rows
     print(
         f"  upstream-feature-census: {len(rows)} upstream capability feature(s) "
-        f"judged -- {len(answered)} answered by a wz feature, "
+        f"judged -- {len(in_full)} answered by a wz feature, "
+        f"{len(partly)} PARTIAL (a wz feature answers a named part), "
         f"{len(unanswered)} UNANSWERED"
     )
     width = max((len(r[0]) for r in rows), default=4)
@@ -564,9 +629,13 @@ def shape_arm(owners: dict[str, list[str]]) -> tuple[list[str], list[tuple]]:
         anchor = wz if wz else "-- none --"
         print(f"    {upstream.ljust(width)}  {anchor}")
         print(f"    {' ' * width}    {note}")
+        if upstream in partial:
+            print(f"    {' ' * width}    PARTIAL: {partial[upstream]}")
+    # The breakdown, not the total. "18 of 19" reads the same whether the
+    # one gap is instrumentation or the TCP link.
+    if partly:
+        print(f"    -- PARTIAL by name: {', '.join(r[0] for r in partly)}")
     if unanswered:
-        # The breakdown, not the total. "18 of 19" reads the same whether the
-        # one gap is instrumentation or the TCP link.
         print(f"    -- UNANSWERED by name: {', '.join(r[0] for r in unanswered)}")
     return failures, rows
 
@@ -797,6 +866,67 @@ def selftest() -> int:
             passed += 1
     os.environ.pop("WZ_UPSTREAM_FEATURE_METADATA", None)
 
+    # The SHAPE arm's PARTIAL rules, on a table of its own so the cases do not move with the real
+    # rows. One CONTROL that must pass, and each other case changes that fixture at the one place a
+    # rule reads, so none of them is green for any reason but its rule.
+    shape_owners = {"wz-a": ["x"], "wz-c": ["x"]}
+    shape_answers: tuple[tuple[str, str | None, str], ...] = (
+        ("a", "wz-a", "answered"),
+        ("b", None, "UNANSWERED -- open-debt item 1: nothing"),
+        ("c", "wz-c", "answered in part"),
+    )
+    shape_cases: list[tuple[str, tuple, dict[str, str], bool]] = [
+        (
+            "a PARTIAL row that names its feature and its owner passes",
+            shape_answers,
+            {"c": "open-debt item 2 owns the rest"},
+            True,
+        ),
+        (
+            "a PARTIAL mark on an UNANSWERED row is refused",
+            shape_answers,
+            {"b": "open-debt item 2 owns the rest"},
+            False,
+        ),
+        (
+            "a PARTIAL mark on a feature no row judges is refused",
+            shape_answers,
+            {"zzz": "open-debt item 2 owns the rest"},
+            False,
+        ),
+        (
+            "a PARTIAL row that cites no register item is refused",
+            shape_answers,
+            {"c": "the rest is missing"},
+            False,
+        ),
+        (
+            "an UNANSWERED row that cites no register item is refused",
+            (("b", None, "UNANSWERED -- nobody owns this"),) + shape_answers[2:],
+            {},
+            False,
+        ),
+        (
+            "an answered row whose feature no member declares is refused",
+            (("a", "wz-gone", "answered"),) + shape_answers[1:],
+            {},
+            False,
+        ),
+    ]
+    shape_passed = 0
+    for label, table, owed, want_ok in shape_cases:
+        failures, _rows = shape_arm(shape_owners, table, owed, quiet=True)
+        if (not failures) != want_ok:
+            print(
+                f"  selftest FAIL [{label}]: expected "
+                f"{'pass' if want_ok else 'FAIL'}, got "
+                f"{'pass' if not failures else 'FAIL'} {failures}",
+                file=sys.stderr,
+            )
+            return 1
+        shape_passed += 1
+    passed += shape_passed
+
     # ARM TWO (R2164) -- an UNUSABLE denominator must raise InputError, which is
     # rc=2, which the caller reports as "nothing was graded". The arm above can
     # never see this: every fixture there is well formed by construction, so the
@@ -853,7 +983,7 @@ def selftest() -> int:
     # The BREAKDOWN, not the total: the two arms answer different questions, and
     # one number lets a collapsed population hide behind the other's.
     print(
-        f"  upstream-feature-census: selftest {passed}/{len(cases)} comparison "
+        f"  upstream-feature-census: selftest {passed}/{len(cases) + len(shape_cases)} comparison "
         f"case(s) + {input_faults}/{len(unusable)} unusable-denominator case(s) "
         f"pass"
     )

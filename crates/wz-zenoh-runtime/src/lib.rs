@@ -500,4 +500,30 @@ mod tests {
     async fn block_in_place_fail_test() {
         ZRuntime::TX.block_in_place(async { println!("Done") });
     }
+
+    /// `tracing-instrument` is what carries the caller's span onto the runtime a future is spawned
+    /// on: the future is polled by another thread, which is inside no span of its own. The same
+    /// test runs with the feature off, and then the future must see NO span: that is the control,
+    /// which says the span seen with the feature on came from the feature and not from the
+    /// subscriber. (`block_in_place` is not asked: it polls the future on the caller's own thread,
+    /// where the caller's span is current whichever way the feature is set.)
+    ///
+    /// A subscriber that gives spans ids is installed for the process, because the future runs on
+    /// a thread the test does not own; a span with no subscriber has no id to compare.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_feature_decides_whether_a_spawned_future_runs_in_its_callers_span() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        let caller = tracing::info_span!("caller");
+        assert!(caller.id().is_some(), "the subscriber gives spans ids");
+        let handle = {
+            let _inside = caller.enter();
+            ZRuntime::Application.spawn(async { tracing::Span::current().id() })
+        };
+        let seen = handle.await.expect("the spawned task ends");
+        if cfg!(feature = "tracing-instrument") {
+            assert_eq!(seen, caller.id(), "the future runs in its caller's span");
+        } else {
+            assert_eq!(seen, None, "without the feature the future has no span");
+        }
+    }
 }
