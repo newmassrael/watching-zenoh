@@ -465,6 +465,8 @@ mod routing_spans;
 mod shed;
 #[cfg(test)]
 mod shed_tests;
+#[cfg(test)]
+mod table_sharing_tests;
 use crate::counter::Counter;
 use crate::sync::{PlainCell, PlainMutex, PlainRwLock};
 pub use egress::{EgressBudget, EgressView};

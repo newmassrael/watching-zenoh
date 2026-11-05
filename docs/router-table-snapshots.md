@@ -134,9 +134,14 @@ What a peer of the zenoh preset can observe must not change under A, which is un
 3. **Nothing is sent to a face after it left.** Under A, `deregister` waits for every fan-out that found the
    face, and no fan-out after finds it (held by
    `a_face_that_leaves_in_the_middle_of_a_fan_out_is_given_nothing_after_it_left`). Under B a reader of an
-   older version still finds the face. The guarantee moves to the face's runtime: `deregister` closes its
-   `FaceRuntime` under the lock a send takes, and a send to a closed runtime is dropped and counted. The same
-   test holds it under both values.
+   older version still finds the face, so `deregister` waits for a grace period: it publishes the version
+   without the face, lets the writer mutex go, and returns only once every reader that loaded an earlier
+   version has dropped it. That is RCU's `synchronize`, and it costs the data path nothing. Closing the face's
+   runtime under a lock every send takes would also hold the guarantee, but a direct send
+   (`try_send_network_message_qos` in `credited_send`) takes no lock of the face today, so it would add one to
+   every send of every message. A thread that holds a version must not wait for a grace period (it would
+   wait for itself); the reader keeps a per-thread depth, and the wait asserts it is zero. The same test
+   holds the guarantee under both values.
 4. **What B does not keep.** Under A a writer waits for the reads under way, so a send a read makes to a
    face precedes any send the following write makes to the same face. Under B the write may send first. No
    rule of the protocol orders a routed Push or Request against a declaration or a final the router sends
@@ -171,6 +176,28 @@ behaviour under A.
    on pc2, alternating runs, recorded here with the build and the host.
 6. **What the measurement asks for, and only that**: persistent maps for a keyed table whose copy is
    measured to dominate a write, combining for writers if declaration bursts are measured to queue.
+
+### 6.1 The phase 0 reading (round 4282)
+
+`router_forward::table_sharing_tests::the_faces_and_the_writers_of_the_tables_measured_together`, release
+build with `routing-router-hat`, on the build machine of 22 cores and 30 GB with nothing else running, four
+runs on the tree of round 4281 (structure A, the only one there is). Eight publisher faces route Puts to four
+subscribers without pause for three seconds while one writer declares and undeclares subscriptions on its
+own face and every 32 declarations brings a face up and takes it down.
+
+| Run | Puts routed per second | Declarations: n, p50, p99, longest | Face transitions: n, p50, longest |
+|---|---|---|---|
+| 1 | 923 720 | 290, 10 040, 10 219, 10 605 us | 10, 10 032, 10 049 us |
+| 2 | 1 278 285 | 292, 10 028, 10 360, 10 485 us | 10, 10 034, 10 044 us |
+| 3 | 1 176 733 | 292, 10 028, 10 251, 10 479 us | 10, 10 057, 10 435 us |
+| 4 | 1 175 844 | 290, 10 028, 10 142, 10 179 us | 10, 10 035, 10 103 us |
+
+Every write took the bound and a little more: with eight faces' threads reading without pause, the lock is
+never without a reader, a writer gets in only when it has waited `TABLES_WRITER_FIRST_AFTER` (10 ms) and the
+readers that come after it queue behind it, and the work of the write itself is the tens of microseconds
+above 10 000. Under A on a busy router a write therefore costs the bound, about a hundred writes a second
+from one writer, whatever the write is. This is the figure phase 5 compares B against; it says what A pays
+and not yet what B would.
 
 ## 7. What is not decided, and what could make this wrong
 
