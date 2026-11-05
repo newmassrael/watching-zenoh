@@ -1,0 +1,822 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+//
+//! Teardown-drain gate for §5.27 api-compat-pico — the SIXTH fixture.
+//!
+//! R311y484 built five fixtures for this defect and none of them measured it.
+//! Read that entry's verification bullets before touching this file: load could
+//! not summon it, a 64 KB pico put was refuted by the pico CLI's own
+//! `Z_FRAG_MAX_SIZE` of 4096, a 3900-byte one had too few writes to lose, a bare
+//! stalling TCP peer could not answer the handshake, and a recording relay
+//! passed 3/3 without the fix. The reason all five failed was one missing lever:
+//! `wz-capi-pico` composed no `transport-fragmentation`, so no `z_put` could
+//! queue more bytes than a single 65535-byte batch, and a single batch is small
+//! enough that the writer task always got it out before teardown.
+//!
+//! R311y485 removed that blocker — the C ABI now fragments. So this fixture
+//! uses the lever the first five lacked: queue far more bytes than the writer
+//! can hand to the kernel in the microseconds between `z_close` latching `stop`
+//! and the per-session runtime being dropped, and then require them to arrive
+//! anyway. They are queued as many fragmented messages, each small enough for
+//! the acceptor to rejoin: it is this crate too, and it rejoins no message past
+//! pico's `FRAG_MAX_SIZE` as its build states it, exactly as pico drops one.
+//!
+//! What it binds to: `drive_dial` ended with `drop(writer_handle)`, which only
+//! DETACHES the writer task. The `rt` that owns that task is dropped on the very
+//! next line (`open_blocking`'s driver thread), which ABORTS it wherever it
+//! stands — including with encoded frames still sitting in its channel. The
+//! library already owns the correct terminal sequence for this
+//! (`OpenedSession::drain_to_close`: release the two `Arc<SessionLinkActions>`
+//! holders, then SEAL the writer's queue and await the task to completion); the
+//! dial role simply did not run it. R311y519 replaced that primitive's original
+//! wall-clock budget with the seal — see `wz_runtime_tokio::writer_queue` — and
+//! this file's `STALL_MS` was raised to 200 ms in the same round precisely
+//! because the budget could not have survived it.
+//!
+//! Both peers are the exported C ABI, so this is the drop-in program's own view:
+//! a pico C program that publishes and then closes.
+//!
+//! Why that program is entitled to expect delivery, stated precisely, because
+//! the obvious version of it is wrong: real pico's `z_close` does NOT flush the
+//! transport. `_z_session_close` (`vendor/zenoh-pico/src/session/utils.c:167`)
+//! stops the runtime and frees the resource / subscription / queryable /
+//! pending-query registries, and moves no outbound byte. It has nothing to
+//! flush — pico's `z_put` writes on the CALLING thread the whole way down
+//! (`_z_write` -> `_z_send_n_msg` -> `_z_transport_tx_send_n_msg`), so by the
+//! time it returns the bytes are the kernel's. wz-capi-pico's `z_put` instead
+//! hands the encoded frames to an async writer task, which is a queue pico does
+//! not have and so a teardown obligation pico does not have. The drain is what
+//! makes the two `z_put`s mean the same thing to the C caller.
+
+#![cfg(all(feature = "engine-tokio", feature = "peer"))]
+
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use wz_runtime_tokio::writer_queue::WRITER_STALL_MS;
+
+use wz_capi_pico::{
+    z_bytes_copy_from_buf, z_bytes_to_slice, z_close, z_closure_sample, z_config_default,
+    z_config_loan_mut, z_config_move, z_declare_subscriber, z_loaned_bytes_t, z_loaned_sample_t,
+    z_open, z_owned_config_t, z_owned_session_t, z_owned_slice_t, z_owned_subscriber_t, z_put,
+    z_sample_payload, z_session_drop, z_session_loan, z_session_loan_mut, z_session_move,
+    z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move, z_undeclare_subscriber,
+    z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t, zp_config_insert,
+    Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
+};
+
+/// One of the payloads published immediately before `z_close`.
+///
+/// It is sized by what has to be TRUE of it, not by taste. It must be past one
+/// negotiated batch, so each put leaves as fragments and an aborted writer can
+/// leave a prefix of a chain on the wire. And its message must stay within the
+/// largest one the acceptor rejoins (pico's `FRAG_MAX_SIZE`,
+/// `wz_session_core::caps::PICO_FRAG_MAX_BYTES`), or the acceptor would drop it
+/// as pico does and the test would be measuring that drop instead of the drain.
+/// The headroom covers the message's encoding beside its payload: the key and
+/// the headers, a few dozen bytes.
+const TAIL_BYTES: usize = wz_session_core::caps::PICO_FRAG_MAX_BYTES - 256;
+
+/// The bytes queued back-to-back before the close, which is what has to be TRUE
+/// in number: enough that the writer task cannot possibly have handed them all to
+/// the kernel in the time `z_close` takes to latch `stop`, wake the drive future,
+/// and drop the runtime. That makes the un-drained loss deterministic rather than
+/// a race this fixture only sometimes wins. Six MiB: more than a loopback
+/// socket pair buffers between a stalled reader and its writer.
+const TAIL_TOTAL_BYTES: usize = 6 * 1024 * 1024;
+
+/// How many tail puts are queued back-to-back before the close.
+const TAIL_COUNT: usize = TAIL_TOTAL_BYTES / TAIL_BYTES;
+
+/// The fixture's sizes are what it claims of them, for the numbers this build
+/// states: a tail fragments, and the three kinds of put are told apart by length.
+const _: () = {
+    assert!(
+        TAIL_BYTES > wz_session_core::caps::PICO_UNICAST_BATCH_BYTES,
+        "a tail must be past one batch, or no put fragments"
+    );
+    assert!(STALL_TRIGGER_BYTES != TAIL_BYTES && CALIBRATION_BYTES != TAIL_BYTES);
+    assert!(STALL_TRIGGER_BYTES != CALIBRATION_BYTES);
+};
+
+/// The put whose delivery makes the acceptor stop reading.
+///
+/// This is the lever the first five fixtures lacked a way to pull. A subscriber
+/// closure runs on the acceptor's drive task — the same task that polls the
+/// link's read half — so a closure that sleeps stops the peer reading, its
+/// receive buffer fills, the dialer's send buffer fills behind it, and the
+/// writer task blocks with frames still in its channel. That is the state
+/// `z_close` has to survive, and nothing smaller than a socket-buffer's worth of
+/// payload can produce it.
+///
+/// A slow subscriber callback is also just what a pico C program does, so this
+/// is not a synthetic condition — it is the ordinary one. Its size only names it,
+/// so it rides one batch.
+const STALL_TRIGGER_BYTES: usize = 1000;
+
+/// How long that closure sleeps.
+///
+/// R311y519 RAISED this 25 -> 200, and the raise is the point. While the drain
+/// was a 50 ms wall-clock budget, this constant had to stay BELOW it or the test
+/// would have been measuring the timeout instead of the drain — which is exactly
+/// the admission that the shipped drain could not deliver to a peer that stalls
+/// longer than one window. That was not a fixture limitation; it was the defect,
+/// and it is what made this test red on hosted CI, where a loaded host stretches
+/// the same drain past the same budget.
+///
+/// At 200 ms the fixture demands what only a drain with NO wall-clock budget can
+/// deliver: the pre-R311y519 design fails it by construction, four times over,
+/// with no dependence on host speed. The bound that remains is per-write and an
+/// order of magnitude above this
+/// ([`WRITER_STALL_MS`]), so the headroom does not depend on winning a race
+/// either.
+const STALL_MS: u64 = 200;
+
+/// The fixture owns its own precondition rather than assuming it.
+///
+/// A peer-side stall this test induces must stay well UNDER the per-write bound,
+/// or the writer bails on the bound and the test silently starts measuring the
+/// wedged-peer defence instead of the drain — green for the wrong reason, which
+/// is the failure mode five earlier fixtures for this defect died of. Checked at
+/// compile time so raising either constant without the other cannot ship.
+const _: () = assert!(
+    STALL_MS * 4 <= WRITER_STALL_MS,
+    "STALL_MS must stay well under WRITER_STALL_MS, or this fixture measures the \
+     per-write wedged-peer bound instead of the teardown drain"
+);
+
+/// The calibration payload, published and confirmed BEFORE the tail.
+///
+/// It owns this fixture's precondition: it proves the subscriber declaration has
+/// propagated and the publish path reaches the acceptor's closure, so a red on
+/// the tail is the teardown drain and not an un-propagated subscription. Three
+/// of R311y484's five fixtures were refuted by a fixture defect rather than by
+/// wz; this leg is what keeps a sixth from joining them.
+const CALIBRATION_BYTES: usize = 1200;
+
+/// Deterministic, size-dependent filler: a truncated delivery cannot masquerade
+/// as a whole one because the trailing bytes are position-dependent.
+fn payload_of(size: usize) -> Vec<u8> {
+    (0..size).map(|i| (i % 251) as u8).collect()
+}
+
+/// Every delivered payload, by length, in arrival order: the tails share one length,
+/// so each is kept and counted rather than the last overwriting the rest.
+type Delivered = Arc<Mutex<HashMap<usize, Vec<Vec<u8>>>>>;
+
+struct Ctx {
+    delivered: Delivered,
+}
+
+unsafe extern "C" fn on_sample(sample: *const z_loaned_sample_t, ctx: *mut c_void) {
+    let ctx = &*(ctx as *const Ctx);
+
+    let payload: *const z_loaned_bytes_t = z_sample_payload(sample);
+    let mut slice: z_owned_slice_t = std::mem::zeroed();
+    if z_bytes_to_slice(payload, &mut slice) == Z_OK {
+        let loaned = z_slice_loan(&slice);
+        let data = z_slice_data(loaned);
+        let len = z_slice_len(loaned);
+        if !data.is_null() {
+            let bytes = std::slice::from_raw_parts(data, len).to_vec();
+            ctx.delivered
+                .lock()
+                .unwrap()
+                .entry(len)
+                .or_default()
+                .push(bytes);
+        }
+        z_slice_drop(z_slice_move(&mut slice));
+
+        // RECORD FIRST, THEN SLEEP. The publisher polls for this length to
+        // learn that the stall has begun, so sleeping before the insert above
+        // would hand it a window that had already closed.
+        if len == STALL_TRIGGER_BYTES {
+            std::thread::sleep(Duration::from_millis(STALL_MS));
+        }
+    }
+}
+
+unsafe extern "C" fn on_drop(ctx: *mut c_void) {
+    drop(Box::from_raw(ctx as *const Ctx as *mut Ctx));
+}
+
+use wz_runtime_tokio_test_support::free_port;
+
+/// A `z_put` that `z_close` follows immediately must still reach the peer.
+///
+/// This is the observable a pico C program has: pico's `z_close` runs
+/// `_z_session_close`, which flushes the transport before the session dies, so a
+/// program that publishes and closes on the next line does not lose the publish.
+/// wz-capi-pico's dial role detached its writer instead, and the runtime drop
+/// that follows aborted it — every frame still queued was discarded with no
+/// error anywhere, because `z_put` had already returned `Z_OK`.
+#[test]
+fn a_put_immediately_before_z_close_is_drained_not_discarded() {
+    let port = free_port();
+    let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+
+    let delivered: Delivered = Arc::new(Mutex::new(HashMap::new()));
+    let delivered_acc = delivered.clone();
+    let sub_ready = Arc::new(AtomicBool::new(false));
+    let sub_ready_acc = sub_ready.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_acc = done.clone();
+
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let acceptor = std::thread::spawn(move || unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        let _ = started_tx.send(());
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK,
+            "acceptor z_open failed"
+        );
+
+        let ctx = Box::into_raw(Box::new(Ctx {
+            delivered: delivered_acc,
+        })) as *mut c_void;
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(&mut closure, Some(on_sample), Some(on_drop), ctx),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut ke, c"teardown/**".as_ptr()),
+            Z_OK
+        );
+        let mut subscriber: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&session),
+                &mut subscriber,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "acceptor z_declare_subscriber failed"
+        );
+        sub_ready_acc.store(true, Ordering::SeqCst);
+
+        // The acceptor outlives the dialer on purpose: the whole question is
+        // what the peer sees AFTER the publisher has closed, so it must still
+        // be reading when the dialer's session is already gone.
+        for _ in 0..3000 {
+            if done_acc.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    });
+
+    started_rx.recv().unwrap();
+
+    let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
+    let mut opened = false;
+    for _ in 0..250 {
+        unsafe {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_CONNECT_KEY,
+                    connect.as_ptr()
+                ),
+                Z_OK
+            );
+            if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                opened = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(opened, "dialer z_open never succeeded");
+
+    for _ in 0..500 {
+        if sub_ready.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        sub_ready.load(Ordering::SeqCst),
+        "acceptor never declared its subscriber"
+    );
+
+    // --- calibration: the fixture proves its own precondition ---------------
+    //
+    // Retried, because the subscription may still be propagating. Once THIS
+    // arrives, the publish path is known good and the session is known live, so
+    // the single-shot tail below has no excuse but the drain.
+    let calibration = payload_of(CALIBRATION_BYTES);
+    let mut calibrated = false;
+    for _ in 0..150 {
+        if delivered.lock().unwrap().contains_key(&CALIBRATION_BYTES) {
+            calibrated = true;
+            break;
+        }
+        unsafe {
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"teardown/calibration".as_ptr()),
+                Z_OK
+            );
+            let mut bytes = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_copy_from_buf(&mut bytes, calibration.as_ptr(), calibration.len()),
+                Z_OK
+            );
+            assert_eq!(
+                z_put(
+                    z_session_loan(&session),
+                    z_view_keyexpr_loan(&ke),
+                    wz_capi_pico::z_bytes_move(&mut bytes),
+                    std::ptr::null(),
+                ),
+                Z_OK,
+                "calibration z_put returned an error"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        calibrated,
+        "the calibration put never arrived — the fixture's own publish path is \
+         broken, so nothing below measures the teardown drain"
+    );
+
+    // --- the gate: publish once, close on the next line ---------------------
+    //
+    // SINGLE SHOT. A retry loop here would defeat the fixture: the property is
+    // that the ONE put issued before `z_close` survives the close, and a second
+    // attempt cannot be made once the session is closed anyway.
+    // --- arm the stall ------------------------------------------------------
+    //
+    // Every buffer below is precomputed, because the whole publish-and-close
+    // sequence has to fit inside the acceptor's STALL_MS sleep.
+    let tail = payload_of(TAIL_BYTES);
+    let tail_keys: Vec<std::ffi::CString> = (0..TAIL_COUNT)
+        .map(|i| std::ffi::CString::new(format!("teardown/tail/{i}")).unwrap())
+        .collect();
+    let trigger = payload_of(STALL_TRIGGER_BYTES);
+    let mut stalled = false;
+    for _ in 0..300 {
+        if delivered.lock().unwrap().contains_key(&STALL_TRIGGER_BYTES) {
+            stalled = true;
+            break;
+        }
+        unsafe {
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"teardown/stall".as_ptr()),
+                Z_OK
+            );
+            let mut bytes = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_copy_from_buf(&mut bytes, trigger.as_ptr(), trigger.len()),
+                Z_OK
+            );
+            assert_eq!(
+                z_put(
+                    z_session_loan(&session),
+                    z_view_keyexpr_loan(&ke),
+                    wz_capi_pico::z_bytes_move(&mut bytes),
+                    std::ptr::null(),
+                ),
+                Z_OK,
+                "the stall-trigger z_put returned an error"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        stalled,
+        "the acceptor never reported the stall trigger, so it is still reading \
+         and the tails below would drain with no back pressure — the fixture \
+         would pass without measuring anything"
+    );
+
+    for (i, ke_str) in tail_keys.iter().enumerate() {
+        let rc = unsafe {
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(z_view_keyexpr_from_str(&mut ke, ke_str.as_ptr()), Z_OK);
+            let mut bytes = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_copy_from_buf(&mut bytes, tail.as_ptr(), tail.len()),
+                Z_OK
+            );
+            z_put(
+                z_session_loan(&session),
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_bytes_move(&mut bytes),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(
+            rc, Z_OK,
+            "tail z_put {i} was rejected before the close, so the close is untested"
+        );
+    }
+
+    // No sleep, no flush, no politeness: this is the C program that publishes
+    // and closes.
+    unsafe {
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    }
+
+    // The close has returned, so the drain (if any) has already run to
+    // completion — `z_close` joins the driver thread. What remains is only the
+    // acceptor's own read + reassembly of bytes already on the wire.
+    // ONE bounded wait for the whole set, not one per size: `z_close` has
+    // already returned, so no further byte can leave this host and a per-size
+    // timeout would only multiply the same expired deadline.
+    let arrived = || {
+        delivered
+            .lock()
+            .unwrap()
+            .get(&TAIL_BYTES)
+            .map_or(0, Vec::len)
+    };
+    for _ in 0..150 {
+        if arrived() >= TAIL_COUNT {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    done.store(true, Ordering::SeqCst);
+    acceptor.join().expect("acceptor thread panicked");
+
+    let arrived = arrived();
+    assert_eq!(
+        arrived,
+        TAIL_COUNT,
+        "z_put returned Z_OK for {TAIL_COUNT} tails and then z_close discarded \
+         {} of them. The peer received the {CALIBRATION_BYTES}-byte \
+         calibration but not every tail. The dial role detaches its writer task \
+         instead of draining it, and the per-session runtime drop that follows \
+         aborts it with frames still queued.",
+        TAIL_COUNT.saturating_sub(arrived)
+    );
+
+    // Arrival is not enough: an aborted writer can also leave a PREFIX of a
+    // chain on the wire, and a fixture that only counted samples would call a
+    // truncated reassembly a pass. A truncated chain is a sample of another
+    // length, so it is not among these; each of these is checked byte for byte.
+    let map = delivered.lock().unwrap();
+    for (i, actual) in map[&TAIL_BYTES].iter().enumerate() {
+        assert!(
+            actual == &tail,
+            "tail {i} arrived with {} bytes but they differ from what was \
+             published — the drain flushed a partial chain",
+            actual.len()
+        );
+    }
+}
+
+/// An idle `z_close` must return at once, not sit out a drain window.
+///
+/// This guards the ONE thing the delivery test above cannot see. Delivery is
+/// insensitive to WHEN the writer exits — a writer that drains its queue and
+/// then lingers has still delivered everything — so only a latency assertion can
+/// catch a drain that ends on a clock rather than on the work being done. The
+/// original defect was exactly that shape: the channel closed only when the last
+/// `Arc<SessionLinkActions>` dropped, one clone lived in the registry's
+/// `FaceEntry`, and every idle `z_close` therefore burned the whole 50 ms budget
+/// — measured at 51.5 ms against 0.1-0.5 ms, five rounds each.
+///
+/// R311y519 removed the budget rather than re-ordering around it, because the
+/// ordering fix was never available on the accept path (see
+/// `wz_runtime_tokio::writer_queue`): the seal now ends the writer no matter who
+/// still holds a sender. So the assertion is no longer "faster than the window"
+/// but an ABSOLUTE ceiling — a drain that ends on any clock at all fails it.
+///
+/// The bound is the MINIMUM over several closes rather than any single one: a
+/// loaded host can stretch one teardown, but a clock-terminated drain stretches
+/// EVERY one, so the minimum separates the two without depending on the host
+/// being quiet.
+#[test]
+fn an_idle_z_close_does_not_burn_the_whole_drain_window() {
+    const ROUNDS: usize = 5;
+
+    let port = free_port();
+    let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_acc = done.clone();
+
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let acceptor = std::thread::spawn(move || unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        let _ = started_tx.send(());
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK,
+            "acceptor z_open failed"
+        );
+        for _ in 0..3000 {
+            if done_acc.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    });
+    started_rx.recv().unwrap();
+
+    let mut fastest = Duration::MAX;
+    for round in 0..ROUNDS {
+        let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
+        let mut opened = false;
+        for _ in 0..250 {
+            unsafe {
+                let mut cfg: z_owned_config_t = std::mem::zeroed();
+                assert_eq!(z_config_default(&mut cfg), Z_OK);
+                assert_eq!(
+                    zp_config_insert(
+                        z_config_loan_mut(&mut cfg),
+                        Z_CONFIG_CONNECT_KEY,
+                        connect.as_ptr()
+                    ),
+                    Z_OK
+                );
+                if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                    opened = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(opened, "dialer z_open never succeeded on round {round}");
+
+        // Nothing was published, so there is nothing to flush and the drain has
+        // no work to wait for.
+        let started = std::time::Instant::now();
+        unsafe {
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        }
+        let elapsed = started.elapsed();
+        unsafe {
+            z_session_drop(z_session_move(&mut session));
+        }
+        fastest = fastest.min(elapsed);
+    }
+
+    done.store(true, Ordering::SeqCst);
+    acceptor.join().expect("acceptor thread panicked");
+
+    // ABSOLUTE, and deliberately not derived from any drain constant: the
+    // property is "an idle close does no waiting at all", and a ceiling computed
+    // from a timeout would silently relax if that timeout ever grew. 25 ms is
+    // two orders of magnitude above the measured 0.1 ms and half of the 51.5 ms
+    // the pre-R311y519 defect produced, so it separates them without a race.
+    const IDLE_CLOSE_CEILING: Duration = Duration::from_millis(25);
+    assert!(
+        fastest < IDLE_CLOSE_CEILING,
+        "the fastest of {ROUNDS} idle z_close calls took {fastest:?}, which is \
+         not below {IDLE_CLOSE_CEILING:?} — the drain is ending on a clock \
+         instead of when the writer is done. A session with nothing pending has \
+         nothing to drain, so the seal should close its queue and the writer \
+         should exit immediately, whoever else still holds a sender."
+    );
+}
+
+/// Small messages put in a burst and `z_close` on the next line: the frame the session still
+/// holds open must reach the peer too.
+///
+/// The first test queues fragmented tails, which leave the session as they are put. A message
+/// of a few bytes does not: the data plane stages it into the open frame of its priority, and
+/// the link's writer puts that frame on the wire when it falls idle, through a hook that holds
+/// the session weakly. `z_close` let go of the session first, so a close that came before the
+/// writer's idle flush found the hook empty and the open frame was dropped with the session:
+/// the puts of the last moments of a burst returned `Z_OK` and never arrived (found by the
+/// host throughput bench of 8-byte puts, which lost the last slot of a run in most runs).
+///
+/// Many short sessions rather than one, because the loss is a race between the close and the
+/// writer's flush and one close wins it often. The payload is what must be TRUE of it: small
+/// enough to share a frame with its neighbours, and of a length no other test here tells apart.
+#[test]
+fn a_burst_of_small_puts_before_z_close_is_not_left_in_the_open_frame() {
+    const ROUNDS: usize = 10;
+    const BURST: usize = 2000;
+    const BURST_BYTES: usize = 8;
+
+    let port = free_port();
+    let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+
+    let delivered: Delivered = Arc::new(Mutex::new(HashMap::new()));
+    let delivered_acc = delivered.clone();
+    let sub_ready = Arc::new(AtomicBool::new(false));
+    let sub_ready_acc = sub_ready.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_acc = done.clone();
+
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let acceptor = std::thread::spawn(move || unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        let _ = started_tx.send(());
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK,
+            "acceptor z_open failed"
+        );
+
+        let ctx = Box::into_raw(Box::new(Ctx {
+            delivered: delivered_acc,
+        })) as *mut c_void;
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(&mut closure, Some(on_sample), Some(on_drop), ctx),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut ke, c"teardown/**".as_ptr()),
+            Z_OK
+        );
+        let mut subscriber: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&session),
+                &mut subscriber,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "acceptor z_declare_subscriber failed"
+        );
+        sub_ready_acc.store(true, Ordering::SeqCst);
+
+        for _ in 0..3000 {
+            if done_acc.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    });
+
+    started_rx.recv().unwrap();
+
+    let count_of = |len: usize| delivered.lock().unwrap().get(&len).map_or(0, Vec::len);
+    let put = |session: &z_owned_session_t, key: &std::ffi::CStr, payload: &[u8]| unsafe {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut bytes = std::mem::zeroed();
+        assert_eq!(
+            z_bytes_copy_from_buf(&mut bytes, payload.as_ptr(), payload.len()),
+            Z_OK
+        );
+        z_put(
+            z_session_loan(session),
+            z_view_keyexpr_loan(&ke),
+            wz_capi_pico::z_bytes_move(&mut bytes),
+            std::ptr::null(),
+        )
+    };
+    let calibration = payload_of(CALIBRATION_BYTES);
+    let burst = payload_of(BURST_BYTES);
+
+    for round in 0..ROUNDS {
+        let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
+        let mut opened = false;
+        for _ in 0..250 {
+            unsafe {
+                let mut cfg: z_owned_config_t = std::mem::zeroed();
+                assert_eq!(z_config_default(&mut cfg), Z_OK);
+                assert_eq!(
+                    zp_config_insert(
+                        z_config_loan_mut(&mut cfg),
+                        Z_CONFIG_CONNECT_KEY,
+                        connect.as_ptr()
+                    ),
+                    Z_OK
+                );
+                if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                    opened = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(opened, "dialer z_open never succeeded on round {round}");
+        for _ in 0..500 {
+            if sub_ready.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            sub_ready.load(Ordering::SeqCst),
+            "acceptor never declared its subscriber"
+        );
+
+        // The precondition, proved every round: this session's publish path reaches the
+        // acceptor's closure, so a shortfall below is the close and not a subscription that had
+        // not propagated yet.
+        let before = count_of(CALIBRATION_BYTES);
+        let mut calibrated = false;
+        for _ in 0..150 {
+            if count_of(CALIBRATION_BYTES) > before {
+                calibrated = true;
+                break;
+            }
+            assert_eq!(
+                put(&session, c"teardown/calibration", &calibration),
+                Z_OK,
+                "calibration z_put returned an error"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            calibrated,
+            "the calibration put never arrived on round {round}, so nothing below measures the close"
+        );
+
+        for i in 0..BURST {
+            assert_eq!(
+                put(&session, c"teardown/burst", &burst),
+                Z_OK,
+                "burst z_put {i} was rejected before the close, so the close is untested"
+            );
+        }
+        // No sleep, no flush: the C program that publishes and closes.
+        unsafe {
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+
+    // ONE bounded wait for the whole set: every close has returned, so no further byte can
+    // leave this host.
+    for _ in 0..150 {
+        if count_of(BURST_BYTES) >= ROUNDS * BURST {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    done.store(true, Ordering::SeqCst);
+    acceptor.join().expect("acceptor thread panicked");
+
+    let arrived = count_of(BURST_BYTES);
+    assert_eq!(
+        arrived,
+        ROUNDS * BURST,
+        "z_put returned Z_OK for {} small puts and z_close left {} of them in the session's open \
+         frame. The frame a session still holds open when it closes is handed to the writer \
+         before the session is let go, or the writer's idle flush, which holds the session \
+         weakly, finds nothing to flush.",
+        ROUNDS * BURST,
+        (ROUNDS * BURST).saturating_sub(arrived)
+    );
+}

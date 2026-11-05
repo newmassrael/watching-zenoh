@@ -11231,11 +11231,12 @@ layer_c1co_pico_client_dials_a_listener() {
                     expect=8
                     admin=""
                 fi
+                wz_test_args wz-capi-pico client_only_dials_a_listener
                 _runci_guarded_test "C1co ${engine}${answering} on a ${listener_engine} listener" "$expect" \
                     env WZ_PICO_LISTENER_BIN="$listener" \
                     cargo test -p wz-capi-pico --no-default-features \
                     --features "${engine},link-udp,query${answering}${admin},liveliness-get,unstable-api,connectivity,local-subscriber,local-queryable" \
-                    --test client_only_dials_a_listener || return 1
+                    "${WZ_TEST_ARGS[@]}" || return 1
             done
         done
         # Two legs of the advanced plane, one per engine. The plane's rules are the neutral
@@ -11245,11 +11246,12 @@ layer_c1co_pico_client_dials_a_listener() {
         # The count is MEASURED on each engine (11, the build with the liveliness and local
         # switches and no admin space), and exact, as the legs above are.
         for engine in engine-coop engine-tokio; do
+            wz_test_args wz-capi-pico client_only_dials_a_listener
             _runci_guarded_test "C1co ${engine} advanced on a ${listener_engine} listener" 11 \
                 env WZ_PICO_LISTENER_BIN="$listener" \
                 cargo test -p wz-capi-pico --no-default-features \
                 --features "${engine},link-udp,query,queryable,liveliness,liveliness-get,advanced,unstable-api,connectivity,local-subscriber,local-queryable" \
-                --test client_only_dials_a_listener || return 1
+                "${WZ_TEST_ARGS[@]}" || return 1
         done
     done
     # The other direction: a wz session DIALS a node that listens, and the node is upstream's own
@@ -11277,38 +11279,42 @@ layer_c1co_pico_client_dials_a_listener() {
     # (`crates/wz-capi-pico/tests/mutual_dial.rs`, step L5 of `docs/capi-pico-on-coop-engine.md`).
     # The tokio engine's run is the crate's default test build; this is the cooperative engine's,
     # whose admission rule it reads: with the rule shut off the test fails on a doubled transport.
+    wz_test_args wz-capi-pico mutual_dial
     _runci_guarded_test "C1co engine-coop mutual dial" 2 \
         cargo test -p wz-capi-pico --no-default-features \
         --features "engine-coop,peer,multi-thread,link-udp,connectivity" \
-        --test mutual_dial || return 1
+        "${WZ_TEST_ARGS[@]}" || return 1
     # The `tls/` link on the cooperative engine, reached through the exported `z_*` symbols (step
     # T4 of L6, `crates/wz-capi-pico/tests/tls_coop_roundtrip.rs`): a listener presents a chain and
     # a dial that trusts it opens a session that carries a put each way, and a dial that trusts
     # another certificate does not open. `tls-mbedtls` is the cooperative engine's secure channel
     # (Mbed TLS built from the pinned submodules), so there is no tokio engine in this build; with
     # the link left out of the stack the listener itself is refused and both tests fail.
+    wz_test_args wz-capi-pico tls_coop_roundtrip
     _runci_guarded_test "C1co tls engine-coop" 2 \
         cargo test -p wz-capi-pico --no-default-features \
         --features "tls-mbedtls,peer,multi-thread,link-udp" \
-        --test tls_coop_roundtrip || return 1
+        "${WZ_TEST_ARGS[@]}" || return 1
     # The same listener tells the node's event log when it ends a connection without a stream
     # (`crates/wz-capi-pico/tests/tls_handshake_drop_event.rs`): a client that is not speaking TLS
     # is dropped and a library event, source 0xFF01, follows with the channel's own code, and a
     # client that connects and says nothing is dropped as a stall with the code 0. With the
     # telling left out of the listener's accept the connection is still dropped and the first
     # test fails for want of the event (measured).
+    wz_test_args wz-capi-pico tls_handshake_drop_event
     _runci_guarded_test "C1co tls handshake drop event" 2 \
         cargo test -p wz-capi-pico --no-default-features \
         --features "tls-mbedtls,peer,multi-thread,link-udp,event-ring" \
-        --test tls_handshake_drop_event || return 1
+        "${WZ_TEST_ARGS[@]}" || return 1
     # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
     # one over the engine's own window, and finds nobody on a group nobody answers, which the
     # tokio engine's default build already runs; this is the same test with no tokio engine in
     # the build (`crates/wz-capi-pico/tests/open_scouts_for_a_locator.rs`).
+    wz_test_args wz-capi-pico open_scouts_for_a_locator
     _runci_guarded_test "C1co scout engine-coop" 1 \
         cargo test -p wz-capi-pico --no-default-features \
         --features "engine-coop,link-udp,scout" \
-        --test open_scouts_for_a_locator || return 1
+        "${WZ_TEST_ARGS[@]}" || return 1
     # A sixth: the observation plane's instruments hosted by the cooperative engine with no task
     # and no tokio engine in the build (`docs/observation-plane.md` M3). The supervisor and the
     # event log are the node's and not a session's (`wz-capi-port`'s `observation`), so the same
@@ -19728,16 +19734,19 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # R3362 -- 8 -> 9: `scouting/multicast/enabled: false` takes a peer off the group, shown as a
     # pair on one group (found without the key, not found with it). 9 = the number the lint read
     # off the file's `#[ignore]`d tests and the run printed.
+    wz_test_args wz-capi-c scouting_open
     _runci_guarded_test "M a C ABI session scouts and is found" 9 \
-        cargo test -p wz-capi-c --test scouting_open -- --ignored --test-threads=1 || return 1
+        cargo test -p wz-capi-c "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     # R3362 -- two config keys read off the datagrams a scouting session sends and the nodes it
     # dials, each as a pair with a control: the IP TTL of a Scout is the key's (and 1 without it),
     # and a peer whose `autoconnect` leaves its role out does not dial a node that answers while
     # the same peer without the key does. One ignored test per file, serial for the group space.
+    wz_test_args wz-capi-c scouting_ttl
     _runci_guarded_test "M a Scout carries the configured multicast TTL" 1 \
-        cargo test -p wz-capi-c --test scouting_ttl -- --ignored --test-threads=1 || return 1
+        cargo test -p wz-capi-c "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
+    wz_test_args wz-capi-c scouting_autoconnect
     _runci_guarded_test "M autoconnect decides which answering node a peer dials" 1 \
-        cargo test -p wz-capi-c --test scouting_autoconnect -- --ignored --test-threads=1 || return 1
+        cargo test -p wz-capi-c "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     # The `scout` role of a `--sessions` driver: one process answers Scouts from a
     # `scouting.multicast` block, a second asks from inside its own session and
     # prints the Hello it hears. It needs a multicast route and nothing else.
@@ -20889,8 +20898,9 @@ layer_z_zenohd_interop() {
     # exact command: 2 passed; and both go red on a mutation that renders the
     # document flat, with the first failing on the VALUE assertion while zenohd
     # started perfectly -- which is the whole reason the assertion is there.
+    wz_test_args wz-capi-c config_verdict_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
-        --test config_verdict_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2948 (F) — a wz-capi-c session RE-DIALS a lost link to a real zenohd.
     # One leg: two client sessions (subscriber, publisher) through a zenohd that
@@ -20898,8 +20908,9 @@ layer_z_zenohd_interop() {
     # with no reopen by the test, so both sessions re-dialled and the
     # subscription was declared again to the fresh router. In this crate for
     # the reason the leg above gives. MEASURED: 1 passed against zenohd 1.10.0.
+    wz_test_args wz-capi-c redial_zenohd_interop
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
-        --test redial_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # The C ABI as a NODE (`router-node`) beside a real zenohd: a router opened by `z_open` and a
     # peer that keeps a `gateway/south` forward between a wz client and zenohd, each way. 2 legs,
@@ -20922,8 +20933,9 @@ layer_z_zenohd_interop() {
     # member record not served: "the client never found the node"). 6 passed against zenohd 1.10.2
     # (build machine hkl002). Built with `router-node`, `advanced` and `group`, which the lane
     # above does not turn on. In this crate for the reason the legs above give.
+    wz_test_args wz-capi-c router_node_zenohd_interop
     _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
-        --features router-node,advanced,group --test router_node_zenohd_interop -- --ignored \
+        --features router-node,advanced,group "${WZ_TEST_ARGS[@]}" -- --ignored \
         --quiet --test-threads=1 \
         || return 1
     # A C session whose config names a usrpwd dictionary authenticates a REAL zenohd's
@@ -20935,8 +20947,9 @@ layer_z_zenohd_interop() {
     # (after the right one proved it connects at all). In this crate for the reason the legs
     # above give. MEASURED: 2 passed against zenohd 1.10.0 (the pin is 1.10.1; this lane is
     # where it is judged against the pinned binary).
+    wz_test_args wz-capi-c listener_auth_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
-        --test listener_auth_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # The READ direction, which is the one that bears on replacement: an operator
     # standing wz up in place of a zenoh node already HAS the config file, and

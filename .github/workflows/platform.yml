@@ -644,7 +644,10 @@ jobs:
             # default build's integration tests. A target behind a feature has its own lane
             # (`scripts/lib/nondefault-tests-gate.sh` lists them). The cost is that the
             # library's unit tests run again beside the integration ones.
-            if compgen -G "crates/$crate/tests/*.rs" > /dev/null; then
+            # A crate whose test files are merged (`scripts/lib/merge_tests.py`) keeps them as
+            # modules of `tests/<target>/main.rs`, and a crate may hold both forms.
+            if compgen -G "crates/$crate/tests/*.rs" > /dev/null ||
+              compgen -G "crates/$crate/tests/*/main.rs" > /dev/null; then
               integrated=SKIPPED
               if [ "$built" = PASS ]; then
                 integrated=FAIL
