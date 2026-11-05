@@ -409,7 +409,12 @@ IMAGES = (
         # the codecs, and the receive path's frames grew by 224. The same figure for the heap and the
         # batching clients. 2,656 once the reader counts the word a function allocates with `str.w rN,
         # [sp, #-4]!` (two on this chain).
-        peak=2656,
+        #
+        # 2,376 bytes over 13 frames at the SCE pin 0907db47a2 with the Response read as its view and
+        # the writer of a response in the parts form: the chain of direct calls is now the receive
+        # path into the engine's turn and the session's send, the same for the heap and the batching
+        # clients.
+        peak=2376,
     ),
     # The fixed client with its storage block taken from the kernel heap at start
     # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
@@ -423,7 +428,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2656,
+        peak=2376,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -475,7 +480,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2656,
+        peak=2376,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -563,10 +568,18 @@ IMAGES = (
         #
         # 2,976 bytes over 11 frames once the Response is read as its view (the reply's delivery
         # reads its chains where they lie): 16 more than before, in the frames the delivery's own
-        # reads took. The kit's reading, 2,872, is 104 under it, so the resource budget's row no
-        # longer carries `chain_misses`: the chain is a bound again, for as long as the reading stays
+        # reads took. The kit's reading, 2,872, was 104 under it, so the resource budget's row did
+        # not carry `chain_misses`: the chain was a bound again, for as long as the reading stayed
         # under it.
-        peak=2976,
+        #
+        # 2,472 bytes over 13 frames once the writer of a response describes its message in the
+        # codec's parts form: the chain is the receive path into the engine's turn and the
+        # session's send, as the answering clients' is, 96 bytes more for the getter (its entry, 24,
+        # the node's drive, 64, and the dialer, 8). The kit's reading did not move, 2,872, so it is
+        # 400 OVER the chain, and the resource budget's row carries `chain_misses` once more: the
+        # chain is not a bound on this image (the reply sink is still called through a register, and
+        # the path under it is not followed).
+        peak=2472,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
