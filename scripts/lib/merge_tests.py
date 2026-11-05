@@ -151,6 +151,40 @@ def classify(
     return merge, stay
 
 
+def helper_modules(crate: Path, test_names: set[str]) -> dict[str, str]:
+    """{module name: path from `tests/` of its source} for the helper modules of the crate: a
+    `tests/<name>/mod.rs` (or a `tests/<name>.rs` that is not itself a test file) that test files
+    declare with `mod <name>;`. Declared in a file that is a module now, that line would look for
+    `tests/it/files/<file>/<name>.rs`; a `#[path]` to where the helper is keeps it, and keeps one
+    instance of the helper for each file, as each file was an executable with its own."""
+    found: dict[str, str] = {}
+    tests = crate / "tests"
+    for sub in tests.iterdir():
+        if sub.is_dir() and (sub / "mod.rs").is_file():
+            found[sub.name] = f"{sub.name}/mod.rs"
+    for path in tests.glob("*.rs"):
+        if path.stem not in test_names and path.stem not in found:
+            if any(re.search(rf"(?m)^\s*mod {re.escape(path.stem)};\s*$", p.read_text())
+                   for p in tests.glob("*.rs") if p != path):
+                found[path.stem] = f"{path.stem}.rs"
+    return found
+
+
+def point_helper_modules(text: str, helpers: dict[str, str]) -> tuple[str, int]:
+    """`text` with each `mod <helper>;` given a `#[path]` to the helper, from `tests/<t>/files/`."""
+    count = 0
+
+    def sub(m: re.Match[str]) -> str:
+        nonlocal count
+        name = m.group("name")
+        if name not in helpers:
+            return m.group(0)
+        count += 1
+        return f'{m.group("indent")}#[path = "../../{helpers[name]}"]\n{m.group(0)}'
+
+    return re.sub(r"(?m)^(?P<indent>[ \t]*)mod (?P<name>[A-Za-z_][A-Za-z0-9_]*);[ \t]*$", sub, text), count
+
+
 def reexecuters(crate: Path) -> list[str]:
     """The files that run their own test binary again (`current_exe`): they name a test of their
     own to the child (`--exact <name>`), and the name of a test is its module path now."""
@@ -217,6 +251,8 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
             print(f"tests/{target} exists already: nothing done", file=sys.stderr)
             return 1
     warn_reexec(reexecuters(crate))
+    helpers = helper_modules(crate, {n for names in merge.values() for n in names}
+                             | {n for n, _ in stay})
     rebased = 0
     moved = 0
     for target, names in sorted(merge.items()):
@@ -227,7 +263,10 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
             dst = it / "files" / f"{name}.rs"
             git("mv", str(src.relative_to(ROOT)), str(dst.relative_to(ROOT)))
             text, changed = rebase_crate_paths(dst.read_text(), name)
-            if changed:
+            text, pointed = point_helper_modules(text, helpers)
+            if pointed:
+                print(f"  helper module pointed by #[path] in {name}")
+            if changed or pointed:
                 dst.write_text(text)
                 rebased += len(changed)
                 for line in changed:
@@ -349,6 +388,14 @@ def selftest() -> int:
               "zenoh_pico_sys, wz_capi_pico") in stay)
         check("a target name is read back", ("a", "t") in listing(
             "Running tests/it_x/main.rs (t/it_x)\nfiles::a::t: test\n", True))
+        (crate / "tests" / "harness").mkdir()
+        (crate / "tests" / "harness" / "mod.rs").write_text("pub fn h() {}\n")
+        (crate / "tests" / "uses.rs").write_text("mod harness;\n#[test] fn t() { harness::h() }\n")
+        helpers = helper_modules(crate, {"uses", "plain"})
+        check("a helper dir is found", helpers.get("harness") == "harness/mod.rs")
+        text, n = point_helper_modules("mod harness;\nmod other;\n", helpers)
+        check("a helper module gets a path and another does not",
+              n == 1 and text == '#[path = "../../harness/mod.rs"]\nmod harness;\nmod other;\n')
         check("a [[test]] name is read", toml_tests(crate / "Cargo.toml") == {"tabled"})
     if failures == 0:
         print("merge_tests: selftest OK")
