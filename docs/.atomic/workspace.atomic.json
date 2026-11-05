@@ -311274,6 +311274,34 @@
         "Open: the bound of the asking client (3,656) joins the writer of a response, `encode_generic` (1,504 bytes), which builds the message it encodes; the request side already encodes from its Parts, the response is the next to move the same way, and the bound's next worst path is then to be read. Layer C1bnl was red in wz-capi-c when read here, from another session's series; read it again after that series lands. The hosted runs of rounds 4249 and 4261 and Layers Qzk and Qzb are still to be read; the pin move of 4261 reached the stack bound's rule without a firmware build, so the next pin move builds the six images before it lands."
       ]
     },
+    "Round 4271": {
+      "decision_summary": "The fixed-memory node images of the T2G board table, the datagram node and the node over tcp/, are held by the stack gate each to a worst chain of its own. They shared one key, zephyr-fixed, with no committed chain, so the gate read their frames and judged their chain against nothing: a change that deepened either chain would not have moved a verdict. The datagram node commits 13,624 bytes and a new key, zephyr-fixed-tcp, commits 13,184; the Qzb lane takes the key from the row's overlays. Committing a chain makes the resource budget require a row or a stated reason for the image, and neither image runs under the kit lane, so both are declared in not_measured_on_the_kit with the reason. One red of the main line is paid in the same change: the asking client's budget row carried chain_misses while its kit reading (2,872) lay under its chain (2,976), which the budget gate refuses.",
+      "changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: zephyr-fixed commits peak 13,624 and a new row, zephyr-fixed-tcp, commits 13,184, each with the frames of its chain; the asking client's row notes that its budget row no longer carries chain_misses. scripts/run-ci.sh: the Qzb lane checks zephyr-fixed-tcp for a row whose overlays include the tcp overlay and zephyr-fixed otherwise. deploy/resource_budget.json: the two images are declared in not_measured_on_the_kit with their reasons, and the asking client's row drops chain_misses."
+      ],
+      "verification_bullets": [
+        "Both images were built with west for the T2G board from the tree at ff6a235d9d and read by the gate under their own keys: the datagram node reads 13,624 bytes over 12 frames and the node over tcp/ 13,184 over 6, each passes at its committed figure, and the tcp/ key refuses the datagram image's ELF (13,624 against 13,184), so the two keys do not hold each other. The gate's selftest and population pass, the resource budget gate reads six images held and its selftest passes, run-ci.sh passes bash -n and shellcheck at warning level. The TLS admin row was read on a board build as scripts/kit-lane.sh builds it and reads its committed 9,632 exactly. Not run: Layer Qzb as a lane, so the lane's key choice is read and not executed, and the figures are one host's SDK build."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Neither node image has a kit stack reading beside its chain (the datagram node's kit verdict predates the current build, the tcp/ node has not run on the kit); a kit run of each would turn the two declarations into rows. The hosted Qzb lane has not run the new key choice. The client images' and the slot node's host tests still write their cells by hand."
+      ],
+      "publishable_decision_summary": "The fixed-memory node images of the T2G board table, the datagram node and the node over tcp/, are held by the stack gate each to a worst chain of its own. They shared one key, zephyr-fixed, with no committed chain, so the gate read their frames and judged their chain against nothing: a change that deepened either chain would not have moved a verdict. The datagram node commits 13,624 bytes and a new key, zephyr-fixed-tcp, commits 13,184; the Qzb lane takes the key from the row's overlays. Committing a chain makes the resource budget require a row or a stated reason for the image, and neither image runs under the kit lane, so both are declared in not_measured_on_the_kit with the reason. One red of the main line is paid in the same change: the asking client's budget row carried chain_misses while its kit reading (2,872) lay under its chain (2,976), which the budget gate refuses.",
+      "publishable_changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: zephyr-fixed commits peak 13,624 and a new row, zephyr-fixed-tcp, commits 13,184, each with the frames of its chain; the asking client's row notes that its budget row no longer carries chain_misses. scripts/run-ci.sh: the Qzb lane checks zephyr-fixed-tcp for a row whose overlays include the tcp overlay and zephyr-fixed otherwise. deploy/resource_budget.json: the two images are declared in not_measured_on_the_kit with their reasons, and the asking client's row drops chain_misses."
+      ],
+      "publishable_verification_bullets": [
+        "Both images were built with west for the T2G board from the tree at ff6a235d9d and read by the gate under their own keys: the datagram node reads 13,624 bytes over 12 frames and the node over tcp/ 13,184 over 6, each passes at its committed figure, and the tcp/ key refuses the datagram image's ELF (13,624 against 13,184), so the two keys do not hold each other. The gate's selftest and population pass, the resource budget gate reads six images held and its selftest passes, run-ci.sh passes bash -n and shellcheck at warning level. The TLS admin row was read on a board build as scripts/kit-lane.sh builds it and reads its committed 9,632 exactly. Not run: Layer Qzb as a lane, so the lane's key choice is read and not executed, and the figures are one host's SDK build."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Neither node image has a kit stack reading beside its chain (the datagram node's kit verdict predates the current build, the tcp/ node has not run on the kit); a kit run of each would turn the two declarations into rows. The hosted Qzb lane has not run the new key choice. The client images' and the slot node's host tests still write their cells by hand."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
