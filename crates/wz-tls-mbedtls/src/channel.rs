@@ -255,6 +255,23 @@ impl IdentitySlot {
         let _ = self.cell.set(id);
         self.cell.get().ok_or(TlsError::State)
     }
+
+    /// Take the program's identity from what was provisioned to it ([`Identity::from_pem`]: the
+    /// certificate chain and its key, PEM) into the slot and lend it. The texts are parsed into the
+    /// channel's own memory, so the caller may wipe them once this returns. A second call is
+    /// [`TlsError::State`], as for [`Self::generate`].
+    pub fn from_pem(
+        &'static self,
+        chain: &CStr,
+        key: &CStr,
+    ) -> Result<&'static Identity, TlsError> {
+        if self.cell.get().is_some() {
+            return Err(TlsError::State);
+        }
+        let id = Identity::from_pem(chain, key)?;
+        let _ = self.cell.set(id);
+        self.cell.get().ok_or(TlsError::State)
+    }
 }
 
 impl Drop for Identity {

@@ -13,8 +13,11 @@
 //! opens a session to this one is known by the zid its key names. Every allocation of the channel
 //! comes from the arena the node starts it on, and none from a heap.
 
+use core::ffi::CStr;
+
 use wz_runtime_coop::ip_stack::IpStack;
 use wz_runtime_coop::ClockSource;
+use wz_runtime_posix::file;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::{PosixTcpDial, PosixTcpListener};
 use wz_runtime_posix::PosixClock;
@@ -67,6 +70,64 @@ pub fn identity_on<const N: usize>(
     IDENTITY
         .generate(c"CN=wz-host-slot-node")
         .map_err(|_| "wz: FAIL - the node could not make its identity")
+}
+
+/// The longest certificate chain a provisioned identity may be, PEM: the node's own certificate
+/// and its intermediates.
+pub const CHAIN_PEM_BYTES: usize = 8 * 1024;
+
+/// The longest private key a provisioned identity may be, PEM.
+pub const KEY_PEM_BYTES: usize = 4 * 1024;
+
+/// Start the channel on `arena` and take the node's identity from the files it was provisioned
+/// with: `chain`, its certificate (and intermediates), and `key`, the certificate's private key,
+/// both PEM. The key is read only when its owner alone may read it, and the text of it is wiped
+/// once the channel holds it. A node told to be one identity that cannot be it stops, with the
+/// file and the reason, and never becomes another.
+///
+/// Out of line, for the stack: the two texts are on this frame only while they are parsed.
+#[inline(never)]
+pub fn identity_from_files<const N: usize>(
+    arena: &'static Arena<N>,
+    chain: &CStr,
+    key: &CStr,
+    say: impl FnOnce(&CStr, &'static str),
+) -> Option<&'static Identity> {
+    if arena.start().is_err() {
+        say(
+            c"the secure channel's arena",
+            "the secure channel could not start",
+        );
+        return None;
+    }
+    let mut chain_text = [0u8; CHAIN_PEM_BYTES];
+    let chain_pem = match file::read_into(chain, &mut chain_text) {
+        Ok(text) => text,
+        Err(why) => {
+            say(chain, why.reason());
+            return None;
+        }
+    };
+    let mut key_text = [0u8; KEY_PEM_BYTES];
+    let identity = match file::read_secret(key, &mut key_text) {
+        Ok(key_pem) => IDENTITY
+            .from_pem(chain_pem, key_pem)
+            .map_err(|_| "it is not the private key of the certificate, or either does not parse"),
+        Err(why) => Err(why.reason()),
+    };
+    // The key's text is the device's secret: it does not stay on the stack once the channel holds
+    // its own copy, or once it was refused.
+    for byte in key_text.iter_mut() {
+        // SAFETY: a live, writable byte of this frame; volatile so the wipe is not elided.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    match identity {
+        Ok(identity) => Some(identity),
+        Err(why) => {
+            say(key, why);
+            None
+        }
+    }
 }
 
 /// The stack of a node at `local` whose links take their buffers from `rx` and `tx`, and whose

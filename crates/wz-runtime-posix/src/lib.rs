@@ -15,7 +15,9 @@
 //!    link is written against; and, under `session-slot`, [`slot`], the stack the slot profile's
 //!    session host is given over it. [`stream`] -- TCP over the same, ([`stream::PosixTcpSocket`]),
 //!    the socket the shared stream link (`wz_runtime_coop::stream_link`) is written against.
-//! 5. [`glue`] -- the console line and the sleep, and [`posix_image_no_heap!`], the image glue
+//! 5. [`file`](mod@file) -- a file read whole into the caller's buffer, and a secret read only when its
+//!    owner alone may read it: a document provisioned to the device apart from the program.
+//! 6. [`glue`] -- the console line and the sleep, and [`posix_image_no_heap!`], the image glue
 //!    (a `critical_section` implementation and the panic handler) of a `#![no_std]`
 //!    `#![no_main]` program.
 //!
@@ -46,6 +48,7 @@ extern crate std;
 extern crate alloc;
 
 pub mod control;
+pub mod file;
 pub mod glue;
 pub mod group;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

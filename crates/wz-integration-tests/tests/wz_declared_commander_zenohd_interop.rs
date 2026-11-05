@@ -24,7 +24,13 @@
 //! - the router the node dials holds the key of the zid granted `close`, and a client of that router
 //!   CLAIMS the zid granted `status`: its `status` is refused and its `close` is decided (the peer is
 //!   not found), so a query that came through a router is the router's, one hop, whatever the asker
-//!   claims.
+//!   claims;
+//! - two declared nodes, each PROVISIONED with an identity (`[identity]`), and neither run before
+//!   their zids are known: `wz_node.py --zid-of` prints each certificate's zid (held here to the zid
+//!   the key names), the target (`slot-commander`) grants `status` to the subject's, and the subject
+//!   (`deploy/nodes/slot-subject.toml`) holds the target by the target's and asks it over a session
+//!   it opens to the target's listener: the status is answered and the close is refused, and each
+//!   node proves the zid the tool printed.
 //!
 //! The locators are fixed in the node, so the legs run one at a time (`--test-threads=1`).
 //!
@@ -48,6 +54,9 @@ use wz_session_core::credential_identity::zid_from_spki_der;
 
 // The node says it listens once its port is bound, and says who it is when it is built.
 // barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-LISTEN {}" for "HOST-WZ-LISTEN tls/127.0.0.1:17477"
+// The node says who it is in parts (`Str("HOST-WZ-CLIENT READY ")` and its zid), which the
+// matcher does not join.
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-CLIENT READY " for "HOST-WZ-CLIENT READY "
 
 /// The declaration the node is built from, with the zids the test replaces.
 const DECLARATION: &str = "deploy/nodes/slot-commander.toml";
@@ -138,32 +147,7 @@ fn built() -> &'static Built {
         let text = text
             .replace(STATUS_ZID, &format!("zid = \"{}\"", granted.zid))
             .replace(CLOSE_ZID, &format!("zid = \"{}\"", router.zid));
-        let file = dir.path().join("slot-commander.toml");
-        std::fs::write(&file, text).expect("write the declaration");
-        let out = dir.path().join("package");
-        let built = Command::new("python3")
-            .arg(root.join("scripts/lib/wz_package.py"))
-            .args([
-                "--platform",
-                "linux-x86_64-glibc",
-                "--artifact",
-                "declared-node",
-            ])
-            .arg("--node-file")
-            .arg(&file)
-            .arg("--out")
-            .arg(&out)
-            .current_dir(&root)
-            .output_bounded()
-            .expect("run wz_package.py");
-        assert!(
-            built.status.success(),
-            "the node did not build from its declaration\n{}{}",
-            String::from_utf8_lossy(&built.stdout),
-            String::from_utf8_lossy(&built.stderr)
-        );
-        let node = out.join("bin/declared-node");
-        assert!(node.is_file(), "no node at {}", node.display());
+        let node = package(dir.path(), "slot-commander", &text);
         Built {
             node,
             granted,
@@ -172,6 +156,39 @@ fn built() -> &'static Built {
             _dir: dir,
         }
     })
+}
+
+/// Write the declaration `text` of the node `id` into `dir` and build the node from it as a
+/// consumer does (`wz_package.py --node-file`): the packaged executable.
+fn package(dir: &Path, id: &str, text: &str) -> PathBuf {
+    let root = repo_root();
+    let file = dir.join(format!("{id}.toml"));
+    std::fs::write(&file, text).expect("write the declaration");
+    let out = dir.join(format!("package-{id}"));
+    let built = Command::new("python3")
+        .arg(root.join("scripts/lib/wz_package.py"))
+        .args([
+            "--platform",
+            "linux-x86_64-glibc",
+            "--artifact",
+            "declared-node",
+        ])
+        .arg("--node-file")
+        .arg(&file)
+        .arg("--out")
+        .arg(&out)
+        .current_dir(&root)
+        .output_bounded()
+        .expect("run wz_package.py");
+    assert!(
+        built.status.success(),
+        "{id} did not build from its declaration\n{}{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let node = out.join("bin/declared-node");
+    assert!(node.is_file(), "no node at {}", node.display());
+    node
 }
 
 /// The PEM block the node printed, once it has printed all of it.
@@ -195,17 +212,22 @@ struct Node {
 impl Node {
     /// Start the node and wait until it listens.
     fn start() -> Self {
+        Self::run(&built().node, "slot-commander (declared node)", LISTENING)
+    }
+
+    /// Start the node `binary` and wait until it says `ready`.
+    fn run(binary: &Path, what: &str, ready: &str) -> Self {
         let out = tempfile::tempfile().expect("a capture for the node");
         let child = ChildGuard::wrap(
-            "slot-commander (declared node)",
-            Command::new(&built().node)
+            what,
+            Command::new(binary)
                 .stdout(Stdio::from(out.try_clone().expect("dup capture")))
                 .stderr(Stdio::from(out.try_clone().expect("dup capture")))
                 .spawn()
                 .expect("spawn the node"),
         );
-        let said = wait_for_substring(&mut out.try_clone().expect("dup"), LISTENING, BUDGET)
-            .unwrap_or_else(|why| panic!("the node never said it listens\n{why}"));
+        let said = wait_for_substring(&mut out.try_clone().expect("dup"), ready, BUDGET)
+            .unwrap_or_else(|why| panic!("{what} never said {ready:?}\n{why}"));
         let zid = said
             .lines()
             .find_map(|line| line.split(READY).nth(1))
@@ -437,4 +459,151 @@ fn through_zenohd_the_commander_is_the_router_and_not_the_client_that_asked() {
          such peer); anything else is not the router being the commander"
     );
     graceful_terminate(router.child_mut(), Duration::from_secs(5));
+}
+
+// ---- two declared nodes, each provisioned with an identity, one commanding the other ----
+
+/// The declaration of the commanding node, with the zid of the node it commands to replace.
+const SUBJECT_DECLARATION: &str = "deploy/nodes/slot-subject.toml";
+/// The zid the subject's declaration names for the node it holds and asks.
+const TARGET_ZID: &str = "c3";
+/// The files the subject's declaration names for its identity, which the test replaces.
+const SUBJECT_CERT: &str = "/etc/wz/slot-subject.crt";
+const SUBJECT_KEY: &str = "/etc/wz/slot-subject.key";
+/// What the subject says once it holds a session and is ready.
+const SUBJECT_READY: &str = "HOST-WZ-CLIENT READY ";
+/// The line the subject says each reply it keeps on.
+const REPLY: &str = "HOST-WZ-REPLY ";
+
+/// Write `party`'s identity as a device is provisioned with it: the certificate, and the key only
+/// its owner may read. Hand back the two paths.
+fn provision(dir: &Path, name: &str, party: &Party) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let (cert, key) = (
+        dir.join(format!("{name}.crt")),
+        dir.join(format!("{name}.key")),
+    );
+    std::fs::write(&cert, &party.key.cert_pem).expect("write the certificate");
+    std::fs::write(&key, &party.key.key_pem).expect("write the key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
+        .expect("make the key its owner's alone");
+    (cert, key)
+}
+
+/// The zid the tool a consumer is given (`wz_node.py --zid-of`) prints for `certificate`.
+fn zid_by_the_tool(certificate: &Path) -> String {
+    let printed = Command::new("python3")
+        .arg(repo_root().join("scripts/lib/wz_node.py"))
+        .arg("--zid-of")
+        .arg(certificate)
+        .output_bounded()
+        .expect("run wz_node.py --zid-of");
+    assert!(
+        printed.status.success(),
+        "wz_node.py --zid-of refused {}: {}",
+        certificate.display(),
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    String::from_utf8_lossy(&printed.stdout).trim().to_owned()
+}
+
+/// The payload a reply the subject kept under a key that holds `tail`, decoded from the hex the
+/// subject prints, once one is there.
+fn kept_reply(out: &str, tail: &str) -> Option<String> {
+    out.lines()
+        .filter(|line| line.starts_with(REPLY) && line.contains(tail))
+        .filter_map(|line| line.split(" hex=").nth(1))
+        .filter(|hex| !hex.is_empty())
+        .last()
+        .map(|hex| {
+            let bytes: Vec<u8> = (0..hex.len() / 2)
+                .map(|at| u8::from_str_radix(&hex[2 * at..2 * at + 2], 16).expect("hex"))
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+}
+
+// wz-proves: none -- the declared node of the fixed-memory profile has no catalog atom: a provisioned identity and the verbs it is granted by are the slot profile's own
+#[test]
+#[ignore = "binary-dep e2e (both nodes are built from their declarations with identities made here); runs via --ignored"]
+fn two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenohd() {
+    let dir = tempfile::tempdir().expect("a directory for the two nodes");
+    let (subject, target, stranger) = (Party::new(), Party::new(), Party::new());
+    let (subject_cert, subject_key) = provision(dir.path(), "subject", &subject);
+    let (target_cert, target_key) = provision(dir.path(), "target", &target);
+
+    // The zids are known before either node runs, from the tool a consumer is given, and they are
+    // the zids the keys name (the rule `wz_session_core::credential_identity` holds).
+    let (subject_zid, target_zid) = (
+        zid_by_the_tool(&subject_cert),
+        zid_by_the_tool(&target_cert),
+    );
+    assert_eq!(
+        (subject_zid.as_str(), target_zid.as_str()),
+        (subject.zid.as_str(), target.zid.as_str()),
+        "wz_node.py --zid-of is not the zid the key names"
+    );
+
+    // The target grants `status` to the subject's zid, and `close` to a zid no node here holds.
+    let root = repo_root();
+    let commander = std::fs::read_to_string(root.join(DECLARATION)).expect("read the declaration");
+    let commander = commander
+        .replace(STATUS_ZID, &format!("zid = \"{subject_zid}\""))
+        .replace(CLOSE_ZID, &format!("zid = \"{}\"", stranger.zid))
+        + &format!(
+            "\n[identity]\ncertificate = {:?}\nprivate_key = {:?}\n",
+            target_cert.display().to_string(),
+            target_key.display().to_string()
+        );
+    // The subject holds the target by the zid the tool printed, and asks it.
+    let asker = std::fs::read_to_string(root.join(SUBJECT_DECLARATION))
+        .expect("read the subject's declaration");
+    assert_eq!(asker.matches(&format!("\"{TARGET_ZID}\"")).count(), 1);
+    let asker = asker
+        .replace(&format!("\"{TARGET_ZID}\""), &format!("\"{target_zid}\""))
+        .replace(&format!("@/{TARGET_ZID}/"), &format!("@/{target_zid}/"))
+        .replace(SUBJECT_CERT, &subject_cert.display().to_string())
+        .replace(SUBJECT_KEY, &subject_key.display().to_string());
+    let target_node = package(dir.path(), "slot-commander", &commander);
+    let subject_node = package(dir.path(), "slot-subject", &asker);
+
+    let mut target_run = Node::run(&target_node, "slot-commander (provisioned)", LISTENING);
+    assert_eq!(
+        target_run.zid, target_zid,
+        "the target proves a zid other than the one its provisioned key names"
+    );
+    let mut subject_run = Node::run(&subject_node, "slot-subject (provisioned)", SUBJECT_READY);
+    assert_eq!(
+        subject_run.zid, subject_zid,
+        "the subject proves a zid other than the one its provisioned key names"
+    );
+
+    // The subject asks over the session it opened to the target's listener: its status is answered
+    // and its close is refused by name.
+    let deadline = std::time::Instant::now() + BUDGET;
+    let (status, close) = loop {
+        let said = subject_run.output();
+        let found = (
+            kept_reply(&said, "/session/status/"),
+            kept_reply(&said, "/session/close/"),
+        );
+        if let (Some(status), Some(close)) = &found {
+            break (status.clone(), close.clone());
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the subject kept no answer to both questions within {BUDGET:?}\n--- subject ---\n{said}\n\
+             --- target ---\n{}",
+            target_run.output()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        status.starts_with("{\"verdict\":\"status\""),
+        "the subject's zid is granted `status` and was not answered: {status}"
+    );
+    assert!(
+        close.contains(CLOSE_REFUSED),
+        "the subject's zid is not granted `close` and was not refused by name: {close}"
+    );
 }

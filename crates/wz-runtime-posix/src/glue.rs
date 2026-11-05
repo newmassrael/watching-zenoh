@@ -29,6 +29,21 @@ pub fn log_args(args: core::fmt::Arguments<'_>) {
     write_all(b"\n");
 }
 
+/// [`log`] of a formatted line written as it is formatted, with no buffer and so no cut: for a line
+/// whose length is the data's (a sample or a reply in hex), which a cut would turn into a line that
+/// says other bytes than the node holds.
+pub fn log_whole(args: core::fmt::Arguments<'_>) {
+    struct Direct;
+    impl Write for Direct {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            write_all(s.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = Direct.write_fmt(args);
+    write_all(b"\n");
+}
+
 /// [`log`] of a line made of [`LogPart`]s: the bytes [`log_args`] writes for the same line, cut at
 /// 256 bytes.
 pub fn log_parts(parts: &[LogPart<'_>]) {

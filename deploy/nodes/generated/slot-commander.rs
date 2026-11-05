@@ -20,6 +20,9 @@ pub const TLS: bool = true;
 /// The secure sessions the node holds at once, which its channel's arena is sized for: a
 /// `tls` router it dials, its peers and the sessions its `tls` listener takes.
 pub const SECURE_SESSIONS: usize = 2;
+/// The files of the identity the device was provisioned with (its certificate chain and the
+/// certificate's private key, PEM), or `None` for a node that makes its own key when it starts.
+pub const IDENTITY: Option<(&core::ffi::CStr, &core::ffi::CStr)> = None;
 /// Whether the node names a commander: it binds the lifecycle verbs in band (decision D12),
 /// which the node's `verbs` feature must be built for.
 pub const VERBS: bool = true;

@@ -1125,6 +1125,23 @@ the time of day (`wall-clock`, in `may_require`): the pinned TF-PSA-Crypto resee
 random generator with it, and the node never forks. The witness is
 `wz_declared_commander_zenohd_interop.rs` (Layer Z `Zcmd`).
 
+A node with a secure channel made its key when it started, so its zid was known only once it ran and
+no grant written before could name it. A declaration may now state the node's identity:
+`[identity]` with `certificate` and `private_key`, the absolute paths of the files the device is
+provisioned with (the certificate chain and the certificate's private key, PEM). The node reads them
+when it starts, takes the key only when its owner alone may read it (the rule `ssh` holds a private
+key to), wipes the key's text once the channel holds it, and stops with the file and the reason when
+either cannot be used: a node told to be one identity never becomes another. The files are read at
+run time, not compiled in, because the key is the device's secret and the image is a file that is
+packaged, hashed and handed around; a node that states an identity therefore requires `filesystem`.
+The zid such a node proves is the first 16 bytes of SHA-256 over its certificate's
+`SubjectPublicKeyInfo`, spelled as zenoh spells a zid, and `wz_node.py --zid-of <certificate>`
+prints it before the node runs, so a consumer does not write the rule again; the vocabulary states
+the rule and the tool (`identity`). The witness's fourth leg provisions two declared nodes, writes
+each one's zid, as the tool printed it, into the other's declaration, and runs them: the subject
+(`slot-subject`) holds the target by its zid over the target's `tls` listener and is answered the
+status it is granted and refused the close it is not, and each node proves the zid the tool printed.
+
 ## 5c. The workload: what a node or a driver sends over time (owner, 2026-10-26)
 
 **Decision (owner, 2026-10-26: cost ignored, the textbook one).** A node declaration says what is

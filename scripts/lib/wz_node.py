@@ -15,6 +15,9 @@ it runs on, held to what the target profile can build.
     wz_node.py --validate FILE          validate a declaration that is not in the registry (`<id>.toml`)
     wz_node.py --vocabulary TARGET      print, as JSON, what the target builds: the declaration schema,
                                         each word's keys and bounds, the budgets and the policies
+    wz_node.py --zid-of PEM             print the zid the key of a certificate (the first of a chain)
+                                        or a public key names, as zenoh spells it: the zid a node
+                                        provisioned with that identity proves (`[identity]`)
     wz_node.py --selftest
 
 A node is a declaration and not an argument vector. This module is the first half of turning one
@@ -79,6 +82,12 @@ not build the node.
                                (`"on"` or `"off"` for a bool, one of its choices otherwise): the
                                behaviour the node is built with where upstream's is not the one it
                                wants; a policy left out is upstream's
+    [identity]                 certificate = "<absolute path>" and private_key = "<absolute path>":
+                               the files of the node's certificate chain and its private key, PEM,
+                               provisioned to the device and read when it starts (a key the group
+                               or others may read is refused); the node's zid is the one that key
+                               names, which `--zid-of` prints before the node runs. Without it a
+                               node with a secure channel makes its own key when it starts
 
 ## What it refuses, and why that is an exit and not a skip
 
@@ -118,6 +127,7 @@ from documents; the heap runtime is not a target here.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import pathlib
@@ -153,6 +163,8 @@ DECLARATION_SCHEMA = 1
 #      `decimal`, `text` and `hex`, and a `with` that lists its values (`in`).
 #   3: the value `verbs` became `words` (`choices`, each with its line in `means`), and an endpoint
 #      role states the `conditions` the validator holds it to, each naming the text of its refusal.
+#      Added beside it since (the number stays): the `identity` section (its keys, what it requires,
+#      the rule of its zid and the tool that computes it).
 VOCABULARY_SCHEMA = 3
 
 # The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
@@ -338,7 +350,86 @@ ENTITY_KINDS = tuple(ENTITY_SHAPES)
 NODE_KEYS = {"id", "help", "target"}
 ENDPOINT_KEYS = {"role"} | {k for shape in ENDPOINT_SHAPES.values() for k in shape["keys"]}
 ENTITY_KEYS = {"kind"} | {k for shape in ENTITY_SHAPES.values() for k in shape["keys"]}
-TOP_KEYS = {"schema", "node", "endpoint", "entity", "sample", "limits", "policy", "allow"}
+TOP_KEYS = {"schema", "node", "endpoint", "entity", "sample", "limits", "policy", "allow", "identity"}
+
+# A node's identity, provisioned to the device apart from the program (`[identity]`): the files of
+# its certificate and of the certificate's private key, read when the node starts. The key of a
+# secure channel is the node's zid (decision D1), so a node that names its files has a zid known
+# before it runs, which another node's grant can name (`--zid-of`); a node that names none makes a
+# key when it starts, and its zid is known only once it has. Files and not the image's bytes: the
+# key is the device's secret, and an image is a file that is packaged, hashed and handed around.
+IDENTITY_KEYS = {
+    "certificate": "the file of the node's certificate and then its intermediates, PEM: an absolute "
+                   "path on the device",
+    "private_key": "the file of the certificate's private key, PEM, which the node reads only when "
+                   "its owner alone may read it: an absolute path on the device",
+}
+# What the zid of an identity is, in the words the vocabulary states it in, and the tool that
+# computes it (so a consumer does not write the rule again).
+IDENTITY_ZID = ("the first 16 bytes of SHA-256 over the certificate's SubjectPublicKeyInfo (DER), "
+                "spelled as zenoh spells a zid: lowercase hex of those bytes read as a little-endian "
+                "integer")
+IDENTITY_ZID_TOOL = "python3 scripts/lib/wz_node.py --zid-of <certificate or public key, PEM>"
+IDENTITY_REFUSED_INSECURE = ("identity: a node's identity is the key its secure channel presents, "
+                             "and the node declares no `tls` router, peer or listener")
+
+
+def identity_problems(data: dict) -> list[str]:
+    """Why the node's `[identity]` is not one it can take (any input; none when it states none)."""
+    ident = data.get("identity")
+    if ident is None:
+        return []
+    if not isinstance(ident, dict):
+        return ["identity: [identity] is a table of certificate and private_key"]
+    out = [f"identity: `{extra}` is not a key of [identity]" for extra in sorted(set(ident) - set(IDENTITY_KEYS))]
+    for key in IDENTITY_KEYS:
+        value = ident.get(key)
+        if not isinstance(value, str) or not value.startswith("/") or any(c in value for c in "\0\n\"\\"):
+            out.append(f"identity: {key} is {value!r}, not an absolute path on the device")
+    if not any(is_secure(ep) for ep in data.get("endpoint", []) if isinstance(data.get("endpoint"), list)):
+        out.append(IDENTITY_REFUSED_INSECURE)
+    return out
+
+
+def der_element(der: bytes, at: int) -> tuple[int, int, int]:
+    """The DER element at `at`: its tag, where its contents start and where they end."""
+    tag, length, at = der[at], der[at + 1], at + 2
+    if length & 0x80:
+        count = length & 0x7F
+        length, at = int.from_bytes(der[at:at + count], "big"), at + count
+    if at + length > len(der):
+        raise ValueError("the DER runs past its end")
+    return tag, at, at + length
+
+
+def spki_of(pem: str) -> bytes:
+    """The DER `SubjectPublicKeyInfo` of a PEM certificate (its own, the first of a chain) or a PEM
+    public key."""
+    match = re.search(r"-----BEGIN (CERTIFICATE|PUBLIC KEY)-----(.*?)-----END \1-----", pem, re.S)
+    if match is None:
+        raise ValueError("no PEM certificate or public key in it")
+    der = base64.b64decode("".join(match[2].split()))
+    if match[1] == "PUBLIC KEY":
+        return der
+    _, tbs_at, _ = der_element(der, 0)  # Certificate
+    _, at, _ = der_element(der, tbs_at)  # TBSCertificate
+    tag, _, end = der_element(der, at)
+    if tag == 0xA0:  # [0] version
+        at = end
+    for _ in range(5):  # serialNumber, signature, issuer, validity, subject
+        at = der_element(der, at)[2]
+    tag, _, end = der_element(der, at)
+    if tag != 0x30:
+        raise ValueError("the certificate's subjectPublicKeyInfo is not where X.509 puts it")
+    return der[at:end]
+
+
+def zid_of(pem: str) -> str:
+    """The zid the key of a PEM certificate or public key names (`IDENTITY_ZID`), as zenoh spells
+    it: what `wz_session_core::credential_identity::zid_from_spki_der` computes, and what the node
+    prints once it holds the key."""
+    digest = hashlib.sha256(spki_of(pem)).digest()[:16]
+    return format(int.from_bytes(digest, "little"), "x")
 
 
 def bound(target: dict, value: int | str) -> int:
@@ -733,6 +824,7 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                            "224.0.0.0 to 239.255.255.255")
     if held.get("commander") and not any(is_secure(ep) for ep in endpoints):
         out.append(condition_refusal(COMMANDER_CONDITIONS, "secure_channel"))
+    out += identity_problems(data)
     if "MAX_PEER_NODES" in data.get("limits", {}) and held.get("peer", 0) > values["MAX_PEER_NODES"]:
         out.append(f"limits: MAX_PEER_NODES is {values['MAX_PEER_NODES']}, the declaration holds "
                    f"{held['peer']} peers by their zid")
@@ -1188,6 +1280,11 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
         "/// The secure sessions the node holds at once, which its channel's arena is sized for: a",
         "/// `tls` router it dials, its peers and the sessions its `tls` listener takes.",
         f"pub const SECURE_SESSIONS: usize = {secure_sessions};",
+        "/// The files of the identity the device was provisioned with (its certificate chain and the",
+        "/// certificate's private key, PEM), or `None` for a node that makes its own key when it starts.",
+        "pub const IDENTITY: Option<(&core::ffi::CStr, &core::ffi::CStr)> = "
+        + (f"Some((c{rust_string(data['identity']['certificate'])}, "
+           f"c{rust_string(data['identity']['private_key'])}));" if "identity" in data else "None;"),
     ] if secure else []
     querier = [
         "/// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each",
@@ -1382,10 +1479,12 @@ def view_of(name: str, data: dict, sha: str, generated: pathlib.Path, decl: dict
         facilities.add("multicast")
     facilities = sorted(facilities)
     # The node's configuration is the declaration, so what it asks for at start is known: the
-    # target's own needs and every endpoint's socket. A group's interface listing and the secure
-    # channel's time of day are the facilities a run may or may not ask for.
+    # target's own needs, every endpoint's socket, and the files of a provisioned identity, which it
+    # reads when it starts. A group's interface listing and the secure channel's time of day are the
+    # facilities a run may or may not ask for.
     target = TARGETS[data["node"]["target"]]
-    requires = sorted(set(target["os_always"]) | set(facilities))
+    provisioned = {"filesystem"} if "identity" in data else set()
+    requires = sorted(set(target["os_always"]) | set(facilities) | provisioned)
     grouped = any(ep["role"] == "multicast" for ep in data["endpoint"])
     secure = any(is_secure(ep) for ep in data["endpoint"])
     may = (set(target["group_may"]) if grouped else set()) | (set(target["tls_may"]) if secure else set())
@@ -1469,6 +1568,10 @@ def vocabulary(target_id: str, decl: dict) -> dict:
         "group": {"carries": sorted(target["group_kinds"]), "refused": dict(sorted(target["group_refused"].items()))},
         "limits": dict(sorted(limits.items())),
         "policies": policies,
+        "identity": {"is": "the table `[identity]`: the files the device was provisioned with, read "
+                           "when the node starts; without it the node makes its own key then",
+                     "keys": dict(IDENTITY_KEYS), "requires": "a `tls` router, peer or listener",
+                     "zid": IDENTITY_ZID, "zid_tool": IDENTITY_ZID_TOOL},
     }
 
 
@@ -2346,6 +2449,58 @@ document_bytes = 8
     short_keys = head + tls_listen + toml_item("endpoint", least_commander) + "\n[limits]\nMAX_KEYEXPR_BYTES = 64\n"
     expect("a commander's node that states keys too short for its verbs is refused, and says how long",
            any(f"up to {VERB_KEY_BYTES} bytes" in p for p in problems(short_keys)))
+    # A provisioned identity: its files are read at start, so the node asks for the filesystem, and
+    # its zid is the one the certificate's key names. The vector's certificate was made with
+    # OpenSSL and its SPKI digested by `openssl pkey -pubin -outform DER | sha256sum`
+    # (da12c709...), an oracle that shares no code with `zid_of`.
+    vector = ("-----BEGIN CERTIFICATE-----\n"
+              "MIIBhjCCASugAwIBAgIUdAQiQTC/Pn8VvLxRjbCXC4tHs54wCgYIKoZIzj0EAwIw\n"
+              "GDEWMBQGA1UEAwwNd3otemlkLXZlY3RvcjAeFw0yNjExMDUwNjMyMjlaFw0yNjEx\n"
+              "MDYwNjMyMjlaMBgxFjAUBgNVBAMMDXd6LXppZC12ZWN0b3IwWTATBgcqhkjOPQIB\n"
+              "BggqhkjOPQMBBwNCAAQ2WJdVQxtigaIm7d3uLzZQxxj3QHp3Y9B1POg+HghVO+Kh\n"
+              "LpIMoEZwoIDBpdkFakLoJZHr24NHcQVkuTPslegRo1MwUTAdBgNVHQ4EFgQUbER9\n"
+              "yyMlNvzKe9Br2oeL/qhXTr8wHwYDVR0jBBgwFoAUbER9yyMlNvzKe9Br2oeL/qhX\n"
+              "Tr8wDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEA3cx2L4by1pfz\n"
+              "LhCewY9lkCNTFkmSmZKux/EmL0dO3XICIQD8TWVTHN/8d7nWHIOOrA6Uxn1O1j2c\n"
+              "C2Qqo3Asm4eoUA==\n"
+              "-----END CERTIFICATE-----\n")
+    vector_key = ("-----BEGIN PUBLIC KEY-----\n"
+                  "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENliXVUMbYoGiJu3d7i82UMcY90B6\n"
+                  "d2PQdTzoPh4IVTvioS6SDKBGcKCAwaXZBWpC6CWR69uDR3EFZLkz7JXoEQ==\n"
+                  "-----END PUBLIC KEY-----\n")
+    expect("the zid of a certificate is the first 16 bytes of SHA-256 over its SPKI, spelled as zenoh does",
+           hashlib.sha256(spki_of(vector)).hexdigest().startswith("da12c70926a3b068623e31cd39394809")
+           and zid_of(vector) == "9483939cd313e6268b0a32609c712da")
+    expect("a certificate and its public key name one zid", zid_of(vector_key) == zid_of(vector))
+    try:
+        zid_of("not a certificate")
+        named = True
+    except ValueError:
+        named = False
+    expect("text with no certificate names no zid", not named)
+    expect("the vocabulary states the rule of the zid and the tool that computes it",
+           vocab["identity"]["zid"] == IDENTITY_ZID and "--zid-of" in vocab["identity"]["zid_tool"]
+           and sorted(vocab["identity"]["keys"]) == ["certificate", "private_key"])
+    provisioned_text = (head + tls_listen + toml_item("endpoint", least_commander)
+                        + '\n[identity]\ncertificate = "/etc/wz/n.crt"\nprivate_key = "/etc/wz/n.key"\n')
+    provisioned = wz_config.read_decl_toml(provisioned_text)
+    expect("a node with a secure channel and a provisioned identity is valid", problems(provisioned_text) == [])
+    expect("its generated file names the identity's files, and a node that names none makes its key",
+           'pub const IDENTITY: Option<(&core::ffi::CStr, &core::ffi::CStr)> = '
+           'Some((c"/etc/wz/n.crt", c"/etc/wz/n.key"));' in emit("n", provisioned, sha)
+           and "= None;" in emit("n", commanding, sha))
+    expect("a provisioned node reads its identity from the filesystem when it starts",
+           "filesystem" in view_of("n", provisioned, sha, pathlib.Path("n.rs"), decl)["requires"]
+           and "filesystem" not in view_of("n", commanding, sha, pathlib.Path("n.rs"), decl)["requires"])
+    insecure = SAMPLE + '\n[identity]\ncertificate = "/etc/wz/n.crt"\nprivate_key = "/etc/wz/n.key"\n'
+    expect("an identity on a node with no secure channel is refused",
+           IDENTITY_REFUSED_INSECURE in problems(insecure))
+    relative = provisioned_text.replace('"/etc/wz/n.key"', '"n.key"')
+    expect("an identity file that is not an absolute path is refused, by the key",
+           any(p.startswith("identity: private_key is 'n.key'") for p in problems(relative)))
+    expect("an identity table with an unknown key is refused",
+           any("`password` is not a key of [identity]" in p
+               for p in problems(provisioned_text + 'password = "x"\n')))
     commanded_view = view_of("n", commanding, sha, pathlib.Path("n.rs"), decl)
     expect("a commander's node resolves for a build: a commander is no place and opens no socket",
            commanded_view["facilities"] == ["sockets-tcp"] and "verbs" in commanded_view["features"]
@@ -2428,6 +2583,13 @@ def main(argv: list[str]) -> int:
             return 1
         print(f"wz-node: {name} is a valid {data['node']['target']} node (declaration "
               f"{hashlib.sha256(blob).hexdigest()})")
+        return 0
+    if len(argv) == 2 and argv[0] == "--zid-of":
+        try:
+            print(zid_of(pathlib.Path(argv[1]).read_text(encoding="utf-8")))
+        except (ValueError, OSError, IndexError) as err:
+            print(f"wz-node: REFUSED -- {argv[1]}: {err}", file=sys.stderr)
+            return 1
         return 0
     if len(argv) == 2 and argv[0] == "--vocabulary":
         if argv[1] not in TARGETS:

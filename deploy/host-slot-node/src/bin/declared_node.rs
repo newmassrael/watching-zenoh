@@ -31,7 +31,7 @@ use host_slot_node_glue::tuning::{
     BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN_ACTIVE, RX, TASK_BYTES_ACTIVE, TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
-use wz_runtime_posix::glue::{log, log_args};
+use wz_runtime_posix::glue::{log, log_args, log_whole};
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
 #[cfg(not(feature = "tls"))]
@@ -73,8 +73,6 @@ mod declared {
 
 #[cfg(feature = "get")]
 use declared::QUERIED;
-#[cfg(feature = "tls")]
-use declared::SECURE_SESSIONS;
 use declared::{
     ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS,
     LISTEN_TLS, MIRRORED, MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS,
@@ -85,6 +83,8 @@ use declared::{
 use declared::{COMMANDERS_CLOSE, COMMANDERS_OPEN, COMMANDERS_RESET, COMMANDERS_STATUS};
 #[cfg(feature = "multicast")]
 use declared::{GROUP, GROUP_ADDR, GROUP_PORT, GROUP_TTL, MEMBERS};
+#[cfg(feature = "tls")]
+use declared::{IDENTITY, SECURE_SESSIONS};
 #[cfg(feature = "listen")]
 use declared::{LISTEN_ADDR, LISTEN_PORT};
 #[cfg(feature = "verbs")]
@@ -624,26 +624,34 @@ impl NodeApp for Report {
 
 /// One cell, said on one line whatever its bytes are: `<tag> <key> put len= kept= seq= hex=`, or
 /// `<tag> <key> del seq=` for a delete.
+///
+/// The line is as long as the cell's bytes make it, so it is written whole as it is formatted
+/// (`log_whole`): the console's line of 256 bytes would cut the hex of any payload past about a
+/// hundred bytes, and a lab would read other bytes than the node keeps.
 fn say_cell(tag: &str, sample: &Latest<'_>) {
-    let mut hex = [0u8; 2 * SAMPLE_MAX];
-    for (at, byte) in sample.payload.iter().enumerate() {
-        hex[2 * at] = b"0123456789abcdef"[usize::from(byte >> 4)];
-        hex[2 * at + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
-    }
     match sample.kind {
-        SampleKind::Put => log_args(format_args!(
+        SampleKind::Put => log_whole(format_args!(
             "{} {} put len={} kept={} seq={} hex={}",
             tag,
             sample.key,
             sample.received_len,
             sample.payload.len(),
             sample.sequence,
-            core::str::from_utf8(&hex[..2 * sample.payload.len()]).unwrap_or("")
+            Hex(sample.payload)
         )),
         SampleKind::Del => log_args(format_args!(
             "{} {} del seq={}",
             tag, sample.key, sample.sequence
         )),
+    }
+}
+
+/// Bytes in lowercase hex, two digits a byte, formatted where they are written.
+struct Hex<'a>(&'a [u8]);
+
+impl core::fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
     }
 }
 
@@ -666,17 +674,30 @@ fn run() -> i32 {
         }
     };
     // Over the secure channel the node's zid is the one its key names (decision D1), and its
-    // certificate is printed for the router's operator to pin.
+    // certificate is printed for the router's operator to pin. The key is the one the device was
+    // provisioned with when the declaration names its files, so the zid is known before the node
+    // runs (and another node's grant can name it); a node that names none makes its own.
     #[cfg(feature = "tls")]
-    let (channel_identity, zid) = match tls::identity_on(&TLS_ARENA) {
+    let made = match IDENTITY {
+        Some((chain, key_file)) => {
+            tls::identity_from_files(&TLS_ARENA, chain, key_file, |file, why| {
+                log_args(format_args!(
+                    "wz: FAIL - the node's identity is not in {}: {}",
+                    file.to_str().unwrap_or("its file"),
+                    why
+                ))
+            })
+            .ok_or(())
+        }
+        None => tls::identity_on(&TLS_ARENA).map_err(log),
+    };
+    #[cfg(feature = "tls")]
+    let (channel_identity, zid) = match made {
         Ok(identity) => {
             identity.certificate_pem(log_args);
             (identity, identity.zid())
         }
-        Err(why) => {
-            log(why);
-            return 2;
-        }
+        Err(()) => return 2,
     };
 
     let Some(identity) = NodeIdentity::new(&zid, key) else {
