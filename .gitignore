@@ -44,6 +44,15 @@ crates/wz-fuzz/corpus/
 crates/wz-fuzz/artifacts/
 crates/wz-fuzz/coverage/
 vendor/sce/target/
+# Every standalone workspace under deploy/ keeps its cargo output local, under
+# `target/` or a `target-<variant>/` of its own (Q.6's and Q.frt2's reason
+# below). The class is stated here because a list of the workspaces known when
+# each was added missed two: `mcu-link-noalloc-probe` and
+# `zephyr-pico-compare/rust` wrote untracked output into the tree, and a fleet
+# check of Layer Q refused it (a check must not change a machine's tree). The
+# lines that follow stay as the record of why each workspace exists.
+deploy/**/target/
+deploy/**/target-*/
 # R311be — deploy/mcu-qemu-demo is a standalone workspace
 # (cross-compile to thumbv7m-none-eabi); its target/ is build
 # output identical in policy to crates/target/.
