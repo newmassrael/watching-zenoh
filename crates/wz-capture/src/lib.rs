@@ -4190,7 +4190,9 @@ impl FlowDissection {
                 // stream must still hold every stretch (and its key); where it
                 // does not, or the stretches do not add up to the payload, the
                 // list logs a copy of it, as it does a recovered datagram's. The
-                // end is kept apart either way.
+                // end is kept apart either way. The payload is handed in on every
+                // door: a unit no entry can stand for is kept whole, and keeps a
+                // copy of it beside its rows, on whichever door it came through.
                 Keep::Entries => {
                     let assembler = self.assembler(direction);
                     let joined: usize = spans.iter().map(|span| span.len as usize).sum();
@@ -4200,14 +4202,12 @@ impl FlowDissection {
                             assembler.holds(span.needs_from(), span.at + span.len as usize)
                         });
                     match (in_stream, spans.as_slice()) {
-                        (true, [one]) => self.frames.push_datagram_in_stream(
-                            unit,
-                            one.at,
-                            payload.len(),
-                            one.masked,
-                            handshake,
-                        ),
-                        (true, _) => self.frames.push_datagram_in_frames(unit, spans, handshake),
+                        (true, [one]) => self
+                            .frames
+                            .push_datagram_in_stream(unit, one.at, &payload, one.masked, handshake),
+                        (true, _) => self
+                            .frames
+                            .push_datagram_in_frames(unit, spans, &payload, handshake),
                         (false, _) => self.frames.push_datagram(unit, &payload, None, handshake),
                     }
                 }

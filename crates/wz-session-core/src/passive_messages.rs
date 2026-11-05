@@ -169,7 +169,10 @@ pub struct MessageList {
     #[cfg(feature = "reassembly")]
     chains: ChainFacts,
     /// The bytes of each datagram unit the list keeps WHOLE, by the
-    /// produced-index of its first row, with how many rows it holds.
+    /// produced-index of its first row, with how many rows it holds: a unit of
+    /// a capture's datagrams, or one a layer below framed in a stream (a
+    /// WebSocket message), which come through different doors and are kept
+    /// whole alike.
     ///
     /// A unit an entry cannot stand for (a record inadmissible on its link, a
     /// coordinate past an entry's fields) keeps its rows as decoded frames, and
@@ -420,20 +423,13 @@ impl MessageList {
         in_container: Option<usize>,
         handshake: LinkHandshake,
     ) {
-        let first = self.produced;
-        let rows = unit.frames.len() as u64;
-        let logged = self.push_logged(
+        self.push_logged(
             unit,
-            bytes.len(),
+            bytes,
             |log| log.place(bytes, in_container),
             None,
             handshake,
         );
-        // A unit kept whole keeps its bytes beside its rows, for the reader
-        // that walks a row's tree ([`Self::whole_units`]).
-        if !logged && rows > 0 {
-            self.whole_units.insert(first, (rows, bytes.into()));
-        }
     }
 
     /// [`Self::push_datagram`] for a unit whose bytes are the stream's own: they
@@ -451,11 +447,16 @@ impl MessageList {
     /// (the masking key is the last of the frame's header), and the list unmasks
     /// them as it reads. A message joined out of fragments stands nowhere in the
     /// stream and is [`Self::push_datagram`]'s.
+    ///
+    /// `payload` is the unit as it was read (unmasked). The list keeps a copy
+    /// of it only where it keeps the unit whole, which is when an entry cannot
+    /// stand for it, and hands it out as the unit's bytes
+    /// ([`Messages::unit_bytes`]); otherwise it reads only its length.
     pub fn push_datagram_in_stream(
         &mut self,
         unit: ReadUnit,
         at: usize,
-        len: usize,
+        payload: &[u8],
         masked: bool,
         handshake: LinkHandshake,
     ) {
@@ -464,7 +465,7 @@ impl MessageList {
         } else {
             LogPlace::Stream(at)
         };
-        self.push_logged(unit, len, |_| place, None, handshake);
+        self.push_logged(unit, payload, |_| place, None, handshake);
     }
 
     /// [`Self::push_datagram_in_stream`] for a unit joined out of several
@@ -475,34 +476,47 @@ impl MessageList {
     /// that lives for the read, and is told before the stream lets go of the
     /// first of them, as for a unit that is one stretch.
     ///
-    /// `spans` must not be empty. A unit of one stretch is
+    /// `spans` must not be empty, and their lengths add up to `payload`'s, the
+    /// unit as it was read (joined and unmasked), which the list keeps as
+    /// [`Self::push_datagram_in_stream`] says. A unit of one stretch is
     /// [`Self::push_datagram_in_stream`]'s.
     pub fn push_datagram_in_frames(
         &mut self,
         unit: ReadUnit,
         spans: Vec<StreamSpan>,
+        payload: &[u8],
         handshake: LinkHandshake,
     ) {
         let Some(first) = spans.first() else {
             unreachable!("a unit joined out of stretches has one");
         };
+        debug_assert_eq!(
+            spans.iter().map(|span| span.len as usize).sum::<usize>(),
+            payload.len(),
+            "the stretches are the payload"
+        );
         let place = LogPlace::Frames(first.needs_from());
-        let len = spans.iter().map(|span| span.len as usize).sum();
-        self.push_logged(unit, len, |_| place, Some(spans), handshake);
+        self.push_logged(unit, payload, |_| place, Some(spans), handshake);
     }
 
-    /// The body of all three: the unit's `len` bytes are at the place `place`
-    /// gives the log, and its records are read again from there. `spans` are the
-    /// stretches of a [`LogPlace::Frames`] unit, which the index keeps. `false`
-    /// where the unit is kept whole instead and logs nothing.
+    /// The body of all three: the unit's bytes, `bytes` as it was read, are at
+    /// the place `place` gives the log, and its records are read again from
+    /// there. `spans` are the stretches of a [`LogPlace::Frames`] unit, which
+    /// the index keeps.
+    ///
+    /// A unit an entry cannot stand for is kept whole instead and logs nothing.
+    /// It keeps `bytes` beside its rows ([`Self::whole_units`]), whichever of
+    /// the three doors it came through: every unit of a list then answers
+    /// [`Messages::unit_bytes`] alike, logged or kept whole.
     fn push_logged(
         &mut self,
         unit: ReadUnit,
-        len: usize,
+        bytes: &[u8],
         place: impl FnOnce(&mut UnitLog) -> LogPlace,
         spans: Option<Vec<StreamSpan>>,
         handshake: LinkHandshake,
-    ) -> bool {
+    ) {
+        let len = bytes.len();
         let ReadUnit { start, frames } = unit;
         // A unit a layer below framed (a WebSocket message) says where its bytes
         // end in the stream it was carried in, which its own bytes cannot say;
@@ -515,8 +529,12 @@ impl MessageList {
                     .all(|frame| UnitRow::can_hold_logged(frame) && frame.wire_end == wire_end)
         });
         let Some(start) = readable else {
+            if !frames.is_empty() {
+                self.whole_units
+                    .insert(self.produced, (frames.len() as u64, bytes.into()));
+            }
             self.append(frames);
-            return false;
+            return;
         };
         let produced = self.produced;
         for (k, frame) in frames.iter().enumerate() {
@@ -537,7 +555,6 @@ impl MessageList {
             spans,
         );
         self.produced += frames.len() as u64;
-        true
     }
 
     /// The list's index, made of the rows it keeps whole if it has none yet:
@@ -2212,8 +2229,10 @@ impl<'a> Messages<'a> {
     /// message again from (open-debt item 924, D8), or the bytes the list
     /// keeps beside a datagram unit it keeps whole, whose rows are decoded
     /// frames that do not carry the bytes they were read from.
-    /// `None` for any other message the list keeps whole, for one whose source
-    /// no longer holds them, and past the end.
+    /// `None` for any other message the list keeps whole (a stream's unit, and
+    /// one a stream's release kept whole, whose bytes the stream then let go:
+    /// the retention the release is for), for one whose source no longer holds
+    /// them, and past the end.
     pub fn unit_bytes(&self, index: usize) -> Option<Cow<'a, [u8]>> {
         let list: &'a MessageList = self.list;
         let source: &'a dyn UnitBytes = self.source;
@@ -3332,16 +3351,29 @@ mod tests {
         handshake: LinkHandshake,
         container: Option<&[u8]>,
     ) -> (MessageList, MessageList) {
-        logged_and_whole_ending(units, handshake, container, |_| None)
+        logged_and_whole_ending(units, handshake, container, |_| None, |_| false)
+    }
+
+    /// The records of a unit no entry can stand for: each one inadmissible on
+    /// its link, as the session writes it of a record its link does not carry.
+    /// Both lists of a pair are given the same, so the one that logs keeps the
+    /// unit whole and the pair still reads alike.
+    fn refuse(frames: &mut [PassiveFrame]) {
+        for frame in frames {
+            frame.inadmissible_on_link = true;
+        }
     }
 
     /// [`logged_and_whole`], with the records of the unit of packet `k` given
-    /// the end `end(k)` says, as a layer below that framed the unit does.
+    /// the end `end(k)` says, as a layer below that framed the unit does, and
+    /// the unit of packet `k` one no entry can stand for where `refused(k)`
+    /// ([`refuse`]).
     fn logged_and_whole_ending(
         units: &[Vec<u8>],
         handshake: LinkHandshake,
         container: Option<&[u8]>,
         end: impl Fn(usize) -> Option<usize>,
+        refused: impl Fn(usize) -> bool,
     ) -> (MessageList, MessageList) {
         let mut logging = crate::passive::PassiveSession::new();
         let mut keeping = crate::passive::PassiveSession::new();
@@ -3361,11 +3393,17 @@ mod tests {
                 for frame in &mut read.frames {
                     frame.wire_end = end(packet);
                 }
+                if refused(packet) {
+                    refuse(&mut read.frames);
+                }
                 logged.push_datagram(read, unit, container.map(|_| place), handshake);
             }
             let mut kept = keeping.next_datagram_on(direction, unit, packet, handshake);
             for frame in &mut kept {
                 frame.wire_end = end(packet);
+            }
+            if refused(packet) {
+                refuse(&mut kept);
             }
             whole.append(kept);
             place += unit.len();
@@ -3438,11 +3476,13 @@ mod tests {
     /// logging list keeps each by its place in the stream of its direction, which
     /// holds them back to back. With `masked`, the stream holds each as a masked
     /// frame's tail does: a four-byte key (a different one for each unit) and the
-    /// unit XORed with it. Returns both lists and the two streams.
+    /// unit XORed with it. The unit of packet `k` is one no entry can stand for
+    /// where `refused(k)` ([`refuse`]). Returns both lists and the two streams.
     fn streamed_and_whole(
         units: &[Vec<u8>],
         handshake: LinkHandshake,
         masked: bool,
+        refused: impl Fn(usize) -> bool,
     ) -> (MessageList, MessageList, TwoStreams) {
         let mut logging = crate::passive::PassiveSession::new();
         let mut keeping = crate::passive::PassiveSession::new();
@@ -3457,25 +3497,30 @@ mod tests {
             let seat = usize::from(direction == Direction::B);
             let _ = logging.observe_at_nanos(1_000 * packet as u64);
             let _ = keeping.observe_at_nanos(1_000 * packet as u64);
-            if masked {
+            let at = if masked {
                 let key = [packet as u8 | 1, 0x5A, 0xC3 ^ packet as u8, 0x0F];
                 streams[seat].extend_from_slice(&key);
                 let at = streams[seat].len();
                 streams[seat].extend(unit.iter().zip(key.iter().cycle()).map(|(b, k)| b ^ k));
-                if let Some(read) =
-                    logging.next_datagram_unit_on(direction, unit, packet, handshake)
-                {
-                    streamed.push_datagram_in_stream(read, at, unit.len(), true, handshake);
+                at
+            } else {
+                let at = streams[seat].len();
+                streams[seat].extend_from_slice(unit);
+                at
+            };
+            if let Some(mut read) =
+                logging.next_datagram_unit_on(direction, unit, packet, handshake)
+            {
+                if refused(packet) {
+                    refuse(&mut read.frames);
                 }
-                whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
-                continue;
+                streamed.push_datagram_in_stream(read, at, unit, masked, handshake);
             }
-            let at = streams[seat].len();
-            streams[seat].extend_from_slice(unit);
-            if let Some(read) = logging.next_datagram_unit_on(direction, unit, packet, handshake) {
-                streamed.push_datagram_in_stream(read, at, unit.len(), false, handshake);
+            let mut kept = keeping.next_datagram_on(direction, unit, packet, handshake);
+            if refused(packet) {
+                refuse(&mut kept);
             }
-            whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
+            whole.append(kept);
         }
         (streamed, whole, TwoStreams(streams))
     }
@@ -3498,7 +3543,8 @@ mod tests {
             (LinkHandshake::Present, true),
             (LinkHandshake::Absent, true),
         ] {
-            let (mut streamed, whole, source) = streamed_and_whole(&units, handshake, masked);
+            let (mut streamed, whole, source) =
+                streamed_and_whole(&units, handshake, masked, |_| false);
             assert!(
                 matches!(streamed.rows, Store::Indexed(_)),
                 "the units became entries"
@@ -3540,10 +3586,12 @@ mod tests {
     /// one frame and its second in another, with the bytes of a control frame
     /// between them, and one of the two frames is masked (the first for an even
     /// packet, the second for an odd one). The list keeps the stretches once for
-    /// the unit.
+    /// the unit. The unit of packet `k` is one no entry can stand for where
+    /// `refused(k)` ([`refuse`]).
     fn framed_and_whole(
         units: &[Vec<u8>],
         handshake: LinkHandshake,
+        refused: impl Fn(usize) -> bool,
     ) -> (MessageList, MessageList, TwoStreams) {
         let mut logging = crate::passive::PassiveSession::new();
         let mut keeping = crate::passive::PassiveSession::new();
@@ -3586,10 +3634,19 @@ mod tests {
                     streams[seat].extend_from_slice(bytes);
                 }
             }
-            if let Some(read) = logging.next_datagram_unit_on(direction, unit, packet, handshake) {
-                framed.push_datagram_in_frames(read, spans, handshake);
+            if let Some(mut read) =
+                logging.next_datagram_unit_on(direction, unit, packet, handshake)
+            {
+                if refused(packet) {
+                    refuse(&mut read.frames);
+                }
+                framed.push_datagram_in_frames(read, spans, unit, handshake);
             }
-            whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
+            let mut kept = keeping.next_datagram_on(direction, unit, packet, handshake);
+            if refused(packet) {
+                refuse(&mut kept);
+            }
+            whole.append(kept);
         }
         (framed, whole, TwoStreams(streams))
     }
@@ -3603,7 +3660,7 @@ mod tests {
     fn a_unit_in_several_stretches_logs_nothing_and_reads_as_one_kept_whole() {
         let units = datagrams(96);
         for handshake in [LinkHandshake::Present, LinkHandshake::Absent] {
-            let (mut framed, whole, source) = framed_and_whole(&units, handshake);
+            let (mut framed, whole, source) = framed_and_whole(&units, handshake, |_| false);
             assert!(
                 matches!(framed.rows, Store::Indexed(_)),
                 "the units became entries"
@@ -3645,6 +3702,80 @@ mod tests {
                 unreachable!("still an index");
             };
             assert!(index.spans.is_empty(), "an empty list keeps no stretches");
+        }
+    }
+
+    /// A unit no entry can stand for is kept whole and keeps its bytes beside
+    /// its rows, on each of the three doors (a datagram's, a unit that stands in
+    /// a stream, masked or not, and one joined out of several stretches): the
+    /// list still reads as one kept whole, every row answers `unit_bytes` with
+    /// the unit it was read out of, logged or kept whole, and the bytes kept
+    /// beside a unit are counted and go with its last row.
+    #[test]
+    fn a_unit_kept_whole_keeps_its_bytes_on_every_door() {
+        let units = datagrams(60);
+        let refused = |packet: usize| packet % 5 == 1;
+        let handshake = LinkHandshake::Present;
+        let doors: [(&str, (MessageList, MessageList, TwoStreams)); 4] = [
+            ("datagram", {
+                let (logged, whole) =
+                    logged_and_whole_ending(&units, handshake, None, |_| None, refused);
+                (logged, whole, TwoStreams([Vec::new(), Vec::new()]))
+            }),
+            (
+                "stream",
+                streamed_and_whole(&units, handshake, false, refused),
+            ),
+            (
+                "masked",
+                streamed_and_whole(&units, handshake, true, refused),
+            ),
+            ("frames", framed_and_whole(&units, handshake, refused)),
+        ];
+        for (door, (mut list, mut whole, source)) in doors {
+            let Store::Indexed(index) = &list.rows else {
+                panic!("{door}: the units became entries");
+            };
+            assert!(
+                !index.held.is_empty(),
+                "{door}: the refused units are kept whole"
+            );
+            assert!(
+                index.held.len() < list.len(),
+                "{door}: and the others are entries"
+            );
+            assert_eq!(
+                list.whole_units.len(),
+                (0..units.len()).filter(|&k| refused(k)).count(),
+                "{door}: one kept unit for each refused one"
+            );
+            assert_reads_as_whole(&list, &whole, &source);
+
+            let rows = list.read(&source);
+            for k in 0..rows.len() {
+                let unit = &units[whole.read(&NoBytes).row(k).stream_offset];
+                assert_eq!(
+                    rows.unit_bytes(k).as_deref(),
+                    Some(unit.as_slice()),
+                    "{door}: row {k} reads its unit"
+                );
+            }
+            let kept: usize = list.whole_units.values().map(|(_, b)| b.len()).sum();
+            assert!(
+                list.memory().unit_log >= kept && kept > 0,
+                "{door}: the kept bytes are counted"
+            );
+
+            let mut census = DroppedFrameCensus::default();
+            while !list.is_empty() {
+                census.absorb(list.discard_oldest(&source).expect("a row"));
+                census.absorb(whole.discard_oldest(&NoBytes).expect("a row"));
+                assert_reads_as_whole(&list, &whole, &source);
+            }
+            assert!(
+                list.whole_units.is_empty(),
+                "{door}: an empty list keeps no unit's bytes"
+            );
         }
     }
 
@@ -3716,7 +3847,7 @@ mod tests {
         let units = datagrams(95);
         let end = |k: usize| (k % 5 != 4).then_some(10_000 + 7 * k);
         let (mut logged, mut whole) =
-            logged_and_whole_ending(&units, LinkHandshake::Present, None, end);
+            logged_and_whole_ending(&units, LinkHandshake::Present, None, end, |_| false);
         let Store::Indexed(index) = &logged.rows else {
             panic!("the units became entries");
         };
