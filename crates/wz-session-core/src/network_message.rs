@@ -2018,6 +2018,12 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
     }
 }
 
+/// The lent form of a record at the heap's capacity: its lists grow, and its bytes are the
+/// frame's. The owned parse reads each record in it (`wz_codecs::lent` holds the lists inline at
+/// the deployment's capacity, which a node with no allocator must).
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+type LentHeap<'f> = sce_forge_runtime::codec::Lent<'f, WireStorage>;
+
 /// Decode ONE record at the cursor and PUSH it onto `out`. `Ok(false)` means
 /// the MID has no envelope decoder in this build — the caller decides whether
 /// that is a terminating `Unknown` absorb (both parsers) or something else.
@@ -2051,43 +2057,47 @@ fn decode_one_record(
     )))]
     let _ = origin;
     match mid {
+        // Each record is read in the lent form at the HEAP's capacity (`LentHeap`: its lists grow,
+        // its bytes are the frame's), and not at the node's (`wz_codecs::lent`, the lists inline at
+        // the deployment's capacity, eight extensions to a chain): the protocol bounds a chain by
+        // nothing, so a participant with an allocator reads any length, as upstream does.
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => {
-            let req = wz_codecs::lent::Request::decode(cursor)?;
+            let req = wz_codecs::request::RequestIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Request(Box::new(own_wire!(req, origin))))?;
         }
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
-            let push = wz_codecs::lent::Push::decode(cursor)?;
+            let push = wz_codecs::push::PushIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Push(Box::new(own_wire!(push, origin))))?;
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
-            let rf = wz_codecs::lent::ResponseFinal::decode(cursor)?;
+            let rf = wz_codecs::response_final::ResponseFinalIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::ResponseFinal(
                 rf.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
             ))?;
         }
         wire_const::N_MID_OAM => {
-            let oam = wz_codecs::lent::Oam::decode(cursor)?;
+            let oam = wz_codecs::oam::OamIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Oam(
                 oam.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
             ))?;
         }
         wire_const::N_MID_INTEREST => {
-            let interest = wz_codecs::lent::Interest::decode(cursor)?;
+            let interest = wz_codecs::interest::InterestIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Interest(
                 interest.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
             ))?;
         }
         #[cfg(feature = "codec-response")]
         wire_const::N_MID_RESPONSE => {
-            let resp = wz_codecs::lent::Response::decode(cursor)?;
+            let resp = wz_codecs::response::ResponseIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Response(Box::new(own_wire!(resp, origin))))?;
         }
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => {
-            let decl = wz_codecs::lent::Declare::decode(cursor)?;
+            let decl = wz_codecs::declare::DeclareIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Declare(Box::new(
                 decl.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
             )))?;
@@ -2132,7 +2142,8 @@ mod chain_saturation_tests {
         // MsgPut header: MID 0x01 plus Z, since the chain is present.
         wire.push(0x01 | 0x80);
         for i in 1..ext_count {
-            wire.push(0x80 | (4 + i as u8));
+            // An id in 4 to 11, whatever the count: the encoding and mandatory bits stay clear.
+            wire.push(0x80 | (4 + (i % 8) as u8));
         }
         wire.push(0x03);
         wire.extend_from_slice(&[0x03, 0xAA, 0xBB, 0xCC]);
@@ -2166,43 +2177,61 @@ mod chain_saturation_tests {
         }
     }
 
-    /// THE FIRING LEG. One more extension than a node stores of a chain. The
-    /// protocol bounds the chain by nothing, but the owned parse decodes the
-    /// lent form at `Node`, which holds eight entries, so the seam refuses the
-    /// ninth as storage (`CapacityExceeded`) rather than misreading the next
-    /// byte as `payload_len` — and refuses on the NESTED chain, which is the
-    /// one that costs a payload; the `Push`'s own chain is absent here.
+    /// THE PAST-THE-CAP LEG. More extensions than a node stores of a chain.
+    /// The protocol bounds the chain by nothing, and a participant with an
+    /// allocator reads any length, as upstream does: the owned parse reads each
+    /// record in the lent form at the HEAP's capacity (`LentHeap`), where it
+    /// read it at the node's (`wz_codecs::lent`, eight entries) and refused the
+    /// ninth as storage (`CapacityExceeded`). The payload after the chain is
+    /// the one on the wire, on the NESTED chain, which is the one that costs a
+    /// payload; the `Push`'s own chain is absent here.
     #[test]
-    fn a_chain_past_the_cap_is_refused_at_the_dispatch_seam() {
-        let wire = push_with_put_exts(crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1);
-        assert_eq!(
-            parse_frame_payload(&wire).unwrap_err(),
-            CodecError::CapacityExceeded,
-            "the dispatch stored a chain past what the node's lent form holds"
-        );
+    fn a_chain_past_what_a_node_stores_is_read_whole_with_an_allocator() {
+        for count in [
+            crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1,
+            40,
+            300,
+            5_000,
+        ] {
+            let wire = push_with_put_exts(count);
+            let msgs = parse_frame_payload(&wire).expect("a terminated chain must parse");
+            assert_eq!(msgs.len(), 1);
+            match &msgs[0] {
+                NetworkMessage::Push(p) => match &p.body {
+                    wz_codecs::push::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                        assert_eq!(
+                            crate::put_payload::inline_bytes(put),
+                            Some(&[0xAAu8, 0xBB, 0xCC][..]),
+                            "{count} extensions"
+                        );
+                        assert_eq!(crate::put_payload::chain(put).len(), count);
+                    }
+                    other => panic!("expected a Put body, got {other:?}"),
+                },
+                other => panic!("expected a Push, got {other:?}"),
+            }
+        }
     }
 
     /// An observer keeps what it read and reports where it stopped, rather
     /// than losing the batch — G4's contract, which A1 must not undo. The
-    /// leading clean record survives; the saturated one does not become a
-    /// decoded message.
+    /// leading clean record survives; the record the frame ends inside does
+    /// not become a decoded message.
     #[test]
-    fn the_best_effort_walk_halts_on_it_without_losing_the_earlier_record() {
+    fn the_best_effort_walk_halts_on_a_cut_record_without_losing_the_earlier_one() {
         let mut wire = wz_codecs::lent::Oam {
             id: 7,
             ..Default::default()
         }
         .encode_to_vec();
-        wire.extend_from_slice(&push_with_put_exts(
-            crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1,
-        ));
+        let mut push = push_with_put_exts(crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1);
+        // The frame ends inside the payload that follows the chain.
+        push.truncate(push.len() - 2);
+        wire.extend_from_slice(&push);
 
         let best = parse_frame_payload_best_effort(&wire);
         assert_eq!(best.messages.len(), 1, "the clean OAM record is kept");
-        assert!(
-            !best.is_complete(),
-            "the saturated record must halt the walk"
-        );
+        assert!(!best.is_complete(), "the cut record must halt the walk");
         assert!(best
             .messages
             .iter()
