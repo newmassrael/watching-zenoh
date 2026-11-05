@@ -310978,6 +310978,34 @@
         "Step 9: storage_config into wz-storage, delete the core storage-backend feature, direction gate strict"
       ]
     },
+    "Round 4264": {
+      "decision_summary": "The runtime task tables of the fixed-memory node images hold one cell per session, not one more. The tables were declared SESSIONS + 1 \"with room beside\" the pump tasks, but a node spawns no task besides a session's pump (the only spawn on the slot path is spawn_pump), and a session's cell is held until its handles are let go, which is the moment the session's slot is freed, so the cells in use never outnumber the slots in use. session_pool_exhaustion holds this at the host: it fills the tables to exactly N sessions (the task table of 2N + 1 cells is exactly full at the N + 1th session) and readmits a peer into the cell a closed session freed. The udp, tcp and mps2 node images and the secure-channel loopback witness (both of its nodes) now declare TASKS = SESSIONS. Static RAM falls by one cell: 4,864 bytes in each of the udp (698,908 to 694,044) and tcp (634,204 to 629,340) images, 4,320 bytes of .data in the mps2 image and 9,664 bytes of .bss in the witness.",
+      "changes_bullets": [
+        "zephyr-admin-node: fixed_node.rs and fixed_tcp.rs declare TASKS as SESSIONS. mcu-admin-node: fixed.rs declares TASKS as SESSIONS. zephyr-admin-loopback: rust/src/lib.rs declares TASKS as SESSIONS for both nodes."
+      ],
+      "verification_bullets": [
+        "On a build host through bx (hkl001): wz-session-lwip session_pool_exhaustion, 5 of 5 pass (ran=5), the basis of the change. On this host: the udp and tcp kit rows build with west, the same tree with TASKS = SESSIONS + 1 read RAM 698,908 and 634,204 bytes and with TASKS = SESSIONS 694,044 and 629,340, FLASH unchanged (213,416 and 213,408; 218,216 and 218,240); the frame gate reads largest frames 6,296 (udp) and 6,408 (tcp) and worst chains 13,616 and 13,184 bytes. The mps2 image boots on qemu and passes the six legs of the stock-zenohd scenario with its two sessions (one accepted, one dialled) filling both cells; its .data is 183,172 bytes, 4,320 fewer. The loopback witness prints ZEPHYR-WZ-ADMIN-TLS PASS on qemu with .bss 409,220 bytes, 9,664 fewer. Not run: the udp and tcp images on a board or an emulator, a node held at SESSIONS sessions through a close and a redial on an image, and Layer Qa, Qz and Qzb as lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "fixed_admin (the TLS node) still declares SESSIONS + 1 tasks and a 2,048-byte cell by hand, and the client images and the host tests of the slot node still write their cells by hand. A task another feature spawns beside the pump (an application task on a node's runtime) takes a cell the table no longer has spare, and the table says so by refusing it, counted by the task pool; no node image spawns one today."
+      ],
+      "publishable_decision_summary": "The runtime task tables of the fixed-memory node images hold one cell per session, not one more. The tables were declared SESSIONS + 1 \"with room beside\" the pump tasks, but a node spawns no task besides a session's pump (the only spawn on the slot path is spawn_pump), and a session's cell is held until its handles are let go, which is the moment the session's slot is freed, so the cells in use never outnumber the slots in use. session_pool_exhaustion holds this at the host: it fills the tables to exactly N sessions (the task table of 2N + 1 cells is exactly full at the N + 1th session) and readmits a peer into the cell a closed session freed. The udp, tcp and mps2 node images and the secure-channel loopback witness (both of its nodes) now declare TASKS = SESSIONS. Static RAM falls by one cell: 4,864 bytes in each of the udp (698,908 to 694,044) and tcp (634,204 to 629,340) images, 4,320 bytes of .data in the mps2 image and 9,664 bytes of .bss in the witness.",
+      "publishable_changes_bullets": [
+        "zephyr-admin-node: fixed_node.rs and fixed_tcp.rs declare TASKS as SESSIONS. mcu-admin-node: fixed.rs declares TASKS as SESSIONS. zephyr-admin-loopback: rust/src/lib.rs declares TASKS as SESSIONS for both nodes."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host through bx (hkl001): wz-session-lwip session_pool_exhaustion, 5 of 5 pass (ran=5), the basis of the change. On this host: the udp and tcp kit rows build with west, the same tree with TASKS = SESSIONS + 1 read RAM 698,908 and 634,204 bytes and with TASKS = SESSIONS 694,044 and 629,340, FLASH unchanged (213,416 and 213,408; 218,216 and 218,240); the frame gate reads largest frames 6,296 (udp) and 6,408 (tcp) and worst chains 13,616 and 13,184 bytes. The mps2 image boots on qemu and passes the six legs of the stock-zenohd scenario with its two sessions (one accepted, one dialled) filling both cells; its .data is 183,172 bytes, 4,320 fewer. The loopback witness prints ZEPHYR-WZ-ADMIN-TLS PASS on qemu with .bss 409,220 bytes, 9,664 fewer. Not run: the udp and tcp images on a board or an emulator, a node held at SESSIONS sessions through a close and a redial on an image, and Layer Qa, Qz and Qzb as lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "fixed_admin (the TLS node) still declares SESSIONS + 1 tasks and a 2,048-byte cell by hand, and the client images and the host tests of the slot node still write their cells by hand. A task another feature spawns beside the pump (an application task on a node's runtime) takes a cell the table no longer has spare, and the table says so by refusing it, counted by the task pool; no node image spawns one today."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
