@@ -27,6 +27,7 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::stream_link::NoStream;
 use wz_runtime_coop::udp_link::NoDatagram;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
+use wz_session_core::adminspace::SessionAdminRow;
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;

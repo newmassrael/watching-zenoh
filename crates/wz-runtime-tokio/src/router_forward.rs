@@ -1914,6 +1914,8 @@ impl RouterSessionsView {
     /// rather than a network's — a Client face is a session this router holds,
     /// and an operator asking what this node is connected to must see it.
     pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
+        use wz_session_core::adminspace::SessionAdminRow;
+
         // R2637 — ONE lookup of the tier's weights for the whole table, not one
         // per face: `links_info` walks the graph, so calling it per session would
         // re-walk it N times to answer N questions about one snapshot.

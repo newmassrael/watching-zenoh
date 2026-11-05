@@ -3771,43 +3771,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.link_driver().watch_room(waker);
     }
 
-    /// R311y473 — this session's links as the adminspace renders them: the
-    /// session-centric mirror of the array zenoh's `transport_unicast_to_json`
-    /// builds from `transport.get_links()` (`net/runtime/adminspace.rs:607-637`).
+    /// R2259 (open-debt item 593) — this session's per-physical-link `(src, dst)`
+    /// enumeration, the one the admin space renders as a `sessions[]` row's links
+    /// (`admin_links` of the admin space's `SessionAdminRow`).
     ///
-    /// ONE entry per PHYSICAL link, which is the whole point. R311y472 put a real
-    /// zenohd on the far end of the 0x4 aggregation envelope and read the verdict
-    /// off ZENOH'S adminspace, because wz's own reported no links at all — the
-    /// admin host hard-coded an empty vector. That was the atom's named S5
-    /// residual, and this is the read side of closing it.
-    ///
-    /// The AGGREGATION SET is the source when it is populated (a multilink session
+    /// ONE entry per PHYSICAL link, which is the whole point (R311y473). The
+    /// AGGREGATION SET is the source when it is populated (a multilink session
     /// registers its own first link into the set at join time, so the set is the
     /// complete picture, not the extra links). An empty set means a single-link
     /// session — including every session in a non-multilink build — and then this
     /// binding's own link is the one entry. The two cases are one method rather
     /// than a caller-side branch precisely so a caller cannot forget the second.
-    ///
-    /// A link whose driver cannot name its endpoints
-    /// ([`BoxedLinkDriver::link_endpoints`] `None` — a test double, a FIFO pair, an
-    /// MCU stack with no address) still gets an entry, with blank ends. The COUNT
-    /// is the load-bearing fact for an admin client asking "is this one session
-    /// over two links?", so dropping such a link would corrupt the answer in order
-    /// to tidy a string.
-    #[cfg(all(feature = "alloc", feature = "adminspace-core"))]
-    pub fn admin_links(&self) -> Vec<crate::adminspace::AdminLink> {
-        self.link_endpoints_all()
-            .into_iter()
-            .map(|e| {
-                let (src, dst) = e.into_strings();
-                crate::adminspace::AdminLink { src, dst }
-            })
-            .collect()
-    }
-
-    /// R2259 (open-debt item 593) — the same per-physical-link `(src, dst)`
-    /// enumeration [`admin_links`](Self::admin_links) renders, WITHOUT the
-    /// `adminspace-core` gate.
     ///
     /// The adminspace view was the first consumer of this walk and so owned it;
     /// the C `z_info_links` / link-events plane is the second, and it is
@@ -3817,12 +3791,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// measured wrong once already. So the walk moves here and the adminspace
     /// renderer becomes a projection of it — one derivation, two consumers.
     ///
-    /// A link whose driver cannot name its endpoints still gets an entry with
-    /// blank ends, for the reason `admin_links` states: the COUNT is the
-    /// load-bearing answer.
+    /// A link whose driver cannot name its endpoints
+    /// ([`BoxedLinkDriver::link_endpoints`] `None` — a test double, a FIFO pair, an
+    /// MCU stack with no address) still gets an entry, with blank ends. The COUNT
+    /// is the load-bearing fact for an admin client asking "is this one session
+    /// over two links?", so dropping such a link would corrupt the answer in order
+    /// to tidy a string.
     ///
     /// Heap profile only: it returns a `Vec`. A session in a slot has one link, and the
-    /// admin node reads its endpoints in place ([`Self::with_admin_session`]).
+    /// admin node reads its endpoints in place ([`Self::link_endpoints`]).
     #[cfg(feature = "alloc")]
     pub fn link_endpoints_all(&self) -> Vec<crate::link::LinkEndpoints> {
         let render = |driver: &R::Driver| match driver.link_endpoints() {
@@ -7516,122 +7493,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
-    /// R2860 — this session as one unicast `sessions[]` row, upstream's
-    /// `transport_unicast_to_json`
-    /// (`zenoh/src/net/runtime/adminspace.rs` @ `let transport_unicast_to_json = move |transport: &TransportUnicast| {`).
-    ///
-    /// The host supplies what only the host knows: which zid and role it files
-    /// the peer under (a Session reads the handshake's, a forwarder the routing
-    /// zid it keyed the face by) and the link weight, which only a router graph
-    /// holds. Everything upstream reads off the TRANSPORT itself — `links`,
-    /// `shm`, `region` — is read here, off this session.
-    ///
-    /// ⚠ WHY THE TRANSPORT HALF IS NOT A HOST'S TO SPELL. Four hosts used to
-    /// build this row as a struct literal, and `shm` in particular was written
-    /// four times. Replacing one host's `is_shm()` with a constant `false`
-    /// compiled and passed that host's tests, because no fixture negotiated SHM
-    /// through a forwarder — the one witness was the Session host's own. With
-    /// the value read here, a host cannot report a different `shm` from the
-    /// session's negotiation, and the witness that pins this method pins every
-    /// host that calls it.
-    #[cfg(feature = "adminspace-core")]
-    pub fn admin_session(
-        &self,
-        peer_zid_hex: alloc::string::String,
-        whatami: Option<alloc::string::String>,
-        weight: Option<crate::adminspace::AdminLinkWeight>,
-    ) -> crate::adminspace::AdminSession {
-        crate::adminspace::AdminSession {
-            peer_zid_hex,
-            whatami,
-            links: self.admin_links(),
-            // The pin binds `false` without `shared-memory`; a build without
-            // `transport-shm` has no negotiation to read and says the same.
-            #[cfg(feature = "transport-shm")]
-            shm: self.is_shm(),
-            #[cfg(not(feature = "transport-shm"))]
-            shm: false,
-            weight,
-            region: Some(self.admin_region()),
-        }
+    /// This binding's own link's two ends, as its driver names them, or `None` where
+    /// the driver cannot name them (a test double, a FIFO pair, an MCU stack with no
+    /// address). Lent and allocation-free: a session in a slot holds its one link in
+    /// place, so a reader that keeps the ends copies them. The admin space's lent
+    /// `sessions[]` row reads its link here; the heap row reads
+    /// `link_endpoints_all` (heap profile), which also walks a multilink session's set.
+    pub fn link_endpoints(&self) -> Option<&crate::link::LinkEndpoints> {
+        self.link_driver().link_endpoints()
     }
 
-    /// [`admin_session`](Self::admin_session) lent instead of built (fixed-memory step
-    /// S9c): this session as one `sessions[]` row, handed to `f` as a BORROWED row
-    /// ([`AdminSessionRef`](crate::adminspace::AdminSessionRef)), with nothing
-    /// allocated. `None` while the session is not established, as upstream lists
-    /// transports and a transport exists only once its handshake has finished.
-    ///
-    /// The row is the one `admin_session` builds, field for field: the peer's zid in
-    /// zenoh's hex form, its role, the one link this session holds with its two
-    /// ends (blank ends where the driver cannot name them, since the COUNT is the
-    /// load-bearing answer), `shm`, and the region, all read off this session by the
-    /// same derivations ([`write_zenoh_hex`](crate::zid_hex::write_zenoh_hex),
-    /// [`write_admin_region`](crate::extbound::write_admin_region)). A role that never
-    /// arrived stays `None`, which the writer renders as upstream's `"unknown"`. The
-    /// link weight is `None`: an MCU session holds no router graph.
-    ///
-    /// The row's texts live on this call's stack in fixed buffers and are gone when
-    /// `f` returns, so what a node keeps it copies (`FixedAdminSession::from_view`).
-    #[cfg(feature = "adminspace-fixed")]
-    pub fn with_admin_session<X>(
-        &self,
-        f: impl FnOnce(crate::adminspace::AdminSessionRef<'_>) -> X,
-    ) -> Option<X> {
-        use crate::adminspace::{AdminLinkList, AdminSessionRef};
-        use crate::text_out::FixedText;
+    /// The peer's zid as the handshake carried it, lent to `f`, or `None` before
+    /// one arrived. Raw: the bytes are the slot's, not normalised through
+    /// `zid_from_wire`, so a reader that renders them renders what the peer sent and
+    /// allocates nothing (`peer_zid`, heap profile, is the owned copy).
+    pub fn with_peer_zid<X>(&self, f: impl FnOnce(Option<&[u8]>) -> X) -> X {
+        R::with_mutex_mut(&self.remote_peer_zid, |slot| f(slot.as_deref()))
+    }
 
-        /// The one link of a session, as the writer reads a list of links.
-        struct OneLink<'a>(Option<&'a crate::link::LinkEndpoints>);
-
-        impl AdminLinkList for OneLink<'_> {
-            fn link_count(&self) -> usize {
-                1
-            }
-
-            fn link(&self, index: usize) -> Option<(&str, &str)> {
-                if index != 0 {
-                    return None;
-                }
-                Some(match self.0 {
-                    Some(ends) => (ends.src.as_str(), ends.dst.as_str()),
-                    None => ("", ""),
-                })
-            }
+    /// Whether this session negotiated SHM, upstream's `transport.is_shm()` as a
+    /// `sessions[]` row reports it. A build without `transport-shm` has no
+    /// negotiation to read and answers `false`, which is what upstream binds without
+    /// `shared-memory`. The value is read here, in the crate that owns the feature,
+    /// so a host cannot report a different `shm` from the session's negotiation.
+    pub fn shm_negotiated(&self) -> bool {
+        #[cfg(feature = "transport-shm")]
+        {
+            self.is_shm()
         }
-
-        if !self.is_established() {
-            return None;
+        #[cfg(not(feature = "transport-shm"))]
+        {
+            false
         }
-        // A zid is at most 16 bytes, 32 hex digits; a region is `north`, `south(..)`,
-        // or `unknown`, well inside 32. A refusal of either is recorded by the text and
-        // leaves the prefix, never a cut row.
-        let mut zid_hex: FixedText<32> = FixedText::new();
-        R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-            if let Some(zid) = slot.as_deref() {
-                crate::zid_hex::write_zenoh_hex(zid, &mut zid_hex);
-            }
-        });
-        let role = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
-        let mut region: FixedText<32> = FixedText::new();
-        let _ = crate::extbound::write_admin_region(
-            &mut region,
-            self.params.whatami,
-            role,
-            self.peer_remote_bound(),
-        );
-        let links = OneLink(self.link_driver().link_endpoints());
-        Some(f(AdminSessionRef {
-            peer_zid_hex: zid_hex.prefix(),
-            whatami: role.map(|role| role.to_str()),
-            links: &links,
-            #[cfg(feature = "transport-shm")]
-            shm: self.is_shm(),
-            #[cfg(not(feature = "transport-shm"))]
-            shm: false,
-            weight: None,
-            region: Some(region.prefix()),
-        }))
     }
 
     /// R2539 — admit the peer's region identity off an Init's ext chain.

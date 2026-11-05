@@ -33,7 +33,7 @@ use core::cell::RefCell;
 use wz_runtime_coop::session_drive::{Accept, SessionDriveConfig, SessionRole, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef};
+use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef, SessionAdminRow};
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;

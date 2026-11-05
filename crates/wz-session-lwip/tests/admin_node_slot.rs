@@ -21,7 +21,7 @@
 //!   observer) applies it to A's control, A's manager dials what it names (B), and B's
 //!   listener admits A's session as its second.
 //! - THE ROW. A session row read through the lend
-//!   (`SessionLinkActions::with_admin_session`) is the row the heap form builds,
+//!   (`SessionAdminRow::with_admin_session`) is the row the heap form builds,
 //!   field for field.
 //! - THE REFUSAL. A node whose session table is smaller than its endpoint list
 //!   dials what it can afford, and the endpoint the table has no slot for waits as a
@@ -45,6 +45,7 @@ use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::PumpSlots;
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
+use wz_session_core::adminspace::SessionAdminRow;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;

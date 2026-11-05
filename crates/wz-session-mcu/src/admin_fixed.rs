@@ -305,7 +305,7 @@ impl<const SESSIONS: usize> FixedNodeStatus<SESSIONS> {
     /// [`Self::set_sessions`] for rows already copied into fixed storage, each as the
     /// result of copying it (a row that did not fit arrives as its refusal and is
     /// COUNTED, not left out silently). What a node that reads each session's row
-    /// through a lend (`SessionLinkActions::with_admin_session`) gives it: the borrowed
+    /// through a lend (`SessionAdminRow::with_admin_session`) gives it: the borrowed
     /// row cannot leave the call that lends it, so the copy is made there and the
     /// copies are given here, outside any lock.
     pub fn set_session_rows(

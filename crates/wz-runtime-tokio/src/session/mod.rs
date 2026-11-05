@@ -6882,6 +6882,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         use wz_codecs::whatami::WhatAmI;
         use wz_session_core::adminspace::{
             admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminAnswerOutcome,
+            SessionAdminRow,
         };
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 

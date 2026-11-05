@@ -524,8 +524,6 @@ wz-session-core	wz-session-core/src/send_wire_error.rs	1	error[E0433]: cannot fi
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `DeclarationCache::generation`: no item named `DeclarationCache` in scope
 wz-session-core	wz-session-core/src/session_actions.rs	2	error: unresolved link to `DeclareOwned`: no item named `DeclareOwned` in scope
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `RequestQueryBuilder`: no item named `RequestQueryBuilder` in scope
-wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::admin_links`: the struct `SessionLinkActions` has no field or associated item named `admin_links`
-wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::admin_session`: the struct `SessionLinkActions` has no field or associated item named `admin_session`
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::compresses_batches`: the struct `SessionLinkActions` has no field or associated item named `compresses_batches`
 wz-session-core	wz-session-core/src/session_actions.rs	3	error: unresolved link to `Self::declare_token_recorded`: the struct `SessionLinkActions` has no field or associated item named `declare_token_recorded`
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::fragment_tx_budget`: the struct `SessionCore` has no field or associated item named `fragment_tx_budget`
@@ -537,7 +535,6 @@ wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link 
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::set_link_priority_range`: the struct `SessionLinkActions` has no field or associated item named `set_link_priority_range`
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::set_lowlatency_offer`: the struct `SessionLinkActions` has no field or associated item named `set_lowlatency_offer`
 wz-session-core	wz-session-core/src/session_actions.rs	2	error: unresolved link to `Self::set_qos_offer`: the struct `SessionLinkActions` has no field or associated item named `set_qos_offer`
-wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::with_admin_session`: the struct `SessionLinkActions` has no field or associated item named `with_admin_session`
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `SessionLinkActions::negotiate_qos_link_against_peer`: the struct `SessionLinkActions` has no field or associated item named `negotiate_qos_link_against_peer`
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `build_declare_queryable`: no item named `build_declare_queryable` in scope
 wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `build_undeclare_subscriber_on_wire`: no item named `build_undeclare_subscriber_on_wire` in scope

@@ -210,6 +210,161 @@ impl AdminSession {
     }
 }
 
+/// The `sessions[]` row a unicast session reports about ITSELF: upstream's
+/// `transport_unicast_to_json`
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `let transport_unicast_to_json = move |transport: &TransportUnicast| {`),
+/// read off the session.
+///
+/// The host supplies what only the host knows: which zid and role it files the
+/// peer under (a Session reads the handshake's, a forwarder the routing zid it
+/// keyed the face by) and the link weight, which only a router graph holds.
+/// Everything upstream reads off the TRANSPORT itself — `links`, `shm`, `region` —
+/// is read here, off the session.
+///
+/// ⚠ WHY THE TRANSPORT HALF IS NOT A HOST'S TO SPELL. Four hosts used to build
+/// this row as a struct literal, and `shm` in particular was written four times.
+/// Replacing one host's `is_shm()` with a constant `false` compiled and passed that
+/// host's tests, because no fixture negotiated SHM through a forwarder — the one
+/// witness was the Session host's own. With the value read here, a host cannot
+/// report a different `shm` from the session's negotiation, and the witness that
+/// pins this trait pins every host that calls it.
+///
+/// An extension trait on `SessionLinkActions`, not methods of it, so the session
+/// engine names nothing of the admin space: the row is built from the session's
+/// public accessors (`link_endpoints_all`, `link_endpoints`, `with_peer_zid`,
+/// `shm_negotiated`, `admin_region`), and a host brings the trait into scope.
+#[cfg(feature = "session-unicast")]
+pub trait SessionAdminRow {
+    /// R311y473 — this session's links as the row renders them, ONE entry per
+    /// PHYSICAL link (the session's `link_endpoints_all`), each with blank ends
+    /// where its driver cannot name them: the COUNT is the load-bearing fact for an
+    /// admin client asking "is this one session over two links?".
+    ///
+    /// R311y472 put a real zenohd on the far end of the 0x4 aggregation envelope and
+    /// read the verdict off ZENOH'S adminspace, because wz's own reported no links
+    /// at all — the admin host hard-coded an empty vector. That was the atom's named
+    /// S5 residual, and this is the read side of closing it.
+    #[cfg(feature = "adminspace-core")]
+    fn admin_links(&self) -> Vec<AdminLink>;
+
+    /// R2860 — this session as one owned unicast `sessions[]` row, the host's
+    /// `peer_zid_hex`, `whatami` and `weight` beside what is read off the session.
+    #[cfg(feature = "adminspace-core")]
+    fn admin_session(
+        &self,
+        peer_zid_hex: String,
+        whatami: Option<String>,
+        weight: Option<AdminLinkWeight>,
+    ) -> AdminSession;
+
+    /// `admin_session` lent instead of built (fixed-memory step S9c): this session as
+    /// one `sessions[]` row, handed to `f` as a BORROWED row ([`AdminSessionRef`]),
+    /// with nothing allocated. `None` while the session is not established, as
+    /// upstream lists transports and a transport exists only once its handshake has
+    /// finished.
+    ///
+    /// The row is the one `admin_session` builds, field for field: the peer's zid in
+    /// zenoh's hex form, its role, the one link this session holds with its two ends
+    /// (blank ends where the driver cannot name them, since the COUNT is the
+    /// load-bearing answer), `shm`, and the region, all read off the session by the
+    /// same derivations ([`write_zenoh_hex`](crate::zid_hex::write_zenoh_hex),
+    /// [`write_admin_region`](crate::extbound::write_admin_region)). A role that never
+    /// arrived stays `None`, which the writer renders as upstream's `"unknown"`. The
+    /// link weight is `None`: an MCU session holds no router graph.
+    ///
+    /// The row's texts live on this call's stack in fixed buffers and are gone when
+    /// `f` returns, so what a node keeps it copies (`FixedAdminSession::from_view`).
+    fn with_admin_session<X>(&self, f: impl FnOnce(AdminSessionRef<'_>) -> X) -> Option<X>;
+}
+
+#[cfg(feature = "session-unicast")]
+impl<R, T> SessionAdminRow for crate::session_actions::SessionLinkActions<R, T>
+where
+    R: crate::link::SessionRuntime,
+    T: wz_runtime_core::TimeSource,
+{
+    #[cfg(feature = "adminspace-core")]
+    fn admin_links(&self) -> Vec<AdminLink> {
+        self.link_endpoints_all()
+            .into_iter()
+            .map(|e| {
+                let (src, dst) = e.into_strings();
+                AdminLink { src, dst }
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "adminspace-core")]
+    fn admin_session(
+        &self,
+        peer_zid_hex: String,
+        whatami: Option<String>,
+        weight: Option<AdminLinkWeight>,
+    ) -> AdminSession {
+        AdminSession {
+            peer_zid_hex,
+            whatami,
+            links: self.admin_links(),
+            shm: self.shm_negotiated(),
+            weight,
+            region: Some(self.admin_region()),
+        }
+    }
+
+    fn with_admin_session<X>(&self, f: impl FnOnce(AdminSessionRef<'_>) -> X) -> Option<X> {
+        use crate::text_out::FixedText;
+
+        /// The one link of a session, as the writer reads a list of links.
+        struct OneLink<'a>(Option<&'a crate::link::LinkEndpoints>);
+
+        impl AdminLinkList for OneLink<'_> {
+            fn link_count(&self) -> usize {
+                1
+            }
+
+            fn link(&self, index: usize) -> Option<(&str, &str)> {
+                if index != 0 {
+                    return None;
+                }
+                Some(match self.0 {
+                    Some(ends) => (ends.src.as_str(), ends.dst.as_str()),
+                    None => ("", ""),
+                })
+            }
+        }
+
+        if !self.is_established() {
+            return None;
+        }
+        // A zid is at most 16 bytes, 32 hex digits; a region is `north`, `south(..)`,
+        // or `unknown`, well inside 32. A refusal of either is recorded by the text and
+        // leaves the prefix, never a cut row.
+        let mut zid_hex: FixedText<32> = FixedText::new();
+        self.with_peer_zid(|zid| {
+            if let Some(zid) = zid {
+                crate::zid_hex::write_zenoh_hex(zid, &mut zid_hex);
+            }
+        });
+        let role = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
+        let mut region: FixedText<32> = FixedText::new();
+        let _ = crate::extbound::write_admin_region(
+            &mut region,
+            self.params.whatami,
+            role,
+            self.peer_remote_bound(),
+        );
+        let links = OneLink(self.link_endpoints());
+        Some(f(AdminSessionRef {
+            peer_zid_hex: zid_hex.prefix(),
+            whatami: role.map(|role| role.to_str()),
+            links: &links,
+            shm: self.shm_negotiated(),
+            weight: None,
+            region: Some(region.prefix()),
+        }))
+    }
+}
+
 /// One `sessions[]` row of the multicast kind, BORROWED: the twin of
 /// [`AdminSessionRef`] for [`AdminMulticastPeer`].
 pub struct AdminMulticastPeerRef<'a> {

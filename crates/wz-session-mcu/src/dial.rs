@@ -215,6 +215,8 @@ mod heap {
     pub fn admin_session_of<C: ClockSource + 'static>(
         actions: &McuActions<C>,
     ) -> Option<wz_session_core::adminspace::AdminSession> {
+        use wz_session_core::adminspace::SessionAdminRow;
+
         if !actions.is_established() {
             return None;
         }

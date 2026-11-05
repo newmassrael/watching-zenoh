@@ -636,6 +636,13 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `admin_config_space` behind `any(adminspace-fixed, adminspace-write)` and
                 # `connect_endpoints` behind `any(connect-endpoints, adminspace-write)`.
                 "adminspace-write",
+                # Round 3301 put `adminspace-core` in the impl-method group: S9e split the
+                # admin space in two, `adminspace-fixed` keeping the modules (probed) and
+                # this feature the heap forms, which were methods of `SessionLinkActions`.
+                # Server-layer split, step 7a, made those the `SessionAdminRow` trait's, so
+                # the one public item left under it is `LinkEndpoints::into_strings`,
+                # behind `all(alloc, adminspace-core)`: compound.
+                "adminspace-core",
                 "attachment-bytes",
                 # R3291 -- `bounded-heapless` LEFT this list by the R2686 route.
                 # It was here because every public item it gated sat behind
@@ -739,12 +746,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # public module is two accessors of `ApplicationLayerObserver`
                 # (`reply_refusals`, `request_refusals`), which are METHODS.
                 "bounded-heapless",
-                # Round 3301 -- `adminspace-core` joins. S9e split the admin space in
-                # two: `adminspace-fixed` keeps the modules (and is probed), and this
-                # feature keeps the heap forms the allocator-free build does not have,
-                # which are methods (`LinkEndpoint::into_strings`, `admin_links`,
-                # `admin_session`), so no `module::name` path is left for it to gate.
-                "adminspace-core",
                 # `clock-source` gates `ClockStanding::holdover_expired`, the event of the
                 # host's holdover bound passing, a METHOD under a simple cfg; the rest of what
                 # it changes in this package is a match arm and the body of a method.
