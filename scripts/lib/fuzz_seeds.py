@@ -81,6 +81,14 @@ LITERAL: dict[str, tuple[str, ...]] = {
         "AwMA/f////kABwAAAAAAAABACgAAAAABAAAAAABhZCBieXRlcw==",
         "AwAAACgDAAAABwAAAAAAAABAAAMA0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHRAAAAAAAABwAAAAAAAAC1AAEKAAEAAAAAAA==",
     ),
+    # The dissection walker showed a timestamp zid of twenty bytes that the
+    # codec refuses, printed as its first sixteen, so the term written from the
+    # print was `Unknown` over its own record (S1). Cut from the crash to the one
+    # datagram it needed: a `Frame` whose `Push` carries a `Del` with that
+    # timestamp (`SpanCursor::zid` now refuses a zid past sixteen bytes).
+    "selector_term": (
+        "AQQBAAABAQDUw7KhAgAEAAAAAAAAAAAA//8AAAEAAAAAAAAAAAAAAEgAAABIAAAAAAAAAAAAAgAAAAABCABFAAA6AAAAAEARZrEKAAABCgAAAqjKHRcAJgAAJb3B8T9dASJBFFsgIDQ5XSBjb3JwdXMgc2FtcGxl",
+    ),
 }
 
 CONTEXT = b'{"negotiated":true,"lowlatency":false}'

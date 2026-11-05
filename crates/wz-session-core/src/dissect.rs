@@ -684,7 +684,22 @@ impl<'a> SpanCursor<'a> {
     /// [`Self::bytes`] returns; only the variant differs. The name is a
     /// parameter, like every other `Cursor` reader's, so the field-name census
     /// reads the literal at each call site instead of a name buried here.
+    ///
+    /// A zid longer than [`CREDENTIAL_ZID_BYTES`] is refused with
+    /// `LengthOutOfRange`, as the codecs refuse it (`sce:max-size="16"` on
+    /// every zid field of `sources/codecs`) and as zenoh does. Five of the
+    /// seven places take the length from a four-bit nibble and cannot exceed
+    /// it; the timestamp and the linkstate entry take a VLE count, and before
+    /// this check they showed a zid of any length that no session decodes.
+    /// Every reader of a zid field ([`crate::zid_hex::zid_to_zenoh_hex`]
+    /// first) reads at most sixteen bytes, so a longer one printed as a zid
+    /// that did not name its own bytes.
+    ///
+    /// [`CREDENTIAL_ZID_BYTES`]: crate::credential_identity::CREDENTIAL_ZID_BYTES
     pub fn zid(&mut self, name: &'static str, n: usize) -> Result<Field, CodecError> {
+        if n > crate::credential_identity::CREDENTIAL_ZID_BYTES {
+            return Err(CodecError::LengthOutOfRange);
+        }
         let field = self.bytes(name, n)?;
         let FieldValue::Bytes(raw) = field.value else {
             unreachable!("bytes() builds a Bytes value")
@@ -2743,6 +2758,7 @@ mod codec_error_serde {
             CodecError::InvalidUtf8 => "InvalidUtf8",
             CodecError::BufferOverflow => "BufferOverflow",
             CodecError::TooManyElements => "TooManyElements",
+            CodecError::LengthOutOfRange => "LengthOutOfRange",
             // `CodecError` is `#[non_exhaustive]`, so a variant added upstream
             // after this build lands here. It serializes under its own name
             // rather than borrowing an existing one: mislabelling a new error
@@ -2767,6 +2783,7 @@ mod codec_error_serde {
             // dissection written under the name the runtime used for it before
             // reads back as that refusal.
             "TooManyElements" | "TlvChainOverflow" => CodecError::TooManyElements,
+            "LengthOutOfRange" => CodecError::LengthOutOfRange,
             _ => CodecError::NeedMoreBytes,
         })
     }
@@ -7902,6 +7919,43 @@ mod tests {
             !json.contains("01020304"),
             "the per-byte wire spelling must not be what a zid prints: {json}"
         );
+    }
+
+    /// The two walkers whose zid length is a VLE count, and not a four-bit
+    /// nibble, refuse a zid past sixteen bytes, as the generated codec of the
+    /// same body does. Before the refusal a timestamp of a twenty-byte zid
+    /// walked: its zid printed as the first sixteen bytes, and a selector
+    /// term written from that print did not name the field it was read from
+    /// (the `selector_term` fuzz target's soundness oracle found it).
+    #[test]
+    fn a_zid_longer_than_sixteen_bytes_is_refused_as_the_codec_refuses_it() {
+        for (n, walks) in [(16usize, true), (17, false), (20, false)] {
+            let zid: Vec<u8> = (1..=n as u8).collect();
+            let bytes = timestamp(0x0123_4567, &zid);
+            let walked = walk_timestamp(&mut SpanCursor::new(&bytes));
+            let decoded = wz_codecs::timestamp::Timestamp::decode(&mut SceCursor::new(&bytes));
+            assert_eq!(walked.is_ok(), walks, "the timestamp walk of {n} bytes");
+            assert_eq!(decoded.is_ok(), walks, "the codec of {n} bytes");
+            if !walks {
+                assert_eq!(walked.unwrap_err(), CodecError::LengthOutOfRange);
+            }
+
+            // A linkstate entry with only its zid present (options P), its
+            // psid and sn, and no links (`links_len` is always read).
+            let entry = concat(&[
+                alloc::vec![0x01],
+                vle(7),
+                vle(9),
+                vle(n as u64),
+                zid,
+                vle(0),
+            ]);
+            let walked = walk_linkstate_entry(&mut SpanCursor::new(&entry));
+            assert_eq!(walked.is_ok(), walks, "the linkstate walk of {n} bytes");
+            if !walks {
+                assert_eq!(walked.unwrap_err(), CodecError::LengthOutOfRange);
+            }
+        }
     }
 
     // ── R311y894: `Join`'s ZBuf `qos`, the per-priority next-SN table ─────

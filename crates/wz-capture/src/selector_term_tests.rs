@@ -393,3 +393,34 @@ fn every_named_node_offers_a_sentence_its_record_answers_yes() {
         assert!(kinds.contains(kind), "{kind} was never walked: {kinds:?}");
     }
 }
+
+/// The `selector_term` fuzz target's first finding, cut to the one message it
+/// needed: a `Frame` whose `Push` carries a `Del` with a timestamp of a
+/// TWENTY-byte zid. The codec refuses that zid (`sce:max-size="16"`), so the
+/// record is the batch's unread remainder, and the walker used to show it
+/// anyway: the zid printed as its first sixteen bytes, and the term
+/// `Push.del.timestamp.zid == …` written from that print was `Unknown` over
+/// the very record it was read from (S1). The walker now refuses the zid as
+/// the codec does, and every node it shows offers a sentence that holds.
+#[test]
+fn a_timestamp_zid_past_sixteen_bytes_offers_no_sentence_it_cannot_hold() {
+    let mut wire = alloc::vec![
+        wz_session_core::wire_const::T_MID_FRAME | 0x20, // reliable
+        0xbd,
+        0xc1,
+        0xf1,
+        0x3f, // sn
+        0x5d,
+        0x01, // Push, mapping flag, key id 1
+        0x22, // Del with a timestamp
+        0x41, // time
+        20,   // zid_len, past the sixteen a zid holds
+    ];
+    wire.extend_from_slice(b"[  49] corpus sample");
+    let held = hold("a twenty-byte timestamp zid", &datagram_capture(&wire));
+    assert!(held.holds(), "{held}");
+    assert!(
+        held.records.records >= 1 && held.records.sentences >= 1,
+        "the Frame was read and judged: {held}"
+    );
+}
