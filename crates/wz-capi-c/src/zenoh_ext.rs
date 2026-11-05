@@ -86,7 +86,8 @@ use crate::abi::{
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{keyexpr_str, DeclaredKeyexpr};
 use crate::publisher::{zc_locality_default, zc_locality_t};
-use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::session::{not_a_registry, session_state};
 
 /// `ze_owned_publication_cache_t` / `ze_loaned_publication_cache_t`
 /// (`zenoh_opaque.h:960-962,989-991`). Unmoved by either feature axis: the type
@@ -605,6 +606,21 @@ pub unsafe extern "C" fn ze_declare_publication_cache(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&queryable_ke).is_err()
         {
             return Z_EINVAL;
+        }
+        // A cache stamps nothing itself and answers time-range queries by the
+        // stamps its samples carry, so upstream refuses a session that holds no
+        // clock: `PublicationCache` fails `conf.session.hlc().is_none()` with
+        // "the 'timestamping' setting must be enabled", which zenoh-c reports as
+        // `Z_EGENERIC` (`zenoh-ext/src/publication_cache.rs` @
+        // `if conf.session.hlc().is_none() {`). Refused here, before anything is
+        // declared, so the caller is left holding the gravestone written above.
+        // SAFETY: the caller's contract.
+        let Some(state) = (unsafe { session_state(session) }) else {
+            // SAFETY: the caller's contract.
+            return unsafe { not_a_registry(session) };
+        };
+        if !state.shared.local_session().node_hlc().is_stamping() {
+            return Z_EGENERIC;
         }
 
         let core = Arc::new(CacheCore {

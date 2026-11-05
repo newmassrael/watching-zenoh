@@ -208,6 +208,28 @@ int main(int argc, char **argv) {
     z_drop(z_move(cache));
     printf("cache.check_after_drop=%d\n", (int)ze_internal_publication_cache_check(&cache));
     printf("qsub.check_after_drop=%d\n", (int)ze_internal_querying_subscriber_check(&qsub));
+
+    /* ---- a cache on a session that holds NO CLOCK is refused ------------- */
+    /* The requirement the first session above had to satisfy, stated from the other side: with
+       `timestamping` left at its shipped value a peer has no HLC, `PublicationCache` bails
+       (`zenoh-ext/src/publication_cache.rs` @ `if conf.session.hlc().is_none() {`) and zenoh-c
+       reports `Z_EGENERIC`. An endpointless peer, scouting off, so it talks to nobody. */
+    {
+        z_owned_config_t config2;
+        z_config_default(&config2);
+        zc_config_insert_json5(z_loan_mut(config2), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
+        zc_config_insert_json5(z_loan_mut(config2), Z_CONFIG_MODE_KEY, "\"peer\"");
+        z_owned_session_t s2;
+        z_result_t open2_rc = z_open(&s2, z_move(config2), NULL);
+        printf("noclock.open.rc=%d\n", (int)open2_rc);
+        if (open2_rc == 0) {
+            ze_owned_publication_cache_t cache2;
+            z_result_t crc2 = ze_declare_publication_cache(z_loan(s2), &cache2, z_loan(ke), NULL);
+            printf("noclock.cache.rc=%d\n", (int)crc2);
+            printf("noclock.cache.check=%d\n", (int)ze_internal_publication_cache_check(&cache2));
+            z_drop(z_move(s2));
+        }
+    }
     z_drop(z_move(s));
     printf("done\n");
     return 0;
@@ -357,6 +379,12 @@ const ANCHORS: &[&str] = &[
     // A moved handle must gravestone, on both families.
     "cache.check_after_drop=0",
     "qsub.check_after_drop=0",
+    // A session that holds no clock cannot back a cache: upstream answers `Z_EGENERIC` and leaves
+    // a gravestone, which is what the diff then holds wz to. Anchored, so an arm that never opened
+    // the clockless session cannot pass by printing nothing.
+    "noclock.open.rc=0",
+    "noclock.cache.rc=-128",
+    "noclock.cache.check=0",
     "done",
 ];
 
