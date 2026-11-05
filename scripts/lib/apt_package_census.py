@@ -668,8 +668,9 @@ _add(
     "of `validate-codegen` says it is for (it sits beside `Install "
     "mnemosyne-cli`). This row used to name the Protobuf emit Layer B verifies; "
     "Layer B left that job in R3016 and nothing in `xtask` or the vendored "
-    "backends spells `protoc`.",
-    ["validate-codegen"],
+    "backends spells `protoc`. R4290: `gate-provenance` installs mnemosyne-cli "
+    "too, for the one armed run of Layer C0.",
+    ["validate-codegen", "gate-provenance"],
 )
 
 # The crate whose build script is the only `cmake` consumer in the workspace,
@@ -1545,8 +1546,9 @@ class BindgenFree(NamedTuple):
 BINDGEN_FREE: dict[str, BindgenFree] = {
     "validate-codegen": BindgenFree(
         layers=frozenset({
+            # R4290: C0 left this job; its one run is armed in gate-provenance.
             "0", "A", "A2", "A3", "A4", "A5",
-            "C0", "C0s", "C0i", "C0b", "C0g", "C0d", "C0e", "C0f", "U",
+            "C0s", "C0i", "C0b", "C0g", "C0d", "C0e", "C0f", "U",
         }),
         exempt={
             "install-mnemosyne-cli.sh": (

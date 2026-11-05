@@ -921,31 +921,12 @@ jobs:
           WZ_A5_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer A5
 
-      - name: Layer C0 (armed) — gate provenance citations resolve
-        # R311y747. Layer C0 also runs on the `defaults-off` job (R2525 moved it
-        # there from "validate + verify + test" for item 590's budget; the
-        # sentence below described that job and the property survived the move),
-        # where it is the SHAPE half only: that job deliberately does not
-        # install mnemosyne-cli (~88s, split out here in R311y428), and
-        # R311y743 gave `gate_provenance_lint` a store read without noticing.
-        # It then FAILED every hosted run from that commit on while every local
-        # run stayed green, because a dev box has the tool on PATH -- Layer C0
-        # is the failing step in runs 31581576586 and 31582103148.
-        #
-        # So the citation half is armed HERE, where its input exists, by the
-        # same rule as WZ_A3_REQUIRE / WZ_A5_REQUIRE above: a lane that SKIPs
-        # where the job provisions its input is a provisioning regression
-        # wearing a green badge. Running the whole lane twice rather than
-        # lifting one gate out of it keeps `unwired_lane_lint`'s subject a
-        # LANE, and the second run costs ~5s.
-        env:
-          WZ_C0_REQUIRE: "1"
-          WZ_KCONFIG_REQUIRE: "1"
-        run: |
-          # The build configuration's presets are resolved by the one pinned Kconfig
-          # interpreter (docs/build-configuration.md C11), so this armed run provisions it.
-          bash scripts/provision-kconfiglib.sh
-          bash scripts/run-ci.sh --layer C0
+      # R4290 — Layer C0 is no longer run here. It ran twice per run, once here
+      # armed and once in `gate-provenance` unarmed, on the R311y747 reasoning
+      # that the second run "costs ~5s". It costs the whole lane: hosted run
+      # 41974391826 cut this job at its 30 minutes 14 minutes into Layer C0,
+      # as run 41939089182 had. The lane now runs once, armed, in
+      # `gate-provenance`, which installs mnemosyne-cli and kconfiglib for it.
 
       - name: Layer C0i (armed) — the impact-ref gate discriminates both ways
         # R311y783. `scripts/append-round.sh` refuses a round whose `--impact`
@@ -1985,7 +1966,8 @@ jobs:
   # R3363 — Layer C0, split out of `defaults-off` (see the note above that job).
   # Its provisioning is that job's, which the apt census derives per job: nothing
   # here is a package C0 reads, but the census states what a job INSTALLS and the
-  # two jobs install the same list, so one row of it covers both.
+  # two jobs install the same list, so one row of it covers both. R4290 adds one
+  # package here, protobuf-compiler, for the mnemosyne-cli install that arms C0.
   gate-provenance:
     name: gate provenance (Layer C0)
     runs-on: ubuntu-22.04
@@ -2014,8 +1996,10 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
+        # R4290 — protobuf-compiler is mnemosyne-server's build script, for the
+        # install of mnemosyne-cli below that arms Layer C0's citation half.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config protobuf-compiler
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -2038,7 +2022,12 @@ jobs:
             crates -> target
             vendor/sce -> target
 
-      - name: Layer C0 — binary-dep test #[ignore] discipline
+      - name: Install mnemosyne-cli (pinned)
+        # R4290 — for Layer C0's citation half below, which reads the store. An
+        # install failure reds this step, as it does in `validate-codegen`.
+        run: bash scripts/install-mnemosyne-cli.sh
+
+      - name: Layer C0 (armed) — binary-dep discipline and gate provenance citations
         # R235-hotfix — pre-flight scan: any wz-integration-tests
         # `tests/*.rs` that calls wz_ap_demo_binary() or
         # zenoh_pico_cli_binary( MUST mark every #[test] with an
@@ -2049,10 +2038,27 @@ jobs:
         # "binary not found" downstream.
         #
         # R2525 — moved to `defaults-off` from `ci` for item 590's budget, and
-        # R3363 — from there to this job. This is still the SHAPE half: no
-        # mnemosyne-cli on this job, so the store-reading arm stays SKIPped here
-        # and armed only where it is provisioned.
-        run: bash scripts/run-ci.sh --layer C0
+        # R3363 — from there to this job.
+        #
+        # R4290 — and it is now the ONE run of the lane, ARMED. Until this round
+        # it was the shape half only (no mnemosyne-cli here), and
+        # `validate-codegen` ran the whole lane a second time armed, on the
+        # R311y747 reasoning that a second run "costs ~5s". It cost the whole
+        # lane: hosted runs 41939089182 and 41974391826 cut that job at its 30
+        # minutes, 14 minutes into Layer C0. The citation half
+        # (`gate_provenance_lint`, `reason_citation_gate`,
+        # `inventory_denominator_lint`) reads the store through mnemosyne-cli and
+        # SKIPs without it; WZ_C0_REQUIRE turns that SKIP into a FAIL, since this
+        # job now provisions it: a lane that SKIPs where its input is
+        # provisioned is a provisioning regression wearing a green badge.
+        env:
+          WZ_C0_REQUIRE: "1"
+          WZ_KCONFIG_REQUIRE: "1"
+        run: |
+          # The build configuration's presets are resolved by the one pinned Kconfig
+          # interpreter (docs/build-configuration.md C11), so this armed run provisions it.
+          bash scripts/provision-kconfiglib.sh
+          bash scripts/run-ci.sh --layer C0
 
       - name: Budget margin — this job's own clock
         if: always()
