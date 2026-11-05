@@ -1223,7 +1223,7 @@ jobs:
   # runner minutes on an already-broken tree, not a lost gate, and the lane
   # still fails by design on such a tree rather than measuring nothing.
   #
-  # R4244 -- TWO SHARDS. The job itself then grew to its limit: 26 to 28 minutes when it
+  # R4245 -- TWO SHARDS. The job itself then grew to its limit: 26 to 28 minutes when it
   # finished, cancelled at 30 in hosted runs 41732702195, 41858067005 and 41884918361, each
   # mutant a build and a run of the leg's crates (3.4 s and 12.8 s in wz-capture). Each shard
   # asks the legs and predicate thresholds whose position is congruent to it
@@ -5890,7 +5890,7 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1bf
 
   # ─────────────────────────────────────────────────────────────────
-  # R4244 -- the ANALYZER crates' lanes, out of `isolated-crates`. That job reached its
+  # R4245 -- the ANALYZER crates' lanes, out of `isolated-crates`. That job reached its
   # 30-minute limit and was cancelled in every run read from 41732702195 to 41884918361:
   # C3 to C1bx took 25 minutes there (C1m alone 10), C1bz was cancelled three minutes in, and
   # C1by was never reached, so the replay engine and the analyzer crates' docs had no hosted
