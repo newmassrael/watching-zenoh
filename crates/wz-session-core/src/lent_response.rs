@@ -34,12 +34,17 @@
 //! skips a reply whose bounded field overflows on the heap profile.
 
 use sce_forge_runtime::codec::{Bounded, CodecError, SceSink, SliceSink};
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
-use wz_codecs::lent::{ExtEntry, ExtEntryVariant, ExtZbuf, Response, ResponseVariant};
+use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
+use wz_codecs::ext_zbuf::ExtZbufParts;
+use wz_codecs::ext_zint::ExtZintParts;
+use wz_codecs::response::{ResponseParts, ResponsePartsBody, ResponseWire};
 use wz_codecs::wire_const;
+use wz_codecs::wireexpr::{WireexprParts, WireexprPartsBody};
+use wz_codecs::wireexpr_local::WireexprLocalParts;
 
+use crate::declare_ext_qos::QOS_EXT_HEADER;
 use crate::ext_header::{ext_identity, EXT_ENC_ZBUF, EXT_FLAG_Z};
-use crate::lent_control::{local, qos_entry, with_z};
+use crate::lent_control::with_z;
 use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
 use crate::sample::QosLevel;
 
@@ -175,12 +180,6 @@ const ERR_HEADER: u8 = 0x05;
 const PUT_HEADER: u8 = 0x01;
 const DEL_HEADER: u8 = 0x02;
 
-/// The `T` (timestamp) flag of a Del, the same bit as a Put's.
-const FLAG_DEL_T: u8 = 0x20;
-
-/// The `Z` (extension chain) flag of a Del, the same bit as a Put's.
-const FLAG_DEL_Z: u8 = 0x80;
-
 /// The responder identity extension of the `Response` envelope:
 /// `zextzbuf!(0x3, false)`, ENC_ZBUF with no `M` flag.
 const RESPONDER_EXT_HEADER: u8 = ext_identity(0x03, false, EXT_ENC_ZBUF);
@@ -231,18 +230,33 @@ impl IdentityBody {
         Ok(Self { bytes, len })
     }
 
-    fn zbuf(&self) -> ExtZbuf<'_> {
-        ExtZbuf {
-            value_len: self.len as u64,
-            value: Bounded::new(&self.bytes[..self.len])
-                .expect("an extension body this node writes is within the u32 length"),
-        }
+    /// The body's bytes, as the extension's value.
+    fn value(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// The entries the envelope's extension chain holds at most: the QoS and the responder.
+const ENVELOPE_ENTRIES: usize = 2;
+
+/// The entries a Put's or a Del's extension chain holds at most: the source info and the
+/// attachment.
+const BODY_ENTRIES: usize = 2;
+
+/// The body of an entry no extension fills: a slot of a chain that is never written.
+static UNUSED_ENTRY_BODY: ExtZintParts = ExtZintParts { value: 0 };
+
+/// An integer-valued extension entry.
+const fn zint_entry<'a>(header: u8, body: &'a ExtZintParts) -> ExtEntryParts<'a> {
+    ExtEntryParts {
+        header,
+        body: ExtEntryPartsBody::CodecZenohExtZint(body),
     }
 }
 
 /// Set the chain-continuation `Z` bit on every entry but the last, which ends the
-/// chain: [`crate::ext_nodeid::apply_chain_z_bits`] over the codec's borrowed entries.
-fn link_chain(chain: &mut HeaplessVec<ExtEntry<'_>, 8>) {
+/// chain: [`crate::ext_nodeid::apply_chain_z_bits`] over the codec's parts entries.
+fn link_chain(chain: &mut [ExtEntryParts<'_>]) {
     let Some(last) = chain.len().checked_sub(1) else {
         return;
     };
@@ -472,7 +486,7 @@ impl<'a> ResponseWriter<'a> {
         out.vle(parts.keyexpr.len() as u64, VLE_U64);
         out.bytes(parts.keyexpr.as_bytes());
         if qos_extension {
-            let entry = qos_entry(parts.qos).header & !EXT_FLAG_Z;
+            let entry = QOS_EXT_HEADER & !EXT_FLAG_Z;
             out.byte(if responder { entry | EXT_FLAG_Z } else { entry });
             out.vle(u64::from(parts.qos.raw), VLE_U64);
         }
@@ -555,77 +569,101 @@ impl<'a> ResponseWriter<'a> {
     /// The `Response` through the codec's own encoder: the reference for [`Self::write_direct`]
     /// and the path of every reply that carries more than the plain one.
     ///
-    /// Not inlined: the `Response` it builds holds chains of eight extension entries at three
-    /// levels, a frame of over two kilobytes, and inlined into the closure that encodes a reply
-    /// it set the frame of every reply, the plain ones too, which never enter it.
+    /// The message is described in the codec's PARTS form (references, a slice of at most two
+    /// extension entries, a few words), which the codec's own wire writer reads
+    /// (`ResponseWire::encode_source`), as the request side does (`lent_request`). The lent form
+    /// of the same codecs holds their lists inline at the capacity the deployment gives them: a
+    /// `Response` built to be encoded was a frame of 1.5 KB under the drain of the reply
+    /// stage, on the worst path of a node's stack, for chains of a few entries.
+    ///
+    /// Not inlined: so that the plain replies, which never enter it, do not take its frame.
     #[inline(never)]
     pub(crate) fn encode_generic<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
     where
         CodecError: From<S::Error>,
     {
-        let parts = &self.parts;
-        // The envelope's extensions: the QoS unless it is the default, then the
-        // responder.
-        let mut chain: HeaplessVec<ExtEntry<'_>, 8> = HeaplessVec::new();
-        if parts.qos != QosLevel::DEFAULT {
-            // Two entries in a list of eight.
-            let _ = chain.push(qos_entry(parts.qos));
-        }
-        if parts.responder.is_some() {
-            let _ = chain.push(ExtEntry {
-                header: RESPONDER_EXT_HEADER,
-                body: ExtEntryVariant::CodecZenohExtZbuf(self.responder.zbuf()),
-            });
-        }
-        link_chain(&mut chain);
-        let header = if chain.is_empty() {
-            RESPONSE_HEADER
-        } else {
-            with_z(RESPONSE_HEADER)
-        };
-        let body = match &parts.kind {
+        match &self.parts.kind {
             PartsKind::Reply {
                 body,
                 encoding,
                 timestamp,
                 attachment,
                 source_info: _,
-            } => ResponseVariant::CodecZenohReply(self.reply(
-                body,
-                *encoding,
-                *timestamp,
-                *attachment,
-            )?),
+            } => self.write_reply(sink, body, *encoding, *timestamp, *attachment),
             #[cfg(feature = "query-reply-err")]
-            PartsKind::Err { encoding, payload } => {
-                ResponseVariant::CodecZenohErr(Self::err(*encoding, payload)?)
-            }
-        };
-        Response {
-            header,
-            request_id: parts.rid,
-            keyexpr: local(0, Some(parts.keyexpr))?,
-            // A chain of no entry is none: the bounds of a chain hold one entry or more, and
-            // the list's capacity is the bound.
-            extensions: Bounded::new(chain),
-            body,
+            PartsKind::Err { encoding, payload } => self.write_err(sink, *encoding, payload),
         }
-        .encode(sink)
-        .map_err(CodecError::from)
+    }
+
+    /// The `Response` envelope around `body`, written into `sink`: the key as a literal, and the
+    /// envelope's extensions, the QoS unless it is the default, then the responder.
+    fn write_response<S: SceSink>(
+        &self,
+        sink: &mut S,
+        body: ResponsePartsBody<'_>,
+    ) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
+        let parts = &self.parts;
+        let qos = ExtZintParts {
+            value: u64::from(parts.qos.raw),
+        };
+        let responder = ExtZbufParts {
+            value: crate::codec_owned::sent(self.responder.value())?,
+        };
+        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); ENVELOPE_ENTRIES];
+        let mut count = 0;
+        if parts.qos != QosLevel::DEFAULT {
+            chain[count] = zint_entry(QOS_EXT_HEADER, &qos);
+            count += 1;
+        }
+        if parts.responder.is_some() {
+            chain[count] = ExtEntryParts {
+                header: RESPONDER_EXT_HEADER,
+                body: ExtEntryPartsBody::CodecZenohExtZbuf(&responder),
+            };
+            count += 1;
+        }
+        let chain = &mut chain[..count];
+        link_chain(chain);
+        let suffix = WireexprLocalParts {
+            id: 0,
+            suffix: Some(crate::codec_owned::sent_suffix(parts.keyexpr)?),
+        };
+        let keyexpr = WireexprParts {
+            body: WireexprPartsBody::WireexprLocal(&suffix),
+        };
+        let response = ResponseParts {
+            // The codec sets the `Z` flag from the chain and the `M` flag from the key's arm.
+            header: RESPONSE_HEADER,
+            request_id: parts.rid,
+            keyexpr: &keyexpr,
+            // A chain of no entry is none: the bounds of a chain hold one entry or more.
+            extensions: Bounded::new(&*chain),
+            body,
+        };
+        ResponseWire::encode_source(&response, sink).map_err(CodecError::from)
     }
 
     /// The Reply body: a Put or a Del, with the value's timestamp and encoding (each
     /// behind the feature the owned builder gates it on) and the source-info and
     /// attachment extensions, in that order, with the attachment under the id of the
     /// arm it rides. `LengthOutOfRange` for a field past its protocol bound.
-    fn reply(
+    fn write_reply<S: SceSink>(
         &self,
+        sink: &mut S,
         body: &PartsBody<'a>,
         encoding: Option<crate::reply_stage::EncodingParts<'a>>,
         timestamp: Option<crate::reply_stage::TimestampParts<'a>>,
         attachment: Option<&'a [u8]>,
-    ) -> Result<wz_codecs::lent::Reply<'_>, CodecError> {
-        use wz_codecs::lent::{Reply, ReplyVariant};
+    ) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
+        use wz_codecs::msg_del::MsgDelParts;
+        use wz_codecs::msg_put::{MsgPutExtensionsHas0x12, MsgPutParts};
+        use wz_codecs::reply::{ReplyParts as CodecReplyParts, ReplyPartsBody};
         let payload: Option<&[u8]> = match body {
             PartsBody::Put(bytes) => Some(bytes),
             PartsBody::Del => None,
@@ -648,139 +686,139 @@ impl<'a> ResponseWriter<'a> {
         #[cfg(feature = "pubsub-timestamp")]
         let timestamp = timestamp
             .map(|ts| {
-                Ok::<_, CodecError>(wz_codecs::lent::Timestamp {
+                Ok::<_, CodecError>(wz_codecs::timestamp::TimestampParts {
                     time: ts.time,
-                    zid_len: ts.zid.len() as u64,
                     zid: crate::codec_owned::sent(ts.zid)?,
                 })
             })
             .transpose()?;
         #[cfg(not(feature = "pubsub-timestamp"))]
-        let timestamp: Option<wz_codecs::lent::Timestamp<'_>> = None;
+        let timestamp: Option<wz_codecs::timestamp::TimestampParts<'_>> = None;
 
         // An encoding is a Put's only: a Del has no slot for it.
         #[cfg(feature = "pubsub-encoding")]
         let encoding = encoding
             .filter(|_| is_put)
             .map(|e| {
-                Ok::<_, CodecError>(wz_codecs::lent::Encoding {
+                Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
                     packed_id: e.packed_id,
-                    schema_len: e.schema.map(|s| s.len() as u64),
                     schema: e.schema.map(schema_text).transpose()?,
                 })
             })
             .transpose()?;
         #[cfg(not(feature = "pubsub-encoding"))]
-        let encoding: Option<wz_codecs::lent::Encoding<'_>> = None;
+        let encoding: Option<wz_codecs::encoding::EncodingParts<'_>> = None;
 
         // The body's extension chain: the source info, then the attachment.
-        let mut chain: HeaplessVec<ExtEntry<'_>, 8> = HeaplessVec::new();
+        #[cfg(feature = "reply-source-info")]
+        let source_info = ExtZbufParts {
+            value: crate::codec_owned::sent(self.source_info.value())?,
+        };
+        #[cfg(feature = "pubsub-attachment")]
+        let attachment = attachment
+            .map(|bytes| {
+                Ok::<_, CodecError>(ExtZbufParts {
+                    value: crate::codec_owned::sent(bytes)?,
+                })
+            })
+            .transpose()?;
+        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); BODY_ENTRIES];
+        // Written only by the entries a build carries (the source info, the attachment).
+        #[cfg_attr(
+            not(any(feature = "reply-source-info", feature = "pubsub-attachment")),
+            allow(unused_mut)
+        )]
+        let mut count = 0;
         #[cfg(feature = "reply-source-info")]
         if self.source_info.len != 0 {
-            let _ = chain.push(ExtEntry {
+            chain[count] = ExtEntryParts {
                 header: crate::ext_header::body_eid::SOURCE_INFO,
-                body: ExtEntryVariant::CodecZenohExtZbuf(self.source_info.zbuf()),
-            });
+                body: ExtEntryPartsBody::CodecZenohExtZbuf(&source_info),
+            };
+            count += 1;
         }
         #[cfg(feature = "pubsub-attachment")]
-        if let Some(attachment) = attachment {
-            let _ = chain.push(ExtEntry {
+        if let Some(attachment) = &attachment {
+            chain[count] = ExtEntryParts {
                 header: if is_put {
                     crate::ext_header::body_eid::PUT_ATTACHMENT
                 } else {
                     crate::ext_header::body_eid::DEL_ATTACHMENT
                 },
-                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
-                    value_len: attachment.len() as u64,
-                    value: crate::codec_owned::sent(attachment)?,
-                }),
-            });
+                body: ExtEntryPartsBody::CodecZenohExtZbuf(attachment),
+            };
+            count += 1;
         }
-        link_chain(&mut chain);
-        let has_chain = !chain.is_empty();
-        let extensions = Bounded::new(chain);
-
+        let chain = &mut chain[..count];
+        link_chain(chain);
+        // The codec derives the `T`, `E` and `Z` flags of a Put's and a Del's header from what
+        // the value holds, and a chain of no entry is none.
+        let put;
+        let del;
         let inner = match payload {
             Some(bytes) => {
-                let mut header = PUT_HEADER;
-                if timestamp.is_some() {
-                    header |= wire_const::FLAG_Z_PUT_T;
-                }
-                if encoding.is_some() {
-                    header |= wire_const::FLAG_Z_PUT_E;
-                }
-                if has_chain {
-                    header |= wire_const::FLAG_Z_PUT_Z;
-                }
-                ReplyVariant::CodecZenohMsgPut(wz_codecs::lent::MsgPut {
-                    header,
-                    timestamp,
-                    encoding,
+                put = MsgPutParts {
+                    header: PUT_HEADER,
+                    timestamp: timestamp.as_ref(),
+                    encoding: encoding.as_ref(),
                     // The reply's chain holds the source info and the attachment, never the
                     // shared-memory marker, so the Put is inline.
-                    extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
-                        extensions: extensions.map(|chain| {
-                            sce_forge_runtime::codec::Chain::new(chain.into_inner())
-                                .expect("the chain holds no shared-memory marker")
-                        }),
+                    extensions_has_0x12: MsgPutExtensionsHas0x12::NotHas0x12 {
+                        // `None` for a chain of no entry; the entries here are never the
+                        // marker's kind, so a chain of one or more is always held.
+                        extensions: sce_forge_runtime::codec::Chain::new(&*chain),
                         payload: crate::codec_owned::sent(bytes)?,
                     },
-                    payload_len: Some(bytes.len() as u64),
-                    slice_count: None,
-                })
+                };
+                ReplyPartsBody::CodecZenohMsgPut(&put)
             }
             None => {
-                let mut header = DEL_HEADER;
-                if timestamp.is_some() {
-                    header |= FLAG_DEL_T;
-                }
-                if has_chain {
-                    header |= FLAG_DEL_Z;
-                }
-                ReplyVariant::CodecZenohMsgDel(wz_codecs::lent::MsgDel {
-                    header,
-                    timestamp,
-                    extensions,
-                })
+                del = MsgDelParts {
+                    header: DEL_HEADER,
+                    timestamp: timestamp.as_ref(),
+                    extensions: Bounded::new(&*chain),
+                };
+                ReplyPartsBody::CodecZenohMsgDel(&del)
             }
         };
-        Ok(Reply {
+        let reply = CodecReplyParts {
             header: REPLY_HEADER,
             consolidation: None,
             extensions: None,
             body: inner,
-        })
+        };
+        self.write_response(sink, ResponsePartsBody::CodecZenohReply(&reply))
     }
 
     /// The Err body: the payload, and the error's own encoding when it names one, its id
     /// packed with the schema bit as `ResponseErrBuilder::encoding` packs it.
     ///
-    /// The lifetime of the value is the caller's (`'o`) and not the parts' (`'a`): a lent
-    /// value is invariant in its lifetime, so an `Err<'a>` cannot be shortened to sit in a
-    /// `Response` that also borrows this writer, and the borrows are shortened here instead.
+    /// The codec derives the `E` and `Z` flags of the header from what the value holds.
     #[cfg(feature = "query-reply-err")]
-    fn err<'o>(
-        encoding: Option<(u32, Option<&'o str>)>,
-        payload: &'o [u8],
-    ) -> Result<wz_codecs::lent::Err<'o>, CodecError> {
-        let mut header = ERR_HEADER;
+    fn write_err<S: SceSink>(
+        &self,
+        sink: &mut S,
+        encoding: Option<(u32, Option<&str>)>,
+        payload: &[u8],
+    ) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         let encoding = encoding
             .map(|(id, schema)| {
-                header |= wire_const::FLAG_Z_ERR_E;
-                Ok::<_, CodecError>(wz_codecs::lent::Encoding {
+                Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
                     packed_id: (id << 1) | u32::from(schema.is_some()),
-                    schema_len: schema.map(|s| s.len() as u64),
                     schema: schema.map(schema_text).transpose()?,
                 })
             })
             .transpose()?;
-        Ok(wz_codecs::lent::Err {
-            header,
-            encoding,
+        let err = wz_codecs::err::ErrParts {
+            header: ERR_HEADER,
+            encoding: encoding.as_ref(),
             extensions: None,
-            payload_len: payload.len() as u64,
             payload: crate::codec_owned::sent(payload)?,
-        })
+        };
+        self.write_response(sink, ResponsePartsBody::CodecZenohErr(&err))
     }
 }
 
