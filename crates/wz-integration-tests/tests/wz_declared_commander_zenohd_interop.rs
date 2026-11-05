@@ -255,7 +255,9 @@ impl Node {
         format!("@/{}/client/session/{verb}/{peer}", self.zid)
     }
 
-    fn output(&mut self) -> String {
+    /// What the node has printed so far. Not named `output`: `bounded::census` reads the text of
+    /// every test file for a bare `.output()` of a child and cannot tell this method from it.
+    fn console(&mut self) -> String {
         read_captured(&mut self.out)
     }
 }
@@ -325,7 +327,7 @@ fn only_reply(asked: (Vec<String>, String), what: &str, node: &mut Node) -> Stri
         [one] => one.clone(),
         _ => panic!(
             "{what}: expected one reply, got {replies:?}\n--- z_get ---\n{text}\n--- node ---\n{}",
-            node.output()
+            node.console()
         ),
     }
 }
@@ -347,12 +349,12 @@ fn a_zenoh_zget_granted_status_reads_it_on_its_own_session_and_is_refused_close(
     assert!(
         status.starts_with("{\"verdict\":\"status\""),
         "the zid granted `status` asked it on its own session and was not answered: {status}\n{}",
-        node.output()
+        node.console()
     );
     assert!(
-        node.output().contains(VERIFIED),
+        node.console().contains(VERIFIED),
         "the node answered, but never read the asker's key as naming the zid it claimed\n{}",
-        node.output()
+        node.console()
     );
     let close = only_reply(
         ask(&config, &node.verb_key("close", &built.stranger.zid)),
@@ -582,7 +584,7 @@ fn two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenoh
     // and its close is refused by name.
     let deadline = std::time::Instant::now() + BUDGET;
     let (status, close) = loop {
-        let said = subject_run.output();
+        let said = subject_run.console();
         let found = (
             kept_reply(&said, "/session/status/"),
             kept_reply(&said, "/session/close/"),
@@ -594,7 +596,7 @@ fn two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenoh
             std::time::Instant::now() < deadline,
             "the subject kept no answer to both questions within {BUDGET:?}\n--- subject ---\n{said}\n\
              --- target ---\n{}",
-            target_run.output()
+            target_run.console()
         );
         std::thread::sleep(Duration::from_millis(200));
     };
