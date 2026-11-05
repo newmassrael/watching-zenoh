@@ -53,10 +53,10 @@ pub const PLUGIN_ID: &str = "rest";
 /// [`plugin_record`](Self::plugin_record) and
 /// [`status_leaves`](Self::status_leaves) sit behind
 /// `adminspace-plugins-handlers`, and that gate is FORCED rather than chosen:
-/// they name `AdminPlugin`, which lives in `wz_session_core::adminspace`, and
-/// that whole module is `#[cfg(feature = "adminspace-core")]`
-/// (`wz-session-core/src/lib.rs` @ `pub mod adminspace;`). This crate's feature
-/// composes it through wz-runtime-tokio's.
+/// they name `AdminPlugin`, which lives in `wz_admin::adminspace`, and
+/// that whole module is `#[cfg(feature = "adminspace-fixed")]`
+/// (`wz-admin/src/lib.rs` @ `pub mod adminspace;`). This crate's feature
+/// composes it through wz-runtime-tokio's and names the admin crate it reads.
 ///
 /// ⚠ THAT WAS ESTABLISHED BY REMOVING THE GATE AND FAILING TO BUILD, after a
 /// grep for `pub mod adminspace` printed the `pub mod` line and not the `#[cfg]`
@@ -151,7 +151,7 @@ impl RestAdmin {
     pub fn status_leaves(
         &self,
         version: &str,
-    ) -> Option<Vec<wz_session_core::adminspace::AdminPluginStatusLeaf>> {
+    ) -> Option<Vec<wz_admin::adminspace::AdminPluginStatusLeaf>> {
         self.serving_addr().map(|addr| status_leaves(version, addr))
     }
 
@@ -164,8 +164,8 @@ impl RestAdmin {
     /// that does not serve the bridge folds nothing and the registry keeps
     /// reporting `rest` as compiled-in-but-not-running, which is what it is.
     #[cfg(feature = "adminspace-plugins-handlers")]
-    pub fn plugin_record(&self, version: &str) -> Option<wz_session_core::adminspace::AdminPlugin> {
-        use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
+    pub fn plugin_record(&self, version: &str) -> Option<wz_admin::adminspace::AdminPlugin> {
+        use wz_admin::adminspace::{AdminPlugin, AdminPluginState};
 
         let addr = self.serving_addr()?;
         Some(
@@ -203,8 +203,8 @@ impl Drop for ServingGuard {
 fn status_leaves(
     version: &str,
     addr: SocketAddr,
-) -> Vec<wz_session_core::adminspace::AdminPluginStatusLeaf> {
-    use wz_session_core::adminspace::AdminPluginStatusLeaf;
+) -> Vec<wz_admin::adminspace::AdminPluginStatusLeaf> {
+    use wz_admin::adminspace::AdminPluginStatusLeaf;
 
     let mut version_json = String::new();
     wz_session_core::json::escape_into(version, &mut version_json);
@@ -250,7 +250,7 @@ mod tests {
     #[cfg(feature = "adminspace-plugins-handlers")]
     #[test]
     fn the_record_is_absent_until_the_bridge_serves() {
-        use wz_session_core::adminspace::AdminPluginState;
+        use wz_admin::adminspace::AdminPluginState;
 
         let admin = RestAdmin::new();
         assert!(
@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(rec.state, AdminPluginState::Started);
         assert_eq!(
             rec.path,
-            wz_session_core::adminspace::WZ_STATIC_PLUGIN_PATH,
+            wz_admin::adminspace::WZ_STATIC_PLUGIN_PATH,
             "a compiled-in subsystem, not a dlopen .so"
         );
     }

@@ -705,38 +705,6 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
 
 // The builds the feature model `wz-session-core` admits (docs/adr/0057 §6): a build
 // that turns a feature on and leaves out one it requires compiles none of this.
-#[cfg(all(feature = "adminspace-config-hotreload", not(feature = "adminspace-core")))]
-compile_error!("feature `adminspace-config-hotreload` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-config-hotreload", not(feature = "storage-backend")))]
-compile_error!("feature `adminspace-config-hotreload` requires `storage-backend`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-core", not(feature = "adminspace-fixed")))]
-compile_error!("feature `adminspace-core` requires `adminspace-fixed`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-core", not(feature = "alloc")))]
-compile_error!("feature `adminspace-core` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-fixed", not(feature = "keyexpr-wildcard-double")))]
-compile_error!("feature `adminspace-fixed` requires `keyexpr-wildcard-double`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-fixed", not(feature = "keyexpr-wildcard-single")))]
-compile_error!("feature `adminspace-fixed` requires `keyexpr-wildcard-single`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-fixed", not(feature = "pubsub-encoding")))]
-compile_error!("feature `adminspace-fixed` requires `pubsub-encoding`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-fixed", not(feature = "storage-profile")))]
-compile_error!("feature `adminspace-fixed` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-introspection-handlers", not(feature = "adminspace-core")))]
-compile_error!("feature `adminspace-introspection-handlers` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-metrics", not(feature = "adminspace-core")))]
-compile_error!("feature `adminspace-metrics` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-metrics", not(feature = "query-selector-parameters")))]
-compile_error!("feature `adminspace-metrics` requires `query-selector-parameters`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-plugins-handlers", not(feature = "adminspace-core")))]
-compile_error!("feature `adminspace-plugins-handlers` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-router-linkstate", not(feature = "adminspace-core")))]
-compile_error!("feature `adminspace-router-linkstate` requires `adminspace-core`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-write", not(feature = "keyexpr-wildcard-double")))]
-compile_error!("feature `adminspace-write` requires `keyexpr-wildcard-double`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-write", not(feature = "keyexpr-wildcard-single")))]
-compile_error!("feature `adminspace-write` requires `keyexpr-wildcard-single`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "adminspace-write", not(feature = "rx-push")))]
-compile_error!("feature `adminspace-write` requires `rx-push`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "alloc", not(feature = "storage-profile")))]
 compile_error!("feature `alloc` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "clock-source", not(feature = "clock-quality")))]

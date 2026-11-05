@@ -35,10 +35,10 @@ use alloc::string::String;
 use core::cell::RefCell;
 
 use critical_section::Mutex;
+use wz_admin::admin_config_space::write_config_space_pattern;
 use wz_admin::admin_connect::{
     parse_connect_endpoints_write, ConnectEndpoints, ConnectWriteOutcome,
 };
-use wz_session_core::admin_config_space::write_config_space_pattern;
 
 /// The write as it arrived, which [`ConnectControl::apply`] takes: named here as well as in
 /// `wz_admin::admin_connect`, so a host that drives this module names the types of its

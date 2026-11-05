@@ -38,8 +38,8 @@ future witness would grep for. Five spellings mean a witness can match some
 hosts and silently miss others, and one of the five already wrapped across a
 line continuation, so a literal grep for the whole sentence did not find it at
 all. R2329 hoisted the wording into
-`wz_session_core::adminspace::denied_read_diagnostic`, and this gate is what
-keeps it there.
+`wz_session_core::adminspace::denied_read_diagnostic` (`wz_admin::adminspace` since
+the server-layer split, step 7), and this gate is what keeps it there.
 
 ## The derivation
 
@@ -154,7 +154,7 @@ def run(root: pathlib.Path) -> int:
                     f"say anything. A read gate that denies SILENTLY is the asymmetry the "
                     f"enum was introduced to remove — the write host has always logged.\n"
                     f"    Fix: `log::error!(\"{{}}\", "
-                    f"wz_session_core::adminspace::{WORDING_FN}(view.keyexpr()))`. Do not "
+                    f"wz_admin::adminspace::{WORDING_FN}(view.keyexpr()))`. Do not "
                     f"re-inline the sentence: five hand-written copies is the state this "
                     f"gate exists to prevent, and a witness greps for ONE spelling."
                 )

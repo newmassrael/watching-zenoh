@@ -15,7 +15,7 @@
 //! Nothing new answers it. `crate::admin_status::host_admin_queryable`
 //! registers, on the node's application-layer observer, a queryable for
 //! `@/<zid>/<whatami>/**` — the key upstream declares its admin queryable
-//! on — and hands every query to `wz_session_core::adminspace::
+//! on — and hands every query to `wz_admin::adminspace::
 //! answer_admin_query`, the answerer the AP's Session and routing hosts
 //! already share, so an MCU's reply is byte-for-byte what theirs would be for
 //! the same state. The MCU runs with a heap, so there is no reason to write a
@@ -37,9 +37,7 @@ use core::cell::RefCell;
 #[cfg(not(feature = "session-slot"))]
 use critical_section::Mutex;
 #[cfg(not(feature = "session-slot"))]
-use wz_session_core::adminspace::{
-    admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminSession,
-};
+use wz_admin::adminspace::{admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminSession};
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::locality::Locality;
 #[cfg(not(feature = "session-slot"))]
@@ -132,7 +130,7 @@ pub trait ConnectStatusSource {
 /// upstream's shape exactly.
 #[cfg(not(feature = "session-slot"))]
 pub fn admin_connect_status_key(zid_hex: &str, whatami: &str) -> String {
-    let mut key = wz_session_core::adminspace::admin_root_key(zid_hex, whatami);
+    let mut key = wz_admin::adminspace::admin_root_key(zid_hex, whatami);
     key.push('/');
     key.push_str(CONNECT_STATUS_TAIL);
     key
@@ -316,15 +314,11 @@ pub fn host_admin_queryable(
     // (the `status/connect` one is the common) is answered without copying the session list or
     // rendering the config, which were done for every GET before.
     let mut root_key = String::new();
-    wz_session_core::adminspace::write_admin_root_key(
-        &mut root_key,
-        &identity.zid_hex,
-        identity.whatami,
-    );
+    wz_admin::adminspace::write_admin_root_key(&mut root_key, &identity.zid_hex, identity.whatami);
     let config_key = alloc::format!("{root_key}/config");
     let answer = BoxedQuerySink::new(move |query, out| {
         // The GET's keyexpr is looked at once for the three keys this closure asks about.
-        let asked = wz_session_core::adminspace::PreparedQuery::new(query.keyexpr());
+        let asked = wz_admin::adminspace::PreparedQuery::new(query.keyexpr());
         let wants_root = asked.intersects(&root_key);
         let wants_config = asked.intersects(&config_key);
         let (read, sessions) = if wants_root {

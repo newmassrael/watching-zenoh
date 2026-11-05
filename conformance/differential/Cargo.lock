@@ -3568,6 +3568,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-admin"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "log",
+ "wz-runtime-core",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-auth"
 version = "0.1.0"
 dependencies = [
@@ -3725,6 +3735,7 @@ dependencies = [
  "webpki-roots",
  "windows-sys 0.61.2",
  "wz-access-control",
+ "wz-admin",
  "wz-auth",
  "wz-codecs",
  "wz-ext-pubsub",

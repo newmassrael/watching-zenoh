@@ -759,7 +759,7 @@ pub(super) type HostedLog = Arc<std::sync::Mutex<Vec<String>>>;
 fn admin_rows(
     legs: Vec<(
         &'static str,
-        Vec<(String, wz_session_core::adminspace::AdminSources)>,
+        Vec<(String, wz_admin::adminspace::AdminSources)>,
     )>,
 ) -> Vec<Seen> {
     legs.into_iter()

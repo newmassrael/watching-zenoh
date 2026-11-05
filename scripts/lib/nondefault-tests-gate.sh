@@ -556,13 +556,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-tls-mbedtls|hook|host-lock,rsa,vendored|"
     "wz-runtime-core|hook|alloc|"
     "wz-session-core|hook|\
-        adminspace-config-hotreload,\
-        adminspace-core,\
-        adminspace-introspection-handlers,\
-        adminspace-metrics,\
-        adminspace-plugins-handlers,\
-        adminspace-router-linkstate,\
-        adminspace-write,\
         attachment-bytes,\
         clock-quality,\
         clock-source,\
@@ -693,13 +686,12 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         pubsub-delete,\
         bounded-heapless\
         |"
-    # S9b: the same fixed backing WITH the admin surface and the Err reply, a
-    # separate row because `adminspace-core` and `query-reply-err` add the admin
-    # writers, the bounded answerer and the typed refusal, and the proof file
-    # `tests/admin_reply_fits.rs` (an admin reply of the bound delivered at zero
-    # allocations, one byte more refused) needs all of it on the fixed backing.
+    # S9b: the same fixed backing WITH the Err reply, a separate row because
+    # `query-reply-err` adds the typed refusal. The admin surface it was run with
+    # (the writers, the bounded answerer, the arena and the proof file
+    # `tests/admin_reply_fits.rs`) is the wz-admin crate's since the server-layer
+    # split, step 7, and its row there names this same core build.
     "wz-session-core|hook|\
-        adminspace-core,\
         bounded-heapless,\
         codec-push,\
         codec-declare,\
@@ -1134,10 +1126,39 @@ storage-mgr-garbage-collection,\
 storage-mgr-strip-prefix,\
 storage-mgr-wildcard-updates,\
 storage-replication|"
-    # The admin space's MCU config-write decoder is the wz-admin crate's (server-layer split,
-    # step 6), and its tests went with it; the core's wide leg ran them before under this same
-    # feature name. No filter, so a test added there later is claimed without touching the row.
-    "wz-admin|hook|adminspace-write|"
+    # The admin space is the wz-admin crate's (server-layer split, steps 6 and 7), and its
+    # tests went with it; the core's wide leg ran them before under these same feature names.
+    # No filter, so a test added there later is claimed without touching the row.
+    "wz-admin|hook|\
+adminspace-config-hotreload,\
+adminspace-core,\
+adminspace-introspection-handlers,\
+adminspace-metrics,\
+adminspace-plugins-handlers,\
+adminspace-router-linkstate,\
+adminspace-write,\
+session-unicast|"
+    # S9b, row R7: the admin surface on the core's fixed backing with the Err reply, the build
+    # the core's own row of that name ran it in, and the proof file `tests/admin_reply_fits.rs`,
+    # whose `required-features` are this core build.
+    "wz-admin|hook|\
+adminspace-core,\
+wz-session-core/bounded-heapless,\
+wz-session-core/codec-push,\
+wz-session-core/codec-declare,\
+wz-session-core/codec-request,\
+wz-session-core/codec-response,\
+wz-session-core/codec-response-final,\
+wz-session-core/declare-queryable,\
+wz-session-core/declare-subscriber,\
+wz-session-core/declare-undeclare,\
+wz-session-core/liveliness-get,\
+wz-session-core/liveliness-subscriber,\
+wz-session-core/liveliness-token,\
+wz-session-core/pubsub-delete,\
+wz-session-core/pubsub-put,\
+wz-session-core/query-queryable,\
+wz-session-core/query-reply-err|"
     # S9d, the end-to-end half: `wz-session-lwip`'s `tests/slot_control_records.rs`
     # drives a real session pair on the host lwIP loopback and counts one acceptor
     # iteration per control record. It names `codec-response-final` beside the slot

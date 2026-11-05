@@ -32,7 +32,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use wz_session_core::adminspace::{AdminLink, AdminSession};
+use wz_admin::adminspace::{AdminLink, AdminSession};
 use wz_session_core::caps;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::peer_tables::PeerTables;

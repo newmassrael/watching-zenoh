@@ -247,39 +247,46 @@ query-queryable = ["codec-request", "codec-response", "wz-session-core/query-que
 # `Session::declare_adminspace(version, locators)` registers it through the
 # existing `query-queryable` declare path and answers a GET under the node
 # prefix with the `local_data` JSON. Composes `query-queryable` (the declare /
-# reply machinery) with `wz-session-core/adminspace-core` (the `AdminLocalData`
-# view + JSON emitter). The wz mirror of zenoh `net/runtime/adminspace.rs`.
-adminspace-core = ["query-queryable", "wz-session-core/adminspace-core"]
+# reply machinery) with `wz-admin/adminspace-core` (the `AdminLocalData`
+# view + JSON emitter). The wz mirror of zenoh `net/runtime/adminspace.rs`. The
+# session's admin row is the `SessionAdminRow` trait the hosts here call, so the
+# admin crate's `session-unicast` comes with it.
+adminspace-core = [
+    "query-queryable",
+    "dep:wz-admin",
+    "wz-admin/adminspace-core",
+    "wz-admin/session-unicast",
+]
 # adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics admin GET: a second
 # dispatch branch in declare_adminspace's handler replying the OpenMetrics
 # build-info body (text/plain). Composes adminspace-core (the dispatch + the
 # metrics_text builder).
 # R2844 — plus the selector-parameters projection the leg reads; see the
-# session-core feature of the same name.
+# wz-admin feature of the same name.
 adminspace-metrics = [
     "adminspace-core",
-    "wz-session-core/adminspace-metrics",
+    "wz-admin/adminspace-metrics",
     "query-selector-parameters",
 ]
 # adminspace-introspection-handlers (§5.23) — the per-entity subscriber/queryable
 # admin introspection. Composes adminspace-core (the reply machinery) + the
-# wz-session-core reply legs, and the caller-side live materialization: the
+# wz-admin reply legs, and the caller-side live materialization: the
 # LinkstateForwarder `subscriptions()`/`queryables()` whole-table accessors (this
 # crate) that the demo host snapshots per app-tick.
 adminspace-introspection-handlers = [
     "adminspace-core",
-    "wz-session-core/adminspace-introspection-handlers",
+    "wz-admin/adminspace-introspection-handlers",
 ]
 # adminspace-plugins-handlers (§5.23, R311y237) — the wz-native plugins admin legs
 # (`plugins/**` + `status/plugins/**`) inside declare_adminspace's answerer + the
 # `plugins` field of local_data. Composes adminspace-core (the dispatch + reply
-# machinery) + the wz-session-core reply legs. The Session host reports the
+# machinery) + the wz-admin reply legs. The Session host reports the
 # compiled-in subsystems it can see via `cfg!(feature = ..)` (storage_manager under
 # `storage-backend`); wz has NO dlopen plugin-manager (the §5.22 plugin family is
 # reserved) — the registry is the cargo-feature/subsystem set.
 adminspace-plugins-handlers = [
     "adminspace-core",
-    "wz-session-core/adminspace-plugins-handlers",
+    "wz-admin/adminspace-plugins-handlers",
 ]
 # rest-http-bridge (§5.26) — a MARKER, deliberately with no forward: the bridge
 # itself is the `wz-rest` crate, which sits ABOVE this one and cannot be named
@@ -290,11 +297,11 @@ adminspace-plugins-handlers = [
 # the crate from disagreeing.
 rest-http-bridge = []
 # adminspace-config-hotreload (§5.23, R311y239) — the config-diff-driven storage
-# lifecycle: the storage-add/del config-write intents (parse in wz-session-core) +
+# lifecycle: the storage-add/del config-write intents (parse in wz-admin) +
 # the DYNAMIC plugin registry (compiled_plugins_dyn reflects storage_manager Started
 # when a storage is live) + the apply via RuntimeStorageManager::add_storage /
 # remove_storage. Composes adminspace-plugins-handlers (the surface it reflects into)
-# + storage-backend (the RuntimeStorageManager + StorageConfig) + the wz-session-core
+# + storage-backend (the RuntimeStorageManager + StorageConfig) + the wz-admin
 # decoder. The wz-native superset of zenoh's config-hotreload (dlopen plugin start/stop).
 adminspace-config-hotreload = [
     # R2822 — a hot reload IS a config write (storage-add/del arrive as a PUT
@@ -303,7 +310,7 @@ adminspace-config-hotreload = [
     "adminspace-plugins-handlers",
     "storage-mgr-multi-storage-host",
     "declare-subscriber",
-    "wz-session-core/adminspace-config-hotreload",
+    "wz-admin/adminspace-config-hotreload",
     # The reader of the storage manager's `plugins` document and its diff
     # (`wz_storage::storage_plugin_config`); `storage-mgr-multi-storage-host`
     # above already pulls the crate.
@@ -315,11 +322,11 @@ adminspace-config-hotreload = [
 # queryable + the route_request empty-route self-dispatch + the LinkstateNetView DOT/
 # successor render seam over its two nets). Requires routing-router-hat (the
 # RouterForwarder + its two LinkstateNetworks live there); composes adminspace-core
-# (the reply machinery) + the wz-session-core answerer (answer_router_admin_query).
+# (the reply machinery) + the wz-admin answerer (answer_router_admin_query).
 adminspace-router-linkstate = [
     "adminspace-core",
     "routing-router-hat",
-    "wz-session-core/adminspace-router-linkstate",
+    "wz-admin/adminspace-router-linkstate",
 ]
 
 # ext-pubsub-serde-codec (§5.25) — pure forward of the Zenoh
@@ -2109,6 +2116,10 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # reason: the stream writer lends the outbound vector (section 9.1), and the
 # AP has no image-size budget the dyn-buffer encoders could break.
 wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend"] }
+# The admin space a node answers from (§5.23): the `local_data` view, every admin leg and the
+# config-write decoder, the server layer's (server-layer split, step 7). Pulled by
+# `adminspace-core`, which every admin feature here composes.
+wz-admin = { path = "../wz-admin", default-features = false, optional = true }
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
 sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # R311il — sce-rust-lua dropped: the session FSM (the last Lua-bound

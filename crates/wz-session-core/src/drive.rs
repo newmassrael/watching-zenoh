@@ -23,6 +23,12 @@ use sce_rust_runtime::Engine;
 use wz_runtime_core::TimeSource;
 
 use crate::driver_loop::DriverLoopOutcome;
+// The decode and judgement of a unit (`decode_unit_in`, `decide_unit_in`) are the only readers of
+// this and of `InboundFrame` below, and are compiled where one of their callers is.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-frame", feature = "session-slot")
+))]
 use crate::inbound::inbound_to_fsm_event;
 use crate::lease::LeaseCheckOutcome;
 #[cfg(feature = "transport-keepalive")]
@@ -37,8 +43,12 @@ use crate::link::SessionRuntime;
 use crate::parse_error::InboundParseError;
 use crate::session_actions::{SessionActionsBinding, SessionLinkActions, SESSION_HOST_REALIZATION};
 use crate::session_fsm_unicast::{SessionFsmUnicastActions, SessionFsmUnicastPolicy};
-// `InboundFrame` is named by the ungated `Unknown` match arm; the codec-gated
-// arms (`Frame` / `KeepAlive` / `Fragment` / `Init` / `Open` / `Close`) reuse it.
+// `InboundFrame` is named by the `Unknown` match arm; the codec-gated arms
+// (`Frame` / `KeepAlive` / `Fragment` / `Init` / `Open` / `Close`) reuse it.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-frame", feature = "session-slot")
+))]
 use crate::inbound::InboundFrame;
 // parse_frame_payload_in backs the codec-frame `Frame` arm only (the heap profile's:
 // the slot profile reads a frame where it lies).
@@ -401,6 +411,14 @@ fn dispatch_unit_borrowed<R: SessionRuntime, T: TimeSource>(
 /// result, the frame destructured out of it, a 702-byte value) were slots of the
 /// frame under the engine's answer to a handshake and under the parser's walk,
 /// the deepest paths a session's stack reaches on the fixed-memory client.
+///
+/// Compiled where one of its two callers is: a build with the slot profile and no
+/// `Frame` codec has neither, and this and the reading it does would be code
+/// nothing calls.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-frame", feature = "session-slot")
+))]
 fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     bytes: &[u8],
     #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
@@ -432,6 +450,10 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
 /// it, and neither is handed a copy. Handed on by value, the 720 bytes were a slot in each frame
 /// between the parser and here, and the handshake's parse is the deepest path of the stack. Out
 /// of line so that the slot is not part of the frame that gives the engine the event.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-frame", feature = "session-slot")
+))]
 #[inline(never)]
 fn read_unit_in<R: SessionRuntime, T: TimeSource>(
     bytes: &[u8],
@@ -455,6 +477,10 @@ fn read_unit_in<R: SessionRuntime, T: TimeSource>(
 
 /// One transport message decoded off the front of a unit: where it ended (the message itself is
 /// in the slot the decode was lent).
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-frame", feature = "session-slot")
+))]
 type DecodedUnit = Result<usize, crate::parse_error::InboundParseError>;
 
 /// transport-lowlatency — the unit of an established lowlatency session that is
@@ -536,6 +562,10 @@ fn dispatch_lean_unit<R: SessionRuntime, T: TimeSource>(
 /// (when there is one) as a shareable value, for every decode and for the
 /// remainder it parks. The decodes run over `shared` itself and never over a copy
 /// of it, because a range is recognisable as part of `shared` only if it is.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-frame", feature = "session-slot")
+))]
 #[inline(never)]
 fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
     bytes: &[u8],
@@ -598,7 +628,11 @@ fn take_decoded(frame: &mut InboundFrame) -> InboundFrame {
 }
 
 /// See the heap form.
-#[cfg(not(feature = "alloc"))]
+#[cfg(all(
+    not(feature = "alloc"),
+    feature = "codec-frame",
+    feature = "session-slot"
+))]
 fn take_decoded(frame: &mut InboundFrame) -> &mut InboundFrame {
     frame
 }
@@ -608,6 +642,10 @@ fn take_decoded(frame: &mut InboundFrame) -> &mut InboundFrame {
 /// event. A message the checks admit is handed back in `admitted` with
 /// [`DriverLoopOutcome::AdvancedFsm`], for the caller to give the engine once this
 /// frame is gone.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-frame", feature = "session-slot")
+))]
 #[inline(never)]
 fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     parsed: DecodedUnit,

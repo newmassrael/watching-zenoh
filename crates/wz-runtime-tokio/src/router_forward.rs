@@ -1915,8 +1915,8 @@ impl RouterSessionsView {
     /// its routing zid lands in, and upstream's table is the transport manager's
     /// rather than a network's — a Client face is a session this router holds,
     /// and an operator asking what this node is connected to must see it.
-    pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
-        use wz_session_core::adminspace::SessionAdminRow;
+    pub fn admin_sessions(&self) -> Vec<wz_admin::adminspace::AdminSession> {
+        use wz_admin::adminspace::SessionAdminRow;
 
         // R2637 — ONE lookup of the tier's weights for the whole table, not one
         // per face: `links_info` walks the graph, so calling it per session would
@@ -1942,7 +1942,7 @@ impl RouterSessionsView {
                     // surfaced. Upstream answers the same way — a transport absent
                     // from its `links_info` renders `null`.
                     zid.and_then(|z| weights.get(&z)).map(|i| {
-                        wz_session_core::adminspace::AdminLinkWeight {
+                        wz_admin::adminspace::AdminLinkWeight {
                             actual_weight: i.actual_weight,
                             dst_weight: i.dst_weight,
                             src_weight: i.src_weight,
@@ -2094,7 +2094,7 @@ impl RouterDeclarationsView {
     /// among the `clients` under the node's zid; and the node is named in the north
     /// bucket of everything a south region sourced. An isolated router therefore
     /// answers these legs with its own admin queryable and nothing else.
-    pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+    pub fn subscribers(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.subs), |by_id| {
             by_id.values().cloned().collect()
@@ -2117,7 +2117,7 @@ impl RouterDeclarationsView {
     /// the SAME `Sources` struct zenoh serializes for both entity kinds, not the
     /// per-declaration `QueryableInfo` — so the client store's inner map is
     /// reduced to its keyexpr set here.
-    pub fn queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+    pub fn queryables(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.qabls), |by_id| {
             by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
@@ -2162,7 +2162,7 @@ impl RouterDeclarationsView {
     /// tables can only be this router's own holding, which is what the peer's
     /// `native` predicate had to distinguish and this one does not.
     #[cfg(feature = "routing-token-tables")]
-    pub fn tokens(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+    pub fn tokens(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.tokens), |by_id| {
             by_id.values().cloned().collect()
@@ -2191,14 +2191,14 @@ impl RouterDeclarationsView {
     /// faces as `clients` and a peer hat its faces as `peers`
     /// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `fn sourced_publishers`), and a router
     /// hat reports none, so an interest from a face the router hat owns is left out.
-    pub fn publishers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+    pub fn publishers(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
         Self::bucket_interests(&tables, &tables.future_subs)
     }
 
     /// The [`publishers`](Self::publishers) twin for queriers, reading the queryable interests
     /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn sourced_queriers`).
-    pub fn queriers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+    pub fn queriers(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
         Self::bucket_interests(&tables, &tables.future_qabls)
     }
@@ -2208,8 +2208,8 @@ impl RouterDeclarationsView {
     fn bucket_interests<V: Copy + PartialEq>(
         tables: &Tables,
         store: &crate::future_interest::FutureInterestStore<V>,
-    ) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        use wz_session_core::adminspace::AdminSources;
+    ) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
+        use wz_admin::adminspace::AdminSources;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
         let mut by_key: HashMap<String, AdminSources> = HashMap::new();
@@ -2275,12 +2275,12 @@ impl RouterDeclarationsView {
         routers: &[(Region, &LinkstatepeerInterest<A>)],
         peers: &[(Region, &LinkstatepeerInterest<B>)],
         clients: &HashMap<FaceId, HashSet<String>>,
-    ) -> Vec<(String, wz_session_core::adminspace::AdminSources)>
+    ) -> Vec<(String, wz_admin::adminspace::AdminSources)>
     where
         A: Clone,
         B: Clone,
     {
-        use wz_session_core::adminspace::AdminSources;
+        use wz_admin::adminspace::AdminSources;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
         let empty = || AdminSources {
@@ -3790,7 +3790,7 @@ router_entry_points! { on_tables:
     fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender);
     fn set_query_timeout(&self, timeout: Duration);
     #[cfg(feature = "adminspace-core")]
-    fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession>;
+    fn admin_sessions(&self) -> Vec<wz_admin::adminspace::AdminSession>;
     #[cfg(feature = "session-close-ingress")]
     fn lifecycle_directory(&self) -> RouterSessionDirectory;
     #[cfg(all(
@@ -3858,9 +3858,9 @@ router_entry_points! { on_tables:
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn declarations_view(&self) -> RouterDeclarationsView;
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn admin_subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)>;
+    fn admin_subscribers(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)>;
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn admin_queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)>;
+    fn admin_queryables(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)>;
     #[cfg(feature = "adminspace-router-linkstate")]
     fn routers_net_view(&self) -> LinkstateNetView;
     #[cfg(feature = "adminspace-router-linkstate")]
@@ -4758,7 +4758,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// descriptions of one behaviour, and the round that changes the behaviour
     /// would update whichever it happened to open.
     #[cfg(feature = "adminspace-core")]
-    pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
+    pub fn admin_sessions(&self) -> Vec<wz_admin::adminspace::AdminSession> {
         self.sessions_view().admin_sessions()
     }
 
@@ -10695,14 +10695,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// bucketing and its reasoning live — deliberately not a second copy of that
     /// doc, for the reason [`admin_sessions`](Self::admin_sessions) gives.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    pub fn admin_subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+    pub fn admin_subscribers(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         self.declarations_view().subscribers()
     }
 
     /// The declared queryables — the [`admin_subscribers`](Self::admin_subscribers)
     /// twin, delegating to [`RouterDeclarationsView::queryables`].
     #[cfg(feature = "adminspace-introspection-handlers")]
-    pub fn admin_queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+    pub fn admin_queryables(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         self.declarations_view().queryables()
     }
 
@@ -15341,7 +15341,7 @@ mod tests {
         }
 
         let hex = |b| zid_to_zenoh_hex(zid(b).as_slice());
-        let flatten = |rows: Vec<(String, wz_session_core::adminspace::AdminSources)>| {
+        let flatten = |rows: Vec<(String, wz_admin::adminspace::AdminSources)>| {
             rows.into_iter()
                 .map(|(k, s)| (k, s.routers, s.peers, s.clients))
                 .collect::<Vec<_>>()
@@ -15473,7 +15473,7 @@ mod tests {
         }
 
         let hex = |b| zid_to_zenoh_hex(zid(b).as_slice());
-        let flatten = |rows: Vec<(String, wz_session_core::adminspace::AdminSources)>| {
+        let flatten = |rows: Vec<(String, wz_admin::adminspace::AdminSources)>| {
             rows.into_iter()
                 .map(|(k, s)| (k, s.routers, s.peers, s.clients))
                 .collect::<Vec<_>>()

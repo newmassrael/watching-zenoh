@@ -305,7 +305,7 @@ pub const REPLY_STAGE_BYTES: usize =
 /// Maximum byte length of ONE admin reply body (the deploy
 /// `session_pool.process.admin_reply_bytes` key): the buffer every admin leg is
 /// written into before it is handed to the session's reply stage
-/// (`admin_reply::AdminReplyArena`, under `adminspace-core`). A body that does not
+/// (the wz-admin crate's `admin_reply::AdminReplyArena`). A body that does not
 /// fit is refused, counted, and answered to the querier as a typed error; it is
 /// never cut short.
 ///

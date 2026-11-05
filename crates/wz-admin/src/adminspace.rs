@@ -32,15 +32,14 @@
 //!
 //! # S9b: written into any text sink, so a fixed node answers with no allocator
 //!
-//! Every writer here emits through [`crate::text_out::TextOut`], not into a
-//! `String`. The AP's entry points ([`crate::adminspace::answer_admin_query`],
-//! [`crate::adminspace::AdminLocalData::to_json`],
-//! [`crate::adminspace::admin_surface_json`], the `*_key` helpers) keep
+//! Every writer here emits through [`wz_session_core::text_out::TextOut`], not into a
+//! `String`. The AP's entry points (`answer_admin_query`, `AdminLocalData::to_json`,
+//! `admin_surface_json`, the `*_key` helpers, all of them the heap profile's) keep
 //! their signatures and write the same bytes into a `String` they own; the
 //! allocation-free entry point is [`crate::adminspace::answer_admin_query_in`],
 //! which takes the buffers it writes into from its caller
 //! ([`crate::admin_reply::AdminBuffer`]:
-//! `String`, or [`crate::text_out::FixedText`] that refuses what does not fit) and
+//! `String`, or [`wz_session_core::text_out::FixedText`] that refuses what does not fit) and
 //! reads its node's state as borrowed rows ([`crate::adminspace::AdminSessionRef`],
 //! [`crate::adminspace::AdminMulticastPeerRef`]) instead of cloning it into owned ones. One writer,
 //! two sinks: the fixed node's reply is the AP's reply byte for byte, because it
@@ -52,7 +51,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::admin_reply::{AdminBuffer, AdminReplyError};
-use crate::text_out::{Overflow, TextOut};
+use wz_session_core::text_out::{Overflow, TextOut};
 
 /// One link of a connected transport — the `{src,dst}` pair zenoh's
 /// `link_to_json` emits (`adminspace.rs:608-613`). The owned rows of this module
@@ -77,7 +76,7 @@ pub struct AdminLink {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminSession {
     /// The peer's zid in zenoh `ZenohId` Display form
-    /// (`crate::zid_hex::zid_to_zenoh_hex`).
+    /// (`wz_session_core::zid_hex::zid_to_zenoh_hex`).
     pub peer_zid_hex: String,
     /// The peer's role string (`WhatAmI::to_str`), or `None` → `"unknown"`.
     pub whatami: Option<String>,
@@ -151,7 +150,7 @@ pub struct AdminMulticastPeer {
 /// The links of one transport as the `local_data` writer reads them: the
 /// `(src, dst)` pairs, by position.
 ///
-/// A trait, not a slice of [`AdminLink`], because a node that holds its rows in
+/// A trait, not a slice of `AdminLink`, because a node that holds its rows in
 /// fixed storage (no `String`) has no `AdminLink` to lend: it implements this on
 /// the row it has, and the one writer reads both. `Vec<AdminLink>` is the AP's.
 pub trait AdminLinkList {
@@ -176,22 +175,22 @@ impl AdminLinkList for Vec<AdminLink> {
 /// One `sessions[]` row of the unicast kind, BORROWED: what the writer reads of a
 /// connected peer, with every text field a `&str` into wherever the node keeps it.
 ///
-/// [`AdminSession`] is the AP's owned row; a node that holds its peers in fixed
+/// `AdminSession` is the AP's owned row; a node that holds its peers in fixed
 /// storage builds this from the row it has and clones nothing, which is what lets
 /// [`answer_admin_query_in`] answer without allocating. Field for field it is
-/// [`AdminSession`], see there for what each means.
+/// `AdminSession` (the heap profile's), see there for what each means.
 pub struct AdminSessionRef<'a> {
-    /// [`AdminSession::peer_zid_hex`].
+    /// `AdminSession::peer_zid_hex`.
     pub peer_zid_hex: &'a str,
-    /// [`AdminSession::whatami`].
+    /// `AdminSession::whatami`.
     pub whatami: Option<&'a str>,
-    /// [`AdminSession::links`].
+    /// `AdminSession::links`.
     pub links: &'a dyn AdminLinkList,
-    /// [`AdminSession::shm`].
+    /// `AdminSession::shm`.
     pub shm: bool,
-    /// [`AdminSession::weight`].
+    /// `AdminSession::weight`.
     pub weight: Option<AdminLinkWeight>,
-    /// [`AdminSession::region`].
+    /// `AdminSession::region`.
     pub region: Option<&'a str>,
 }
 
@@ -267,8 +266,8 @@ pub trait SessionAdminRow {
     /// zenoh's hex form, its role, the one link this session holds with its two ends
     /// (blank ends where the driver cannot name them, since the COUNT is the
     /// load-bearing answer), `shm`, and the region, all read off the session by the
-    /// same derivations ([`write_zenoh_hex`](crate::zid_hex::write_zenoh_hex),
-    /// [`write_admin_region`](crate::extbound::write_admin_region)). A role that never
+    /// same derivations ([`write_zenoh_hex`](wz_session_core::zid_hex::write_zenoh_hex),
+    /// [`write_admin_region`](wz_session_core::extbound::write_admin_region)). A role that never
     /// arrived stays `None`, which the writer renders as upstream's `"unknown"`. The
     /// link weight is `None`: an MCU session holds no router graph.
     ///
@@ -278,9 +277,9 @@ pub trait SessionAdminRow {
 }
 
 #[cfg(feature = "session-unicast")]
-impl<R, T> SessionAdminRow for crate::session_actions::SessionLinkActions<R, T>
+impl<R, T> SessionAdminRow for wz_session_core::session_actions::SessionLinkActions<R, T>
 where
-    R: crate::link::SessionRuntime,
+    R: wz_session_core::link::SessionRuntime,
     T: wz_runtime_core::TimeSource,
 {
     #[cfg(feature = "adminspace-core")]
@@ -312,10 +311,10 @@ where
     }
 
     fn with_admin_session<X>(&self, f: impl FnOnce(AdminSessionRef<'_>) -> X) -> Option<X> {
-        use crate::text_out::FixedText;
+        use wz_session_core::text_out::FixedText;
 
         /// The one link of a session, as the writer reads a list of links.
-        struct OneLink<'a>(Option<&'a crate::link::LinkEndpoints>);
+        struct OneLink<'a>(Option<&'a wz_session_core::link::LinkEndpoints>);
 
         impl AdminLinkList for OneLink<'_> {
             fn link_count(&self) -> usize {
@@ -342,12 +341,14 @@ where
         let mut zid_hex: FixedText<32> = FixedText::new();
         self.with_peer_zid(|zid| {
             if let Some(zid) = zid {
-                crate::zid_hex::write_zenoh_hex(zid, &mut zid_hex);
+                wz_session_core::zid_hex::write_zenoh_hex(zid, &mut zid_hex);
             }
         });
-        let role = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
+        let role = self
+            .peer_whatami_wire()
+            .and_then(wz_session_core::WhatAmI::from_wire);
         let mut region: FixedText<32> = FixedText::new();
-        let _ = crate::extbound::write_admin_region(
+        let _ = wz_session_core::extbound::write_admin_region(
             &mut region,
             self.params.whatami,
             role,
@@ -366,15 +367,15 @@ where
 }
 
 /// One `sessions[]` row of the multicast kind, BORROWED: the twin of
-/// [`AdminSessionRef`] for [`AdminMulticastPeer`].
+/// [`AdminSessionRef`] for `AdminMulticastPeer` (the heap profile's).
 pub struct AdminMulticastPeerRef<'a> {
-    /// [`AdminMulticastPeer::peer_zid_hex`].
+    /// `AdminMulticastPeer::peer_zid_hex`.
     pub peer_zid_hex: &'a str,
-    /// [`AdminMulticastPeer::whatami`].
+    /// `AdminMulticastPeer::whatami`.
     pub whatami: Option<&'a str>,
-    /// [`AdminMulticastPeer::group`].
+    /// `AdminMulticastPeer::group`.
     pub group: Option<&'a str>,
-    /// [`AdminMulticastPeer::links`].
+    /// `AdminMulticastPeer::links`.
     pub links: &'a dyn AdminLinkList,
 }
 
@@ -434,7 +435,7 @@ fn push_opt_u16<W: TextOut + ?Sized>(v: Option<u16>, out: &mut W) {
 /// does not depend on it and must not start: the routing layer computes the
 /// triple and hands it over as DATA. The runtime converts.
 ///
-/// Integer-only by obligation, not by taste: [`AdminSession`] derives `Eq`, so a
+/// Integer-only by obligation, not by taste: `AdminSession` derives `Eq`, so a
 /// float could not live here. That costs nothing, because upstream also reports
 /// `actual_weight` as a `u16` — it casts its jittered `f64` down before
 /// reporting.
@@ -643,17 +644,17 @@ impl AdminPlugin {
     /// calls with the buffer it was given.
     fn write_status_json<W: TextOut + ?Sized>(&self, out: &mut W) {
         out.push_str("{\"name\":");
-        crate::json::escape_into(&self.name, out);
+        wz_session_core::json::escape_into(&self.name, out);
         out.push_str(",\"id\":");
-        crate::json::escape_into(&self.id, out);
+        wz_session_core::json::escape_into(&self.id, out);
         if let Some(v) = &self.version {
             out.push_str(",\"version\":");
-            crate::json::escape_into(v, out);
+            wz_session_core::json::escape_into(v, out);
         }
         out.push_str(",\"long_version\":null,\"path\":");
-        crate::json::escape_into(&self.path, out);
+        wz_session_core::json::escape_into(&self.path, out);
         out.push_str(",\"state\":");
-        crate::json::escape_into(self.state.as_str(), out);
+        wz_session_core::json::escape_into(self.state.as_str(), out);
         out.push_str(",\"report\":{\"level\":\"Info\"}}");
     }
 }
@@ -699,11 +700,11 @@ fn push_plugins_object<W: TextOut + ?Sized>(plugins: &[AdminPlugin], out: &mut W
             out.push(',');
         }
         // The object KEY is the plugin id as a quoted JSON string.
-        crate::json::escape_into(&p.id, out);
+        wz_session_core::json::escape_into(&p.id, out);
         out.push_str(":{\"name\":");
-        crate::json::escape_into(&p.name, out);
+        wz_session_core::json::escape_into(&p.name, out);
         out.push_str(",\"path\":");
-        crate::json::escape_into(&p.path, out);
+        wz_session_core::json::escape_into(&p.path, out);
         out.push('}');
         last = next;
     }
@@ -795,7 +796,7 @@ pub struct AdminSpacePermissions {
     /// default `false` (`PermissionsConf::default`, lib.rs:893) — the asymmetry:
     /// GET is permissive, config-WRITE is denied unless explicitly granted. The
     /// gate that consults this value is the `adminspace-write` atom (a separate
-    /// cfg); [`parse_admin_config_write`] is where the check lives.
+    /// cfg); `parse_admin_config_write` is where the check lives.
     pub write: bool,
 }
 
@@ -866,7 +867,7 @@ pub struct AdminLiveInputs {
     /// (R311y810). A seam that picked for the caller would force the
     /// second kind of host to re-implement the answerer, which is exactly the
     /// duplication this type exists to end.
-    pub stats: Option<crate::stats_registry::StatsRegistry>,
+    pub stats: Option<wz_session_core::stats_registry::StatsRegistry>,
 }
 
 /// The outcome of an admin-query answer — whether the `read` gate served the GET
@@ -878,7 +879,7 @@ pub struct AdminLiveInputs {
 /// in configuration")`,
 /// `zenoh/src/net/runtime/adminspace.rs` @ `permissions().read`) because its
 /// adminspace
-/// is a std, `tracing`-linked component. [`answer_admin_query`] is `no_std` +
+/// is a std, `tracing`-linked component. `answer_admin_query` is `no_std` +
 /// `alloc` and links no logger, so it REPORTS the deny to its caller and the host —
 /// which owns the log facade — emits the diagnostic. One gate, one decision, and
 /// the report is a value rather than a side effect, so a test can assert the deny
@@ -930,7 +931,7 @@ pub fn denied_read_diagnostic(keyexpr: &str) -> alloc::string::String {
     out
 }
 
-/// [`denied_read_diagnostic`] written into any sink, for a host that logs from a
+/// `denied_read_diagnostic` written into any sink, for a host that logs from a
 /// fixed buffer: the sentence is spelled here once and the `String` form above
 /// is this one.
 pub fn write_denied_read_diagnostic<W: TextOut + ?Sized>(out: &mut W, keyexpr: &str) {
@@ -967,7 +968,7 @@ impl AdminLocalData {
     ///   computes it per unicast session from this node's mode, the peer's, and
     ///   the peer's `open::ext::RemoteBound`, writing `unknown` only where that
     ///   fails. wz now reads that extension and computes it the same way
-    ///   ([`crate::extbound`]); every host fills it from one method.
+    ///   ([`wz_session_core::extbound`]); every host fills it from one method.
     /// * `weight` — CLOSED by R2637. A router now fills it from its own
     ///   `links_info`, emitting the same `{actual_weight, dst_weight, src_weight}`
     ///   object the pin does, or `null` where it holds no weighted link to that
@@ -1000,14 +1001,14 @@ impl AdminLocalData {
     }
 }
 
-/// [`AdminLocalData::to_json`] for a node that does not hold its state as an
-/// [`AdminLocalData`]: the same object, written into any sink, from the rows as
+/// `AdminLocalData::to_json` for a node that does not hold its state as an
+/// `AdminLocalData`: the same object, written into any sink, from the rows as
 /// borrowed views. `to_json` is this function called over an owned
 /// `AdminLocalData`, so the two cannot differ. A free function, not a method, because
 /// the owned `AdminLocalData` is the heap profile's and this is not.
 ///
 /// `sessions` and `multicast_peers` are walked once, in order, and a refusal of
-/// the sink is the sink's to report ([`crate::text_out::FixedText::finish`]).
+/// the sink is the sink's to report ([`wz_session_core::text_out::FixedText::finish`]).
 #[allow(clippy::too_many_arguments)]
 pub fn write_local_data_json<'a, W, S, M, L>(
     mut out: &mut W,
@@ -1029,7 +1030,7 @@ pub fn write_local_data_json<'a, W, S, M, L>(
     let _ = plugins;
     // R311y60 — the locators string array via the json::push_str_array SSOT.
     out.push_str("{\"locators\":");
-    crate::json::push_str_array(locators, &mut out);
+    wz_session_core::json::push_str_array(locators, &mut out);
     // `metadata` is the host's rendered config value (`null` when unset);
     // `plugins` is the started-plugins object under
     // `adminspace-plugins-handlers`, else `null` (the original behavior).
@@ -1123,7 +1124,7 @@ pub fn admin_root_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
-/// [`admin_root_key`] written into any sink. Every admin key in this module is
+/// `admin_root_key` written into any sink. Every admin key in this module is
 /// this prefix and a tail, and every `String`-returning key function below is its
 /// writer called over a `String`, so the fixed node's reply key and the AP's are
 /// the same bytes by construction.
@@ -1156,7 +1157,7 @@ pub fn admin_queryable_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
-/// [`admin_queryable_key`] written into any sink.
+/// `admin_queryable_key` written into any sink.
 pub fn write_admin_queryable_key<W: TextOut + ?Sized>(out: &mut W, zid_hex: &str, whatami: &str) {
     write_admin_leg_key(out, zid_hex, whatami, "**");
 }
@@ -1265,7 +1266,7 @@ pub struct AdminLeg {
     pub cardinality: AdminLegCardinality,
 }
 
-/// The media type string for an [`EncodingHint`](crate::sample::EncodingHint) this
+/// The media type string for an [`EncodingHint`](wz_session_core::sample::EncodingHint) this
 /// module replies with — DERIVED from the encoding SSOT, never enumerated here.
 ///
 /// # R2414: this used to be a two-arm `if/else` whose `else` returned JSON
@@ -1280,22 +1281,22 @@ pub struct AdminLeg {
 /// failure this repository keeps paying for, here planted inside the very gate
 /// built to prevent it.
 ///
-/// [`encoding_to_mime`](crate::encoding::encoding_to_mime) already IS the
+/// [`encoding_to_mime`](wz_session_core::encoding::encoding_to_mime) already IS the
 /// id↔MIME SSOT (it knows all 53 predefined ids, `application/openmetrics-text`
 /// among them, and re-joins a schema with `;`), so deriving from it means a leg
 /// that changes encoding cannot change what the document says about it without
 /// the two disagreeing.
 #[cfg(test)]
-fn leg_encoding_name(hint: &crate::sample::EncodingHint) -> String {
-    crate::encoding::encoding_to_mime(hint)
+fn leg_encoding_name(hint: &wz_session_core::sample::EncodingHint) -> String {
+    wz_session_core::encoding::encoding_to_mime(hint)
 }
 
 /// The media type an admin leg replies in.
 ///
 /// One value for both uses, the reply and the manifest row: the answerer hands its
-/// parts to the reply ([`crate::query_sink::ReplyOut::reply_keyed_encoded_parts`])
+/// parts to the reply ([`wz_session_core::query_sink::ReplyOut::reply_keyed_encoded_parts`])
 /// and the manifest writes the name the encoding SSOT gives the same parts
-/// ([`crate::encoding::write_encoding_mime_parts`]), so a leg cannot say one thing
+/// ([`wz_session_core::encoding::write_encoding_mime_parts`]), so a leg cannot say one thing
 /// and reply another. The parts are borrowed from constants, so choosing an
 /// encoding allocates nothing, which an owned `EncodingHint` of the metrics type
 /// (its schema is a `String`) could not promise.
@@ -1317,22 +1318,26 @@ impl AdminLegEncoding {
             // The ids the owned `EncodingHint` constants are made of, so a node with
             // no allocator (which has no `EncodingHint`) says the same thing.
             Self::Json => (
-                crate::encoding::packed_no_schema(crate::encoding::ID_APPLICATION_JSON),
+                wz_session_core::encoding::packed_no_schema(
+                    wz_session_core::encoding::ID_APPLICATION_JSON,
+                ),
                 None,
             ),
             Self::Text => (
-                crate::encoding::packed_no_schema(crate::encoding::ID_TEXT_PLAIN),
+                wz_session_core::encoding::packed_no_schema(
+                    wz_session_core::encoding::ID_TEXT_PLAIN,
+                ),
                 None,
             ),
             #[cfg(feature = "adminspace-metrics")]
-            Self::Metrics => crate::encoding::encoding_parts_from_mime(METRICS_ENCODING),
+            Self::Metrics => wz_session_core::encoding::encoding_parts_from_mime(METRICS_ENCODING),
         }
     }
 
     /// The media type string of this encoding, written into any sink.
     pub fn write_name<W: TextOut + ?Sized>(self, out: &mut W) {
         let (packed_id, schema) = self.parts();
-        crate::encoding::write_encoding_mime_parts(packed_id, schema, out);
+        wz_session_core::encoding::write_encoding_mime_parts(packed_id, schema, out);
     }
 }
 
@@ -1391,7 +1396,7 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
 /// Every admin leg THIS BUILD answers, in reply order, one call of `visit` per leg
 /// with the leg's key (written into `key`), its encoding and its cardinality.
 ///
-/// The one place the list of legs is written: [`admin_legs`] collects it and
+/// The one place the list of legs is written: `admin_legs` collects it and
 /// [`write_admin_surface_json`] writes it as the manifest document. `key` is the
 /// caller's buffer, reset before each leg, so a node with no allocator passes a
 /// fixed one; a key that does not fit it ends the visit with that buffer's
@@ -1490,7 +1495,7 @@ pub fn visit_admin_legs<K: AdminBuffer>(
 /// one with `adminspace-plugins-handlers` and no started plugin emits
 /// `"plugins":{}`. So the bytes DO discriminate today — and nothing declared it,
 /// nothing gated it, and a consumer could only learn it by reading this tree.
-/// [`admin_legs`] cannot say it either: `plugins` is a FIELD of a leg that is in
+/// `admin_legs` cannot say it either: `plugins` is a FIELD of a leg that is in
 /// the list both ways.
 ///
 /// This is the same hole `wz-capture`'s `doc_revision::planes` fills for the
@@ -1591,7 +1596,7 @@ pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
     out
 }
 
-/// [`admin_surface_json`] written into any sink, with the buffer the leg keys are
+/// `admin_surface_json` written into any sink, with the buffer the leg keys are
 /// assembled in supplied by the caller: the manifest of a node with no allocator.
 ///
 /// `Err` only when a LEG KEY does not fit `key` ([`visit_admin_legs`]); the
@@ -1630,14 +1635,14 @@ pub fn write_admin_surface_json<W: TextOut + ?Sized, K: AdminBuffer>(
             out.push_str(",\"encoding\":\"");
             // The media type is written through the escaper piece by piece, so it
             // needs no buffer of its own: `"` + name + `"`, escaped as one string.
-            encoding.write_name(&mut crate::json::JsonStringBody(&mut out));
+            encoding.write_name(&mut wz_session_core::json::JsonStringBody(&mut out));
             out.push_str("\",\"cardinality\":");
             push_json_str(cardinality.as_str(), &mut out);
             out.push('}');
         },
     )?;
     out.push_str("],\"unspoken\":");
-    crate::json::push_str_array(admin_unspoken_fields(), &mut out);
+    wz_session_core::json::push_str_array(admin_unspoken_fields(), &mut out);
     out.push('}');
     Ok(())
 }
@@ -1672,11 +1677,11 @@ impl AdminSources {
     /// `json::push_str_array` SSOT [`AdminLocalData::to_json`] uses (quote + escape).
     fn write_json<W: TextOut + ?Sized>(&self, mut out: &mut W) {
         out.push_str("{\"routers\":");
-        crate::json::push_str_array(&self.routers, &mut out);
+        wz_session_core::json::push_str_array(&self.routers, &mut out);
         out.push_str(",\"peers\":");
-        crate::json::push_str_array(&self.peers, &mut out);
+        wz_session_core::json::push_str_array(&self.peers, &mut out);
         out.push_str(",\"clients\":");
-        crate::json::push_str_array(&self.clients, &mut out);
+        wz_session_core::json::push_str_array(&self.clients, &mut out);
         out.push('}');
     }
 }
@@ -1686,8 +1691,9 @@ impl AdminSources {
 /// One variant per handler upstream registers through its shared per-entity
 /// helper — `zenoh/src/net/runtime/adminspace.rs` @ `fn resources_data`, reached
 /// from `subscriber`, `publisher`, `queryable`, `querier` and `token`. The set is
-/// upstream's, not a wz choice, which is why [`Self::ALL`] can be the population
-/// every surface derives from.
+/// upstream's, not a wz choice, which is why `AdminEntityKind::ALL` (under
+/// `adminspace-introspection-handlers`, a plain span so a build without it documents
+/// cleanly) can be the population every surface derives from.
 /// ⚠ `Ord` IS DERIVED, and an earlier comment on the one consumer that needed it
 /// argued against exactly that — "making it `Ord` would widen a `wz-session-core`
 /// public type for one consumer's map key". R2691 overturned that on evidence.
@@ -1996,7 +2002,7 @@ impl AdminConfigWriteSpace {
     /// Gate 1 is what wz did NOT have. It compared a CONCRETE literal prefix
     /// with `strip_prefix`, so `@/*/peer/config/batch-size` — an ordinary
     /// wildcard write upstream applies to its own config — was silently
-    /// dropped. Set semantics is the fix, and it is [`crate::keyexpr_match`]'s
+    /// dropped. Set semantics is the fix, and it is [`wz_session_core::keyexpr_match`]'s
     /// existing `keyexpr_intersects_target`, unconditionally available here
     /// because `adminspace-core` implies `keyexpr-wildcard-double`.
     ///
@@ -2151,7 +2157,7 @@ pub struct AdminAnswerCtx<'a> {
     /// feature of its own and would therefore break the moment feature
     /// unification turned the flag on in `wz-session-core`. The field costs one
     /// `Option` in a build that never fills it.
-    pub stats: Option<&'a crate::stats_registry::StatsRegistry>,
+    pub stats: Option<&'a wz_session_core::stats_registry::StatsRegistry>,
     /// R2859 — the members of every multicast group this node is on, the rows
     /// `local_data` writes after the unicast `sessions` the answerer is passed.
     ///
@@ -2174,11 +2180,11 @@ pub struct AdminAnswerCtx<'a> {
 /// keeps the replies from each owning a copy of that wording; the refusal is
 /// handed back so the answerer counts it.
 fn reply_leg(
-    out: &mut dyn crate::query_sink::ReplyOut,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     key: &str,
     body: &str,
     encoding: AdminLegEncoding,
-) -> Result<(), crate::query_sink::ReplyError> {
+) -> Result<(), wz_session_core::query_sink::ReplyError> {
     let (packed_id, schema) = encoding.parts();
     let staged = out.reply_keyed_encoded_parts(key, body.as_bytes(), packed_id, schema);
     if let Err(e) = &staged {
@@ -2190,7 +2196,7 @@ fn reply_leg(
 /// Whether the GET `query` intersects the admin key `key`.
 ///
 /// The key is split into a chunk view on the stack, bounded as every keyexpr scan
-/// in this crate is ([`crate::keyexpr_match::MAX_KEYEXPR_CHUNKS`]): unbounded on the
+/// in this crate is ([`wz_session_core::keyexpr_match::MAX_KEYEXPR_CHUNKS`]): unbounded on the
 /// growable backing, so the AP answers exactly as before, and a key deeper than the
 /// bound is not a match on a no-heap node.
 ///
@@ -2219,7 +2225,7 @@ pub struct PreparedQuery<'a> {
     /// No wildcard, no empty chunk and no deeper than the scans accept: against a plain key
     /// such a query intersects exactly when the two are the same text.
     plain: bool,
-    chunks: core::cell::OnceCell<Option<crate::keyexpr_match::KeyChunks<'a>>>,
+    chunks: core::cell::OnceCell<Option<wz_session_core::keyexpr_match::KeyChunks<'a>>>,
 }
 
 impl<'a> PreparedQuery<'a> {
@@ -2250,15 +2256,15 @@ impl<'a> PreparedQuery<'a> {
                 _ => {}
             }
         }
-        let Some(key_chunks) = crate::keyexpr_match::KeyChunks::split(key) else {
+        let Some(key_chunks) = wz_session_core::keyexpr_match::KeyChunks::split(key) else {
             return false;
         };
         let query_chunks = self
             .chunks
-            .get_or_init(|| crate::keyexpr_match::KeyChunks::split(self.text));
+            .get_or_init(|| wz_session_core::keyexpr_match::KeyChunks::split(self.text));
         match query_chunks {
             Some(query_chunks) => {
-                crate::keyexpr_match::keyexpr_intersects_chunks(query_chunks, &key_chunks)
+                wz_session_core::keyexpr_match::keyexpr_intersects_chunks(query_chunks, &key_chunks)
             }
             None => false,
         }
@@ -2301,7 +2307,7 @@ fn scan_key(key: &str) -> KeyShape {
             _ => chunk_len += 1,
         }
     }
-    if chunk_len > 0 && chunks < crate::keyexpr_match::MAX_KEYEXPR_CHUNKS {
+    if chunk_len > 0 && chunks < wz_session_core::keyexpr_match::MAX_KEYEXPR_CHUNKS {
         KeyShape::Plain
     } else {
         KeyShape::Irregular
@@ -2325,10 +2331,10 @@ fn starts_with_chunks(query: &str, prefix: &str) -> bool {
 /// [`PreparedQuery`] to, over every pair they build.
 #[cfg(test)]
 fn key_intersects_query_by_chunks(query: &str, key: &str) -> bool {
-    let Some(chunks) = crate::keyexpr_match::KeyChunks::split(key) else {
+    let Some(chunks) = wz_session_core::keyexpr_match::KeyChunks::split(key) else {
         return false;
     };
-    crate::keyexpr_match::keyexpr_intersects_target(query, &chunks)
+    wz_session_core::keyexpr_match::keyexpr_intersects_target(query, &chunks)
 }
 
 /// The bytes reserved for the key buffer of one admin answer: `@/<zid>/<whatami>/` is 17 bytes
@@ -2352,15 +2358,15 @@ pub struct AdminNodeFacts<'a, S, M, L> {
     /// The embedder-supplied version string.
     pub version: &'a str,
     /// The node config's `metadata` as JSON text, `"null"` when unset; see
-    /// [`AdminLocalData::metadata_json`].
+    /// `AdminLocalData::metadata_json`.
     pub metadata_json: &'a str,
-    /// The admin GET permission: `false` answers nothing ([`AdminAnswerCtx::read`]).
+    /// The admin GET permission: `false` answers nothing (`AdminAnswerCtx::read`).
     pub read: bool,
     /// This node's stats registry, if it has one (`AdminAnswerCtx::stats`). A registry
     /// is a heap structure, so a node with no allocator holds none: the field is there
     /// on both profiles, and without one it can only be `None`.
     #[cfg(feature = "alloc")]
-    pub stats: Option<&'a crate::stats_registry::StatsRegistry>,
+    pub stats: Option<&'a wz_session_core::stats_registry::StatsRegistry>,
     /// See the heap form: a reference to nothing, so `None` is the only value.
     #[cfg(not(feature = "alloc"))]
     pub stats: Option<&'a core::convert::Infallible>,
@@ -2418,9 +2424,10 @@ impl AdminAnswer {
 /// The typed refusal a querier receives in place of a body that did not fit: an
 /// Err reply (JSON) naming what was refused and the two sizes, so an operator reads
 /// from the querier's side how large the node's reply buffer would have to be.
-fn refuse_too_large(out: &mut dyn crate::query_sink::ReplyOut, overflow: Overflow) {
+fn refuse_too_large(out: &mut dyn wz_session_core::query_sink::ReplyOut, overflow: Overflow) {
     use core::fmt::Write as _;
-    let mut message: crate::text_out::FixedText<128> = crate::text_out::FixedText::new();
+    let mut message: wz_session_core::text_out::FixedText<128> =
+        wz_session_core::text_out::FixedText::new();
     let _ = write!(
         message,
         "{{\"error\":\"admin_reply_too_large\",\"needed\":{},\"capacity\":{}}}",
@@ -2431,7 +2438,7 @@ fn refuse_too_large(out: &mut dyn crate::query_sink::ReplyOut, overflow: Overflo
     // thing not worth sending.
     if let Ok(text) = message.finish() {
         out.reply_err(
-            Some(u32::from(crate::encoding::ID_APPLICATION_JSON)),
+            Some(u32::from(wz_session_core::encoding::ID_APPLICATION_JSON)),
             None,
             text.as_bytes(),
         );
@@ -2443,7 +2450,7 @@ fn refuse_too_large(out: &mut dyn crate::query_sink::ReplyOut, overflow: Overflo
 struct LegRun<'r, K: AdminBuffer, B: AdminBuffer> {
     key: &'r mut K,
     body: &'r mut B,
-    out: &'r mut dyn crate::query_sink::ReplyOut,
+    out: &'r mut dyn wz_session_core::query_sink::ReplyOut,
     query: PreparedQuery<'r>,
     report: AdminAnswer,
 }
@@ -2545,8 +2552,8 @@ impl<K: AdminBuffer, B: AdminBuffer> LegRun<'_, K, B> {
 pub(crate) fn serve_one_leg<K: AdminBuffer, B: AdminBuffer>(
     key: &mut K,
     body: &mut B,
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     zid_hex: &str,
     whatami: &str,
     tail: &str,
@@ -2573,25 +2580,25 @@ pub(crate) fn serve_one_leg<K: AdminBuffer, B: AdminBuffer>(
 
 /// The admin-query answerer written into buffers its caller supplies, and reading
 /// its node's state as borrowed rows: the allocation-free form of
-/// [`answer_admin_query`], which is this function called with `String` buffers over
-/// an owned [`AdminAnswerCtx`].
+/// `answer_admin_query`, which is this function called with `String` buffers over
+/// an owned `AdminAnswerCtx` (both the heap profile's).
 ///
 /// `key` receives each leg's reply key and `body` each leg's document, one leg at a
-/// time. With a fixed buffer ([`crate::text_out::FixedText`]) nothing is allocated
+/// time. With a fixed buffer ([`wz_session_core::text_out::FixedText`]) nothing is allocated
 /// here; a leg that does not fit is refused, counted in the returned
 /// [`AdminAnswer`] and answered to the querier as a typed error, never cut short. See
-/// [`answer_admin_query`] for the legs and their gates.
+/// `answer_admin_query` for the legs and their gates.
 ///
 /// `config_json` is the `config` leg's document as a RESULT, because a node that
 /// rendered it into a fixed buffer hands that buffer's refusal over with it
-/// ([`crate::text_out::FixedText::finish`]): the leg is then refused, counted and
+/// ([`wz_session_core::text_out::FixedText::finish`]): the leg is then refused, counted and
 /// answered with the typed error, and the other legs of the GET are served.
 #[allow(clippy::too_many_arguments)]
 pub fn answer_admin_query_in<'a, K, B, S, M, L>(
     key: &mut K,
     body: &mut B,
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     node: AdminNodeFacts<'a, S, M, L>,
     declarations: &[AdminDeclaration],
     plugins: &[AdminPlugin],
@@ -2671,7 +2678,9 @@ where
             AdminLegEncoding::Metrics,
             |k| write_admin_leg_key(k, zid_hex, whatami, "metrics"),
             |b, _| {
-                let param = |key: &str| crate::selector_params::param_value_bytes(parameters, key);
+                let param = |key: &str| {
+                    wz_session_core::selector_params::param_value_bytes(parameters, key)
+                };
                 // R2843 — the two bodies upstream serves, chosen by the VALUE the
                 // host passed, not by a `#[cfg]` (the same shape `ctx.read` uses).
                 // With a registry the body IS its document, build info first and
@@ -2685,7 +2694,7 @@ where
                         let mut doc = String::new();
                         registry.encode_metrics(
                             &mut doc,
-                            crate::stats_registry::MetricsQuery::from_parameters(param),
+                            wz_session_core::stats_registry::MetricsQuery::from_parameters(param),
                         );
                         doc
                     }
@@ -2701,7 +2710,7 @@ where
                 // `zenoh/src/net/runtime/adminspace.rs` @ `if query.parameters().get("descriptors") == Some("false") {`
                 //
                 // EQUALITY against `"false"`, not a presence test:
-                // [`crate::selector_params::param_value`] documents that a VALUELESS
+                // [`wz_session_core::selector_params::param_value`] documents that a VALUELESS
                 // key yields `Some("")` (zenoh's own `get` semantics), so a bare
                 // `?descriptors` must leave the descriptors ON. Upstream's `==
                 // Some("false")` says the same; `is_some()` would not.
@@ -2849,8 +2858,8 @@ where
 /// owned context, so the AP and a node with no allocator write one set of legs.
 #[cfg(feature = "alloc")]
 pub fn answer_admin_query(
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     ctx: &AdminAnswerCtx,
     sessions: &[AdminSession],
     declarations: &[AdminDeclaration],
@@ -2990,8 +2999,8 @@ pub struct AdminRouterCtx<'a> {
 /// S9b — this is [`answer_router_admin_query_in`] over `String` buffers it makes.
 #[cfg(feature = "alloc")]
 pub fn answer_router_admin_query(
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     ctx: &AdminRouterCtx,
 ) -> AdminAnswerOutcome {
     let mut key = String::new();
@@ -2999,12 +3008,12 @@ pub fn answer_router_admin_query(
     answer_router_admin_query_in(&mut key, &mut body, view, out, ctx).outcome
 }
 
-// The keys of the documents wz serves that upstream does not are `crate::wz_root`'s, so a host
+// The keys of the documents wz serves that upstream does not are `wz_session_core::wz_root`'s, so a host
 // that serves one without the rest of the admin space names the same key.
 #[cfg(feature = "alloc")]
-pub use crate::wz_root::{capacity_report_key, snapshot_key, WZ_EXTENSION_ROOT};
+pub use wz_session_core::wz_root::{capacity_report_key, snapshot_key, WZ_EXTENSION_ROOT};
 
-/// Answer a GET with the capacity report ([`crate::capacity::CapacityReport`]) as
+/// Answer a GET with the capacity report ([`wz_session_core::capacity::CapacityReport`]) as
 /// `application/json` under [`capacity_report_key`], when the GET intersects that key and `read`
 /// (the node's admin read permission, the same gate upstream's admin answers pass) permits.
 ///
@@ -3013,11 +3022,11 @@ pub use crate::wz_root::{capacity_report_key, snapshot_key, WZ_EXTENSION_ROOT};
 /// A GET that does not intersect the key is served nothing and is not a denial.
 #[cfg(feature = "alloc")]
 pub fn answer_capacity_query(
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     zid_hex: &str,
     read: bool,
-    report: &crate::capacity::CapacityReport,
+    report: &wz_session_core::capacity::CapacityReport,
 ) -> AdminAnswerOutcome {
     let key = capacity_report_key(zid_hex);
     answer_wz_json(view, out, &key, read, || {
@@ -3033,12 +3042,12 @@ pub fn answer_capacity_query(
 /// does. `latest` runs only for a GET that reaches the key and is allowed to read it, and answers
 /// `None` before the host has taken its first snapshot, when there is nothing to serve: the GET
 /// is then served no reply and is not a denial. The body is
-/// [`Snapshot::write_json`](crate::resource_snapshot::Snapshot::write_json)'s, written by the
+/// [`Snapshot::write_json`](wz_session_core::resource_snapshot::Snapshot::write_json)'s, written by the
 /// host that holds the sampler.
 #[cfg(feature = "alloc")]
 pub fn answer_snapshot_query(
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     zid_hex: &str,
     read: bool,
     latest: impl FnOnce() -> Option<String>,
@@ -3051,8 +3060,8 @@ pub fn answer_snapshot_query(
 /// to one that does when `read` is false.
 #[cfg(feature = "alloc")]
 fn answer_wz_json(
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     key: &str,
     read: bool,
     body: impl FnOnce() -> Option<String>,
@@ -3078,8 +3087,8 @@ fn answer_wz_json(
 pub fn answer_router_admin_query_in<K: AdminBuffer, B: AdminBuffer>(
     key: &mut K,
     body: &mut B,
-    view: &dyn crate::query_sink::QueryView,
-    out: &mut dyn crate::query_sink::ReplyOut,
+    view: &dyn wz_session_core::query_sink::QueryView,
+    out: &mut dyn wz_session_core::query_sink::ReplyOut,
     ctx: &AdminRouterCtx,
 ) -> AdminAnswer {
     let mut run = LegRun {
@@ -3127,7 +3136,7 @@ pub fn answer_router_admin_query_in<K: AdminBuffer, B: AdminBuffer>(
                     write_route_successor_entry_suffix(k, src_hex, dst_hex);
                 },
                 |b, _| {
-                    crate::json::escape_into(successor_hex, b);
+                    wz_session_core::json::escape_into(successor_hex, b);
                     Ok(())
                 },
             );
@@ -3211,11 +3220,11 @@ pub enum AdminConfigWrite {
         /// what made this the follow-up R311y496 named and this round closed.
         ///
         /// `None` keeps the pre-y497 behaviour byte-for-byte:
-        /// [`to_storage_config`](Self::to_storage_config) resolves it to `"mem"`,
+        /// `to_storage_config` (under `adminspace-config-hotreload`) resolves it to `"mem"`,
         /// and a host that maps storages onto its own volume still may.
         volume_id: Option<String>,
         /// R2571 — the PER-STORAGE volume payload the client sent, the wire half
-        /// of [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg).
+        /// of `StorageConfig::volume_cfg` (the core's `storage_config`, under `storage-backend`).
         /// EMPTY is upstream's `Value::Null`: the client named a bare volume id.
         ///
         /// Upstream's `volume` field is a string OR an object carrying a
@@ -3227,12 +3236,12 @@ pub enum AdminConfigWrite {
         /// itself, which was already refused when empty.
         ///
         /// R2802 — each value is the JSON value its text spells, for the reason
-        /// [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg)
+        /// `StorageConfig::volume_cfg`
         /// gives: `?read_only=true` is the boolean, `?read_only="true"` the
         /// string, and text that is no JSON5 value at all (`?dir=/srv/a`) is
         /// carried as the string it is. Upstream's admin plane is written in JSON
         /// and so never loses the type; this text form now keeps it too.
-        volume_cfg: Vec<(String, crate::json5::Json5Value)>,
+        volume_cfg: Vec<(String, wz_session_core::json5::Json5Value)>,
     },
     /// `.../config/storage-del <name>` — live-despawn the storage named `name`
     /// (RAII undeclare of its capture-sub + queryable). R311y239.
@@ -3345,13 +3354,13 @@ pub enum AdminConfigWrite {
 
 #[cfg(feature = "adminspace-config-hotreload")]
 impl AdminConfigWrite {
-    /// R311y239 — the intent → [`crate::storage_config::StorageConfig`] SSOT: an
+    /// R311y239 — the intent → [`wz_session_core::storage_config::StorageConfig`] SSOT: an
     /// [`AddStorage`](Self::AddStorage) intent maps to a `StorageConfig` (zenoh-faithful
-    /// defaults, [`StorageConfig::new`](crate::storage_config::StorageConfig::new)) the
+    /// defaults, [`StorageConfig::new`](wz_session_core::storage_config::StorageConfig::new)) the
     /// runtime storage manager spawns; any other
     /// intent yields `None`. Kept here (not at the runtime layer) because both the
-    /// intent and `StorageConfig` are wz-session-core types — one mapping, no drift.
-    pub fn to_storage_config(&self) -> Option<crate::storage_config::StorageConfig> {
+    /// intent and `StorageConfig` sit below the runtime — one mapping, no drift.
+    pub fn to_storage_config(&self) -> Option<wz_session_core::storage_config::StorageConfig> {
         match self {
             AdminConfigWrite::AddStorage {
                 name,
@@ -3359,7 +3368,7 @@ impl AdminConfigWrite {
                 volume_id,
                 volume_cfg,
             } => {
-                let mut config = crate::storage_config::StorageConfig::new(
+                let mut config = wz_session_core::storage_config::StorageConfig::new(
                     name,
                     key_expr,
                     // A client that named NO volume resolves to the in-memory one,
@@ -3463,7 +3472,7 @@ pub enum AdminConfigWriteOutcome {
 /// Upstream's write gate is ONE gate that checks the permission once, extracts
 /// the key once, and then matches on the body
 /// (`zenoh/src/net/runtime/adminspace.rs` @ `match &msg.payload {`). This type
-/// is what lets [`parse_admin_config_write`] have that shape instead of a
+/// is what lets `parse_admin_config_write` have that shape instead of a
 /// second entry point for deletes, which would have put the permission check in
 /// two places.
 ///
@@ -3499,10 +3508,10 @@ impl<'a> AdminConfigWriteBody<'a> {
     /// to pass `sample.payload()` under a Del — which is not a hypothetical:
     /// until R2646 every one of them passed exactly that, because the payload
     /// was all the gate accepted.
-    pub fn of_sample(sample: &'a dyn crate::sink::SampleView) -> Self {
+    pub fn of_sample(sample: &'a dyn wz_session_core::sink::SampleView) -> Self {
         match sample.kind() {
-            crate::sample_kind::SampleKind::Put => Self::Put(sample.payload()),
-            crate::sample_kind::SampleKind::Del => Self::Del,
+            wz_session_core::sample_kind::SampleKind::Put => Self::Put(sample.payload()),
+            wz_session_core::sample_kind::SampleKind::Del => Self::Del,
         }
     }
 }
@@ -3512,7 +3521,7 @@ impl<'a> AdminConfigWriteBody<'a> {
 ///
 /// Upstream has no action names in that space at all: every sub-key of `config/`
 /// is a config PATH there. wz put seven verbs of its own beside them, and
-/// [`parse_admin_config_write`] needs a discriminator between the two
+/// `parse_admin_config_write` needs a discriminator between the two
 /// vocabularies. This const is wz's half of it — the half this crate owns — and
 /// the config half arrives as the `is_config_key` parameter, because the
 /// runtime-mutable registry lives in a crate that depends on this one.
@@ -3874,7 +3883,7 @@ fn parse_storage_add_payload(
     String,
     String,
     Option<String>,
-    Vec<(String, crate::json5::Json5Value)>,
+    Vec<(String, wz_session_core::json5::Json5Value)>,
 )> {
     let (head, key_expr) = text.split_once(':')?;
     let head = head.trim();
@@ -3882,7 +3891,7 @@ fn parse_storage_add_payload(
     if key_expr.is_empty() {
         return None;
     }
-    let mut volume_cfg: Vec<(String, crate::json5::Json5Value)> = Vec::new();
+    let mut volume_cfg: Vec<(String, wz_session_core::json5::Json5Value)> = Vec::new();
     let (name, volume_id) = match head.rsplit_once('@') {
         Some((n, v)) => {
             let (n, v) = (n.trim(), v.trim());
@@ -3952,7 +3961,7 @@ fn parse_volume_cfg_pairs(cfg: &str) -> Option<Vec<(String, String)>> {
 /// at all -- a bare path like `/srv/a`, which is how every pre-R2802 client
 /// wrote one -- is the string it reads as. A storage payload's values are
 /// typed because the backends that read them are (see
-/// [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg));
+/// `StorageConfig::volume_cfg`, the core's `storage_config` under `storage-backend`);
 /// a VOLUME's `?k=v` stays text, since the one backend that reads those takes
 /// only a path.
 ///
@@ -3961,9 +3970,9 @@ fn parse_volume_cfg_pairs(cfg: &str) -> Option<Vec<(String, String)>> {
 /// `?dir=123` it is the number, which the filesystem backend refuses for `dir`
 /// exactly as upstream's refuses a number there.
 #[cfg(feature = "adminspace-config-hotreload")]
-fn typed_volume_value(text: &str) -> crate::json5::Json5Value {
-    crate::json5::parse(text)
-        .unwrap_or_else(|_| crate::json5::Json5Value::String(String::from(text)))
+fn typed_volume_value(text: &str) -> wz_session_core::json5::Json5Value {
+    wz_session_core::json5::parse(text)
+        .unwrap_or_else(|_| wz_session_core::json5::Json5Value::String(String::from(text)))
 }
 
 /// R2696 — decode `volume-add`'s payload: `<id>[@<backend>][?<k>=<v>&…]`.
@@ -4044,13 +4053,13 @@ fn parse_volume_add_payload(text: &str) -> Option<AdminConfigWrite> {
 /// format is not fidelity. Everything before it is byte-for-byte the pin's.
 ///
 /// R2821 — the three lines are written by
-/// [`crate::stats_registry::push_build_info`], the same writer the registry's
+/// [`wz_session_core::stats_registry::push_build_info`], the same writer the registry's
 /// document opens with, so the no-stats body and the stats body cannot drift
 /// apart on the one block they share.
 #[cfg(feature = "adminspace-metrics")]
 pub fn metrics_text(zid_hex: &str, whatami: &str, version: &str) -> String {
     let mut out = String::new();
-    crate::stats_registry::push_build_info(&mut out, zid_hex, whatami, version);
+    wz_session_core::stats_registry::push_build_info(&mut out, zid_hex, whatami, version);
     out
 }
 
@@ -4063,11 +4072,11 @@ pub fn metrics_eof() -> &'static str {
 }
 
 /// Append `s` to `out` as a quoted, escaped JSON string. R311y50 — delegates to
-/// the [`crate::json::escape_into`] SSOT escaper (hoisted so it is not duplicated
+/// the [`wz_session_core::json::escape_into`] SSOT escaper (hoisted so it is not duplicated
 /// by the `config`-side admin-JSON emitter); the thin local name is kept because
 /// the `local_data` builder above calls it at ~8 sites.
 fn push_json_str<W: TextOut + ?Sized>(s: &str, out: &mut W) {
-    crate::json::escape_into(s, out);
+    wz_session_core::json::escape_into(s, out);
 }
 
 #[cfg(test)]
@@ -4127,9 +4136,9 @@ mod tests {
         );
         // A key deeper than the scans accept is not a plain key: the rule decides it. One the
         // scans accept whole is.
-        let deep = vec!["k"; crate::keyexpr_match::MAX_KEYEXPR_CHUNKS + 1].join("/");
+        let deep = vec!["k"; wz_session_core::keyexpr_match::MAX_KEYEXPR_CHUNKS + 1].join("/");
         assert!(!is_plain_key(&deep));
-        let shallow = vec!["k"; crate::keyexpr_match::MAX_KEYEXPR_CHUNKS].join("/");
+        let shallow = vec!["k"; wz_session_core::keyexpr_match::MAX_KEYEXPR_CHUNKS].join("/");
         assert!(is_plain_key(&shallow));
         assert_eq!(
             key_intersects_query(&shallow, &shallow),
@@ -4415,8 +4424,8 @@ mod tests {
         // is what locks the dep: drop `keyexpr-wildcard-double` from
         // `adminspace-core` and the `**` degrades to a literal chunk, flipping
         // every positive assertion below to a non-match.
-        use crate::keyexpr_match::keyexpr_intersects_target;
         use alloc::vec::Vec;
+        use wz_session_core::keyexpr_match::keyexpr_intersects_target;
         let qk = admin_queryable_key("a1b2", "peer"); // "@/a1b2/peer/**"
         let root: Vec<&str> = "@/a1b2/peer".split('/').collect();
         let metrics: Vec<&str> = "@/a1b2/peer/metrics".split('/').collect();
@@ -5139,14 +5148,14 @@ mod tests {
     /// on whichever half it defaulted to.
     #[test]
     fn a_samples_kind_reaches_the_gate_through_of_sample() {
-        use crate::sink::BorrowedSample;
+        use wz_session_core::sink::BorrowedSample;
 
         let key = "@/a1b2/peer/config/adminspace/permissions/read";
         let put = BorrowedSample {
             keyexpr: key,
             payload: b"false",
-            kind: crate::sample_kind::SampleKind::Put,
-            reliability: crate::reliability::Reliability::Reliable,
+            kind: wz_session_core::sample_kind::SampleKind::Put,
+            reliability: wz_session_core::reliability::Reliability::Reliable,
         };
         assert_eq!(
             parse_admin_config_write(
@@ -5166,8 +5175,8 @@ mod tests {
         let del = BorrowedSample {
             keyexpr: key,
             payload: b"",
-            kind: crate::sample_kind::SampleKind::Del,
-            reliability: crate::reliability::Reliability::Reliable,
+            kind: wz_session_core::sample_kind::SampleKind::Del,
+            reliability: wz_session_core::reliability::Reliability::Reliable,
         };
         assert_eq!(
             parse_admin_config_write(
@@ -5302,7 +5311,7 @@ mod tests {
     #[cfg(feature = "adminspace-config-hotreload")]
     mod config_hotreload {
         use super::*;
-        use crate::json5::Json5Value;
+        use wz_session_core::json5::Json5Value;
 
         #[test]
         fn storage_add_decodes_name_keyexpr_and_names_no_volume() {
@@ -5877,7 +5886,7 @@ mod tests {
         let hint = encoding
             .as_ref()
             .expect("the metrics leg carries an encoding");
-        let mime = crate::encoding::encoding_to_mime(hint);
+        let mime = wz_session_core::encoding::encoding_to_mime(hint);
 
         // ANTI-VACUITY FIRST: the leg really is answering as openmetrics, so a
         // build that dropped the encoding cannot pass the claim below.
@@ -5925,7 +5934,7 @@ mod tests {
         let mut expected = String::new();
         registry.encode_metrics(
             &mut expected,
-            crate::stats_registry::MetricsQuery::default(),
+            wz_session_core::stats_registry::MetricsQuery::default(),
         );
         assert_eq!(body, expected);
         // Stated separately from the equality, which would also hold if the
@@ -5957,22 +5966,25 @@ mod tests {
     #[cfg(feature = "adminspace-metrics")]
     #[test]
     fn metrics_parameters_reach_the_registry() {
-        use crate::stats_registry::MetricsQuery;
+        use wz_session_core::stats_registry::MetricsQuery;
         let mut registry = registry_with_traffic();
         // A disconnected transport WITH counts, so `disconnected=true` has a
         // series to list — one without any writes nothing either way, which is
         // what the first run of this test measured.
-        let gone = registry.open_unicast_transport("e5f6", crate::WhatAmI::Client, None);
+        let gone = registry.open_unicast_transport("e5f6", wz_session_core::WhatAmI::Client, None);
         let slot = registry
             .open_link(
                 gone,
-                crate::stats_registry::LinkLabels::new("tcp/127.0.0.1:7447", "tcp/127.0.0.1:50001"),
+                wz_session_core::stats_registry::LinkLabels::new(
+                    "tcp/127.0.0.1:7447",
+                    "tcp/127.0.0.1:50001",
+                ),
             )
             .expect("the transport was just registered");
         registry
             .transport_mut(gone)
             .expect("the transport was just registered")
-            .inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, 7);
+            .inc_bytes(wz_session_core::stats_registry::StatsDirection::Rx, slot, 7);
         registry.close_link(gone, slot);
         registry.close_transport(gone, 0);
         let default_body = metrics_body(&registry, None);
@@ -6361,7 +6373,7 @@ mod tests {
     /// promises a consumer.
     ///
     /// Implemented HERE rather than delegated to
-    /// [`keyexpr_match::keyexpr_intersects_target`](crate::keyexpr_match) because
+    /// [`keyexpr_match::keyexpr_intersects_target`](wz_session_core::keyexpr_match) because
     /// that matcher honours `*` only under `keyexpr-wildcard-single`, and this
     /// build's own gate must not report agreement because a feature that reads
     /// wildcards was compiled out. The first draft did delegate, and a
@@ -6436,9 +6448,9 @@ mod tests {
         /// `replies`. It used to be dropped on the floor (`_encoding`), which made
         /// the manifest's encoding column unverifiable from here: a test can only
         /// compare a declaration against a measurement it kept.
-        encodings: Vec<Option<crate::sample::EncodingHint>>,
+        encodings: Vec<Option<wz_session_core::sample::EncodingHint>>,
     }
-    impl crate::query_sink::ReplyOut for RecordingReply {
+    impl wz_session_core::query_sink::ReplyOut for RecordingReply {
         fn reply(&mut self, payload: &[u8]) {
             self.replies.push((String::new(), payload.to_vec()));
             self.encodings.push(None);
@@ -6447,7 +6459,7 @@ mod tests {
             &mut self,
             keyexpr: &str,
             payload: &[u8],
-        ) -> Result<(), crate::query_sink::ReplyError> {
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
             self.replies.push((keyexpr.to_string(), payload.to_vec()));
             self.encodings.push(None);
             Ok(())
@@ -6456,8 +6468,8 @@ mod tests {
             &mut self,
             keyexpr: &str,
             payload: &[u8],
-            encoding: Option<&crate::sample::EncodingHint>,
-        ) -> Result<(), crate::query_sink::ReplyError> {
+            encoding: Option<&wz_session_core::sample::EncodingHint>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
             self.replies.push((keyexpr.to_string(), payload.to_vec()));
             self.encodings.push(encoding.cloned());
             Ok(())
@@ -6522,7 +6534,9 @@ mod tests {
     /// that pin the metrics body. Separate from [`admin_ctx`] so every OTHER
     /// admin test keeps asserting the no-stats body unchanged.
     #[cfg(feature = "adminspace-metrics")]
-    fn admin_ctx_with_stats(stats: &crate::stats_registry::StatsRegistry) -> AdminAnswerCtx<'_> {
+    fn admin_ctx_with_stats(
+        stats: &wz_session_core::stats_registry::StatsRegistry,
+    ) -> AdminAnswerCtx<'_> {
         AdminAnswerCtx {
             stats: Some(stats),
             ..admin_ctx(true)
@@ -6533,10 +6547,11 @@ mod tests {
     /// transport with one open tcp link that has sent 140 bytes, so every
     /// partition a metrics parameter can switch off has a series in it.
     #[cfg(feature = "adminspace-metrics")]
-    fn registry_with_traffic() -> crate::stats_registry::StatsRegistry {
-        use crate::stats_registry::{LinkLabels, StatsDirection, StatsRegistry};
-        let mut registry = StatsRegistry::new("a1b2", crate::WhatAmI::Peer, "0.1.0");
-        let transport = registry.open_unicast_transport("c3d4", crate::WhatAmI::Router, None);
+    fn registry_with_traffic() -> wz_session_core::stats_registry::StatsRegistry {
+        use wz_session_core::stats_registry::{LinkLabels, StatsDirection, StatsRegistry};
+        let mut registry = StatsRegistry::new("a1b2", wz_session_core::WhatAmI::Peer, "0.1.0");
+        let transport =
+            registry.open_unicast_transport("c3d4", wz_session_core::WhatAmI::Router, None);
         let slot = registry
             .open_link(
                 transport,
@@ -6549,9 +6564,9 @@ mod tests {
         metrics.inc_bytes(StatsDirection::Tx, slot, 140);
         metrics.observe_network_message_payload(
             StatsDirection::Tx,
-            crate::stats::StatSpace::User,
-            crate::qos::Priority::DEFAULT,
-            crate::stats_registry::MessageLabel::Put,
+            wz_session_core::stats::StatSpace::User,
+            wz_session_core::qos::Priority::DEFAULT,
+            wz_session_core::stats_registry::MessageLabel::Put,
             false,
             12,
             ["demo/**"],
@@ -6562,7 +6577,7 @@ mod tests {
     /// The metrics leg's body for `parameters`, answered against `registry`.
     #[cfg(feature = "adminspace-metrics")]
     fn metrics_body(
-        registry: &crate::stats_registry::StatsRegistry,
+        registry: &wz_session_core::stats_registry::StatsRegistry,
         parameters: Option<&str>,
     ) -> String {
         let mut out = RecordingReply::default();
@@ -6586,8 +6601,8 @@ mod tests {
             .expect("the metrics leg replied")
     }
 
-    fn admin_view(keyexpr: &str) -> crate::query_sink::BorrowedQuery<'_> {
-        crate::query_sink::BorrowedQuery {
+    fn admin_view(keyexpr: &str) -> wz_session_core::query_sink::BorrowedQuery<'_> {
+        wz_session_core::query_sink::BorrowedQuery {
             keyexpr,
             parameters: None,
             attachment: None,
@@ -6596,7 +6611,7 @@ mod tests {
             encoding: None,
             rid: 1,
             is_local: false,
-            qos: crate::sample::QosLevel::DEFAULT,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
         }
     }
 
@@ -6616,8 +6631,8 @@ mod tests {
     fn admin_view_with_params<'a>(
         keyexpr: &'a str,
         parameters: &'a str,
-    ) -> crate::query_sink::BorrowedQuery<'a> {
-        crate::query_sink::BorrowedQuery {
+    ) -> wz_session_core::query_sink::BorrowedQuery<'a> {
+        wz_session_core::query_sink::BorrowedQuery {
             parameters: Some(parameters.as_bytes()),
             ..admin_view(keyexpr)
         }
@@ -7132,8 +7147,8 @@ mod tests {
             .any(|(k, v)| k == "@/a1b2/router/linkstate/peers" && v == b"graph { P }"));
     }
 
-    fn a_capacity_report() -> crate::capacity::CapacityReport {
-        use crate::capacity::{CapacityReport, EffectiveBound, Limiter};
+    fn a_capacity_report() -> wz_session_core::capacity::CapacityReport {
+        use wz_session_core::capacity::{CapacityReport, EffectiveBound, Limiter};
         CapacityReport {
             lease_ms: 10_000,
             share_ppm: Some(13_200),

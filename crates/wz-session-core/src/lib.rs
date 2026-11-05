@@ -894,43 +894,23 @@ pub mod json5_lex;
 /// nothing but `core`.
 pub mod retry_period;
 
-/// R2824 (§5.23) — which sub-key a config write names in a node's config
-/// space, with no allocator: the membership gates the AP decoder
-/// (`adminspace`) and the MCU decoder (`admin_connect`, the wz-admin crate's
-/// since the server-layer split, step 6) both run.
-#[cfg(any(feature = "adminspace-fixed", feature = "adminspace-write"))]
-pub mod admin_config_space;
-
 /// The list of endpoints a node holds sessions with, with no allocator. Filled by upstream's
-/// `connect/endpoints` config write (`admin_connect`) or by a firmware that dials a router it was
-/// built to know; nothing in it is the admin space's, so it has a feature of its own.
-#[cfg(any(feature = "connect-endpoints", feature = "adminspace-write"))]
+/// `connect/endpoints` config write (the wz-admin crate's `admin_connect`, whose
+/// `adminspace-write` turns this feature on) or by a firmware that dials a router it was built to
+/// know; nothing in it is the admin space's, so it has a feature of its own.
+#[cfg(feature = "connect-endpoints")]
 pub mod connect_endpoints;
 
-// R2824 (§5.23 `adminspace-write`) — upstream's `connect/endpoints` config write, decided with
-// no allocator, is the wz-admin crate's `admin_connect` (server-layer split, step 6). This
-// crate keeps the two things it reads, `admin_config_space` and `connect_endpoints` above,
-// under the same `adminspace-write`, and never names the crate above it.
+// §5.23 — the admin space of a node is the wz-admin crate's since the server-layer split (steps 6
+// and 7): the `@/<zid>/<whatami>/**` keys and the `local_data` view (`adminspace`), the buffers
+// an admin reply is built in (`admin_reply`), the config-space membership (`admin_config_space`)
+// and the `connect/endpoints` config write (`admin_connect`), under the features of the same
+// names there. This crate keeps what those modules read and never names the crate above it.
 
 // The keys of the documents wz serves that upstream does not, under the one root outside `@/`.
 // Documented in its own `//!`; a plain comment here for the reason noted at `event_ring`.
 #[cfg(feature = "alloc")]
 pub mod wz_root;
-
-/// §5.23 — admin space `local_data` view: the `@/<zid>/<whatami>/**` built-in
-/// queryable keyexpr helpers + the `local_data` JSON body, the wz mirror of
-/// zenoh `net/runtime/adminspace.rs`. Pure data-view (the queryable wiring lives
-/// in wz-runtime-tokio); `alloc`-only / no_std-feasible.
-#[cfg(feature = "adminspace-fixed")]
-pub mod adminspace;
-
-/// Fixed-memory step S9b — the buffers an admin reply is built in
-/// ([`admin_reply::AdminBuffer`]: a `String` that grows, or a fixed buffer that
-/// refuses what does not fit), the typed refusal ([`admin_reply::AdminReplyError`])
-/// and its counters, and the per-process arena a node with no allocator answers
-/// from ([`admin_reply::AdminReplyArena`]).
-#[cfg(feature = "adminspace-fixed")]
-pub mod admin_reply;
 
 /// Shared slice-based VLE decoder (the `SceCursor::read_vle_u64` borrowed-slice
 /// twin) — the SSOT for parsing a varint out of an already-buffered ext body.

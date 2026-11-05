@@ -53,7 +53,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
+use wz_admin::adminspace::{AdminPlugin, AdminPluginState};
 use wz_session_core::json5::Json5Value;
 use wz_storage::storage_plugin_config::STORAGE_MANAGER_PLUGIN;
 

@@ -1018,8 +1018,8 @@ pub struct TxSlotGrant {
 
 /// R311y473 — one link's locator pair, the wz counterpart of the `{src,dst}`
 /// object zenoh's `link_to_json` emits per link of a transport
-/// (`net/runtime/adminspace.rs:608-613`). Populated into
-/// [`crate::adminspace::AdminLink`] by the admin host, so a foreign admin client
+/// (`net/runtime/adminspace.rs:608-613`). Populated into the wz-admin crate's
+/// `adminspace::AdminLink` by the admin host, so a foreign admin client
 /// sees the same shape against wz as against zenohd.
 ///
 /// Both fields are LOCATORS (`<scheme>/<address>`), not bare addresses — see the
@@ -1066,7 +1066,7 @@ impl LinkEndpoints {
     /// The two ends as owned `String`s, for a consumer that renders them (the
     /// admin space's link list): moved out as they are where they already are
     /// `String`s, copied where they are fixed text.
-    #[cfg(all(feature = "alloc", feature = "adminspace-core"))]
+    #[cfg(feature = "alloc")]
     pub fn into_strings(self) -> (String, String) {
         #[cfg(not(feature = "session-slot"))]
         {

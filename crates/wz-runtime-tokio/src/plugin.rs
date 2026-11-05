@@ -51,8 +51,8 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 
+use wz_admin::adminspace::{AdminPlugin, AdminPluginState};
 use wz_plugin_abi::{Compatibility, EntryFn, PluginEntry, PluginVTable, ENTRY_SYMBOL, OK};
-use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
 
 /// Why a load or start refused.
 ///
@@ -335,7 +335,7 @@ impl DynamicPlugin {
     /// The admin-space record for this plugin.
     ///
     /// `path` is the real filesystem path, NOT
-    /// [`wz_session_core::adminspace::WZ_STATIC_PLUGIN_PATH`]. That difference
+    /// [`wz_admin::adminspace::WZ_STATIC_PLUGIN_PATH`]. That difference
     /// is the whole foreign-observable discriminator for this atom: a statically
     /// composed subsystem reports `"__static__"` by construction, so a record
     /// carrying a `.so` path cannot be produced without a `dlopen` having
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(rec.id, "wz_example");
         assert_ne!(
             rec.path,
-            wz_session_core::adminspace::WZ_STATIC_PLUGIN_PATH,
+            wz_admin::adminspace::WZ_STATIC_PLUGIN_PATH,
             "a dlopen'd plugin must not report the static marker — that field is \
              the whole discriminator for this atom"
         );

@@ -57,7 +57,7 @@
 //! address can therefore reach the dial layer here; it cannot be applied as a
 //! connection, and the dial layer says so.
 
-use wz_session_core::admin_config_space::{
+use crate::admin_config_space::{
     subkey_in_config_space, write_config_space_pattern, ConfigSpaceRefusal,
 };
 use wz_session_core::caps::MAX_STATIC_CONNECT;

@@ -3790,7 +3790,11 @@ dependencies = [
 name = "wz-admin"
 version = "0.1.0"
 dependencies = [
+ "hashbrown 0.15.5",
  "heapless",
+ "log",
+ "serde_json",
+ "wz-runtime-core",
  "wz-session-core",
 ]
 
@@ -4280,6 +4284,7 @@ name = "wz-rest"
 version = "0.1.0"
 dependencies = [
  "tokio",
+ "wz-admin",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
@@ -4372,6 +4377,7 @@ dependencies = [
  "webpki-roots",
  "windows-sys 0.61.2",
  "wz-access-control",
+ "wz-admin",
  "wz-auth",
  "wz-capture",
  "wz-codecs",
@@ -4470,6 +4476,7 @@ dependencies = [
  "critical-section",
  "heapless",
  "lwip-sys",
+ "wz-admin",
  "wz-codecs",
  "wz-link-lwip",
  "wz-runtime-coop",

@@ -30,10 +30,10 @@
 
 use core::cell::RefCell;
 
+use wz_admin::adminspace::{write_admin_queryable_key, AdminSessionRef, SessionAdminRow};
 use wz_runtime_coop::session_drive::{Accept, SessionDriveConfig, SessionRole, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef, SessionAdminRow};
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
@@ -111,7 +111,7 @@ where
         let mut admin_key = KeyText::new();
         write_admin_queryable_key(&mut admin_key, zid_hex, whatami);
         let mut config_key = KeyText::new();
-        let _ = wz_session_core::admin_config_space::write_config_space_pattern(
+        let _ = wz_admin::admin_config_space::write_config_space_pattern(
             &mut config_key,
             zid_hex,
             whatami,

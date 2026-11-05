@@ -203,7 +203,7 @@ mod heap {
         /// `NodeStatus::set_sessions`, collecting this over
         /// `ConnectManager::sessions`.
         #[cfg(feature = "adminspace-core")]
-        pub fn admin_session(&self) -> Option<wz_session_core::adminspace::AdminSession> {
+        pub fn admin_session(&self) -> Option<wz_admin::adminspace::AdminSession> {
             admin_session_of(&self.actions)
         }
     }
@@ -214,8 +214,8 @@ mod heap {
     #[cfg(feature = "adminspace-core")]
     pub fn admin_session_of<C: ClockSource + 'static>(
         actions: &McuActions<C>,
-    ) -> Option<wz_session_core::adminspace::AdminSession> {
-        use wz_session_core::adminspace::SessionAdminRow;
+    ) -> Option<wz_admin::adminspace::AdminSession> {
+        use wz_admin::adminspace::SessionAdminRow;
 
         if !actions.is_established() {
             return None;

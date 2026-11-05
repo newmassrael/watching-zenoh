@@ -40,12 +40,12 @@
 
 use std::cell::RefCell;
 
+use wz_admin::adminspace::SessionAdminRow;
 use wz_link_lwip::rx_sockets::SessionRxPool;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
-use wz_session_core::adminspace::SessionAdminRow;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;

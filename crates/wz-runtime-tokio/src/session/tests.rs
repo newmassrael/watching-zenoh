@@ -4118,7 +4118,7 @@ fn declare_adminspace_reports_the_negotiated_shm_flag() {
 ))]
 #[test]
 fn declare_adminspace_applies_a_permitted_config_write_to_what_it_serves() {
-    use wz_session_core::adminspace::AdminSpacePermissions;
+    use wz_admin::adminspace::AdminSpacePermissions;
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
     // Write `metadata` over this session's own config-write keyexpr, then
@@ -4866,7 +4866,7 @@ fn declare_adminspace_read_false_denies_get_with_final_only() {
     // answers NOTHING — the querier receives only the terminating Final, the wz
     // mirror of zenoh's bare ResponseFinal on a read-permission deny
     // (adminspace.rs:457-467).
-    use wz_session_core::adminspace::AdminSpacePermissions;
+    use wz_admin::adminspace::AdminSpacePermissions;
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
     let (session, _driver) = build_session();
@@ -4932,7 +4932,7 @@ fn declare_adminspace_live_permit_source_flips_the_gate_at_runtime() {
     // would pass against a handler that had simply been rebuilt with a new constant,
     // and would say nothing about deny->grant; the three phases pin that the SOURCE
     // is what decides, not the declare call.
-    use wz_session_core::adminspace::AdminSpacePermissions;
+    use wz_admin::adminspace::AdminSpacePermissions;
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
     let (session, _driver) = build_session();

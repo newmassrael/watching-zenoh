@@ -32,7 +32,7 @@
 //! ## Binding to the atom's cfg-gated code
 //!
 //! Every router admin leg is `#[cfg(feature = "adminspace-router-linkstate")]`
-//! (wz-session-core/src/adminspace.rs — `admin_route_successor_prefix`,
+//! (wz-admin/src/adminspace.rs — `admin_route_successor_prefix`,
 //! `route_successor_entry_key`, and the RouterForwarder self-dispatch host in
 //! wz-ap-demo/src/runner.rs:2482 all gate on it). The E7 binary is built WITH the
 //! feature for this lane; without it the router hosts no `@/<zid>/router/**`

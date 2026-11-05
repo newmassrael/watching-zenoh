@@ -48,8 +48,8 @@
 //! fed by declaration sinks would be the other thing — a second source of truth
 //! that can disagree with the first — which is the shape `run_peer` also refused.
 
+use wz_admin::adminspace::{AdminDeclaration, AdminEntityKind, AdminSources};
 use wz_codecs::whatami::WhatAmI;
-use wz_session_core::adminspace::{AdminDeclaration, AdminEntityKind, AdminSources};
 use wz_session_core::observer::ApplicationLayerObserver;
 
 /// The identity of the ONE face a Session holds, as the admin plane needs it:

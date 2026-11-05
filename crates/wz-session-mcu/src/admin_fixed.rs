@@ -26,7 +26,7 @@
 //!
 //! What writes [`FixedNodeStatus`] on a slot image is the admin node shell (step
 //! S9c, `crate::admin_status::NodeStatus`'s writer today); it gives the rows as
-//! [`wz_session_core::adminspace::AdminSessionRef`] views of whatever it keeps.
+//! [`wz_admin::adminspace::AdminSessionRef`] views of whatever it keeps.
 //!
 //! # The lock
 //!
@@ -40,8 +40,8 @@
 use core::cell::{Cell, RefCell};
 
 use critical_section::Mutex;
-use wz_session_core::admin_reply::{AdminReplyArena, AdminReplyRefusals};
-use wz_session_core::adminspace::{
+use wz_admin::admin_reply::{AdminReplyArena, AdminReplyRefusals};
+use wz_admin::adminspace::{
     write_admin_queryable_key, AdminLegEncoding, AdminLinkList, AdminLinkWeight, AdminNodeFacts,
     AdminSessionRef,
 };
@@ -183,7 +183,7 @@ pub enum RowRefused {
     TooManyLinks,
 }
 
-/// One `sessions[]` row in fixed storage: [`wz_session_core::adminspace::AdminSession`]
+/// One `sessions[]` row in fixed storage: [`wz_admin::adminspace::AdminSession`]
 /// with every text a fixed field.
 pub struct FixedAdminSession {
     peer_zid_hex: FixedText<ZID_TEXT_BYTES>,
@@ -805,12 +805,7 @@ impl VerbLegs {
         let mut zid: FixedText<ZID_TEXT_BYTES> = FixedText::new();
         zid.push_str(zid_hex);
         let mut pattern: FixedText<{ caps::MAX_KEYEXPR_BYTES }> = FixedText::new();
-        wz_session_core::adminspace::write_admin_leg_key(
-            &mut pattern,
-            zid_hex,
-            whatami,
-            "session/**",
-        );
+        wz_admin::adminspace::write_admin_leg_key(&mut pattern, zid_hex, whatami, "session/**");
         if zid.overflowed() || pattern.overflowed() {
             return Err(VerbNameRefused::TooLong);
         }

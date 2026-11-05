@@ -44,12 +44,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use wz_admin::admin_config_space::write_config_space_pattern;
+use wz_admin::adminspace::admin_queryable_key;
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
-use wz_session_core::admin_config_space::write_config_space_pattern;
-use wz_session_core::adminspace::admin_queryable_key;
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::observer::ApplicationLayerObserver;

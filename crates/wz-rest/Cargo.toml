@@ -76,6 +76,9 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 # field). Not re-exported through wz-runtime-tokio's encoding path, so depended
 # on directly.
 wz-session-core = { path = "../wz-session-core" }
+# The plugin record the bridge advertises on the admin space (`src/admin.rs`), whose types are the
+# admin crate's; pulled by `adminspace-plugins-handlers` alone.
+wz-admin = { path = "../wz-admin", default-features = false, optional = true }
 # The async runtime. Mirrors wz-runtime-tokio's own tokio feature choice; net +
 # io-util for the TcpListener/stream, time for the per-connection read timeout,
 # sync for the reply-collection oneshot.
@@ -95,19 +98,24 @@ rest-sse-subscribe = [
 # record + its `status/plugins/rest/{version,port}` sub-tree, the wz analogue of
 # `zenoh-plugin-rest`'s `adminspace_getter`. Gated because a build can want the
 # bridge without an adminspace to advertise it on, and because `AdminPlugin`
-# lives in `wz_session_core::adminspace`, a module that is itself
-# `#[cfg(feature = "adminspace-core")]` — so the record cannot be built without
-# it. ONE forward: wz-runtime-tokio's own feature composes `adminspace-core`
-# down to wz-session-core, and it is also what brings `compiled_plugins` (the
-# registry this record folds over) and `declare_adminspace_with_live_inputs`,
-# which the crate's `rest_admin_plugin_e2e` names.
+# lives in `wz_admin::adminspace`, a module that is itself
+# `#[cfg(feature = "adminspace-fixed")]` — so the record cannot be built without
+# it. wz-runtime-tokio's own feature composes `adminspace-core` down to wz-admin,
+# and it is also what brings `compiled_plugins` (the registry this record folds
+# over) and `declare_adminspace_with_live_inputs`, which the crate's
+# `rest_admin_plugin_e2e` names; the admin crate itself is named here because
+# this crate's code names its types.
 #
 # ⚠ The second forward this line used to carry was justified by a claim that
 # did not survive measurement — that the `AdminPlugin` / `AdminPluginStatusLeaf`
 # TYPES needed it. They are ungated, but they are ungated INSIDE a gated
 # module, so reaching them still takes the feature. Removing the gate on that
 # reading failed to compile, which is the only reader that settles a path.
-adminspace-plugins-handlers = ["wz-runtime-tokio/adminspace-plugins-handlers"]
+adminspace-plugins-handlers = [
+    "wz-runtime-tokio/adminspace-plugins-handlers",
+    "dep:wz-admin",
+    "wz-admin/adminspace-plugins-handlers",
+]
 
 [dev-dependencies]
 # The integration test drives the bridge over a real TCP socket against a live

@@ -231,8 +231,9 @@ impl core::fmt::Display for VolumeBuildError {
 ///
 /// ⚠ The dlopen backend (`storage-mgr-dynamic-volume-loading`) is deliberately
 /// not reachable from here — see
-/// [`AdminConfigWrite::AddVolume`](wz_session_core::adminspace::AdminConfigWrite::AddVolume),
-/// which states why upstream's `paths` field is not carried on the wire.
+/// `wz_admin::adminspace::AdminConfigWrite::AddVolume` (a plain span: a build
+/// without the admin space has no such item to link), which states why
+/// upstream's `paths` field is not carried on the wire.
 pub fn build_volume(
     backend: &str,
     volume_cfg: &[(String, String)],
@@ -606,7 +607,7 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     /// `@/<zid>/<whatami>/status/plugins/storage_manager`, the wz analogue of
     /// `StoragesPlugin`'s `adminspace_getter`
     /// (`zenoh-plugin-storage-manager/src/lib.rs:336-389`). Feed the result to
-    /// [`AdminPlugin::with_status_leaves`](wz_session_core::adminspace::AdminPlugin::with_status_leaves)
+    /// [`AdminPlugin::with_status_leaves`](wz_admin::adminspace::AdminPlugin::with_status_leaves)
     /// on the `storage_manager` record the admin handler builds, and the answerer
     /// serves it.
     ///
@@ -636,8 +637,8 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     pub fn admin_status_leaves(
         &self,
         version: &str,
-    ) -> Vec<wz_session_core::adminspace::AdminPluginStatusLeaf> {
-        use wz_session_core::adminspace::{AdminPluginStatusLeaf, WZ_STATIC_PLUGIN_PATH};
+    ) -> Vec<wz_admin::adminspace::AdminPluginStatusLeaf> {
+        use wz_admin::adminspace::{AdminPluginStatusLeaf, WZ_STATIC_PLUGIN_PATH};
 
         let mut leaves = Vec::new();
         let mut version_json = String::new();
@@ -1956,7 +1957,7 @@ mod tests {
     #[tokio::test]
     async fn config_hotreload_spawns_despawns_storage_and_reflects_plugin_state() {
         use crate::compiled_plugins_dyn;
-        use wz_session_core::adminspace::{
+        use wz_admin::adminspace::{
             parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,
             AdminConfigWriteOutcome, AdminConfigWriteSpace, AdminPluginState,
         };

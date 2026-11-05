@@ -8,7 +8,7 @@
 //! ([`crate::adminspace`]) and handed to the session's reply stage as one payload.
 //! On the AP the document is a `String` that grows, as it always was. A node with
 //! no allocator builds it in a buffer whose size is a number its deploy file
-//! states (`session_pool.process.admin_reply_bytes`, [`crate::caps::MAX_ADMIN_REPLY_BYTES`]),
+//! states (`session_pool.process.admin_reply_bytes`, [`wz_session_core::caps::MAX_ADMIN_REPLY_BYTES`]),
 //! and a document that does not fit is not cut to fit: it is REFUSED, COUNTED, and
 //! the querier is told, in a typed error reply, that its answer was too large for
 //! this node. [`crate::admin_reply::AdminBuffer`] is the one trait both buffers are
@@ -22,8 +22,8 @@ use crate::adminspace::{
     answer_admin_query_in, serve_one_leg, AdminAnswerOutcome, AdminDeclaration, AdminLegEncoding,
     AdminMulticastPeerRef, AdminNodeFacts, AdminPlugin, AdminSessionRef,
 };
-use crate::query_sink::ReplyError;
-use crate::text_out::{FixedText, Overflow, TextOut};
+use wz_session_core::query_sink::ReplyError;
+use wz_session_core::text_out::{FixedText, Overflow, TextOut};
 
 /// A buffer an admin reply is written into: a [`TextOut`] that can be emptied
 /// for the next document and read back as a result.
@@ -73,7 +73,7 @@ pub enum AdminReplyError {
     KeyTooLong(Overflow),
     /// The document was built, and the session's reply stage refused it. The stage
     /// has counted that refusal in its own tables
-    /// ([`crate::reply_stage::ReplyRefusals`]); this carries which.
+    /// ([`wz_session_core::reply_stage::ReplyRefusals`]); this carries which.
     Refused(ReplyError),
 }
 
@@ -90,10 +90,10 @@ impl core::fmt::Display for AdminReplyError {
 /// What the admin answerer refused since it was made, by why.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AdminReplyRefusals {
-    /// Legs whose body did not fit [`crate::caps::MAX_ADMIN_REPLY_BYTES`] (or the
+    /// Legs whose body did not fit [`wz_session_core::caps::MAX_ADMIN_REPLY_BYTES`] (or the
     /// size the arena was made with).
     pub too_large: u32,
-    /// Legs whose reply key did not fit [`crate::caps::MAX_ADMIN_KEY_BYTES`].
+    /// Legs whose reply key did not fit [`wz_session_core::caps::MAX_ADMIN_KEY_BYTES`].
     pub key_too_long: u32,
     /// Replies built whole that the session's reply stage then refused.
     pub refused_by_stage: u32,
@@ -121,7 +121,7 @@ impl AdminReplyRefusals {
 
 /// The scratch a node with no allocator builds its admin replies in: one reply key
 /// buffer, one body buffer and one config buffer, sized by the deploy file
-/// (`session_pool.process.admin_reply_bytes`, [`crate::caps::MAX_ADMIN_REPLY_BYTES`])
+/// (`session_pool.process.admin_reply_bytes`, [`wz_session_core::caps::MAX_ADMIN_REPLY_BYTES`])
 /// and a running count of what it refused.
 ///
 /// # Per process, not per session, and why that is not the isolation hole it looks like
@@ -131,7 +131,7 @@ impl AdminReplyRefusals {
 /// because the arena is SCRATCH, not state: a GET is answered to completion, the
 /// reply copied into the asking session's own reply stage, before the next one
 /// starts, and nothing a peer can write is kept in it. What a peer can exhaust is
-/// the stage it asks into ([`crate::reply_stage`]), which is the session's. A
+/// the stage it asks into ([`wz_session_core::reply_stage`]), which is the session's. A
 /// per-session arena would multiply the buffers by the number of sessions to hold
 /// bytes no session holds at the same time.
 ///
@@ -140,9 +140,9 @@ impl AdminReplyRefusals {
 /// a lock and finds the lock taken has a re-entrant call and refuses it itself.
 ///
 /// `BODY` is the body buffer's size and the config buffer's, the one number the
-/// deploy file states; the key buffer is [`crate::caps::MAX_ADMIN_KEY_BYTES`].
+/// deploy file states; the key buffer is [`wz_session_core::caps::MAX_ADMIN_KEY_BYTES`].
 pub struct AdminReplyArena<const BODY: usize> {
-    key: FixedText<{ crate::caps::MAX_ADMIN_KEY_BYTES }>,
+    key: FixedText<{ wz_session_core::caps::MAX_ADMIN_KEY_BYTES }>,
     body: FixedText<BODY>,
     config: FixedText<BODY>,
     refusals: AdminReplyRefusals,
@@ -182,8 +182,8 @@ impl<const BODY: usize> AdminReplyArena<BODY> {
     #[allow(clippy::too_many_arguments)]
     pub fn answer<'a, S, M, L>(
         &mut self,
-        view: &dyn crate::query_sink::QueryView,
-        out: &mut dyn crate::query_sink::ReplyOut,
+        view: &dyn wz_session_core::query_sink::QueryView,
+        out: &mut dyn wz_session_core::query_sink::ReplyOut,
         node: AdminNodeFacts<'a, S, M, L>,
         declarations: &[AdminDeclaration],
         plugins: &[AdminPlugin],
@@ -224,8 +224,8 @@ impl<const BODY: usize> AdminReplyArena<BODY> {
     #[allow(clippy::too_many_arguments)]
     pub fn serve_leg(
         &mut self,
-        view: &dyn crate::query_sink::QueryView,
-        out: &mut dyn crate::query_sink::ReplyOut,
+        view: &dyn wz_session_core::query_sink::QueryView,
+        out: &mut dyn wz_session_core::query_sink::ReplyOut,
         zid_hex: &str,
         whatami: &str,
         tail: &str,
@@ -260,11 +260,11 @@ mod tests {
     use crate::adminspace::{
         answer_admin_query, AdminAnswerCtx, AdminLink, AdminMulticastPeerRef, AdminSession,
     };
-    use crate::query_sink::{BorrowedQuery, QueryView, ReplyOut};
-    use crate::sample::{EncodingHint, QosLevel};
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
+    use wz_session_core::query_sink::{BorrowedQuery, QueryView, ReplyOut};
+    use wz_session_core::sample::{EncodingHint, QosLevel};
 
     /// A reply sink that keeps what it was given, for a test to read.
     #[derive(Default)]
@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(out.errors.len(), 1, "the querier gets a typed refusal");
         assert_eq!(
             out.errors[0].0,
-            Some(u32::from(crate::encoding::ID_APPLICATION_JSON))
+            Some(u32::from(wz_session_core::encoding::ID_APPLICATION_JSON))
         );
         assert_eq!(
             out.errors[0].1,

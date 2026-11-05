@@ -14,12 +14,12 @@
 //!
 //! The only change is the chunk buffer: a `BoundedVec` of
 //! `keyexpr_match::MAX_KEYEXPR_CHUNKS` instead of a `Vec`. That is the rule
-//! `keyexpr_match` already applies to every keyexpr scan in this crate —
+//! `keyexpr_match` already applies to every keyexpr scan in `wz-session-core` —
 //! unbounded on the `alloc` backing, so the AP answers exactly as before, and
 //! a key deeper than the bound is not this node's on a no-heap MCU.
 
-use crate::bounded::BoundedVec;
-use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
+use wz_session_core::bounded::BoundedVec;
+use wz_session_core::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 
 /// The number of chunks in front of an admin config-write sub-key:
 /// `@` / `<zid>` / `<whatami>` / `config`. Upstream states the same four as a

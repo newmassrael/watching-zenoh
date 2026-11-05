@@ -1069,8 +1069,7 @@ where
         feature = "adminspace-introspection-handlers",
         feature = "adminspace-core"
     ))]
-    admin_declarations:
-        Arc<<R as Runtime>::Mutex<Vec<wz_session_core::adminspace::AdminDeclaration>>>,
+    admin_declarations: Arc<<R as Runtime>::Mutex<Vec<wz_admin::adminspace::AdminDeclaration>>>,
     /// R2702 — the §5.16 EGRESS interceptor chain this session consults before
     /// it puts a locally-originated message on the wire.
     ///
@@ -6631,7 +6630,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             self.declare_adminspace_with_permissions(
                 version,
                 locators,
-                wz_session_core::adminspace::AdminSpacePermissions::default(),
+                wz_admin::adminspace::AdminSpacePermissions::default(),
             )
         }
         #[cfg(not(feature = "adminspace-core"))]
@@ -6666,7 +6665,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         version: impl Into<String>,
         locators: Vec<String>,
-        permissions: wz_session_core::adminspace::AdminSpacePermissions,
+        permissions: wz_admin::adminspace::AdminSpacePermissions,
     ) -> Result<AdminSpace<R, T>, AdminSpaceError>
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
@@ -6723,7 +6722,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn declare_adminspace_config_writer(
         &self,
         config: Arc<std::sync::Mutex<crate::config::WzConfig>>,
-        mut on_intent: impl FnMut(wz_session_core::adminspace::AdminConfigWrite) + Send + 'static,
+        mut on_intent: impl FnMut(wz_admin::adminspace::AdminConfigWrite) + Send + 'static,
     ) -> Result<Subscriber<R>, SubscribeError>
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
@@ -6731,7 +6730,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         T: 'static,
     {
         let zid_hex = wz_session_core::zid_hex::zid_to_zenoh_hex(&self.actions().params.zid);
-        let space = wz_session_core::adminspace::AdminConfigWriteSpace::new(
+        let space = wz_admin::adminspace::AdminConfigWriteSpace::new(
             &zid_hex,
             self.actions().params.whatami.to_str(),
         );
@@ -6760,7 +6759,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// answered under one consistent permit even if the value changes mid-dispatch.
     /// On a deny the handler emits the diagnostic zenoh logs inside its own gate
     /// (`adminspace.rs:458-461`) — reported here by
-    /// [`AdminAnswerOutcome`](wz_session_core::adminspace::AdminAnswerOutcome)
+    /// [`AdminAnswerOutcome`](wz_admin::adminspace::AdminAnswerOutcome)
     /// rather than logged by the `no_std` answerer.
     ///
     /// R2860 — QUERYABLE ONLY, and that is the point of this form rather than a
@@ -6775,7 +6774,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         version: impl Into<String>,
         locators: Vec<String>,
-        permissions: impl Fn() -> wz_session_core::adminspace::AdminSpacePermissions + Send + 'static,
+        permissions: impl Fn() -> wz_admin::adminspace::AdminSpacePermissions + Send + 'static,
     ) -> Result<Queryable<R, T>, QueryableError>
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
@@ -6822,7 +6821,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(feature = "adminspace-plugins-handlers")]
         let plugins = crate::compiled_plugins(&version);
         #[cfg(not(feature = "adminspace-plugins-handlers"))]
-        let plugins: Vec<wz_session_core::adminspace::AdminPlugin> = Vec::new();
+        let plugins: Vec<wz_admin::adminspace::AdminPlugin> = Vec::new();
         // ⚠ GATED, not underscore-prefixed: this handle exists only for the build
         // that reports stats, and spelling that with a `#[cfg]` says so, where
         // `_stats_actions` would merely silence the compiler on every other build.
@@ -6833,7 +6832,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let stats_version = version.clone();
         self.declare_adminspace_with_live_inputs(version, locators, move || {
             let config = view();
-            wz_session_core::adminspace::AdminLiveInputs {
+            wz_admin::adminspace::AdminLiveInputs {
                 permissions: config.permissions,
                 // R2843 — the one-session host's registry: this node and its one
                 // transport, read per GET so a scrape reflects the traffic up to
@@ -6874,16 +6873,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         version: impl Into<String>,
         locators: Vec<String>,
-        inputs: impl Fn() -> wz_session_core::adminspace::AdminLiveInputs + Send + 'static,
+        inputs: impl Fn() -> wz_admin::adminspace::AdminLiveInputs + Send + 'static,
     ) -> Result<Queryable<R, T>, QueryableError>
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
-        use wz_codecs::whatami::WhatAmI;
-        use wz_session_core::adminspace::{
+        use wz_admin::adminspace::{
             admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminAnswerOutcome,
             SessionAdminRow,
         };
+        use wz_codecs::whatami::WhatAmI;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
         let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
@@ -6996,7 +6995,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             #[cfg(feature = "adminspace-introspection-handlers")]
             let declarations = R::with_mutex_mut(&declarations_cache, |slot| slot.clone());
             #[cfg(not(feature = "adminspace-introspection-handlers"))]
-            let declarations: Vec<wz_session_core::adminspace::AdminDeclaration> = Vec::new();
+            let declarations: Vec<wz_admin::adminspace::AdminDeclaration> = Vec::new();
             if answer_admin_query(
                 view,
                 out,
@@ -7013,7 +7012,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // the config-write host logged — an asymmetry with itself.
                 log::error!(
                     "{}",
-                    wz_session_core::adminspace::denied_read_diagnostic(view.keyexpr())
+                    wz_admin::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
         };

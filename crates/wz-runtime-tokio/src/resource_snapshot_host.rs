@@ -222,7 +222,7 @@ impl SnapshotService {
     }
 
     /// Answer a GET for the snapshot document, as the admin space serves it under
-    /// [`snapshot_key`](wz_session_core::adminspace::snapshot_key): the latest snapshot as JSON to a
+    /// [`snapshot_key`](wz_admin::adminspace::snapshot_key): the latest snapshot as JSON to a
     /// GET that reaches the key when `read` permits, nothing before the first snapshot, and a
     /// denial when `read` is false. The host registers a queryable on that key and calls this from
     /// its handler with the admin read permit it already resolves for every admin leg.
@@ -233,10 +233,8 @@ impl SnapshotService {
         out: &mut dyn wz_session_core::query_sink::ReplyOut,
         zid_hex: &str,
         read: bool,
-    ) -> wz_session_core::adminspace::AdminAnswerOutcome {
-        wz_session_core::adminspace::answer_snapshot_query(view, out, zid_hex, read, || {
-            self.latest_json()
-        })
+    ) -> wz_admin::adminspace::AdminAnswerOutcome {
+        wz_admin::adminspace::answer_snapshot_query(view, out, zid_hex, read, || self.latest_json())
     }
 
     /// Poll on the build's period from a task of its own, with the hosted platform's source: the

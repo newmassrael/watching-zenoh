@@ -807,6 +807,8 @@ name = "wz-admin"
 version = "0.1.0"
 dependencies = [
  "heapless",
+ "log",
+ "wz-runtime-core",
  "wz-session-core",
 ]
 
@@ -870,6 +872,7 @@ dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
  "tokio",
+ "wz-admin",
  "wz-codecs",
  "wz-ext-pubsub",
  "wz-node-time",

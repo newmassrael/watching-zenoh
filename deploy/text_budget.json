@@ -180,11 +180,11 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-admin-fixed-tls": {
-      "text_bytes": 333368,
+      "text_bytes": 333232,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 61554,
+        "wz_session_core": 60016,
         "c:mbedtls": 54968,
         "c:net_": 25114,
         "wz_session_mcu": 23666,
@@ -209,7 +209,7 @@
         "sha2": 2382,
         "c:x509": 2230,
         "keccak": 2164,
-        "wz_admin": 2090,
+        "wz_admin": 3628,
         "wz_runtime_zephyr": 1896,
         "c:cyhal": 1862,
         "wz_tls_mbedtls": 1652,
@@ -238,7 +238,7 @@
         "heapless": 548,
         "c:route": 514
       },
-      "measured": "2026-11-02, scripts/kit-lane.sh build of the fixed-memory admin node over Zephyr's sockets and the secure channel (overlays/t2g_admin_fixed_tls.conf), at the first row of this image: text 326,088 bytes, data 4,132, bss 412,711 with the main stack at 47,104 bytes; 325,720 once the pending-query registries were stated as zero (the stack 19,584, .bss 385,207), 368 bytes less, inside the row's tolerance, and the row moved to it. Most of it is the channel (Mbed TLS, about 55 KB of its own symbols with the PSA and ECP parts beside) and the session core (60 KB, the verbs and the admin surface among it). 332,424 on 2026-11-05 (.bss 236,935, data 2,788) with the SCE pin at 07cb8c5020 (see the asking client's row): 5,664 bytes less than the row held, 3,714 of them in wz_codecs (13,506 to 9,792) and 2,254 in wz_session_core (64,588 to 62,334).",
+      "measured": "2026-11-02, scripts/kit-lane.sh build of the fixed-memory admin node over Zephyr's sockets and the secure channel (overlays/t2g_admin_fixed_tls.conf), at the first row of this image: text 326,088 bytes, data 4,132, bss 412,711 with the main stack at 47,104 bytes; 325,720 once the pending-query registries were stated as zero (the stack 19,584, .bss 385,207), 368 bytes less, inside the row's tolerance, and the row moved to it. Most of it is the channel (Mbed TLS, about 55 KB of its own symbols with the PSA and ECP parts beside) and the session core (60 KB, the verbs and the admin surface among it). 332,424 on 2026-11-05 (.bss 236,935, data 2,788) with the SCE pin at 07cb8c5020 (see the asking client's row): 5,664 bytes less than the row held, 3,714 of them in wz_codecs (13,506 to 9,792) and 2,254 in wz_session_core (64,588 to 62,334). 333,232 on 2026-11-05 with the admin space moved into the wz-admin crate (server-layer split, step 7): the code is the same and changes owner, wz_session_core 61,554 to 60,016 and wz_admin 2,090 to 3,628 (1,538 bytes each way), the image 136 bytes less than the row held.",
       "evidence": "docs/text-ownership.md"
     }
   }

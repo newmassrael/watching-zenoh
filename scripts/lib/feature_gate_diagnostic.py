@@ -221,9 +221,8 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "fields only, which the census re-derives every run"
         )
         for f in (
-            "adminspace-introspection-handlers",
-            "adminspace-plugins-handlers",
-            "adminspace-router-linkstate",
+            # Server-layer split, step 7: the three admin features that headed this list
+            # left with the admin space; the wz-admin row says the same of them.
             # R2454 — `codec-fragment` LEFT this list, for the same reason
             # `declare-final` did below and by the same route: the claim was
             # true when R2207 derived it, and R2448 is the round that made it
@@ -441,8 +440,29 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "fields only, which the census re-derives every run"
         ),
     },
-    # Its one feature gates `admin_connect` at the crate root, probed off the root.
-    "wz-admin": {},
+    # Server-layer split, step 7: the admin space arrived with these three, and the sentence
+    # the core's row said of them holds of the same `#[cfg]`s here, which the census
+    # re-derives. `adminspace-fixed` and `adminspace-write` gate the crate-root modules,
+    # probed off the root. `adminspace-core` joins them: what it gates on its own here is
+    # the heap half of the `SessionAdminRow` trait (`admin_links`, `admin_session`),
+    # items of a trait and not of a module, which the census counts as no public item;
+    # the core's `LinkEndpoints::into_strings` it gated there is `alloc`'s now.
+    "wz-admin": {
+        f: (
+            "no `#[cfg]` in this package attaches this feature to a publicly "
+            "visible item; it gates private items, expressions or struct "
+            "fields only, which the census re-derives every run"
+        )
+        for f in (
+            "adminspace-core",
+            "adminspace-introspection-handlers",
+            "adminspace-plugins-handlers",
+            "adminspace-router-linkstate",
+            # The core's fixed backing, forwarded as the shells forward it: a selector that
+            # gates nothing in this package.
+            "session-slot",
+        )
+    },
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public
@@ -630,19 +650,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "gated here' without naming a feature -- measured on 1.97.0"
             )
             for f in (
-                # Server-layer split, step 6: `pub mod admin_connect`, the one public item
-                # this feature gated alone, is the wz-admin crate's. What the core keeps
-                # under it is the config space and the endpoint list the decoder reads,
-                # `admin_config_space` behind `any(adminspace-fixed, adminspace-write)` and
-                # `connect_endpoints` behind `any(connect-endpoints, adminspace-write)`.
-                "adminspace-write",
-                # Round 3301 put `adminspace-core` in the impl-method group: S9e split the
-                # admin space in two, `adminspace-fixed` keeping the modules (probed) and
-                # this feature the heap forms, which were methods of `SessionLinkActions`.
-                # Server-layer split, step 7a, made those the `SessionAdminRow` trait's, so
-                # the one public item left under it is `LinkEndpoints::into_strings`,
-                # behind `all(alloc, adminspace-core)`: compound.
-                "adminspace-core",
+                # Server-layer split, step 7: `adminspace-write` and `adminspace-core` left
+                # this list with the package, as every admin feature did (the wz-admin
+                # crate's now, under the same names). `connect-endpoints` left it too: with
+                # `adminspace-write` gone, `pub mod connect_endpoints` is behind the bare
+                # feature, a simple site the root probe reads.
                 "attachment-bytes",
                 # R3291 -- `bounded-heapless` LEFT this list by the R2686 route.
                 # It was here because every public item it gated sat behind
@@ -653,10 +665,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `submodule_probes` reads, so the feature became probed and this
                 # row false. The merge of that branch did not run this gate.
                 "codec-fragment",
-                # `pub mod connect_endpoints` is gated `any(connect-endpoints, adminspace-write)`: the
-                # list a node dials, which the config write also fills, so the feature alone is not
-                # what gates it.
-                "connect-endpoints",
                 # `codec-hello` and `codec-linkstate` LEFT this list by the R3291
                 # route. The SCE pin past ADR 0077 section 7 took the default
                 # profile from the codecs whose lists the protocol bounds by

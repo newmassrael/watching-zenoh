@@ -14,14 +14,6 @@
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:sce="http://sce.dev/ext"
        version="1.0" sce:kind="feature-model" name="wz-session-core">
-  <sce:feature name="adminspace-config-hotreload" requires="adminspace-core storage-backend"/>
-  <sce:feature name="adminspace-core" requires="adminspace-fixed alloc"/>
-  <sce:feature name="adminspace-fixed" requires="keyexpr-wildcard-double keyexpr-wildcard-single pubsub-encoding storage-profile"/>
-  <sce:feature name="adminspace-introspection-handlers" requires="adminspace-core"/>
-  <sce:feature name="adminspace-metrics" requires="adminspace-core query-selector-parameters"/>
-  <sce:feature name="adminspace-plugins-handlers" requires="adminspace-core"/>
-  <sce:feature name="adminspace-router-linkstate" requires="adminspace-core"/>
-  <sce:feature name="adminspace-write" requires="keyexpr-wildcard-double keyexpr-wildcard-single rx-push"/>
   <sce:feature name="alloc" requires="storage-profile"/>
   <sce:feature name="attachment-bytes"/>
   <sce:feature name="bounded-heapless"/>

@@ -45,6 +45,8 @@ default = ["alloc"]
 alloc = [
     "wz-runtime-coop/alloc",
     "wz-session-core/alloc",
+    # The admin space's heap forms follow the core's, when the node has an admin space.
+    "wz-admin?/alloc",
 ]
 
 # Exposes the in-memory network the shell's own tests run on, for a sibling
@@ -192,11 +194,10 @@ group = [
 ]
 adminspace-write = [
     "dial",
-    # The write is decided by wz-admin's `admin_connect` (server-layer split, step 6); the
-    # core's feature of the same name keeps the config space and the endpoint list it reads.
+    # The write is decided by wz-admin's `admin_connect` (server-layer split, steps 6 and 7),
+    # whose feature of the same name brings the config space and the core's endpoint list.
     "dep:wz-admin",
     "wz-admin/adminspace-write",
-    "wz-session-core/adminspace-write",
     "pubsub-put",
     "wz-session-core/pubsub-delete",
     "wz-session-core/session-unicast-accept",
@@ -208,14 +209,15 @@ adminspace-write = [
 ]
 adminspace-core = [
     "adminspace-fixed",
-    "wz-session-core/adminspace-core",
+    "wz-admin/adminspace-core",
 ]
 # S9e — the admin node's pieces that need no allocator (the fixed status and identity
 # rows, the arena the replies are built in, the host the writes go through): what the
 # per-session slot profile answers an admin GET with. `adminspace-core` is this plus
 # the growable node and the owned rows, so it implies this and the heap.
 adminspace-fixed = [
-    "wz-session-core/adminspace-fixed",
+    "dep:wz-admin",
+    "wz-admin/adminspace-fixed",
     "query-queryable",
     "codec-response",
     "codec-response-final",
@@ -235,9 +237,11 @@ wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, featu
 # Runtime-agnostic session SSOT: the action bundle, the engine-free FSM, the
 # admin answerers. no_std selects the heapless engine; alloc the bundle.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["session-unicast", "no_std"] }
-# R2828 — the config-write decision `admin_host` applies (`wz_admin::admin_connect`), above the
-# core since the server-layer split. Optional, pulled only by `adminspace-write`.
-wz-admin = { path = "../wz-admin", default-features = false, optional = true }
+# The admin space the node answers from and the config-write decision `admin_host` applies
+# (`wz_admin::adminspace`, `admin_reply`, `admin_config_space`, `admin_connect`), above the core
+# since the server-layer split. Optional, pulled by `adminspace-fixed` and `adminspace-write`; a
+# session's admin row is read off the unicast session this crate always has.
+wz-admin = { path = "../wz-admin", default-features = false, features = ["session-unicast"], optional = true }
 # R2828 — `admin_host::ConnectControl` locks with the same IRQ-disabling Mutex
 # the cooperative runtime uses. No impl feature here: the firmware (or the std
 # impl in dev-dependencies, for host tests) supplies it at link time.

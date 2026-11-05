@@ -36,7 +36,7 @@ use super::Subscriber;
 #[cfg(feature = "adminspace-write")]
 use crate::sink::SampleView;
 #[cfg(feature = "adminspace-write")]
-use wz_session_core::adminspace::{AdminConfigWrite, AdminConfigWriteSpace};
+use wz_admin::adminspace::{AdminConfigWrite, AdminConfigWriteSpace};
 
 /// The RAII handle for a Session-hosted adminspace: dropping it undeclares
 /// both the admin queryable and the config-write subscriber, the pair
@@ -117,7 +117,7 @@ impl std::error::Error for AdminSpaceError {}
 /// rendering a reply reports come from one moment.
 #[cfg(feature = "adminspace-core")]
 pub(super) struct AdminConfigView {
-    pub(super) permissions: wz_session_core::adminspace::AdminSpacePermissions,
+    pub(super) permissions: wz_admin::adminspace::AdminSpacePermissions,
     pub(super) config_json: String,
     pub(super) metadata_json: String,
 }
@@ -135,7 +135,7 @@ impl AdminConfigView {
                 metadata_json: String::from(c.admin_metadata_json()),
             },
             Err(_) => Self {
-                permissions: wz_session_core::adminspace::AdminSpacePermissions {
+                permissions: wz_admin::adminspace::AdminSpacePermissions {
                     read: false,
                     write: false,
                 },
@@ -150,12 +150,10 @@ impl AdminConfigView {
 /// grants nothing: a config that cannot be read cannot say a request is
 /// allowed.
 #[cfg(feature = "adminspace-write")]
-fn admin_permissions_of(
-    config: &Mutex<WzConfig>,
-) -> wz_session_core::adminspace::AdminSpacePermissions {
+fn admin_permissions_of(config: &Mutex<WzConfig>) -> wz_admin::adminspace::AdminSpacePermissions {
     match config.lock() {
         Ok(c) => c.admin_permissions(),
-        Err(_) => wz_session_core::adminspace::AdminSpacePermissions {
+        Err(_) => wz_admin::adminspace::AdminSpacePermissions {
             read: false,
             write: false,
         },
@@ -199,7 +197,7 @@ pub fn apply_admin_config_write(
     sample: &dyn SampleView,
     on_intent: &mut dyn FnMut(AdminConfigWrite),
 ) {
-    use wz_session_core::adminspace::{
+    use wz_admin::adminspace::{
         parse_admin_config_write, AdminConfigWriteBody, AdminConfigWriteOutcome,
     };
 

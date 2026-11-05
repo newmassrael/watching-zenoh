@@ -639,7 +639,7 @@ pub use wz_session_core::decl_sink;
 /// `crate::adminspace::answer_admin_query` for its forwarder-hosted admin
 /// queryable, the same answerer `Session::declare_adminspace` uses.
 #[cfg(feature = "adminspace-core")]
-pub use wz_session_core::adminspace;
+pub use wz_admin::adminspace;
 
 /// R311y237 (§5.23 `adminspace-plugins-handlers`) — the wz-native plugin registry:
 /// the compiled-in composable subsystems THIS binary carries, as
@@ -655,8 +655,8 @@ pub use wz_session_core::adminspace;
 /// `zenoh-plugin-storage-manager`) under `storage-backend` and `rest` (the wz mirror
 /// of `zenoh-plugin-rest`) under `rest-http-bridge`.
 #[cfg(feature = "adminspace-plugins-handlers")]
-pub fn compiled_plugins(version: &str) -> Vec<wz_session_core::adminspace::AdminPlugin> {
-    use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
+pub fn compiled_plugins(version: &str) -> Vec<wz_admin::adminspace::AdminPlugin> {
+    use wz_admin::adminspace::{AdminPlugin, AdminPluginState};
 
     compiled_plugin_ids()
         .into_iter()
@@ -717,8 +717,8 @@ fn compiled_plugin_ids() -> Vec<&'static str> {
 pub fn compiled_plugins_dyn(
     version: &str,
     storage_started: bool,
-) -> Vec<wz_session_core::adminspace::AdminPlugin> {
-    use wz_session_core::adminspace::AdminPluginState;
+) -> Vec<wz_admin::adminspace::AdminPlugin> {
+    use wz_admin::adminspace::AdminPluginState;
 
     // The SAME membership [`compiled_plugins`] reports, with the one subsystem this
     // builder is told about promoted. `rest` is not promoted here and must not be:
@@ -739,7 +739,7 @@ pub fn compiled_plugins_dyn(
 #[cfg(all(test, feature = "adminspace-plugins-handlers"))]
 mod compiled_plugins_tests {
     use super::compiled_plugins;
-    use wz_session_core::adminspace::{AdminPluginState, WZ_STATIC_PLUGIN_PATH};
+    use wz_admin::adminspace::{AdminPluginState, WZ_STATIC_PLUGIN_PATH};
 
     /// What THIS compilation's features say the registry must hold — read from
     /// `cfg!` HERE rather than from the function under test, so the two can
@@ -918,7 +918,7 @@ mod admin_write_permit_tests {
 #[cfg(all(test, feature = "adminspace-core", feature = "zenoh-config"))]
 mod admin_write_vocabulary_tests {
     use super::admin_write_knows_config_key;
-    use wz_session_core::adminspace::{
+    use wz_admin::adminspace::{
         parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
         AdminConfigWriteSpace, ADMIN_CONFIG_WRITE_ACTIONS,
     };

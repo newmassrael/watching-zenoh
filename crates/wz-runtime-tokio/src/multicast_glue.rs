@@ -2119,18 +2119,18 @@ impl McastGroupMembership {
     /// the member's (`io/zenoh-transport/src/multicast/transport.rs` @
     /// `link.dst = p.locator.clone();`).
     #[cfg(feature = "adminspace-core")]
-    pub fn admin_peers(&self) -> Vec<wz_session_core::adminspace::AdminMulticastPeer> {
+    pub fn admin_peers(&self) -> Vec<wz_admin::adminspace::AdminMulticastPeer> {
         self.with(|view| {
             let Some(view) = view.as_ref() else {
                 return Vec::new();
             };
             view.members
                 .iter()
-                .map(|m| wz_session_core::adminspace::AdminMulticastPeer {
+                .map(|m| wz_admin::adminspace::AdminMulticastPeer {
                     peer_zid_hex: wz_session_core::zid_hex::zid_to_zenoh_hex(m.peer.as_slice()),
                     whatami: m.whatami.map(|w| String::from(w.to_str())),
                     group: Some(view.group.clone()),
-                    links: vec![wz_session_core::adminspace::AdminLink {
+                    links: vec![wz_admin::adminspace::AdminLink {
                         src: view.src.clone(),
                         dst: format!("udp/{}", m.locator),
                     }],
@@ -3312,7 +3312,7 @@ mod tests {
     #[cfg(feature = "adminspace-core")]
     #[tokio::test]
     async fn the_drive_loop_keeps_the_member_view_the_admin_rows_come_from() {
-        use wz_session_core::adminspace::{AdminLink, AdminMulticastPeer};
+        use wz_admin::adminspace::{AdminLink, AdminMulticastPeer};
 
         let peer = [0x01, 0x02, 0x03, 0x04];
         let group = "udp/224.0.0.224:7446";

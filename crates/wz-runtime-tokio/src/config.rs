@@ -826,7 +826,7 @@ pub struct WzConfig {
     /// the "one live config instance, read per request" invariant is structural.
     /// Default = zenoh's `PermissionsConf::default` (read `true`, write `false`).
     #[cfg(feature = "adminspace-core")]
-    admin_permissions: wz_session_core::adminspace::AdminSpacePermissions,
+    admin_permissions: wz_admin::adminspace::AdminSpacePermissions,
     /// §5.23 `adminspace-core` — the LIVE `metadata` value, already rendered as
     /// the JSON upstream serves for it, which is all anything here does with it.
     ///
@@ -1040,7 +1040,7 @@ impl Default for WzConfig {
             ))]
             interceptor_inputs: InterceptorInputs::default(),
             #[cfg(feature = "adminspace-core")]
-            admin_permissions: wz_session_core::adminspace::AdminSpacePermissions::default(),
+            admin_permissions: wz_admin::adminspace::AdminSpacePermissions::default(),
             #[cfg(feature = "adminspace-core")]
             metadata: String::from("null"),
             // R2634 — no configured weight is upstream's default too: the config
@@ -1623,7 +1623,7 @@ impl WzConfig {
     #[cfg(feature = "adminspace-core")]
     pub fn with_admin_permissions(
         mut self,
-        permissions: wz_session_core::adminspace::AdminSpacePermissions,
+        permissions: wz_admin::adminspace::AdminSpacePermissions,
     ) -> Self {
         self.admin_permissions = permissions;
         self
@@ -1656,7 +1656,7 @@ impl WzConfig {
     /// directly, so a build with the gate compiled out stays permissive at exactly
     /// one place.
     #[cfg(feature = "adminspace-core")]
-    pub fn admin_permissions(&self) -> wz_session_core::adminspace::AdminSpacePermissions {
+    pub fn admin_permissions(&self) -> wz_admin::adminspace::AdminSpacePermissions {
         self.admin_permissions
     }
 
@@ -1700,7 +1700,7 @@ impl WzConfig {
     #[cfg(feature = "adminspace-core")]
     pub fn set_admin_permissions(
         &mut self,
-        permissions: wz_session_core::adminspace::AdminSpacePermissions,
+        permissions: wz_admin::adminspace::AdminSpacePermissions,
     ) {
         self.admin_permissions = permissions;
     }
@@ -3215,7 +3215,7 @@ mod tests {
         use crate::zenoh_config::ZenohNodeConfig;
 
         let mut cfg = WzConfig::new();
-        cfg.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+        cfg.set_admin_permissions(wz_admin::adminspace::AdminSpacePermissions {
             read: false,
             write: true,
         });
@@ -3326,7 +3326,7 @@ mod tests {
     #[test]
     fn a_runtime_key_write_reaches_the_live_value() {
         let mut cfg = WzConfig::new();
-        cfg.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+        cfg.set_admin_permissions(wz_admin::adminspace::AdminSpacePermissions {
             read: false,
             write: true,
         });
@@ -3350,7 +3350,7 @@ mod tests {
     #[test]
     fn a_value_that_smuggles_a_second_key_is_refused() {
         let mut cfg = WzConfig::new();
-        cfg.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+        cfg.set_admin_permissions(wz_admin::adminspace::AdminSpacePermissions {
             read: false,
             write: true,
         });
@@ -4126,7 +4126,7 @@ mod tests {
         );
 
         let mut flipped = router_config();
-        flipped.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+        flipped.set_admin_permissions(wz_admin::adminspace::AdminSpacePermissions {
             read: false,
             write: true,
         });
@@ -4252,7 +4252,7 @@ mod tests {
     #[cfg(feature = "adminspace-core")]
     #[test]
     fn admin_permissions_are_a_live_config_slice() {
-        use wz_session_core::adminspace::AdminSpacePermissions;
+        use wz_admin::adminspace::AdminSpacePermissions;
 
         // Default = zenoh's PermissionsConf (read true, write false).
         let mut cfg = WzConfig::new();

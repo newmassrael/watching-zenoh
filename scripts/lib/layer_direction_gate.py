@@ -76,9 +76,6 @@ SERVER_STEM = re.compile(r"^(?:storage_\w+|admin\w*|extauth_\w+)$")
 # deletes its name here, and nothing is ever added.
 IN_CORE = frozenset(
     {
-        "admin_config_space",
-        "admin_reply",
-        "adminspace",
         "storage_config",
     }
 )

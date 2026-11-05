@@ -3,17 +3,18 @@
 #
 # wz-admin — the admin space of a node, the server layer's management surface: the wz mirror of
 # zenoh's admin space, the `@/<zid>/<whatami>/**` keys a host reads a node's state from and
-# writes its config through. The modules arrive from the core one landable step at a time
-# (server-layer split, steps 6-8); this crate holds today the config-WRITE surface an MCU can
-# carry (`admin_connect`). The read side (`adminspace`, `admin_reply`) and the config-space
-# membership both decoders share (`admin_config_space`) are still the core's, and the dependency
-# points one way: this crate is built on the core and the core never names it
+# writes its config through. The modules arrived from the core in the server-layer split (steps
+# 6 and 7): the read side (`adminspace`, the `local_data` view and every admin leg), the buffers
+# an answer is built in (`admin_reply`), the config-space membership both write decoders share
+# (`admin_config_space`) and the config-WRITE surface an MCU can carry (`admin_connect`). The
+# dependency points one way: this crate is built on the core and the core never names it
 # (`scripts/lib/layer_direction_gate.py`).
 #
 # Every feature keeps the name it had in the core, so a deploy's switch reads the same; what a
 # feature needs of the core is named in its list.
 #
-# no_std with NO allocator: the write surface here exists for the targets that have none.
+# no_std, and an allocator only with `alloc`: the fixed admin space (`adminspace-fixed`) and the
+# write surface (`adminspace-write`) exist for the targets that have none.
 [package]
 name = "wz-admin"
 version.workspace = true
@@ -30,22 +31,187 @@ name = "wz_admin"
 path = "src/lib.rs"
 
 [features]
+# The core's own default set, so `cargo test -p wz-admin --features <admin feature>` builds what
+# `cargo test -p wz-session-core --features <admin feature>` built before the split, and
+# `--no-default-features` the slim profile it built then. Every dependent names this crate with
+# `default-features = false`.
+default = ["alloc", "wz-session-core/default"]
+
+# The heap forms of the admin space: the `String`-returning helpers, the owned rows and leg
+# list, the AP's config-write decoder. The core's `alloc` is the one allocator switch; this one
+# follows it, and a dependent that turns the core's on turns this one on with it.
+alloc = ["wz-session-core/alloc"]
+
+# A unicast session's admin row (`adminspace::SessionAdminRow`), built from the session's own
+# accessors. It follows the core's `session-unicast`, the feature those accessors are under.
+session-unicast = ["wz-session-core/session-unicast"]
+
+# The core's fixed-memory backing (`session-slot`), the one the admin space without a heap is
+# built on: `adminspace-fixed` without `alloc` is the slot node's admin space, and the core
+# compiles its storage profile only with one of the two backings. A SELECTOR, as the shells'
+# features of this name are: a final binary turns it on, never a dependency line (the core's
+# manifest says why). It gates nothing here; a build of this crate that gives up `alloc` names it
+# so the admin space is built the way the slot node builds it.
+session-slot = ["wz-session-core/session-slot"]
+
+# adminspace-core (§5.23) — the built-in `@/<zid>/<whatami>/**` admin queryable
+# keyexpr helpers + the `local_data` JSON body (the wz mirror of zenoh
+# `net/runtime/adminspace.rs` `local_data` + `AdminSpace::start`). Pure
+# data-view: the `AdminLocalData` struct + its manual (no `serde_json`) JSON
+# emitter, so it needs only `alloc` (no_std-feasible per the R311xu P4 scoping).
+# The queryable WIRING (registering the built-in queryable, snapshotting peer
+# state) lives in wz-runtime-tokio's `adminspace-core` feature, which composes
+# this with `query-queryable`.
+#
+# R2661 — `keyexpr-wildcard-single` JOINS the composition (through
+# `adminspace-fixed`), on the same rule that put `-double` here: the feature list
+# states what this SURFACE needs, and the admin config space is DEFINED in terms of
+# single-chunk wildcards. Upstream decides whether a config PUT is its own with
+# `local_config_key.intersects(&key_expr)` against the format
+# `@/${zid:*}/${whatami:*}/config/${key:**}`, and `AdminConfigWriteSpace::subkey`
+# now asks the same question. Without `-single`, `chunk_intersects` compiles no
+# `*` arm, so `@/*/peer/config/batch-size` answers `NotAWrite` -- a slim
+# adminspace build would register its config-write subscriber, log that it is
+# hosting it, and silently ignore a write upstream applies. That is the
+# "compiles, registers, logs, applies nothing" failure with a feature flag as its
+# cause instead of a transposition, and R2661 exists to end that class here.
+#
+# MEASURED on the profile itself (`--no-default-features --features
+# adminspace-core`) rather than argued from the `#[cfg]`: before this line, that
+# build answered `Ok("batch-size")` for the concrete key, `Err(NotAWrite)` for
+# `@/*/peer/config/batch-size`, and `Ok("**")` for a `**` SUB-KEY. The third
+# answer is this rule proving itself -- `**` worked on the same build precisely
+# because `-double` was already composed, so the only difference between a
+# wildcard this gate honours and one it drops is which feature this list names.
+#
+# Both compositions are pinned by a TEST rather than a cfg, which is what keeps
+# them falsifiable: `admin_queryable_double_wildcard_routes_root_and_subpath_gets`
+# for `-double`, `a_wildcard_addressed_write_reaches_this_nodes_config_space`
+# for this one. Drop either feature from this list and those positive assertions
+# flip to non-matches.
+# NOTE `keyexpr-dollar-star` is deliberately NOT composed, and the line is not
+# cost: `$*` is a general matcher facility a client may use anywhere, while `*`
+# is part of the admin space's own DEFINITION. A profile that omits `$*` narrows
+# every keyexpr consumer equally; one that omits `*` breaks this gate alone.
+adminspace-core = [
+    "alloc",
+    "adminspace-fixed",
+]
+
+# adminspace-fixed (S9e) — the admin space a node with NO allocator answers from:
+# the `local_data` view, the key helpers and the reply writers over `TextOut`,
+# and the buffers an answer is built in (`admin_reply`), without anything that
+# owns a growable string. `adminspace-core` is this plus the heap forms (the
+# `String`-returning helpers, the owned leg list, the AP's write surface), so a
+# build that names both has the heap, as feature unification says, and a build
+# on the slot profile that names only this one links no allocator. It carries the
+# same wildcard and encoding composition as `adminspace-core` for the same reason.
+adminspace-fixed = [
+    "wz-session-core/storage-profile",
+    "wz-session-core/keyexpr-wildcard-single",
+    "wz-session-core/keyexpr-wildcard-double",
+    "wz-session-core/pubsub-encoding",
+]
+
 # adminspace-write (§5.23) — R2824: upstream's config-WRITE surface for `connect/endpoints`
 # WITHOUT an allocator (the `admin_connect` module), so an MCU can be told at runtime which peers
-# to hold sessions with. The same name as the core's feature, which is the one switch: the core's
-# keeps the two things this module reads, the config-space membership (`admin_config_space`) and
-# the endpoint list the write fills (`connect_endpoints`), with the wildcard matcher and the Push
-# a write arrives as. It does not compose `alloc`: the AP write surface needs a heap and lives
-# with the read side, and this one exists for the targets that have none.
-adminspace-write = ["wz-session-core/adminspace-write"]
+# to hold sessions with. It reads the config-space membership (`admin_config_space`) and fills the
+# core's endpoint list (`connect-endpoints`). It composes the same two wildcard features as
+# adminspace-core and for the same reason: membership in the config space is decided by set
+# semantics, and `*` / `**` are part of the space's own definition. It deliberately does NOT
+# compose `alloc` or adminspace-core: the AP write surface lives there and needs a heap, and this
+# one exists for the targets that have none.
+adminspace-write = [
+    "wz-session-core/connect-endpoints",
+    "wz-session-core/keyexpr-wildcard-single",
+    "wz-session-core/keyexpr-wildcard-double",
+    # A config write arrives as a Put on an admin key: a Push.
+    "wz-session-core/rx-push",
+]
+
+# adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics OpenMetrics body
+# (the build-info `zenoh_build` gauge; the transport-stats OpenMetrics
+# composition is a documented follow-up). Pure data-view (the metrics_text
+# builder + the metrics keyexpr helper); composes adminspace-core. The wiring
+# (the metrics dispatch branch) lives in wz-runtime-tokio's adminspace-metrics.
+# R2844 — and the leg READS its query's selector parameters (`descriptors`, and
+# the four stats partitions), so the parameters projection comes with it:
+# without `query-selector-parameters` every queryable sees `None`, and the leg
+# answered every GET as if no parameter had been given.
+adminspace-metrics = ["adminspace-core", "wz-session-core/query-selector-parameters"]
+# adminspace-introspection-handlers (§5.23) — the per-entity admin introspection
+# reply legs (`@/<zid>/<whatami>/{subscriber,queryable}/<keyexpr>`) inside
+# `answer_admin_query` + the `admin_entity_key` helper. The wz analogue of zenoh's
+# `subscribers_data`/`queryables_data` handlers; the `AdminDeclaration` slice the
+# reply consumes is always-compiled (signature stability). Composes adminspace-core
+# (the reply machinery + the keyexpr matcher). publisher/querier are OMITTED (wz
+# maintains no such table; zenoh's empty-table loop emits nothing).
+adminspace-introspection-handlers = ["adminspace-core"]
+# adminspace-plugins-handlers (§5.23, R311y237) — the wz-native plugins admin legs
+# (`@/<zid>/<whatami>/plugins/**` full PluginStatusRec + `.../status/plugins/<id>/
+# __path__`) inside `answer_admin_query` + the plugin key helpers + the `plugins`
+# field of local_data (surface A). The wz superset of zenoh's PluginsManager admin
+# handlers (net/runtime/adminspace.rs:922 `plugins_data` + :952 `plugins_status`):
+# a wz "plugin" is a COMPILED-IN composable subsystem (storage_manager, rest), NOT
+# a dlopen `.so` — the AdminPlugin slice is the cargo-feature/subsystem registry the
+# host supplies, always-compiled (signature stability). Composes adminspace-core.
+adminspace-plugins-handlers = ["adminspace-core"]
+# adminspace-config-hotreload (§5.23, R311y239) — the config-diff-driven storage
+# lifecycle: the `storage-add` / `storage-del` admin config-WRITE sub-key parse arms
+# in parse_admin_config_write (the wz-native superset of zenoh's config-hotreload,
+# which is dlopen plugin start/stop — no wz analogue). Composes adminspace-core (the
+# config-write decoder) + the core's storage-backend (the StorageConfig the decoded
+# AddStorage intent maps to; the storage subsystem it drives is the runtime's).
+adminspace-config-hotreload = ["adminspace-core", "wz-session-core/storage-backend"]
+# adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
+# (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`)
+# inside `answer_router_admin_query` + the `admin_linkstate_*` / route-successor
+# key helpers. The wz analogue of zenoh's `routers_linkstate_data` /
+# `peers_linkstate_data` / `route_successor` handlers (net/runtime/adminspace.rs:
+# 741-919). Pure host-agnostic data-view: the answerer takes ALREADY-rendered DOT
+# strings + `(src,dst,successor)` hex triples IN (the router host renders them from
+# its two `LinkstateNetwork`s at the wz-runtime-tokio layer, so this stays no_std-
+# feasible and net-agnostic, exactly as `answer_admin_query` takes `config_json`).
+# Composes adminspace-core (the reply machinery + the keyexpr matcher).
+adminspace-router-linkstate = ["adminspace-core"]
 
 [dependencies]
-# The config-space membership, the endpoint list, the capacity constants and the JSON5 lexer the
-# write is decided with.
+# Everything the admin space reads and writes with: the session's accessors, the keyexpr
+# matcher, the text sinks, the query sink an answer is handed to, the capacity constants, the
+# JSON writers and the JSON5 lexer.
 wz-session-core = { path = "../wz-session-core", default-features = false }
+# The clock a session is generic over, named by the session admin row's impl.
+wz-runtime-core = { path = "../wz-runtime-core" }
 # The fixed-room pattern the config space is matched against, and the endpoint list the decoder
 # fills before it is handed over; the core's version, so the two name one type.
 heapless = { version = "0.8", default-features = false }
+# The line a refused admin reply is logged with, upstream's own wording (`adminspace::reply_leg`).
+# The no_std facade the core logs through; the host links the logger.
+log = "0.4"
+
+[dev-dependencies]
+# TEST-ONLY: the documents the admin space writes by hand are parsed back as JSON, and their key
+# order compared with what upstream's writer produces. Inert in the production artifact.
+serde_json = "1"
+# TEST-ONLY: the alias table the core's query dispatch reads (`admin_reply_fits`), the core's own
+# version so the two name one type.
+hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
+
+# S9b, row R7 — an admin reply of exactly the bound is delivered at zero allocations through the
+# real query path, one byte more is refused, counted and answered as a typed error. It needs the
+# core on the fixed backing with the query path and the Err reply; those are the core's features,
+# which a `cfg` in the test cannot name, so they are required here and the target is skipped
+# without them.
+[[test]]
+name = "admin_reply_fits"
+path = "tests/admin_reply_fits.rs"
+required-features = [
+    "adminspace-core",
+    "wz-session-core/bounded-heapless",
+    "wz-session-core/query-queryable",
+    "wz-session-core/codec-request",
+    "wz-session-core/query-reply-err",
+]
 
 [lints]
 workspace = true

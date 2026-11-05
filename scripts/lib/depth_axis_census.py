@@ -1252,7 +1252,8 @@ PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
 # one R2533 added to its reason when the owner declined a gzip dependency: the
-# reason now names `wz-session-core/src/adminspace.rs` as the file holding
+# reason now names `wz-admin/src/adminspace.rs` (the core's until the server-layer
+# split, step 7) as the file holding
 # `metrics_encoding_never_claims_a_content_encoding`, the guard that keeps the
 # encoding string from ever claiming a content-encoding wz cannot produce.
 # A declined feature is recorded as a DIVERGENCE rather than a gap, and a

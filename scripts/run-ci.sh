@@ -7801,7 +7801,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # the capacity report's answerer, which are ungated like the rest. Each count is what its
     # command PRINTED.
     # 53 -> 54 with C1am's guard, for the snapshot answerer's test (`f04bb6ec`).
-    _runci_guarded_test C1ak 54 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    _runci_guarded_test C1ak 54 cargo test -p wz-admin --features adminspace-metrics,wz-session-core/transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -8055,7 +8055,7 @@ layer_c1am_cargo_test_adminspace() {
     # 53 -> 54: the snapshot answerer's test (`f04bb6ec`, serve a hosted node's snapshot), which
     # the filter selects; the hosted run of 017e3c71 printed 54.
     _runci_guarded_test "C1AM adminspace 54" 54 \
-        cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
+        cargo test -p wz-admin --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
     # hex zid an operator types. Number PRINTED by the guard, not counted off
@@ -8069,7 +8069,7 @@ layer_c1am_cargo_test_adminspace() {
     # `same_zid`, the comparison of two spellings of one id. PRINTED by the
     # hosted run, whose red printed the missing leg.
     _runci_guarded_test "C1AM zid_hex 9" 9 \
-        cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
+        cargo test -p wz-session-core --lib zid_hex --quiet || return 1
     # The one `zid_to_zenoh_hex` test is the replication digest's, which is the wz-storage
     # crate's since the server-layer split (step 4).
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
@@ -8103,13 +8103,15 @@ layer_c1am_cargo_test_adminspace() {
     # and the default feature set does not name `adminspace-write`.
     # R2841 9 -> 12: upstream's locators-object element (a group, an empty
     # group with an unknown member, and what upstream's visitor refuses).
-    # Server-layer split, step 6: the decoder is the wz-admin crate's, which
-    # takes the core with no default features and turns on the core's
-    # `adminspace-write` through its own, so the build is the same one.
+    # Server-layer split, steps 6 and 7: the decoder is the wz-admin crate's, which
+    # takes the core with no default features and turns on, through its own
+    # `adminspace-write`, what the core's feature of that name composed, so the
+    # build is the same one. The lexer is the core's and needs no feature at all:
+    # `--no-default-features` is the build with no allocator.
     _runci_guarded_test "C1AM admin_connect no-alloc 12" 12 \
         cargo test -p wz-admin --no-default-features --features adminspace-write --lib admin_connect --quiet || return 1
     _runci_guarded_test "C1AM json5_lex no-alloc 2" 2 \
-        cargo test -p wz-session-core --no-default-features --features adminspace-write --lib json5_lex --quiet || return 1
+        cargo test -p wz-session-core --no-default-features --lib json5_lex --quiet || return 1
     # The read-side resolver had NO guarded filter at all (only the write side did),
     # so `admin_read_permit_tests` was running in no lane — a population-0 hole on
     # the cfg site both admin GET hosts now resolve through. Pinned here.
@@ -8133,17 +8135,17 @@ layer_c1am_cargo_test_adminspace() {
     # 50 -> 51: one more `adminspace` test joined this feature's lib (hosted C1AM printed
     # `51 passed`); re-derived on the build host.
     _runci_guarded_test "C1AM adminspace introspection 51" 51 \
-        cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
+        cargo test -p wz-admin --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM adminspace 51" 51 \
-        cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
+        cargo test -p wz-admin --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
     # the Started gate over the leaves. They land HERE and not on the hotreload
-    # guard below because `wz-session-core`'s own `adminspace-config-hotreload`
+    # guard below because `wz-admin`'s own `adminspace-config-hotreload`
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
     _runci_guarded_test "C1AM adminspace 59" 59 \
-        cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
+        cargo test -p wz-admin --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM compiled_plugins 1" 1 \
@@ -8170,7 +8172,7 @@ layer_c1am_cargo_test_adminspace() {
     # 66 -> 67: the one more `adminspace` test the lib gained (the other four commands of this
     # layer moved with it); re-derived on the build host, which printed 67.
     _runci_guarded_test "C1AM adminspace 67" 67 \
-        cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
+        cargo test -p wz-admin --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
     # (no adminspace feature) stays at 5 — measured, not assumed.
@@ -8266,7 +8268,10 @@ layer_c1am_cargo_test_adminspace() {
     # with it. Read off this command: `11 passed`.
     _runci_guarded_test "C1AM router introspection admin_ 11" 11 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
+    # Server-layer split, step 7: the admin space is the wz-admin crate's, so its every leg is
+    # linted there, with every admin feature on (the MCU write surface among them).
     (cd crates \
+        && cargo clippy -p wz-admin --all-targets --features adminspace-config-hotreload,adminspace-introspection-handlers,adminspace-metrics,adminspace-plugins-handlers,adminspace-router-linkstate,adminspace-write,session-unicast --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings \
@@ -8309,11 +8314,11 @@ layer_c1am_cargo_test_adminspace() {
 layer_c1an_cargo_test_adminspace_nodefault() {
     # R2859 — both +2, as the C1AM guards (see there).
     _runci_guarded_test "C1AN adminspace 46" 46 \
-        cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
+        cargo test -p wz-admin --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
     # The one more `adminspace` test the lib gained is in each of these four commands (C1AM 51
     # and 59 above, C1AN 46 and 51), re-derived on the build host.
     _runci_guarded_test "C1AN adminspace 51" 51 \
-        cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
+        cargo test -p wz-admin --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AN declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AN declare_adminspace 6" 6 \
@@ -8324,8 +8329,8 @@ layer_c1an_cargo_test_adminspace_nodefault() {
     _runci_guarded_test "C1AN declare_adminspace 8" 8 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     (cd crates \
-        && cargo clippy -p wz-session-core --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features adminspace-router-linkstate --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-admin --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-admin --no-default-features --features adminspace-router-linkstate --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --all-targets --quiet -- -D warnings)
@@ -10431,10 +10436,15 @@ layer_c1g_cargo_test_observer() {
     # with zero allocations through the real query path, one byte more is refused,
     # counted and answered as a typed error at zero allocations, and the refusal is
     # one leg's, not the session's or another session's. 3 = what that command PRINTED.
+    # Server-layer split, step 7: the admin surface, the arena and the proof file are the
+    # wz-admin crate's, run over the same core build (the core's features named through the
+    # admin crate); the core's own lib keeps the fixed backing with the Err reply.
     _runci_guarded_test C1g + \
-        cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless,adminspace-core,query-reply-err --quiet || return 1
+        cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless,query-reply-err --quiet || return 1
+    _runci_guarded_test C1g + \
+        cargo test -p wz-admin --lib --features adminspace-core,wz-session-core/codec-push,wz-session-core/codec-declare,wz-session-core/codec-request,wz-session-core/codec-response,wz-session-core/codec-response-final,wz-session-core/query-queryable,wz-session-core/liveliness-token,wz-session-core/liveliness-subscriber,wz-session-core/liveliness-get,wz-session-core/declare-subscriber,wz-session-core/declare-queryable,wz-session-core/declare-undeclare,wz-session-core/pubsub-put,wz-session-core/pubsub-delete,wz-session-core/bounded-heapless,wz-session-core/query-reply-err --quiet || return 1
     _runci_guarded_test C1g 3 \
-        cargo test -p wz-session-core --test admin_reply_fits --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless,adminspace-core,query-reply-err --quiet || return 1
+        cargo test -p wz-admin --test admin_reply_fits --features adminspace-core,wz-session-core/codec-push,wz-session-core/codec-declare,wz-session-core/codec-request,wz-session-core/codec-response,wz-session-core/codec-response-final,wz-session-core/query-queryable,wz-session-core/liveliness-token,wz-session-core/liveliness-subscriber,wz-session-core/liveliness-get,wz-session-core/declare-subscriber,wz-session-core/declare-queryable,wz-session-core/declare-undeclare,wz-session-core/pubsub-put,wz-session-core/pubsub-delete,wz-session-core/bounded-heapless,wz-session-core/query-reply-err --quiet || return 1
     # Fixed-memory step S4 — the LEND-ONLY send profile (`tx-lend-only`, the MCU
     # selector: every frame is encoded into a slot the link lends, and a send
     # with no slot is a counted refusal, never a heap frame). The crate's own lib
@@ -24664,7 +24674,7 @@ layer_c1bv_dynamic_volume_loading() {
     # The WIRE half: the storage-add payload's volume selection, which is what
     # makes a loaded volume reachable from a foreign client at all.
     _runci_guarded_test "C1bv wire" + \
-        cargo test -p wz-session-core --features adminspace-config-hotreload \
+        cargo test -p wz-admin --features adminspace-config-hotreload \
         --lib --quiet adminspace::tests::config_hotreload:: || return 1
     (cd crates && cargo clippy -p wz-runtime-tokio --no-default-features \
         --features storage-mgr-dynamic-volume-loading --all-targets -- -D warnings) || return 1

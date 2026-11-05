@@ -291,7 +291,6 @@ wz-runtime-tokio	wz-runtime-tokio/src/shm_relay.rs	1	error[E0432]: unresolved im
 wz-runtime-tokio	wz-runtime-tokio/src/storage_gc_service.rs	1	error: unresolved link to `crate::storage_replication_service::DigestPublisher`: no item named `storage_replication_service` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/storage_manager_service.rs	1	error: unresolved link to `crate::filesystem_storage::FilesystemVolume::new`: no item named `filesystem_storage` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/storage_manager_service.rs	1	error: unresolved link to `crate::storage_manager_service::RuntimeStorageManager::stop_plugin`: the struct `RuntimeStorageManager` has no field or associated item named `stop_plugin`
-wz-runtime-tokio	wz-runtime-tokio/src/storage_manager_service.rs	1	error: unresolved link to `wz_session_core::adminspace::AdminConfigWrite::AddVolume`: no item named `adminspace` in module `wz_session_core`
 wz-runtime-tokio	wz-runtime-tokio/src/storage_service.rs	1	error: unresolved link to `crate::storage_gc_service`: no item named `storage_gc_service` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/storage_service.rs	1	error: unresolved link to `crate::storage_replication_service`: no item named `storage_replication_service` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/stream_link.rs	1	error: unresolved link to `crate::tls_pipeline::TlsReadDriver`: no item named `tls_pipeline` in module `wz_runtime_tokio`
@@ -346,9 +345,6 @@ wz-session-core	-	1	error: unresolved link to `declare_routing_context`
 wz-session-core	-	1	error: unresolved link to `extfragment`
 wz-session-core	-	1	error: unresolved link to `multicast_join`
 wz-session-core	-	1	error: unresolved link to `push_routing_context`
-wz-session-core	wz-session-core/src/adminspace.rs	1	error: unresolved link to `Self::ALL`: the enum `AdminEntityKind` has no variant or associated item named `ALL`
-wz-session-core	wz-session-core/src/adminspace.rs	1	error: unresolved link to `Self::to_storage_config`: the enum `AdminConfigWrite` has no variant or associated item named `to_storage_config`
-wz-session-core	wz-session-core/src/adminspace.rs	2	error: unresolved link to `crate::storage_config::StorageConfig::volume_cfg`: no item named `storage_config` in module `wz_session_core`
 wz-session-core	wz-session-core/src/auth_dispatch.rs	1	error: unresolved link to `crate::extmultilink::MultiLinkDispatch::captured_peer_pubkey`: no item named `extmultilink` in module `wz_session_core`
 wz-session-core	wz-session-core/src/auth_dispatch.rs	2	error: unresolved link to `crate::session_actions::SessionLinkActions`: no item named `session_actions` in module `wz_session_core`
 wz-session-core	wz-session-core/src/caps.rs	1	error: unresolved link to `crate::declaration_sync::DeclarationSync`: no item named `declaration_sync` in module `wz_session_core`

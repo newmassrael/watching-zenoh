@@ -23,20 +23,16 @@
 //! here; it is the codec mirrors' step. The window ends where the reply is held by
 //! the session's stage.
 //!
-//! Compiles only on the fixed backing, where the capacities are hard.
-#![cfg(all(
-    feature = "bounded-heapless",
-    feature = "query-queryable",
-    feature = "codec-request",
-    feature = "adminspace-core"
-))]
+//! Compiles only on the fixed backing, where the capacities are hard, with the query path and
+//! the Err reply: the core features it needs are this target's `required-features`
+//! (`Cargo.toml` @ `name = "admin_reply_fits"`), which a `cfg` in this file could not name.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
-use wz_session_core::admin_reply::{AdminReplyArena, AdminReplyRefusals};
-use wz_session_core::adminspace::{AdminNodeFacts, AdminSession};
+use wz_admin::admin_reply::{AdminReplyArena, AdminReplyRefusals};
+use wz_admin::adminspace::{AdminNodeFacts, AdminSession};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
@@ -229,27 +225,25 @@ fn one_byte_more_is_refused_counted_and_answered_with_a_typed_error_at_zero_allo
         "(heap allocations, legs refused as too large, as key too long, Finals owed): the \
          querier still gets its Final"
     );
-    // With the Err reply feature the querier is TOLD, in a typed reply.
-    #[cfg(feature = "query-reply-err")]
-    {
-        assert_eq!(staged.len(), 1);
-        match &staged[0] {
-            QueryReply::Err {
-                encoding, payload, ..
-            } => {
-                assert!(encoding.is_some(), "the error says what it is encoded as");
-                let text = String::from_utf8(payload.clone()).expect("text");
-                assert_eq!(
-                    text,
-                    format!(
-                        "{{\"error\":\"admin_reply_too_large\",\"needed\":{},\"capacity\":{}}}",
-                        ROOT_BYTES,
-                        ROOT_BYTES - 1
-                    )
-                );
-            }
-            other => panic!("a typed Err reply, got {other:?}"),
+    // With the Err reply feature (required by this target) the querier is TOLD, in a typed
+    // reply.
+    assert_eq!(staged.len(), 1);
+    match &staged[0] {
+        QueryReply::Err {
+            encoding, payload, ..
+        } => {
+            assert!(encoding.is_some(), "the error says what it is encoded as");
+            let text = String::from_utf8(payload.clone()).expect("text");
+            assert_eq!(
+                text,
+                format!(
+                    "{{\"error\":\"admin_reply_too_large\",\"needed\":{},\"capacity\":{}}}",
+                    ROOT_BYTES,
+                    ROOT_BYTES - 1
+                )
+            );
         }
+        other => panic!("a typed Err reply, got {other:?}"),
     }
 }
 
