@@ -313038,6 +313038,34 @@
         "Layer C0 in the fleet still stops at config_key_fixture_gate.py reading a test file at its pre-merge path, owned by the test-merge session."
       ]
     },
+    "Round 4321": {
+      "decision_summary": "Layer C0 on the build fleet stopped at config_key_fixture_gate, which opened the fixture test of wz-integration-tests by its path before the files were merged and then looked in run-ci.sh for the literal text of the call that runs it. Both are the layout the tree no longer has. The gate runs in its default mode in Layer C0, which neither the selftest sweep nor the round-fed list of the hook covers, so every call of run-ci that runs python3 with its own arguments was run here once.",
+      "changes_bullets": [
+        "config_key_fixture_gate finds its fixture test through test_sources.locate, keeping the plain path when the file is in neither layout so a missing file is still named, and reads the script through retarget_test_refs.expand so the wire leg's call reads as --test <name> as it did when the script spelled it."
+      ],
+      "verification_bullets": [
+        "The gate passes in the mode Layer C0 calls it. The other 120 python3 calls of run-ci.sh that are not a selftest or a plain check were run with their own arguments: 113 pass, and the seven that do not either need a release library or a generated table that a source tree does not have, or run longer than the limit set here; none of them reads a test path. The old test paths that remain in run-ci.sh are in comments."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Shell gates that run in Layer C0 and read a test file by a path were not run here. The hook's round-fed list does not run selftests or the gates' default modes, so a gate can be red in Layer C0 and green at the push; running every python3 call of run-ci.sh once per round that moves test files, or putting those calls in the hook, is open."
+      ],
+      "publishable_decision_summary": "Layer C0 on the build fleet stopped at config_key_fixture_gate, which opened the fixture test of wz-integration-tests by its path before the files were merged and then looked in run-ci.sh for the literal text of the call that runs it. Both are the layout the tree no longer has. The gate runs in its default mode in Layer C0, which neither the selftest sweep nor the round-fed list of the hook covers, so every call of run-ci that runs python3 with its own arguments was run here once.",
+      "publishable_changes_bullets": [
+        "config_key_fixture_gate finds its fixture test through test_sources.locate, keeping the plain path when the file is in neither layout so a missing file is still named, and reads the script through retarget_test_refs.expand so the wire leg's call reads as --test <name> as it did when the script spelled it."
+      ],
+      "publishable_verification_bullets": [
+        "The gate passes in the mode Layer C0 calls it. The other 120 python3 calls of run-ci.sh that are not a selftest or a plain check were run with their own arguments: 113 pass, and the seven that do not either need a release library or a generated table that a source tree does not have, or run longer than the limit set here; none of them reads a test path. The old test paths that remain in run-ci.sh are in comments."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Shell gates that run in Layer C0 and read a test file by a path were not run here. The hook's round-fed list does not run selftests or the gates' default modes, so a gate can be red in Layer C0 and green at the push; running every python3 call of run-ci.sh once per round that moves test files, or putting those calls in the hook, is open."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
