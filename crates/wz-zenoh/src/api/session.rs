@@ -6531,8 +6531,18 @@ mod tests {
                 "{first:?}"
             );
             assert!(first.into_option().is_none(), "it is not made yet");
+            // A provider that could not be made is told apart from one still being made: its pool
+            // is `mlock`ed whole, so an `RLIMIT_MEMLOCK` below the pool size refuses it at once.
             let deadline = Instant::now() + Duration::from_secs(5);
-            while session.get_shm_provider().into_option().is_none() {
+            loop {
+                match session.get_shm_provider() {
+                    ShmProviderState::Ready(_) => break,
+                    ShmProviderState::Initializing(_) => {}
+                    other => panic!(
+                        "the provider could not be made ({other:?}); a memlock limit below the \
+                         pool size refuses it"
+                    ),
+                }
                 assert!(Instant::now() < deadline, "the provider was never made");
                 std::thread::sleep(Duration::from_millis(10));
             }

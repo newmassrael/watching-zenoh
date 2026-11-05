@@ -2584,8 +2584,16 @@ jobs:
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
 
+      # A leg that turns `shared-memory` on makes a session's provider, whose pool is a POSIX
+      # segment `mlock`ed whole (`wz-zenoh-shm/src/shm/unix.rs`, upstream's own call). The
+      # runner's `RLIMIT_MEMLOCK` is 8192 KB and the default pool 16 MiB, so the provider fails
+      # here and not on a build host (run 42061671165, shard 1): the limit is raised as the Z8
+      # job raises it, for the same reason.
       - name: Layer C1bnl — every leg of the non-default test table
-        run: bash scripts/run-ci.sh --layer C1bnl
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          ulimit -l
+          bash scripts/run-ci.sh --layer C1bnl
 
       - name: Budget margin — this job's own clock
         # Floor 20, alarm 90, the `nondefault` and `dissect` settings: a job
