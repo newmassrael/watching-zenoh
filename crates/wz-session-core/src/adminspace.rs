@@ -980,7 +980,12 @@ pub fn write_admin_root_key<W: TextOut + ?Sized>(out: &mut W, zid_hex: &str, wha
 }
 
 /// The root key, then `/` and `tail`: `@/<zid>/<whatami>/<tail>`.
-fn write_admin_leg_key<W: TextOut + ?Sized>(out: &mut W, zid_hex: &str, whatami: &str, tail: &str) {
+pub fn write_admin_leg_key<W: TextOut + ?Sized>(
+    out: &mut W,
+    zid_hex: &str,
+    whatami: &str,
+    tail: &str,
+) {
     write_admin_root_key(out, zid_hex, whatami);
     out.push('/');
     out.push_str(tail);

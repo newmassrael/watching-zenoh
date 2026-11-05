@@ -1,0 +1,49 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# A fixed-memory node that takes orders (decision D12 of docs/session-lifecycle-intent.md): it dials
+# one router over the secure channel, listens on `tls/` for the nodes that open a session to it, and
+# binds the four lifecycle verbs in band, each granted to the zids named below and to nobody else.
+# A verb is decided for the zid the link's key proved: a node's own zid on a session it opened to the
+# listener, the router's on a query the router forwarded. On the per-session slot profile (no
+# allocator).
+#
+# The endpoints are this machine's loopback on ports of their own, because this is the node the
+# interop test builds and runs against the reference router and stock clients
+# (crates/wz-integration-tests/tests/wz_declared_commander_zenohd_interop.rs). A zid is named by a
+# key and no key is committed, so the test makes the keys when it runs and builds this declaration
+# with each commander's zid replaced by the zid of the key it made for that role: `a1` is a node
+# that opens a session to the listener, `b2` is the router.
+
+schema = 1
+
+[node]
+id = "slot-commander"
+help = "A fixed-memory client that dials a router and listens over TLS, and answers the lifecycle verbs it grants to named zids."
+target = "slot"
+
+[[endpoint]]
+role = "dial"
+locator = "tls/127.0.0.1:17476"
+
+[[endpoint]]
+role = "listen"
+locator = "tls/127.0.0.1:17477"
+accepts = 1
+
+# A node that opens a session to the listener may read the status of a peer, and nothing else.
+[[endpoint]]
+role = "commander"
+zid = "a1"
+verbs = "status"
+
+# The router may close a peer: whatever it forwards is the router's to ask, so this grant is a grant
+# to every node behind it.
+[[endpoint]]
+role = "commander"
+zid = "b2"
+verbs = "close"
+
+[[entity]]
+kind = "queryable"
+key = "lab/commander/doc"
+document_bytes = 16

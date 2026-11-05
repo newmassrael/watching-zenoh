@@ -14,13 +14,20 @@ pub const DIALED: [&str; 0] = [];
 /// of the zid and the locator it may be found at (decision D7, the third transport).
 pub const PEERS: usize = 0;
 pub const PEER_NODES: [([u8; 16], &str); 0] = [];
-/// Whether a dialled endpoint or a peer is `tls/`, which the node's `tls` feature must be built for.
+/// Whether a dialled endpoint, a peer or the listening endpoint is `tls/`, which the node's
+/// `tls` feature must be built for.
 pub const TLS: bool = false;
+/// Whether the node names a commander: it binds the lifecycle verbs in band (decision D12),
+/// which the node's `verbs` feature must be built for.
+pub const VERBS: bool = false;
 /// Whether the node listens, the locator it listens on (empty when it does not) and how many
 /// sessions a peer opened it holds at once.
 pub const LISTENS: bool = true;
 pub const LISTEN: &str = "tcp/127.0.0.1:17475";
 pub const ACCEPTS: usize = 2;
+/// Whether the listening locator is `tls/`, which the node's `listen-tls` feature must be
+/// built for.
+pub const LISTEN_TLS: bool = false;
 /// The address and port the listening locator names.
 pub const LISTEN_ADDR: [u8; 4] = [127, 0, 0, 1];
 pub const LISTEN_PORT: u16 = 17475;

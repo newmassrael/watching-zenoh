@@ -72,6 +72,12 @@ lifecycle-reset = ["lifecycle-verbs"]
 # lifecycle-status -- `status`: the links of the node and the state of its machine, mirrored at each
 # tick and read without the loop.
 lifecycle-status = ["lifecycle-verbs"]
+# client-verbs -- a client of the slot profile binds the verbs in band (decision D12): one queryable
+# more, `@/<zid>/<whatami>/session/**`, answered by `admin_fixed::VerbLegs` from the store its
+# connect manager holds the nodes in, for the commander the link's key proved. The node's
+# declaration names its commanders (`scripts/lib/wz_node.py`); the verbs it binds are the
+# `lifecycle-*` features the image names beside this one.
+client-verbs = ["lifecycle-verbs", "adminspace-fixed", "client-slot"]
 
 # Fixed-memory step S5 — the shell on the per-session slot profile
 # (`wz-runtime-coop`'s `session-slot`). The application layer is generic over the

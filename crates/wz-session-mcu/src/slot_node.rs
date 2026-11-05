@@ -505,6 +505,11 @@ pub struct Entities<'a> {
     /// The keys of the liveliness tokens it declares on every session. A token holds nothing the
     /// node keeps: the router has it for as long as the session lasts.
     pub tokens: &'a [&'static str],
+    /// The lifecycle verbs it binds in band, on one queryable more (`client-verbs`), or `None` for
+    /// a node that names no commander. [`ClientNode::start`] names them with the node's zid
+    /// before they are registered.
+    #[cfg(feature = "client-verbs")]
+    pub verbs: Option<&'static crate::admin_fixed::VerbLegs>,
 }
 
 impl Entities<'static> {
@@ -513,6 +518,8 @@ impl Entities<'static> {
         subscriptions: &[],
         mirrors: &[],
         tokens: &[],
+        #[cfg(feature = "client-verbs")]
+        verbs: None,
     };
 }
 
@@ -531,6 +538,11 @@ pub enum InstallRefused {
     TooManyDeclarations,
     /// The observer was built before.
     Twice,
+    /// The lifecycle verbs could not be named for the node (its zid, or the key made of it, does
+    /// not fit), or were registered before they were named: the node would declare a queryable
+    /// that answers under no key of its own.
+    #[cfg(feature = "client-verbs")]
+    Verbs,
 }
 
 impl InstallRefused {
@@ -542,6 +554,8 @@ impl InstallRefused {
             Self::Tokens => "wz: FAIL - a liveliness token, and this node cannot declare one",
             Self::TooManyDeclarations => "wz: FAIL - more documents than declarations",
             Self::Twice => "wz: FAIL - the observer was installed twice",
+            #[cfg(feature = "client-verbs")]
+            Self::Verbs => "wz: FAIL - the node's lifecycle verbs have no key of the node's own",
         }
     }
 }
@@ -560,9 +574,9 @@ pub fn install_documents<const N: usize>(
     install_entities(app, documents, &Entities::NONE, declared)
 }
 
-/// [`install_documents`], and the subscriptions, the queryables that answer from them and the
-/// liveliness tokens. The declarations are recorded in this order: the documents, the mirrors, the
-/// subscriptions, the tokens.
+/// [`install_documents`], and the subscriptions, the queryables that answer from them, the
+/// liveliness tokens and the lifecycle verbs. The declarations are recorded in this order: the
+/// documents, the mirrors, the verbs, the subscriptions, the tokens.
 #[inline(never)]
 pub fn install_entities<const N: usize>(
     app: &'static SlotApp<DocumentSinks>,
@@ -591,6 +605,19 @@ pub fn install_entities<const N: usize>(
             if !declared.push(Declaration {
                 kind: DeclarationKind::Queryable,
                 key: mirror.key,
+            }) {
+                return Err(InstallRefused::TooManyDeclarations);
+            }
+        }
+        // The verbs answer under the node's own key, which naming them made.
+        #[cfg(feature = "client-verbs")]
+        if let Some(legs) = entities.verbs {
+            let key = legs.key().ok_or(InstallRefused::Verbs)?;
+            register_answer(&mut observer.queryables, key, Answer::Verbs(legs))
+                .map_err(|_| InstallRefused::Registry)?;
+            if !declared.push(Declaration {
+                kind: DeclarationKind::Queryable,
+                key,
             }) {
                 return Err(InstallRefused::TooManyDeclarations);
             }
@@ -1143,6 +1170,19 @@ where
         let zid_len = identity.zid().len();
         zid[..zid_len].copy_from_slice(identity.zid());
 
+        // The verbs are the node's own, so their key names it: its zid, and the mode it is (a
+        // client, which `NodeIdentity::params` presents; the peer it shows a node that opened a
+        // session to it is that session's handshake and not a second identity).
+        #[cfg(feature = "client-verbs")]
+        if let Some(legs) = entities.verbs {
+            if legs
+                .name(zid_text.prefix(), WhatAmI::Client.to_str())
+                .is_err()
+            {
+                port.log(&[Str(InstallRefused::Verbs.message())]);
+                return Err(EXIT_OBSERVER);
+            }
+        }
         // The application's registrations, on the observer the session dispatches to. A node
         // whose registrations were refused would declare what nothing answers: stop instead,
         // with the reason.
@@ -1674,6 +1714,64 @@ mod tests {
         assert!(all.iter().all(|d| d.kind == DeclarationKind::Queryable));
     }
 
+    /// The verbs a node binds answer under the node's own key, which naming them made, after the
+    /// documents; verbs that were never named are refused rather than registered under no key.
+    #[cfg(feature = "client-verbs")]
+    #[test]
+    fn the_verbs_are_declared_under_the_node_s_own_key_and_only_once_named() {
+        use crate::admin_fixed::VerbLegs;
+        use crate::connect_manager::{Commanders, StoreNode};
+        const { assert!(MAX_QUERYABLES >= 2) };
+        let store: &'static PeerStore = Box::leak(Box::new(PeerStore::new()));
+        let node: &'static StoreNode<Commanders> =
+            Box::leak(Box::new(StoreNode::new(store, Commanders::NONE)));
+        let documents = [Document {
+            key: "demo/doc",
+            body: "{}",
+        }];
+
+        let unnamed: &'static VerbLegs = Box::leak(Box::new(VerbLegs::new(node)));
+        let refused = install_entities(
+            app(),
+            &documents,
+            &Entities {
+                verbs: Some(unnamed),
+                ..Entities::NONE
+            },
+            declared::<2>(),
+        );
+        assert_eq!(refused.err(), Some(InstallRefused::Verbs));
+
+        let legs: &'static VerbLegs = Box::leak(Box::new(VerbLegs::new(node)));
+        let key = legs.name("1f", WhatAmI::Client.to_str()).unwrap();
+        assert_eq!(key, "@/1f/client/session/**");
+        assert!(
+            legs.name("1f", "client").is_err(),
+            "a node names its verbs once"
+        );
+        let declared = declared::<2>();
+        install_entities(
+            app(),
+            &documents,
+            &Entities {
+                verbs: Some(legs),
+                ..Entities::NONE
+            },
+            declared,
+        )
+        .unwrap();
+        let all = declared.all();
+        assert_eq!(
+            all.iter()
+                .map(|d| (d.kind, d.key))
+                .collect::<std::vec::Vec<_>>(),
+            [
+                (DeclarationKind::Queryable, "demo/doc"),
+                (DeclarationKind::Queryable, "@/1f/client/session/**"),
+            ]
+        );
+    }
+
     fn cells<const K: usize, const N: usize>() -> &'static LatestCells<K, N> {
         Box::leak(Box::new(LatestCells::new()))
     }
@@ -1712,6 +1810,8 @@ mod tests {
                 subscriptions: &subscriptions,
                 mirrors: &mirrors,
                 tokens: TOKENS,
+                #[cfg(feature = "client-verbs")]
+                verbs: None,
             },
             declared,
         )

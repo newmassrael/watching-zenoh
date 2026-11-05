@@ -625,7 +625,7 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
 /// literal key of this node names, decided by the one function every transport is decided by.
 #[cfg(feature = "lifecycle-verbs")]
 #[inline(never)]
-fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleNode>(
+fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleNode + ?Sized>(
     arena: &mut AdminReplyArena<BODY>,
     query: &dyn QueryView,
     out: &mut dyn ReplyOut,
@@ -721,6 +721,153 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
 
 /// The tail of the capability query, `@/<zid>/<whatami>/session/verbs`.
 const VERBS_TAIL: &str = "session/verbs";
+
+/// Bytes of the document one lifecycle verb is answered with on a client node: a status of a
+/// peer with its machines is the longest, and the admin node of the kit answers the same
+/// documents from an arena of this size (`deploy/zephyr-admin-node`, `AdminHost<1024>`). A
+/// document past it is refused, counted ([`VerbLegs::refusals`]) and answered as a typed error.
+#[cfg(feature = "client-verbs")]
+pub const VERB_REPLY_BYTES: usize = 1024;
+
+/// The in-band lifecycle verbs of a node that is not an admin node: a client of the slot
+/// profile (`crate::slot_node`), whose queryables answer documents and cells, binds the four
+/// verbs on one queryable more, `@/<zid>/<whatami>/session/**`, decided by the same function and
+/// in the same documents as the admin node's ([`Verbs`]).
+///
+/// The commander of every verb is whom the key of the link the query arrived on proved
+/// ([`QueryView::requester`], decision D12): the router's when the query came through one, the
+/// asking node's own only on a secure session it holds with this node. A grant names a zid, so it
+/// takes effect for the link that proves that zid, and for no node behind it.
+///
+/// `const`, so the image declares it in a `static` beside the node it wraps; the name is set once,
+/// when the node knows its zid ([`Self::name`]), before the queryable is registered.
+#[cfg(feature = "client-verbs")]
+pub struct VerbLegs {
+    node: &'static (dyn wz_session_core::lifecycle_node::LifecycleNode + Sync),
+    host: AdminHost<VERB_REPLY_BYTES>,
+    name: core::cell::UnsafeCell<VerbName>,
+    named: Cell<bool>,
+}
+
+/// Who the node is, as the verbs' keys name it, and the key the queryable is registered under.
+#[cfg(feature = "client-verbs")]
+struct VerbName {
+    zid_hex: FixedText<ZID_TEXT_BYTES>,
+    whatami: &'static str,
+    pattern: FixedText<{ caps::MAX_KEYEXPR_BYTES }>,
+}
+
+// SAFETY: the profile's rule: one thread runs the program. The name is written once, by `name`,
+// before the queryable that reads it is registered, and never after; the arena is behind its own
+// lock.
+#[cfg(feature = "client-verbs")]
+unsafe impl Sync for VerbLegs {}
+
+/// Why the verbs could not be named.
+#[cfg(feature = "client-verbs")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerbNameRefused {
+    /// The zid, or the key made of it, is longer than its fixed field.
+    TooLong,
+    /// The verbs were named before: a node names them once.
+    Twice,
+}
+
+#[cfg(feature = "client-verbs")]
+impl VerbLegs {
+    /// The verbs `node` binds, unnamed.
+    pub const fn new(
+        node: &'static (dyn wz_session_core::lifecycle_node::LifecycleNode + Sync),
+    ) -> Self {
+        Self {
+            node,
+            host: AdminHost::new(),
+            name: core::cell::UnsafeCell::new(VerbName {
+                zid_hex: FixedText::new(),
+                whatami: "",
+                pattern: FixedText::new(),
+            }),
+            named: Cell::new(false),
+        }
+    }
+
+    /// Name the node the verbs are of, `@/<zid_hex>/<whatami>`, and hand back the key the
+    /// queryable is registered and declared under, `@/<zid_hex>/<whatami>/session/**`. Once: the
+    /// key is lent for the life of the program.
+    pub fn name(
+        &'static self,
+        zid_hex: &str,
+        whatami: &'static str,
+    ) -> Result<&'static str, VerbNameRefused> {
+        if self.named.get() {
+            return Err(VerbNameRefused::Twice);
+        }
+        let mut zid: FixedText<ZID_TEXT_BYTES> = FixedText::new();
+        zid.push_str(zid_hex);
+        let mut pattern: FixedText<{ caps::MAX_KEYEXPR_BYTES }> = FixedText::new();
+        wz_session_core::adminspace::write_admin_leg_key(
+            &mut pattern,
+            zid_hex,
+            whatami,
+            "session/**",
+        );
+        if zid.overflowed() || pattern.overflowed() {
+            return Err(VerbNameRefused::TooLong);
+        }
+        // SAFETY: `named` is false, so nothing has read the name or been lent the key; one thread
+        // runs the program.
+        let name = unsafe { &mut *self.name.get() };
+        *name = VerbName {
+            zid_hex: zid,
+            whatami,
+            pattern,
+        };
+        self.named.set(true);
+        // SAFETY: the name is never written again (`named` is now true), so the key lives, unmoved
+        // and unchanged, for as long as the `static` does.
+        Ok(unsafe { &*self.name.get() }.pattern.prefix())
+    }
+
+    /// The key the queryable is registered and declared under, once named.
+    pub fn key(&'static self) -> Option<&'static str> {
+        // SAFETY: named, so never written again.
+        self.named
+            .get()
+            .then(|| unsafe { &*self.name.get() }.pattern.prefix())
+    }
+
+    /// The node's zid and role, once named.
+    fn named(&self) -> Option<(&str, &'static str)> {
+        if !self.named.get() {
+            return None;
+        }
+        // SAFETY: named, so never written again.
+        let name = unsafe { &*self.name.get() };
+        Some((name.zid_hex.prefix(), name.whatami))
+    }
+
+    /// What the arena refused since it was made: documents past [`VERB_REPLY_BYTES`], keys too
+    /// long, replies the session's stage refused.
+    pub fn refusals(&self) -> AdminReplyRefusals {
+        self.host.refusals()
+    }
+
+    /// Answer one query that reached the verbs' queryable: the capability document and the verb
+    /// the key names, for the commander the link proved.
+    pub fn answer(&self, query: &dyn QueryView, out: &mut dyn ReplyOut) {
+        let Some((zid_hex, whatami)) = self.named() else {
+            return;
+        };
+        critical_section::with(|cs| {
+            let Ok(mut arena) = self.host.arena.borrow(cs).try_borrow_mut() else {
+                let busy = self.host.busy.borrow(cs);
+                busy.set(busy.get().saturating_add(1));
+                return;
+            };
+            serve_verbs(&mut arena, query, out, zid_hex, whatami, self.node);
+        });
+    }
+}
 
 /// One admin GET, answered from the node's status in the host's arena.
 fn answer_admin_query<const BODY: usize, const SESSIONS: usize, O: InBand>(

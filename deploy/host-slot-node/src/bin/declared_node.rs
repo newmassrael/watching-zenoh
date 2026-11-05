@@ -73,23 +73,38 @@ mod declared {
 
 #[cfg(feature = "get")]
 use declared::QUERIED;
+#[cfg(feature = "tls")]
+use declared::SECURE_SESSIONS;
 use declared::{
-    ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS, MIRRORED,
-    MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS, REPLAYED, REPLAYS,
-    REPLAY_SAMPLES, SAMPLE_MAX, SESSIONS, SUBSCRIBERS, SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
+    ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS,
+    LISTEN_TLS, MIRRORED, MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS,
+    REPLAYED, REPLAYS, REPLAY_SAMPLES, SAMPLE_MAX, SESSIONS, SUBSCRIBERS, SUBSCRIPTIONS, TLS,
+    TOKENS, TOKEN_KEYS, VERBS,
 };
+#[cfg(feature = "verbs")]
+use declared::{COMMANDERS_CLOSE, COMMANDERS_OPEN, COMMANDERS_RESET, COMMANDERS_STATUS};
 #[cfg(feature = "multicast")]
 use declared::{GROUP, GROUP_ADDR, GROUP_PORT, GROUP_TTL, MEMBERS};
 #[cfg(feature = "listen")]
 use declared::{LISTEN_ADDR, LISTEN_PORT};
+#[cfg(feature = "verbs")]
+use wz_session_mcu::admin_fixed::VerbLegs;
+#[cfg(feature = "verbs")]
+use wz_session_mcu::connect_manager::{Commanders, StoreNode};
+#[cfg(feature = "tls")]
+use wz_tls_mbedtls::channel::Arena;
 
 /// The runtime's task table: a pump task per session, the dialled and the accepted, and one for the
 /// group the node is a member of; nothing else runs as a task.
 const TASKS: usize = SESSIONS + GROUPS;
 
+/// The queryables of the lifecycle verbs: one, `@/<zid>/client/session/**`, for a node that names a
+/// commander.
+const VERB_QUERYABLES: usize = VERBS as usize;
+
 /// The declarations the node sends on a session: its documents, the queryables that answer from a
-/// cell, the subscriptions and the liveliness tokens.
-const DECLS: usize = DOCS + MIRRORS + SUBSCRIBERS + TOKENS;
+/// cell, the verbs' queryable, the subscriptions and the liveliness tokens.
+const DECLS: usize = DOCS + MIRRORS + VERB_QUERYABLES + SUBSCRIBERS + TOKENS;
 
 /// The revision of how this executable is driven. It takes no argument and reads no document, so the
 /// surface is the console lines a lab waits for; it moves when one of them is removed or changes
@@ -113,7 +128,7 @@ wz_abi_stamp::facts!(
 );
 
 const _: () = assert!(
-    DOCS + MIRRORS <= MAX_QUERYABLES,
+    DOCS + MIRRORS + VERB_QUERYABLES <= MAX_QUERYABLES,
     "the declaration has more queryables than the registry holds"
 );
 const _: () = assert!(
@@ -298,6 +313,14 @@ const _: () = assert!(
     "a node listens exactly when it holds sessions a peer opened"
 );
 const _: () = assert!(
+    LISTEN_TLS == cfg!(feature = "listen-tls"),
+    "the declaration's listening endpoint is `tls/` exactly when the node is built with the `listen-tls` feature"
+);
+const _: () = assert!(
+    VERBS == cfg!(feature = "verbs"),
+    "the declaration names a commander exactly when the node is built with the `verbs` feature that binds the verbs"
+);
+const _: () = assert!(
     (GROUPS == 1) == cfg!(feature = "multicast"),
     "the declaration has a multicast endpoint exactly when the node is built with the `multicast` feature"
 );
@@ -364,6 +387,29 @@ const fn peer_table() -> [DeclaredPeer; PEERS] {
 
 /// The declarations the node sends on each session, in the order of their registrations.
 static DECLARED: Declared<DECLS> = Declared::new();
+
+/// Every allocation the secure channel makes, sized for the secure sessions the declaration holds
+/// at once: a `tls` router it dials, its peers and the sessions its `tls` listener takes.
+#[cfg(feature = "tls")]
+static TLS_ARENA: Arena<{ tls::arena_bytes(SECURE_SESSIONS) }> = Arena::new();
+
+/// The lifecycle verbs, over the store the node's connect manager holds its nodes in, permitted to
+/// the zids the declaration names for each verb (decision D12) and to nobody else: a verb no
+/// commander is named for is commanded by nobody.
+#[cfg(feature = "verbs")]
+static VERB_NODE: StoreNode<Commanders> = StoreNode::new(
+    &NODE.peers,
+    Commanders {
+        open: &COMMANDERS_OPEN,
+        close: &COMMANDERS_CLOSE,
+        reset: &COMMANDERS_RESET,
+        status: &COMMANDERS_STATUS,
+    },
+);
+
+/// The verbs' queryable, named with the node's zid when it starts.
+#[cfg(feature = "verbs")]
+static VERB_LEGS: VerbLegs = VerbLegs::new(&VERB_NODE);
 
 /// The cell the group's session lives in, the one the node's group takes, and what the group keeps
 /// for the loop: the peer tables its pump dispatches against and the members it has.
@@ -622,7 +668,7 @@ fn run() -> i32 {
     // Over the secure channel the node's zid is the one its key names (decision D1), and its
     // certificate is printed for the router's operator to pin.
     #[cfg(feature = "tls")]
-    let (channel_identity, zid) = match tls::identity() {
+    let (channel_identity, zid) = match tls::identity_on(&TLS_ARENA) {
         Ok(identity) => {
             identity.certificate_pem(log_args);
             (identity, identity.zid())
@@ -665,9 +711,27 @@ fn run() -> i32 {
         tls::stack([0; 4], &NODE.rx, &NODE.tx, channel_identity).with_idle_wait_ms(IDLE_WAIT_MS);
     // The port is bound before the node is built, so the line a lab waits for is said only once a
     // connection to it would be taken.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(feature = "listen-tls")))]
     let listening = match PosixTcpListener::bind(LISTEN_ADDR, LISTEN_PORT) {
         Ok(listener) => Listening::<_, ACCEPTS>::new(stack.acceptor(listener)),
+        Err(why) => {
+            log_args(format_args!(
+                "wz: FAIL - cannot listen on {LISTEN}: {why:?}"
+            ));
+            return 3;
+        }
+    };
+    // Over the secure channel, each connection is a handshake that proves the zid of the node
+    // that opened it before its session is made.
+    #[cfg(feature = "listen-tls")]
+    let listening = match PosixTcpListener::bind(LISTEN_ADDR, LISTEN_PORT) {
+        Ok(port) => match tls::listener(port, channel_identity) {
+            Ok(listener) => Listening::<_, ACCEPTS>::new(stack.tls_acceptor(listener)),
+            Err(why) => {
+                log(why);
+                return 3;
+            }
+        },
         Err(why) => {
             log_args(format_args!(
                 "wz: FAIL - cannot listen on {LISTEN}: {why:?}"
@@ -710,6 +774,8 @@ fn run() -> i32 {
             subscriptions: &subscribed,
             mirrors: &mirrored,
             tokens: &TOKEN_KEYS,
+            #[cfg(feature = "verbs")]
+            verbs: Some(&VERB_LEGS),
         },
         layer: Active::<PUBLISHERS, QUERIERS, REPLAYS, MADE_MAX> {
             publications: publications(),

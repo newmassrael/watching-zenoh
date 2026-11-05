@@ -501,6 +501,10 @@ pub enum Answer {
     /// no sample has reached the cell, so a querier gets the final of an empty reply and not an
     /// invented value.
     Latest(LatestRef),
+    /// The node's lifecycle verbs (`client-verbs`): the capability document and the verb a key of
+    /// this node names, for the commander the link's key proved (decision D12).
+    #[cfg(feature = "client-verbs")]
+    Verbs(&'static crate::admin_fixed::VerbLegs),
 }
 
 /// A queryable that answers every query with one JSON document, or from a subscription's latest
@@ -536,6 +540,8 @@ fn answer(source: &mut Answer, query: &dyn QueryView, out: &mut dyn ReplyOut) {
                 let _ = out.reply_keyed(query.keyexpr(), latest.payload);
             }
         }),
+        #[cfg(feature = "client-verbs")]
+        Answer::Verbs(legs) => legs.answer(query, out),
     }
 }
 

@@ -1093,8 +1093,13 @@ It is not an endpoint the node reaches or is reached at, so it has no locator, h
 raises no budget, and a node of commanders alone has no endpoint. The authority is a list per verb,
 empty unless stated, and a zid listed for one verb commands no other; a wildcard commander does not
 exist and a pair of a zid and a verb is declared once. A commander is a zid a key proved, and only a
-secure channel proves one (decision D2), so a node that names one declares a `tls` router or peer,
-and the validator refuses it for a node that has none. The vocabulary states the verbs a commander
+secure channel proves one (decision D2), so a node that names one declares a `tls` router, peer or
+listener, and the validator refuses it for a node that has none. The zid is the key of the link the
+query arrived on, one hop: a query a router forwarded is the router's, since the node proves the
+router's key and nothing proves who asked the router. A grant to a node's own zid is therefore used
+only on a session that node holds with this one, which it opens to the `tls` listener or which this
+node opens to it as a `tls` peer; a grant to a router's zid is a grant to every node that router
+forwards a query from. The `secure_channel` condition of the vocabulary states this. The vocabulary states the verbs a commander
 may be granted, each with what it lets the commander do (`status` among them, since it reveals which
 peers a node holds), and these conditions as `COMMANDER_CONDITIONS`, the table the validator takes
 its refusals from, so the selftest breaks each one and finds the condition's own refusal. The generator emits `COMMANDERS_OPEN`,
@@ -1102,6 +1107,23 @@ its refusals from, so the selftest breaks each one and finds the condition's own
 zid, only for a node that names a commander; the image gives them to
 `wz_session_mcu::connect_manager::Commanders`. A node that names none is commanded by nobody in
 band, which is where it starts, and the owner of its control pipe is judged apart (`PipeOr`).
+
+Until the round that adds this paragraph the slot target generated the lists and no code read them:
+the declared node bound no verb, while the vocabulary said the commander role was built. A node that
+names a commander is now built with the image's `verbs` feature (its `const` assertion holds the two
+together), which registers one queryable more, `@/<zid>/client/session/**`, answered by
+`wz_session_mcu::admin_fixed::VerbLegs` from the store the node's connect manager holds its nodes
+in, through the same `lifecycle_verdict` the admin node uses. The verbs take that queryable and keys
+of up to 109 bytes (`@/<zid>/client/session/reset/<peer>/<generation>`), which the generator gives
+the build (`MAX_QUERYABLES`, `MAX_KEYEXPR_BYTES`) when the declaration states neither, and refuses a
+declaration that states less. The vocabulary says a role is built only when the target's image
+declares the feature that does what the role grants (`role_features`, read from the image's manifest
+by cargo), so a target whose image stopped binding the verbs would say so, with the reason. A
+listener may be `tls/` (the image's `listen-tls`), the secure channel's server side, which knows each
+node that opens a session to it by the zid its key proved. A node with a secure channel may ask for
+the time of day (`wall-clock`, in `may_require`): the pinned TF-PSA-Crypto reseeds a forked child's
+random generator with it, and the node never forks. The witness is
+`wz_declared_commander_zenohd_interop.rs` (Layer Z `Zcmd`).
 
 ## 5c. The workload: what a node or a driver sends over time (owner, 2026-10-26)
 

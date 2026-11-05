@@ -2021,6 +2021,25 @@ def manifest_features(path: pathlib.Path) -> dict:
     return feats
 
 
+@functools.cache
+def package_features(manifest: pathlib.Path) -> dict:
+    """The `[features]` table of the package `manifest` names, which may be a workspace of its own
+    (an image under `deploy/`): asked of cargo, as [`workspace_features`] does, for the same reason."""
+    proc = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline",
+         "--manifest-path", str(manifest)],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise OSError(f"`cargo metadata` of {manifest} failed: {proc.stderr.strip()}")
+    wanted = manifest.resolve()
+    for package in json.loads(proc.stdout)["packages"]:
+        if pathlib.Path(package["manifest_path"]).resolve() == wanted:
+            return package["features"]
+    raise KeyError(f"{manifest} names no package of its workspace")
+
+
 def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
     out: list[str] = []
     caps = decl["caps"]

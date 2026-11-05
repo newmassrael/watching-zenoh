@@ -11981,6 +11981,12 @@ layer_c1m_session_lwip() {
     # them assert is the other half (a token is declared, and is not refused).
     _runci_guarded_test "C1m mcu slot node with tokens" 31 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
+    # The same tests of a node that binds the lifecycle verbs in band (`client-verbs`, what a
+    # declaration that names a commander builds), and one more: the verbs are declared under the
+    # node's own key once named, and refused unnamed.
+    _runci_guarded_test "C1m mcu slot node with verbs" 32 \
+        cargo test -p wz-session-mcu --features client-verbs,lifecycle-close,lifecycle-reset,lifecycle-status \
+        --lib slot_node --quiet || return 1
     # The client that answers queries and subscribes to nothing (`client-slot-queryable`, what
     # `CONFIG_WZ_SUBSCRIBE=n` builds): the declaration of a subscriber is refused and the registry of
     # subscriptions is not compiled, so what is held here is that the slot client builds without it.
@@ -12605,6 +12611,8 @@ layer_c1m_session_lwip() {
         && cargo clippy -p wz-session-mcu --all-targets --features adminspace-core --quiet -- -D warnings \
         && cargo clippy -p wz-session-mcu --all-targets \
             --features adminspace-core,adminspace-write --quiet -- -D warnings \
+        && cargo clippy -p wz-session-mcu --all-targets \
+            --features client-verbs,lifecycle-close,lifecycle-reset,lifecycle-status --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
@@ -21194,6 +21202,15 @@ layer_z_zenohd_interop() {
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zsrv 3 env \
         WZ_DECLARED_NODE_SERVER="$decl_pkg/slot-server/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_server_zenohd_interop \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    # The verbs, the same way, with the stock `z_get` and zenohd as the askers: the node is built from
+    # `slot-commander` with its commanders' zids replaced by keys the test makes (a zid is named by a
+    # key and no key is committed), so the test builds it (`wz_package.py --node-file`). A node granted
+    # `status` reads it on a session it opened to the node's `tls` listener and is refused `close`; a
+    # node granted nothing is refused; through a router, the router's key is the commander, whatever
+    # the client that asked claims.
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 3 env WZ_ZENOHD_BIN="$zenohd" \
+        cargo test -p wz-integration-tests --test wz_declared_commander_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
     [ "$decl_rc" -eq 0 ] || return 1

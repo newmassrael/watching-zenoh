@@ -76,6 +76,22 @@ get = ["wz-session-mcu/query-get"]
 # (PEM) for the router's operator to pin, and takes the zid its key names. Off, the stack refuses
 # `tls/` as unsupported.
 tls = ["dep:wz-tls-mbedtls"]
+# The node listens on `tls/`: the secure channel's server side, the same mutual authentication a
+# dial has, so a node that opens a session to this one is known by the zid its key names. Built
+# exactly when a node declaration's `listen` endpoint is `tls/` (`scripts/lib/wz_node.py` names
+# the features of a node), and the node's own `const` assertion holds the two to each other.
+listen-tls = ["listen", "tls"]
+# The node binds the lifecycle verbs in band (decision D12 of docs/session-lifecycle-intent.md):
+# `@/<zid>/client/session/{open,close,reset,status}/<peer>` asked of it on any session is decided
+# for the zid the link's key proved, by the lists of commanders its declaration names. Built
+# exactly when a node declaration names a commander, and the node's own `const` assertion holds
+# the two to each other.
+verbs = [
+    "wz-session-mcu/client-verbs",
+    "wz-session-mcu/lifecycle-close",
+    "wz-session-mcu/lifecycle-reset",
+    "wz-session-mcu/lifecycle-status",
+]
 # The node takes the peers it holds from lines on standard input and answers each on standard
 # output (`src/control.rs`): the out-of-band transport of decision D7 of
 # docs/session-lifecycle-intent.md, for a test agent that starts the process. Off, the node holds

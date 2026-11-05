@@ -757,6 +757,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 # tick through `cfg!`, so the census has nothing of it to grade.
                 "lifecycle-reset",
                 "lifecycle-status",
+                # The verbs a client of the slot profile binds in band (`admin_fixed::VerbLegs`,
+                # `VERB_REPLY_BYTES`, `slot_client::Answer::Verbs`, `slot_node::Entities::verbs`):
+                # items of modules behind a feature, selected by an image whose declaration
+                # names a commander (`host-slot-node --features verbs`), never added to by a
+                # library caller.
+                "client-verbs",
                 "session-slot",
                 "test-support",
                 "transport-multicast",
@@ -1220,6 +1226,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "adminspace-write",
             "client-core",
             "client-node",
+            "client-verbs",
             "codec-push",
             "codec-response",
             "codec-response-final",

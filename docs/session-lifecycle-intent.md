@@ -1284,6 +1284,18 @@ build), and D14 follows. A node that already holds a secure channel and an
 admin queryable has no image yet: the host slot node is a client with no admin
 queryable.
 
+The declared slot node binds the verbs since the round that adds this paragraph
+(docs/target-build-contract.md, section 5b): a node whose declaration names a
+commander registers one queryable more, `@/<zid>/client/session/**`, decided by
+`lifecycle_verdict` over the store of its connect manager, for the zid the
+link's key proved, by `Commanders` built from the generated lists. It holds the
+secure channel on both sides: it dials `tls/` and may listen on `tls/`, so a
+node it grants a verb to can hold the session that proves its zid. The
+commander is one hop: through a router it is the router's key, and a grant to a
+node behind a router is not used until that node holds a session with this one.
+It is not the admin node (it answers no admin GET), so the order above stands
+for the admin images.
+
 The first two pieces of that channel are built and witnessed on the target.
 Zephyr's sockets have a listener (`ZephyrTcpListener`), and the IP stack turns
 what a secure listener completes into the stack's `tls/` link

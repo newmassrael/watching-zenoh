@@ -27,9 +27,10 @@ not build the node.
 
     [node]                     id (the file's name), help, target
     [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>" (a router it dials);
-                               role = "listen", locator = "tcp/<a.b.c.d>:<port>" and accepts = N (the
-                               port it takes connections on, and how many sessions of them it holds
-                               at once; a node that listens presents itself to them as a peer);
+                               role = "listen", locator = "tcp/<a.b.c.d>:<port>" or "tls/..." and
+                               accepts = N (the port it takes connections on, and how many sessions
+                               of them it holds at once; a node that listens presents itself to them
+                               as a peer, and over `tls` knows each by the zid its key proved);
                                role = "multicast", locator = "udp/<group>:<port>", members = N and
                                an optional ttl (a group the node is a member of, which carries
                                publishers and subscriptions: the literal Put is all its outbound
@@ -46,7 +47,9 @@ not build the node.
                                this node in band, decision D12 of docs/session-lifecycle-intent.md:
                                open, close, reset or status, each a list of its own, empty unless
                                stated, and no wildcard; a commander is a zid a key proved, so the
-                               node must have a secure channel, a `tls` router or peer)
+                               node must have a secure channel, a `tls` router, peer or listener;
+                               the zid is the link's, one hop, so through a router it is the
+                               router's)
     [[entity]]               kind = "queryable", key, and document_bytes (a fixed document) or
                                from = "<subscriber key>" (the latest sample of that subscription);
                                kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
@@ -231,11 +234,17 @@ COMMANDER_VERBS = tuple(COMMANDER_VERB_MEANS)
 # told each condition in the words the validator refuses it with.
 COMMANDER_CONDITIONS = (
     {"id": "secure_channel",
-     "holds": "the node declares a `tls` router (`dial`) or a `tls` peer: a commander is a zid a "
-              "link's key proved, and only a secure channel proves one",
+     "holds": "the node declares a `tls` router (`dial`), a `tls` peer or a `tls` listener: a "
+              "commander is a zid a link's key proved, and only a secure channel proves one. The "
+              "zid is the key of the link the query arrived on, one hop: a query that came through "
+              "a router is the router's (the node proves the router's key, and nothing proves who "
+              "asked the router), so a grant to a node's own zid is used only on a session that node "
+              "holds with this one, which it opens to the `tls` listener or which this node opens to "
+              "it as a `tls` peer. A grant to a router's zid is a grant to every node that router "
+              "forwards a query from.",
      "refusal": "a commander is a zid a link's key proved, and only a secure channel proves one "
-                "(decision D2 of docs/session-lifecycle-intent.md): declare a `tls` router or peer, "
-                "or no commander"},
+                "(decision D2 of docs/session-lifecycle-intent.md): declare a `tls` router, peer or "
+                "listener, or no commander"},
     {"id": "one_pair",
      "holds": "a pair of a zid and a verb is declared once, across every commander of the node",
      "refusal": "a pair of a zid and a verb is declared once"},
@@ -245,6 +254,17 @@ COMMANDER_CONDITIONS = (
      "refusal": "a commander has no locator: it is a zid the node takes orders from, not a place it "
                 "reaches"},
 )
+
+
+# The roles whose `tls/` locator is a secure channel the node holds: a router it dials, a peer it
+# holds by its zid and the port it listens on. A group is UDP, and a commander is no place at all.
+SECURE_ROLES = ("dial", "peer", "listen")
+
+
+def is_secure(ep: object) -> bool:
+    """Whether the endpoint `ep` is a secure channel the node holds (any input)."""
+    return (isinstance(ep, dict) and ep.get("role") in SECURE_ROLES
+            and isinstance(ep.get("locator"), str) and ep["locator"].startswith("tls/"))
 
 
 def condition_refusal(conditions: tuple[dict, ...], name: str) -> str:
@@ -447,6 +467,12 @@ TARGETS = {
         # What a group may ask for besides its socket: the interfaces are listed only when routing
         # has no interface for the group (`multicast_interface` of wz-runtime-posix).
         "group_may": ("interface-list",),
+        # What the secure channel may ask for besides its socket: its random generator reseeds a
+        # process that finds itself a forked child with the time of day mixed into the seed (the
+        # fork protection of `core/psa_crypto_random.c` in the pinned TF-PSA-Crypto, on a Unix-like
+        # platform and without `MBEDTLS_HAVE_TIME`), so the file imports `gettimeofday`. The node
+        # never forks, so a run does not ask; a device must still provide it.
+        "tls_may": ("wall-clock",),
         # A group is UDP: a member's datagrams are the group's, with no connection to hold.
         "multicast_schemes": ("udp",),
         # The members of the group the node tracks at once, each a row of its peer table.
@@ -474,9 +500,15 @@ TARGETS = {
                 "give; a group's publisher puts a document",
             },
         },
-        # A listener is a stream's: a `tcp/` connection is a link the moment it is accepted, with no
-        # handshake of the transport's own to read first.
-        "listen_schemes": ("tcp",),
+        # A listener is a stream's: a `tcp/` connection is a link the moment it is accepted, and a
+        # `tls/` one once its handshake has proved the zid of the node that opened it (the secure
+        # channel's server side, mutual authentication as a dial has it).
+        "listen_schemes": ("tcp", "tls"),
+        # The feature of the image a role needs beyond its endpoint: a role is built only where the
+        # image's own Cargo.toml has it (`role_refusal`), so the vocabulary says a target builds a
+        # role exactly when its image does what the role grants. A commander's grant is decided by
+        # the verbs the image binds in band.
+        "role_features": {"commander": "verbs"},
         # A peer held by its zid is dialled over a secure channel: only that proves the node that
         # answered is the one the zid names (decision D4 of docs/session-lifecycle-intent.md).
         "peer_schemes": ("tls",),
@@ -524,7 +556,6 @@ TARGETS = {
         "listen_refused": {
             "udp": "a datagram listener answers the sender of an InitSyn and the slot node's "
             "accept loop is a stream's",
-            "tls": "the secure channel of the slot node is one it dials; it has no server side yet",
         },
     },
 }
@@ -545,6 +576,25 @@ def image_limits(target: dict) -> dict[str, int]:
         for name, value in env.items()
         if name.startswith("WZ_LIMIT_")
     }
+
+
+def image_features(target: dict) -> set[str]:
+    """The cargo features the target's image declares (`[features]` of `<image>/Cargo.toml`, as
+    cargo reads it), so a role cannot be called built for a feature the image does not have."""
+    return set(wz_config.package_features(ROOT / target["image"] / "Cargo.toml"))
+
+
+def role_refusal(target: dict, role: str) -> str | None:
+    """Why `target` does not build the endpoint `role`, or None when it does: the target's own
+    refusal, or the feature of its image the role needs (`role_features`) that the image does not
+    have."""
+    if role not in target["endpoint_limits"]:
+        return target["refused"][role]
+    feature = target.get("role_features", {}).get(role)
+    if feature is not None and feature not in image_features(target):
+        return (f"the image {target['image']} has no `{feature}` feature, which is what does what a "
+                f"`{role}` grants")
+    return None
 
 
 def limit_values(decl: dict, stated: dict, image: dict[str, int]) -> tuple[dict[str, int], list[str]]:
@@ -622,8 +672,8 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         role = ep.get("role")
         if role not in ENDPOINT_ROLES:
             out.append(f"{who}: role is {role!r}, not one of {', '.join(ENDPOINT_ROLES)}")
-        elif role not in target["endpoint_limits"]:
-            out.append(f"{who}: a `{role}` endpoint is not built on {node['target']}: {target['refused'][role]}")
+        elif (why_not := role_refusal(target, role)) is not None:
+            out.append(f"{who}: a `{role}` endpoint is not built on {node['target']}: {why_not}")
         else:
             held[role] = held.get(role, 0) + 1
             if held[role] == target["endpoint_limits"][role] + 1:
@@ -681,10 +731,7 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             elif role == "multicast" and not 224 <= int(match["a"]) <= 239:
                 out.append(f"{who}: locator {ep['locator']!r} is not a group: a multicast address is "
                            "224.0.0.0 to 239.255.255.255")
-    if held.get("commander") and not any(
-        isinstance(ep.get("locator"), str) and ep["locator"].startswith("tls/")
-        for ep in endpoints if isinstance(ep, dict) and ep.get("role") in ("dial", "peer")
-    ):
+    if held.get("commander") and not any(is_secure(ep) for ep in endpoints):
         out.append(condition_refusal(COMMANDER_CONDITIONS, "secure_channel"))
     if "MAX_PEER_NODES" in data.get("limits", {}) and held.get("peer", 0) > values["MAX_PEER_NODES"]:
         out.append(f"limits: MAX_PEER_NODES is {values['MAX_PEER_NODES']}, the declaration holds "
@@ -780,11 +827,18 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         out.append(f"its queriers can have {pending} queries pending; the declaration states "
                    f"MAX_PENDING_QUERIES = {stated['MAX_PENDING_QUERIES']} (state at least {pending}, or "
                    "nothing, and it follows from the entities)")
-    for name, need, what in (("MAX_QUERYABLES", queryables, "queryables"),
+    # The verbs a commander is granted are answered by one queryable more, under keys as long as
+    # VERB_KEY_BYTES.
+    verbs = verb_queryables(data)
+    for name, need, what in (("MAX_QUERYABLES", queryables + verbs, "queryables"),
                              ("MAX_SUBSCRIPTIONS", subscribers, "subscriptions")):
         if name in stated and isinstance(stated[name], int) and stated[name] < need:
             out.append(f"{need} {what}; the declaration states {name} = {stated[name]} (state at least "
                        f"{need}, or nothing, and it follows from the entities)")
+    if verbs and isinstance(stated.get("MAX_KEYEXPR_BYTES"), int) and stated["MAX_KEYEXPR_BYTES"] < VERB_KEY_BYTES:
+        out.append(f"a commander's verbs are asked under keys of up to {VERB_KEY_BYTES} bytes; the "
+                   f"declaration states MAX_KEYEXPR_BYTES = {stated['MAX_KEYEXPR_BYTES']} (state at least "
+                   f"{VERB_KEY_BYTES}, or nothing, and it follows from the commanders)")
     # A node that states a closed key set is held to what the table can carry: canonical keys, concrete
     # publishers and tokens, no wildcard that nothing concrete meets, no entity twice.
     if states_closed_key_set(data):
@@ -878,20 +932,35 @@ def pending_need(entities: list) -> int:
     return total
 
 
+# The longest key a lifecycle verb is asked under, `@/<zid>/client/session/reset/<peer>/<generation>`
+# with a zid of sixteen bytes and the largest generation: what a node that names a commander must
+# hold as one key (`MAX_KEYEXPR_BYTES`), since the query and its reply are under that key.
+VERB_KEY_BYTES = len("@/" + "f" * 32 + "/client/session/reset/" + "f" * 32 + "/" + str(2**64 - 1))
+
+
+def verb_queryables(data: dict) -> int:
+    """The queryables the lifecycle verbs take: one, `@/<zid>/client/session/**`, for a node that
+    names a commander (any input)."""
+    return int(any(isinstance(ep, dict) and ep.get("role") == "commander"
+                   for ep in data.get("endpoint", [])))
+
+
 def budgets(data: dict, decl: dict) -> dict[str, int]:
-    """The budgets a node's build is given: what the declaration states, and the three its entities
-    decide (`MAX_QUERYABLES`, `MAX_SUBSCRIPTIONS`, `MAX_PENDING_QUERIES`) when the image's own is
-    below what they need and the declaration does not state one. Valid input only: `validate` ran
-    first."""
+    """The budgets a node's build is given: what the declaration states, and the ones its entities
+    and its commanders decide (`MAX_QUERYABLES`, `MAX_SUBSCRIPTIONS`, `MAX_PENDING_QUERIES`,
+    `MAX_PEER_NODES`, `MAX_KEYEXPR_BYTES`) when the image's own is below what they need and the
+    declaration does not state one. Valid input only: `validate` ran first."""
     target = TARGETS[data["node"]["target"]]
     stated = dict(data.get("limits", {}))
     values, _ = limit_values(decl, stated, image_limits(target))
     entities = data.get("entity", [])
+    verbs = verb_queryables(data)
     needs = {
-        "MAX_QUERYABLES": sum(1 for e in entities if e["kind"] == "queryable"),
+        "MAX_QUERYABLES": sum(1 for e in entities if e["kind"] == "queryable") + verbs,
         "MAX_SUBSCRIPTIONS": sum(1 for e in entities if e["kind"] == "subscriber"),
         "MAX_PENDING_QUERIES": pending_need(entities),
         "MAX_PEER_NODES": sum(1 for ep in data["endpoint"] if ep["role"] == "peer"),
+        "MAX_KEYEXPR_BYTES": VERB_KEY_BYTES if verbs else 0,
     }
     for name, need in needs.items():
         if name not in stated and need > values[name]:
@@ -1058,7 +1127,7 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
         f"([{', '.join(str(b) for b in int(zid, 16).to_bytes(16, 'little'))}], {rust_string(locator)})"
         for zid, locator in peers
     )
-    secure = any(d.startswith("tls/") for d in dialed) or bool(peers)
+    secure = any(is_secure(ep) for ep in data["endpoint"])
     # The nodes that may command each lifecycle verb in band (decision D12). Generated only when the
     # node names a commander: the image reads them under a feature that is on exactly then.
     commanders =[ep for ep in data["endpoint"] if ep["role"] == "commander"]
@@ -1110,6 +1179,16 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
         f"pub const MEMBERS: usize = {members};",
     ] if groups else []
     commander_lines = commander_rows(commanders)
+    listen_tls = bool(listens) and listen_at.startswith("tls/")
+    # The secure sessions the node holds at once, which its channel's arena is sized for: a `tls`
+    # router it dials, its peers (each `tls`) and the sessions a `tls` listener takes.
+    secure_sessions = (sum(d.startswith("tls/") for d in dialed) + len(peers)
+                       + (accepts if listen_tls else 0))
+    channel = [
+        "/// The secure sessions the node holds at once, which its channel's arena is sized for: a",
+        "/// `tls` router it dials, its peers and the sessions its `tls` listener takes.",
+        f"pub const SECURE_SESSIONS: usize = {secure_sessions};",
+    ] if secure else []
     querier = [
         "/// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each",
         "/// keeps).",
@@ -1133,14 +1212,22 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// of the zid and the locator it may be found at (decision D7, the third transport).",
             f"pub const PEERS: usize = {len(peers)};",
             f"pub const PEER_NODES: [([u8; 16], &str); {len(peers)}] = [{peer_nodes}];",
-            "/// Whether a dialled endpoint or a peer is `tls/`, which the node's `tls` feature must be built for.",
+            "/// Whether a dialled endpoint, a peer or the listening endpoint is `tls/`, which the node's",
+            "/// `tls` feature must be built for.",
             f"pub const TLS: bool = {'true' if secure else 'false'};",
+            *channel,
+            "/// Whether the node names a commander: it binds the lifecycle verbs in band (decision D12),",
+            "/// which the node's `verbs` feature must be built for.",
+            f"pub const VERBS: bool = {'true' if commanders else 'false'};",
             *commander_lines,
             "/// Whether the node listens, the locator it listens on (empty when it does not) and how many",
             "/// sessions a peer opened it holds at once.",
             f"pub const LISTENS: bool = {'true' if listens else 'false'};",
             f"pub const LISTEN: &str = {rust_string(listen_at)};",
             f"pub const ACCEPTS: usize = {accepts};",
+            "/// Whether the listening locator is `tls/`, which the node's `listen-tls` feature must be",
+            "/// built for.",
+            f"pub const LISTEN_TLS: bool = {'true' if listen_tls else 'false'};",
             *listener,
             "/// The sessions the node holds at most: the ones it dials, the peers it holds by their zid and",
             "/// the ones a peer opened.",
@@ -1215,18 +1302,23 @@ SCHEME_FACILITIES = {"tcp": "sockets-tcp", "tls": "sockets-tcp", "udp": "sockets
 
 
 def features_of(data: dict) -> list[str]:
-    """The cargo features a node is built with: `declared`, `tls` exactly when a dialled endpoint is
-    `tls/` (which the node's own `const` assertion holds again), `get` for a node that asks (and
-    only such a node: the layer's queries and the pending table are not in any other), `token` for a
-    node that declares a liveliness token and `listen` for a node that has a port to listen on."""
-    tls = any(ep["locator"].startswith("tls/") for ep in data["endpoint"] if ep["role"] in ("dial", "peer"))
+    """The cargo features a node is built with: `declared`, `tls` exactly when a dialled endpoint, a
+    peer or the listening endpoint is `tls/` (which the node's own `const` assertion holds again),
+    `get` for a node that asks (and only such a node: the layer's queries and the pending table are
+    not in any other), `token` for a node that declares a liveliness token, `listen` for a node that
+    has a port to listen on and `listen-tls` when that port is `tls/`, and `verbs` for a node that
+    names a commander (the verbs it binds in band)."""
+    tls = any(is_secure(ep) for ep in data["endpoint"])
     asks = any(e["kind"] == "querier" for e in data.get("entity", []))
     alive = any(e["kind"] == "liveliness-token" for e in data.get("entity", []))
-    listens = any(ep["role"] == "listen" for ep in data["endpoint"])
+    listens = [ep for ep in data["endpoint"] if ep["role"] == "listen"]
+    listen_tls = any(is_secure(ep) for ep in listens)
     grouped = any(ep["role"] == "multicast" for ep in data["endpoint"])
+    commands = any(ep["role"] == "commander" for ep in data["endpoint"])
     return (["declared"] + (["tls"] if tls else []) + (["get"] if asks else [])
             + (["token"] if alive else []) + (["listen"] if listens else [])
-            + (["multicast"] if grouped else []))
+            + (["listen-tls"] if listen_tls else [])
+            + (["multicast"] if grouped else []) + (["verbs"] if commands else []))
 
 
 def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
@@ -1282,19 +1374,22 @@ def resolve_file(path: pathlib.Path, decl: dict, work: pathlib.Path) -> dict:
 
 def view_of(name: str, data: dict, sha: str, generated: pathlib.Path, decl: dict) -> dict:
     """The build's view of a validated declaration, however it was given."""
-    schemes = [LOCATOR_RE.fullmatch(ep["locator"])["scheme"] for ep in data["endpoint"]]
+    # A commander is a zid and no place, so only the endpoints that have a locator open a socket.
+    schemes = [LOCATOR_RE.fullmatch(ep["locator"])["scheme"] for ep in data["endpoint"] if "locator" in ep]
     facilities = {SCHEME_FACILITIES[s] for s in schemes}
     if any(ep["role"] == "multicast" for ep in data["endpoint"]):
         # A group is a UDP socket that has joined it: the socket option is a facility of its own.
         facilities.add("multicast")
     facilities = sorted(facilities)
     # The node's configuration is the declaration, so what it asks for at start is known: the
-    # target's own needs and every endpoint's socket. A group's interface listing is the one
-    # facility a run may or may not ask for.
+    # target's own needs and every endpoint's socket. A group's interface listing and the secure
+    # channel's time of day are the facilities a run may or may not ask for.
     target = TARGETS[data["node"]["target"]]
     requires = sorted(set(target["os_always"]) | set(facilities))
     grouped = any(ep["role"] == "multicast" for ep in data["endpoint"])
-    may_require = sorted(set(target["group_may"]) - set(requires)) if grouped else []
+    secure = any(is_secure(ep) for ep in data["endpoint"])
+    may = (set(target["group_may"]) if grouped else set()) | (set(target["tls_may"]) if secure else set())
+    may_require = sorted(may - set(requires))
     unknown = [f for f in requires + may_require if f not in wz_config.OS_FACILITIES]
     if unknown:
         raise ValueError(f"{name}: the facilities {', '.join(unknown)} that it asks for are not "
@@ -1334,8 +1429,9 @@ def vocabulary(target_id: str, decl: dict) -> dict:
                "commander": ()}
     endpoints = {}
     for role, shape in ENDPOINT_SHAPES.items():
-        if role not in target["endpoint_limits"]:
-            endpoints[role] = {"built": False, "reason": target["refused"][role]}
+        why_not = role_refusal(target, role)
+        if why_not is not None:
+            endpoints[role] = {"built": False, "reason": why_not}
             continue
         entry = {"built": True, "max": target["endpoint_limits"][role], "schemes": list(schemes[role]),
                  "keys": resolved(shape["keys"])}
@@ -1547,8 +1643,21 @@ def _selftest() -> int:
             "accepts = 1\n", "more than 1 `listen`")
     refuses("a datagram listener is refused with the target's reason",
             listening.replace("tcp/0.0.0.0", "udp/0.0.0.0"), "a `udp` listener is not built on slot")
-    refuses("a secure listener is refused with the target's reason",
-            listening.replace("tcp/0.0.0.0", "tls/0.0.0.0"), "a `tls` listener is not built on slot")
+    # A secure listener: the channel's server side, which proves the zid of a node that opens a
+    # session to this one.
+    secure_listen = listening.replace("tcp/0.0.0.0", "tls/0.0.0.0")
+    slrs = emit("n", wz_config.read_decl_toml(secure_listen), sha)
+    expect("a secure listener is valid, built with the channel and its server side",
+           problems(secure_listen) == []
+           and features_of(wz_config.read_decl_toml(secure_listen)) == ["declared", "tls", "listen", "listen-tls"])
+    expect("a secure listener makes the node secure and sizes the channel for every session it takes",
+           "pub const TLS: bool = true;" in slrs and "pub const LISTEN_TLS: bool = true;" in slrs
+           and "pub const SECURE_SESSIONS: usize = 2;" in slrs)
+    expect("a plain listener is not the secure one, and a node with no channel sizes none",
+           "pub const LISTEN_TLS: bool = false;" in lrs and "SECURE_SESSIONS" not in lrs)
+    both_secure = secure_listen.replace("tcp/10.0.0.1", "tls/10.0.0.1")
+    expect("the channel holds the router it dials and the sessions it takes",
+           "pub const SECURE_SESSIONS: usize = 3;" in emit("n", wz_config.read_decl_toml(both_secure), sha))
     # A multicast group: a member of it publishes and subscribes, and the rest is refused by name.
     group_node = """schema = 1
 
@@ -2218,8 +2327,41 @@ document_bytes = 8
         expect(f"the refusal of `{condition['id']}` is no other condition's",
                not any(other["refusal"] in p for other in command["conditions"] if other is not condition
                        for p in found))
+    # A commander is decided by the verbs the image binds: the node is built with them exactly when
+    # it names one, and its secure channel may be the listener a commander opens a session to.
+    tls_listen = toml_item("endpoint", {"role": "listen", "locator": "tls/127.0.0.1:7500", "accepts": 1})
+    commanding = wz_config.read_decl_toml(head + tls_listen + toml_item("endpoint", least_commander))
+    expect("a commander of a node that only listens on `tls` is valid",
+           problems(head + tls_listen + toml_item("endpoint", least_commander)) == [])
+    expect("a node that names a commander is built with the verbs, and one that names none is not",
+           "verbs" in features_of(commanding)
+           and "verbs" not in features_of(wz_config.read_decl_toml(head + tls_listen)))
+    expect("the generated file says the node binds the verbs, and one that names none does not",
+           "pub const VERBS: bool = true;" in emit("n", commanding, sha)
+           and "pub const VERBS: bool = false;" in emit("n", wz_config.read_decl_toml(head + tls_listen), sha))
+    expect("a commander's verbs take a queryable and keys as long as the longest verb key",
+           verb_queryables(commanding) == 1
+           and verb_queryables(wz_config.read_decl_toml(head + tls_listen)) == 0
+           and budgets(commanding, decl)["MAX_KEYEXPR_BYTES"] == VERB_KEY_BYTES == 109)
+    short_keys = head + tls_listen + toml_item("endpoint", least_commander) + "\n[limits]\nMAX_KEYEXPR_BYTES = 64\n"
+    expect("a commander's node that states keys too short for its verbs is refused, and says how long",
+           any(f"up to {VERB_KEY_BYTES} bytes" in p for p in problems(short_keys)))
+    commanded_view = view_of("n", commanding, sha, pathlib.Path("n.rs"), decl)
+    expect("a commander's node resolves for a build: a commander is no place and opens no socket",
+           commanded_view["facilities"] == ["sockets-tcp"] and "verbs" in commanded_view["features"]
+           and commanded_view["may_require"] == ["wall-clock"]
+           and commanded_view["limits"]["WZ_LIMIT_MAX_KEYEXPR_BYTES"] == str(VERB_KEY_BYTES))
+    expect("the image builds the feature a commander needs",
+           TARGETS["slot"]["role_features"]["commander"] in image_features(TARGETS["slot"]))
+    unbound = {**TARGETS["slot"], "role_features": {"commander": "no-such-feature"}}
+    expect("a role whose feature the image lacks is not built, and says which feature",
+           role_refusal(unbound, "commander") is not None
+           and "`no-such-feature`" in role_refusal(unbound, "commander")
+           and role_refusal(TARGETS["slot"], "commander") is None)
     expect("the vocabulary's listener schemes are the ones a listener is accepted over",
-           vocab["endpoints"]["listen"]["schemes"] == ["tcp"]
+           vocab["endpoints"]["listen"]["schemes"] == ["tcp", "tls"]
+           and problems(head + toml_item("endpoint", {"role": "listen", "locator": "tls/127.0.0.1:7500",
+                                                      "accepts": 1})) == []
            and any("listener is not built" in p for p in problems(
                head + toml_item("endpoint", {"role": "listen", "locator": "udp/127.0.0.1:7500", "accepts": 1}))))
     expect("the vocabulary names the budgets and their values when a node states none",
