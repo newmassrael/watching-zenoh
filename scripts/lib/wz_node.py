@@ -561,7 +561,8 @@ TARGETS = {
         # What the secure channel may ask for besides its socket: its random generator reseeds a
         # process that finds itself a forked child with the time of day mixed into the seed (the
         # fork protection of `core/psa_crypto_random.c` in the pinned TF-PSA-Crypto, on a Unix-like
-        # platform and without `MBEDTLS_HAVE_TIME`), so the file imports `gettimeofday`. The node
+        # platform when the build leaves mbedTLS's time option, MBEDTLS_HAVE_TIME, undefined), so
+        # the file imports `gettimeofday`. The node
         # never forks, so a run does not ask; a device must still provide it.
         "tls_may": ("wall-clock",),
         # A group is UDP: a member's datagrams are the group's, with no connection to hold.
