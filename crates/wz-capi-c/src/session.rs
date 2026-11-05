@@ -17,7 +17,7 @@ use std::ffi::c_void;
 use wz_capi_core::drive::{FaceDrive, OpenError, SessionState};
 #[cfg(feature = "router-node")]
 use wz_capi_core::drive::{NodeRole, RouterState};
-use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
+use wz_capi_core::faces::{no_shm_clients, FaceEventSink, FaceSnapshot, OpenShmClients};
 use wz_capi_core::open_plan::{dial_role, AbiChoices, OpenPlan, OpenRefusal, StatedEndpoints};
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::TxQueueConf;
@@ -71,6 +71,82 @@ impl SessionHandle {
             Self::Registry(state) => state.zid(),
             #[cfg(feature = "router-node")]
             Self::Node(node) => crate::zid::z_id_t::from_wire(node.zid()).id,
+        }
+    }
+
+    /// The id and the announced role of every established peer, the role in its 2-bit wire form
+    /// (0 router, 1 peer, 2 client): the registry's sessions, or the faces a node holds.
+    pub(crate) fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
+        match self {
+            Self::Registry(state) => state.shared.peer_identities(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node
+                .forwarder()
+                .face_snapshots()
+                .into_iter()
+                .map(|face| (face.zid.to_vec(), face.whatami))
+                .collect(),
+        }
+    }
+
+    /// Where the transports and links of this session are read, and their coming and going is
+    /// watched.
+    pub(crate) fn face_source(&self) -> FaceSource {
+        match self {
+            Self::Registry(state) => FaceSource::Registry(state.shared.clone()),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => FaceSource::Node(node.clone()),
+        }
+    }
+}
+
+/// The faces of a session as the transports and links a program lists and listens for. A
+/// listener holds its own copy, so that it can unwatch after the session handle is gone.
+#[derive(Clone)]
+pub(crate) enum FaceSource {
+    Registry(std::sync::Arc<wz_capi_core::faces::SharedSession>),
+    #[cfg(feature = "router-node")]
+    Node(std::sync::Arc<RouterState>),
+}
+
+impl FaceSource {
+    /// Every transport zenoh reports: each unicast face, then, on the registry, each member of
+    /// each group the session joined, a multicast transport of its own
+    /// (`zenoh/src/net/runtime/mod.rs` @ `.map(|ref peer| Transport::new(peer, true));`). A node
+    /// joins no group through this ABI, so it lists its faces.
+    pub(crate) fn connected(&self) -> Vec<FaceSnapshot> {
+        match self {
+            Self::Registry(shared) => {
+                #[cfg_attr(not(feature = "multicast-transport"), allow(unused_mut))]
+                let mut all = shared.face_snapshots();
+                #[cfg(feature = "multicast-transport")]
+                all.extend(shared.group_member_snapshots());
+                all
+            }
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.forwarder().face_snapshots(),
+        }
+    }
+
+    /// Observe the faces coming up and going down; the id undoes it ([`Self::unwatch`]).
+    pub(crate) fn watch(&self, sink: FaceEventSink) -> u64 {
+        match self {
+            Self::Registry(shared) => shared.watch_faces(sink),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.forwarder().watch_faces(sink),
+        }
+    }
+
+    /// Stop observing.
+    pub(crate) fn unwatch(&self, watcher: u64) {
+        match self {
+            Self::Registry(shared) => {
+                shared.unwatch_faces(watcher);
+            }
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => {
+                node.forwarder().unwatch_faces(watcher);
+            }
         }
     }
 }

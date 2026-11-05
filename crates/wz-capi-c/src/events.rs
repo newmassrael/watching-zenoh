@@ -82,7 +82,7 @@ use crate::abi::{
 use crate::ffi::{guard_val, guarded};
 use crate::publisher::{z_reliability_t, Z_RELIABILITY_BEST_EFFORT, Z_RELIABILITY_RELIABLE};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{not_a_registry, session_handle, FaceSource};
 use crate::zid::z_id_t;
 
 // ---------------------------------------------------------------------------
@@ -530,13 +530,13 @@ unsafe impl<T> Sync for EventClosure<T> {}
 /// owned, and a listener that could not undeclare itself once its session
 /// variable went out of scope would leak the C closure's context forever.
 struct ListenerState {
-    shared: Arc<wz_capi_core::faces::SharedSession>,
+    source: FaceSource,
     watcher: u64,
 }
 
 impl Drop for ListenerState {
     fn drop(&mut self) {
-        self.shared.unwatch_faces(self.watcher);
+        self.source.unwatch(self.watcher);
     }
 }
 
@@ -1915,17 +1915,6 @@ fn passes(filter: TransportFilter, snapshot: &FaceSnapshot) -> bool {
     })
 }
 
-/// Every transport zenoh reports: each unicast face, then each member of each group the
-/// session joined, a multicast transport of its own
-/// (`zenoh/src/net/runtime/mod.rs` @ `.map(|ref peer| Transport::new(peer, true));`).
-fn connected(shared: &wz_capi_core::faces::SharedSession) -> Vec<FaceSnapshot> {
-    #[cfg_attr(not(feature = "multicast-transport"), allow(unused_mut))]
-    let mut all = shared.face_snapshots();
-    #[cfg(feature = "multicast-transport")]
-    all.extend(shared.group_member_snapshots());
-    all
-}
-
 /// Default link-events listener options (zenoh-c
 /// `z_link_events_listener_options_default`).
 ///
@@ -2000,7 +1989,7 @@ unsafe fn declare_link_listener(
     // behind would leak the C context on every rejected declare.
     // SAFETY: the caller's contract.
     let taken = unsafe { (*callback)._this.take() };
-    let Some(state) = (unsafe { session_state(session) }) else {
+    let Some(held) = (unsafe { session_handle(session) }) else {
         let mut held = taken;
         held.run_drop();
         return Err(unsafe { not_a_registry(session) });
@@ -2019,9 +2008,9 @@ unsafe fn declare_link_listener(
     let closure = Arc::new(EventClosure {
         closure: std::sync::Mutex::new(taken),
     });
-    let shared = state.shared.clone();
+    let source = held.face_source();
     if history {
-        for snapshot in connected(&shared) {
+        for snapshot in source.connected() {
             if passes(filter, &snapshot) {
                 deliver_link_event(&closure, FaceEventKind::Up, &snapshot);
             }
@@ -2033,12 +2022,12 @@ unsafe fn declare_link_listener(
     // its multicast transport never calls
     // (`zenoh/src/api/connectivity.rs` @ `impl TransportMulticastEventHandler for ConnectivityMulticastHandler {`).
     // Its link is reported by the listing and by the history above, which read the links.
-    let watcher = shared.watch_faces(Arc::new(move |kind, snapshot: &FaceSnapshot| {
+    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
         if !snapshot.is_multicast && passes(filter, snapshot) {
             deliver_link_event(&sink, kind, snapshot);
         }
     }));
-    Ok(Box::into_raw(Box::new(ListenerState { shared, watcher })) as Handle)
+    Ok(Box::into_raw(Box::new(ListenerState { source, watcher })) as Handle)
 }
 
 /// Declare a link-events listener (zenoh-c `z_declare_link_events_listener`).
@@ -2116,7 +2105,7 @@ unsafe fn declare_transport_listener(
     }
     // SAFETY: the caller's contract — taken unconditionally, as above.
     let taken = unsafe { (*callback)._this.take() };
-    let Some(state) = (unsafe { session_state(session) }) else {
+    let Some(held) = (unsafe { session_handle(session) }) else {
         let mut held = taken;
         held.run_drop();
         return Err(unsafe { not_a_registry(session) });
@@ -2126,21 +2115,21 @@ unsafe fn declare_transport_listener(
     let closure = Arc::new(EventClosure {
         closure: std::sync::Mutex::new(taken),
     });
-    let shared = state.shared.clone();
+    let source = held.face_source();
     if history {
-        for snapshot in connected(&shared) {
+        for snapshot in source.connected() {
             deliver_transport_event(&closure, FaceEventKind::Up, &snapshot);
         }
     }
     let sink = closure.clone();
-    let watcher = shared.watch_faces(Arc::new(move |kind, snapshot: &FaceSnapshot| {
+    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
         if snapshot.is_multicast {
             deliver_transport_event(&sink, kind, &as_announced(snapshot));
         } else {
             deliver_transport_event(&sink, kind, snapshot);
         }
     }));
-    Ok(Box::into_raw(Box::new(ListenerState { shared, watcher })) as Handle)
+    Ok(Box::into_raw(Box::new(ListenerState { source, watcher })) as Handle)
 }
 
 /// A group member as zenoh ANNOUNCES it, which is not as zenoh lists it: the announced
@@ -2451,10 +2440,10 @@ pub unsafe extern "C" fn z_info_links(
             // SAFETY: the caller's contract.
             unsafe { take_transport_filter((*options).transport) }
         };
-        let rc = match unsafe { session_state(session) } {
-            Some(state) => {
+        let rc = match unsafe { session_handle(session) } {
+            Some(handle) => {
                 if let Some(call) = held.call {
-                    for snapshot in connected(&state.shared) {
+                    for snapshot in handle.face_source().connected() {
                         if !passes(filter, &snapshot) {
                             continue;
                         }
@@ -2495,10 +2484,10 @@ pub unsafe extern "C" fn z_info_transports(
         }
         // SAFETY: the caller's contract.
         let mut held = unsafe { (*callback)._this.take() };
-        let rc = match unsafe { session_state(session) } {
-            Some(state) => {
+        let rc = match unsafe { session_handle(session) } {
+            Some(handle) => {
                 if let Some(call) = held.call {
-                    for snapshot in connected(&state.shared) {
+                    for snapshot in handle.face_source().connected() {
                         let mut owned = z_owned_transport_t::from_snapshot(&snapshot);
                         // SAFETY: a live owned transport this frame built.
                         unsafe {

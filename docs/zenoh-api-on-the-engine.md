@@ -1127,9 +1127,13 @@ Each lands whole with its surface lines, tests and faults in one round.
       which ends the one query the node's face holds for it), then the two that need only
       the session's id: a timestamp is the node's id and the wall clock, and a declared key
       is the key it names, with no alias bound (a node names every key whole on the wire, so
-      its undeclaration has none to retract), then what is left (the routers and peers of
-      a session, the transport and link events, the resource snapshot, the shared-memory
-      provider, the advanced pair, the group). In a build with `router-node` a router opened through the C ABI is the
+      its undeclaration has none to retract), then what the faces of the node say: the peers
+      and routers it is linked to, its transports and links, and the listeners that hear of
+      one coming and going, read off the node's own face table through the one `FaceSource`
+      the registry shares (`SessionHandle::face_source`), then what is left (the resource
+      snapshot, which counts the messages a session received and a node does not count, so
+      it answers unavailable and not a snapshot of nothing; the shared-memory provider, the
+      advanced pair, the group). In a build with `router-node` a router opened through the C ABI is the
       router data plane whatever it holds (`OpenPlan::node_role`), as the Rust API's is, and
       forwards between the clients that dial it; a peer or a client is a node there only where
       it keeps a south apart, and a build without `router-node` opens the registry of faces,

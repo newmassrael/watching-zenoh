@@ -93,9 +93,7 @@ use wz_capi_c::timestamp::{
     z_timestamp_id, z_timestamp_new, z_timestamp_ntp64_time, z_timestamp_t,
 };
 #[cfg(feature = "router-node")]
-use wz_capi_c::zid::{
-    z_closure_zid, z_info_routers_zid, z_info_zid, z_moved_closure_zid_t, z_owned_closure_zid_t,
-};
+use wz_capi_c::zid::z_info_zid;
 use wz_runtime_tokio_test_support::free_port;
 
 const KEYEXPR: &str = "wz/session-roles/demo";
@@ -361,17 +359,13 @@ fn a_gateway_south_of_subregions_opens_a_node_that_carries_little_yet() {
                 "the node has its own id ({mode})"
             );
             assert!(!z_session_is_closed(z_session_loan(&session)));
-            // The routers a session is linked to are one of the operations a node does not carry
-            // yet, and the closure given with the call is consumed all the same.
-            let mut closure: z_owned_closure_zid_t = std::mem::zeroed();
-            z_closure_zid(&mut closure, None, None, std::ptr::null_mut());
+            // The resource snapshot counts the messages a session received, which a node does not
+            // count, so it answers that it is unavailable and not a snapshot of nothing.
+            #[cfg(feature = "resource-snapshot")]
             assert_eq!(
-                z_info_routers_zid(
-                    z_session_loan(&session),
-                    (&mut closure as *mut z_owned_closure_zid_t).cast::<z_moved_closure_zid_t>(),
-                ),
+                wz_capi_c::snapshot::wz_capi_c_snapshot_poll(z_session_loan(&session)),
                 Z_EUNAVAILABLE,
-                "a node does not carry the routers of a session yet ({mode})"
+                "a node does not count messages for a snapshot ({mode})"
             );
             assert_eq!(
                 z_close(z_session_loan_mut(&mut session), std::ptr::null_mut()),

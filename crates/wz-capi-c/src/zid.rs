@@ -58,7 +58,7 @@ use std::ffi::c_void;
 use crate::abi::{z_closure_drop_callback_t, z_loaned_session_t, z_owned_string_t};
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_handle, session_state};
+use crate::session::{not_a_registry, session_handle};
 use crate::string::owned_string_from;
 
 /// The zid width zenoh puts on the wire.
@@ -445,7 +445,7 @@ unsafe fn enumerate_peers(
         // closure and the release below is unconditional.
         let rc = (|| {
             // SAFETY: the caller's contract.
-            let Some(state) = (unsafe { session_state(session) }) else {
+            let Some(handle) = (unsafe { session_handle(session) }) else {
                 return unsafe { not_a_registry(session) };
             };
             let Some(call) = taken.call else {
@@ -453,7 +453,7 @@ unsafe fn enumerate_peers(
                 // nothing to invoke.
                 return Z_OK;
             };
-            for (zid, whatami) in state.shared.peer_identities() {
+            for (zid, whatami) in handle.peer_identities() {
                 if (whatami == WHATAMI_WIRE_ROUTER) != routers {
                     continue;
                 }
