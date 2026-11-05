@@ -311036,6 +311036,60 @@
         "Stage seven continues. Still Z_EUNAVAILABLE on a node: the advanced subscriber (history, recovery, miss detection, its liveliness and its sample-miss listeners) and the matching and detection that belong to it, the group, and the resource snapshot (by design until the node counts the messages it received). The advanced publisher on a node has no witness below a real zenohd, no test of its heartbeat beacon, and its chunk put is untested. The registry arm of the advanced publisher is unrun against upstream here (the oracle lanes C1cc and C1ce own it). A remote the node dials and places in its own south has no stock witness yet. The C ABI default does not have router-node (capic-router-node is 5,729,813 bytes of text against capic-default's 9,467,100 budget), a peer that listens and keeps no south is the registry in the C ABI, and the value of a get in shared memory goes out as bytes on a node. The hosted runs of the rounds since 4242 are unread."
       ]
     },
+    "Round 4266": {
+      "decision_summary": "Round 4259 bound a declared node's commanders to the verbs, and a consumer could still not write a grant to a declared node: a node with a secure channel made its key when it started, so its zid was known only once it ran, while a grant is compiled into the node that holds it. A declaration may now state the node's identity, `[identity]` with the files of its certificate chain and private key: read at start, not compiled in, because the key is the device's secret and an image is a file that is packaged, hashed and handed around. The key is taken only when its owner alone may read it, its text is wiped once the channel holds it, and a node that cannot be the identity it was told stops rather than make another. The zid it proves is known before it runs: `wz_node.py --zid-of` prints it from the certificate, by the rule the vocabulary states, so no consumer writes the rule again. Running the two nodes found that the declared node's reply line was cut at the console's 256 bytes, so a reply past about a hundred bytes was reported as other bytes than the node kept; the line is now written whole.",
+      "changes_bullets": [
+        "wz-runtime-posix: `file` (read_into, and read_secret, refused unread when the group or others may read it); glue::log_whole writes a line as it is formatted, with no 256-byte cut.",
+        "wz-tls-mbedtls: IdentitySlot::from_pem, the provisioned counterpart of generate.",
+        "deploy/host-slot-node: tls::identity_from_files reads the chain and the owner-only key into its own frame, wipes the key text, and says which file and why when it cannot; the declared node takes IDENTITY when the declaration names it and makes its key otherwise; say_cell writes the reply and sample lines whole (hex formatted in place, no stack buffer).",
+        "scripts/lib/wz_node.py: `[identity]` (certificate, private_key; absolute paths; a secure node only); generated IDENTITY; such a node requires filesystem; `--zid-of` (SPKI of a certificate or public key, SHA-256, first 16 bytes, zenoh hex) with an OpenSSL-made vector in its selftest; the vocabulary's `identity` section (keys, requirement, rule, tool).",
+        "deploy/nodes/slot-subject.toml: a provisioned node that holds slot-commander by zid over its tls listener and asks status and close.",
+        "wz_declared_commander_zenohd_interop: a fourth leg, two provisioned declared nodes commanding each other by zids the tool printed before either ran (Zcmd 3 -> 4).",
+        "docs/target-build-contract.md 5b: the provisioned identity and its zid."
+      ],
+      "verification_bullets": [
+        "wz_declared_commander_zenohd_interop on pc2: 4 passed. The new leg builds both nodes from their declarations with identities made at run, asserts that `--zid-of` prints the zid the key names and that each node proves it, and that the subject's status is answered and its close refused. Its first run failed on the cut reply line (the refusal's text ended mid-word), which is what found the console defect.",
+        "wz-runtime-posix file tests: 2 passed (whole read and its bound; an exposed secret is refused unread, an owner-only one is read, a missing one is refused at open).",
+        "clippy -D warnings: wz-runtime-posix (default and session-slot), wz-tls-mbedtls.",
+        "wz_node.py --selftest OK (the OpenSSL vector's SPKI digest and zid, a certificate and its public key naming one zid, identity refusals), --check 9 of 9; wz_package.py --selftest OK; both nodes package for linux-x86_64-glibc against their bounds.",
+        "Layer C1bz on pc2 for wz-runtime-posix, wz-tls-mbedtls, wz-integration-tests: pass, after the module link was written `mod@file` (it was ambiguous with the `file!` macro). guarded_count_gate over the range: 29 of 29.",
+        "The 131 round-fed static gates after the rebase: 0, once the subject's ready line was declared to barrier_needle_gate (the node prints it in parts)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Open: the Zephyr images make their key at start too; a provisioned identity there needs the board's secure storage, not a file, and is not built.",
+        "Open: the admin images' commander lists are still Kconfig text; a declaration does not build them.",
+        "Open from round 4234: the fuzz target's hosted time is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use."
+      ],
+      "publishable_decision_summary": "Round 4259 bound a declared node's commanders to the verbs, and a consumer could still not write a grant to a declared node: a node with a secure channel made its key when it started, so its zid was known only once it ran, while a grant is compiled into the node that holds it. A declaration may now state the node's identity, `[identity]` with the files of its certificate chain and private key: read at start, not compiled in, because the key is the device's secret and an image is a file that is packaged, hashed and handed around. The key is taken only when its owner alone may read it, its text is wiped once the channel holds it, and a node that cannot be the identity it was told stops rather than make another. The zid it proves is known before it runs: `wz_node.py --zid-of` prints it from the certificate, by the rule the vocabulary states, so no consumer writes the rule again. Running the two nodes found that the declared node's reply line was cut at the console's 256 bytes, so a reply past about a hundred bytes was reported as other bytes than the node kept; the line is now written whole.",
+      "publishable_changes_bullets": [
+        "wz-runtime-posix: `file` (read_into, and read_secret, refused unread when the group or others may read it); glue::log_whole writes a line as it is formatted, with no 256-byte cut.",
+        "wz-tls-mbedtls: IdentitySlot::from_pem, the provisioned counterpart of generate.",
+        "deploy/host-slot-node: tls::identity_from_files reads the chain and the owner-only key into its own frame, wipes the key text, and says which file and why when it cannot; the declared node takes IDENTITY when the declaration names it and makes its key otherwise; say_cell writes the reply and sample lines whole (hex formatted in place, no stack buffer).",
+        "scripts/lib/wz_node.py: `[identity]` (certificate, private_key; absolute paths; a secure node only); generated IDENTITY; such a node requires filesystem; `--zid-of` (SPKI of a certificate or public key, SHA-256, first 16 bytes, zenoh hex) with an OpenSSL-made vector in its selftest; the vocabulary's `identity` section (keys, requirement, rule, tool).",
+        "deploy/nodes/slot-subject.toml: a provisioned node that holds slot-commander by zid over its tls listener and asks status and close.",
+        "wz_declared_commander_zenohd_interop: a fourth leg, two provisioned declared nodes commanding each other by zids the tool printed before either ran (Zcmd 3 -> 4).",
+        "docs/target-build-contract.md 5b: the provisioned identity and its zid."
+      ],
+      "publishable_verification_bullets": [
+        "wz_declared_commander_zenohd_interop on pc2: 4 passed. The new leg builds both nodes from their declarations with identities made at run, asserts that `--zid-of` prints the zid the key names and that each node proves it, and that the subject's status is answered and its close refused. Its first run failed on the cut reply line (the refusal's text ended mid-word), which is what found the console defect.",
+        "wz-runtime-posix file tests: 2 passed (whole read and its bound; an exposed secret is refused unread, an owner-only one is read, a missing one is refused at open).",
+        "clippy -D warnings: wz-runtime-posix (default and session-slot), wz-tls-mbedtls.",
+        "wz_node.py --selftest OK (the OpenSSL vector's SPKI digest and zid, a certificate and its public key naming one zid, identity refusals), --check 9 of 9; wz_package.py --selftest OK; both nodes package for linux-x86_64-glibc against their bounds.",
+        "Layer C1bz on pc2 for wz-runtime-posix, wz-tls-mbedtls, wz-integration-tests: pass, after the module link was written `mod@file` (it was ambiguous with the `file!` macro). guarded_count_gate over the range: 29 of 29.",
+        "The 131 round-fed static gates after the rebase: 0, once the subject's ready line was declared to barrier_needle_gate (the node prints it in parts)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the Zephyr images make their key at start too; a provisioned identity there needs the board's secure storage, not a file, and is not built.",
+        "Open: the admin images' commander lists are still Kconfig text; a declaration does not build them.",
+        "Open from round 4234: the fuzz target's hosted time is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
