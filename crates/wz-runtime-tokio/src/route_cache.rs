@@ -51,6 +51,20 @@ pub struct RouteInputs {
     pub table: u64,
 }
 
+impl RouteInputs {
+    /// Whether these inputs were read from a version of the tables older than the one `newer` was
+    /// read from: they differ, and neither member is ahead of `newer`'s.
+    ///
+    /// Both members are counters that a write of the tables moves forward and nothing moves back,
+    /// and they live as long as the cache that holds routes against them (the hat that owns both),
+    /// so of two inputs read along one sequence of writes one always precedes the other or they
+    /// are equal. A pair where neither precedes the other (a counter that wrapped) is not ordered,
+    /// and the cache treats it as it treats newer inputs.
+    pub fn precedes(self, newer: RouteInputs) -> bool {
+        self != newer && self.net <= newer.net && self.table <= newer.table
+    }
+}
+
 /// Routes by keyexpr, then by source, all fresh at one [`RouteInputs`].
 #[derive(Debug)]
 struct Fresh<T, S> {
@@ -77,6 +91,13 @@ struct Fresh<T, S> {
 /// mutation takes the tables for writing. Two threads that miss the same key therefore compute the
 /// same route at the same inputs, and the second store replaces the first with an equal value.
 /// Neither runs `compute` under the memo's lock, so a route that is slow to compute holds no reader.
+///
+/// Where readers hold different versions of the tables at once (`docs/router-table-snapshots.md`,
+/// section 3 (c)), two readers can ask at different inputs. The memo is still sound, since a route
+/// is served only at the inputs it was computed at, and it is a function of those alone. What the
+/// memo keeps is the newest inputs it has been brought to: a store or a refresh from inputs that
+/// [precede](RouteInputs::precedes) them is answered and not kept, so a reader of an older version
+/// never drops what a reader of a newer one stored.
 #[derive(Debug)]
 pub struct RouteCache<T, S = Zid> {
     fresh: PlainRwLock<Fresh<T, S>>,
@@ -112,8 +133,10 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     ///
     /// Storing at new inputs first drops every route kept at the old ones, as
     /// upstream's `Routes::set_route` clears on a version change, so stale
-    /// entries never outlive the next store. `compute` must not route through
-    /// this cache.
+    /// entries never outlive the next store. A route computed at inputs that
+    /// [precede](RouteInputs::precedes) the kept ones is returned and not kept:
+    /// it is fresh only for the older version it was read from. `compute` must
+    /// not route through this cache.
     pub fn get_or_compute(
         &self,
         inputs: RouteInputs,
@@ -135,6 +158,9 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         if resource() {
             let mut fresh = self.fresh.write();
             if fresh.inputs != Some(inputs) {
+                if fresh.inputs.is_some_and(|kept| inputs.precedes(kept)) {
+                    return route;
+                }
                 fresh.routes.clear();
                 fresh.inputs = Some(inputs);
             }
@@ -162,6 +188,10 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     ///
     /// Safe by construction: it only ever retires more than it must, never fewer, because the caller
     /// supplies the keys the table's own mutators recorded and every mutation records its key.
+    ///
+    /// A refresh to inputs that [precede](RouteInputs::precedes) the cache's moves nothing and asks
+    /// nothing: the cache stays at the newer inputs, whose routes a reader of the older version is
+    /// never served.
     pub fn refresh(
         &self,
         inputs: RouteInputs,
@@ -173,8 +203,12 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         // task wait for every other's whether or not anything changed. A write is taken only to
         // move the inputs, which a mutation of the tables caused (and which holds them for
         // writing), so two threads that both see the move and both take the write lock find it
-        // already done by the second, and return.
-        if self.fresh.read().inputs == Some(inputs) {
+        // already done by the second, and return. A reader of an older version than the cache's
+        // is decided under the read lock too: it has nothing to move.
+        let at_or_past_inputs = |kept: Option<RouteInputs>| {
+            kept.is_some_and(|kept| kept == inputs || inputs.precedes(kept))
+        };
+        if at_or_past_inputs(self.fresh.read().inputs) {
             return;
         }
         let mut fresh = self.fresh.write();
@@ -182,7 +216,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             fresh.inputs = Some(inputs);
             return;
         };
-        if was == inputs {
+        if at_or_past_inputs(Some(was)) {
             return;
         }
         let mut moved: Vec<String> = Vec::new();
@@ -377,6 +411,71 @@ mod tests {
         cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
         cache.refresh(AT, |_, _| unreachable!(), |_, _| unreachable!());
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn inputs_precede_when_they_differ_and_neither_member_is_ahead() {
+        let newer = RouteInputs { net: 2, table: 3 };
+        assert!(AT.precedes(newer));
+        assert!(RouteInputs { net: 2, table: 1 }.precedes(newer));
+        assert!(!newer.precedes(newer), "inputs do not precede themselves");
+        assert!(!newer.precedes(AT));
+        let wrapped = RouteInputs { net: 3, table: 0 };
+        assert!(
+            !wrapped.precedes(newer) && !newer.precedes(wrapped),
+            "a pair where each is ahead in one member is not ordered"
+        );
+    }
+
+    /// A reader of an older version of the tables, missing a key, gets the route of its own version
+    /// and does not drop what a reader of the newer version stored: the memo stays at the newer
+    /// inputs with their routes, and serves them there without computing again.
+    #[test]
+    fn a_store_from_older_inputs_is_answered_and_keeps_the_newer_routes() {
+        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        let newer = RouteInputs { net: 1, table: 2 };
+        cache.get_or_compute(newer, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        let older = cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(4)]);
+        assert_eq!(older, vec![zid(4)], "the older reader gets its own route");
+        assert_eq!(cache.len(), 1, "and it is not kept beside the newer ones");
+        let served = cache.get_or_compute(newer, &zid(1), "demo/a", || true, || unreachable!());
+        assert_eq!(
+            served,
+            vec![zid(9)],
+            "the newer route survived the older store"
+        );
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(8)]);
+        assert_eq!(
+            cache.computes(),
+            3,
+            "a route kept at the newer inputs is never served at the older ones"
+        );
+    }
+
+    #[test]
+    fn a_refresh_to_older_inputs_moves_nothing_and_asks_nothing() {
+        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        let newer = RouteInputs { net: 2, table: 2 };
+        cache.get_or_compute(newer, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        cache.refresh(AT, |_, _| unreachable!(), |_, _| unreachable!());
+        assert_eq!(cache.len(), 1);
+        cache.get_or_compute(newer, &zid(1), "demo/a", || true, || unreachable!());
+        assert_eq!(cache.computes(), 1);
+    }
+
+    /// Inputs that are not ordered against the kept ones are what a counter that wrapped would give:
+    /// the memo moves to them and drops what it kept, as it did before it kept the newest.
+    #[test]
+    fn inputs_that_neither_precede_replace_the_routes_as_newer_ones_do() {
+        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        let kept = RouteInputs { net: 2, table: 2 };
+        cache.get_or_compute(kept, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        let unordered = RouteInputs { net: 3, table: 1 };
+        cache.get_or_compute(unordered, &zid(1), "demo/b", || true, || vec![zid(5)]);
+        assert_eq!(cache.len(), 1);
+        cache.get_or_compute(unordered, &zid(1), "demo/b", || true, || unreachable!());
+        cache.get_or_compute(kept, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        assert_eq!(cache.computes(), 3, "the route at the replaced inputs went");
     }
 
     #[test]
