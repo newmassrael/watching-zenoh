@@ -229,15 +229,22 @@ fn a_node_that_joined_second_finds_a_peer_by_asking_and_misses_it_when_it_is_gon
         let node_seen = Arc::new(Seen::default());
         let node_group = join(&node, "a-node");
         watch(&node_group, &node_seen);
+        // An event reaches the callback from the subscription on, as upstream's `subscribe` has
+        // it, and the peer's beacon runs on its own clock: one that lands between the join and
+        // the subscription puts the peer in the view with no callback to tell. Read after the
+        // subscription, a view of one means the peer is still to come, and its join is told.
+        let peer_still_to_come = wz_capi_c_group_size(wz_capi_c_group_loan(&node_group)) == 1;
         assert!(
             wz_capi_c_group_wait_for_view_size(wz_capi_c_group_loan(&node_group), 2, 15_000),
             "the node never learned of the peer from its beacon"
         );
         // The view grows before the event is delivered, so the count is waited for.
-        assert!(
-            eventually(|| node_seen.joins.load(Ordering::SeqCst) >= 1),
-            "the node was never told of the join"
-        );
+        if peer_still_to_come {
+            assert!(
+                eventually(|| node_seen.joins.load(Ordering::SeqCst) >= 1),
+                "the node was never told of the join"
+            );
+        }
 
         // The peer goes: its group is left and its session closed, so no beacon comes, and the
         // lease of one second runs out under the node's watchdog.
