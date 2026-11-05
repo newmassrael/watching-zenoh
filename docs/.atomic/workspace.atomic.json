@@ -312402,6 +312402,74 @@
         "Phases 5 and 6 as filed in round 4281."
       ]
     },
+    "Round 4304": {
+      "decision_summary": "Two hosted reds are repaid at their root. The nightly Fuzz run (42016507903, at b0caa2b649) failed its `selector_term` job on an input from the `pcap` corpus. The soundness oracle offered the term `Push.del.timestamp.zid == 617320737570726f63205d393420205b` and found it Unknown over the very record whose tree held the field (rule S1). The input was a `Frame` whose `Push` carried a `Del` with a timestamp of a twenty-byte zid. The generated timestamp codec refuses that zid (`sce:max-size=\"16\"`), and so do zenoh-pico and zenoh. The dissection walker read any VLE length, and every reader of a zid field reads at most sixteen bytes, so the zid printed as a value that did not name its own bytes. The walker now refuses a zid past sixteen bytes in `SpanCursor::zid`, the one constructor every zid site goes through. Two of those seven sites take a VLE count (the timestamp and the linkstate entry); the other five take a four-bit nibble and could not exceed it. The refusal is the codec's own `LengthOutOfRange`, and the dissection's serde name table now names it, so a persisted dissection records it by its name and not as \"Unrecognised\".\n\nCI run 42011089802 (at 0c7298a48d) failed Layer C1cn: clippy `large_enum_variant` on `wz-zenoh`'s `Engine`. Its `Router` variant was at least 352 bytes, against 104 for `Tokio`, once the router node took an ABI extension and an engine state of its own (8ef208ab60, ed4d766806). The variant is now `Box<RouterEngine>`. A node is opened once, so one allocation keeps every peer and client session at its own size. The session that owns the router mode of `wz-zenoh` was told before the fix.\n\nThe same run's other two reds were attributed rather than repaired here. The bare-`.output()` census red in `validate + verify + test` was already repaid by 3522f080a1. The C1cs red is the eight cases that round 4290 and 9e3e643439 moved. That run predates both, and its hosted readings all fall under the moved budgets: pico-client 1,892,417 against 1,906,600, pico-default 4,470,378 against 4,499,900, capic-default 9,606,825 against 9,642,000. The fleet measurement 4290 rested on therefore agrees with the hosted machine.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/dissect.rs`:",
+        "`SpanCursor::zid` refuses `LengthOutOfRange` past `CREDENTIAL_ZID_BYTES` (16).",
+        "The serde name table names `LengthOutOfRange` in both directions.",
+        "New test: `a_zid_longer_than_sixteen_bytes_is_refused_as_the_codec_refuses_it`. It walks the timestamp and the linkstate entry at 16, 17 and 20 bytes, and holds the timestamp walk to the generated codec's own verdict.",
+        "`crates/wz-capture/src/selector_term_tests.rs`: new test `a_timestamp_zid_past_sixteen_bytes_offers_no_sentence_it_cannot_hold`. The fuzz input is cut to the one datagram it needed and run through both levels of the soundness oracle.",
+        "`scripts/lib/fuzz_seeds.py`: the same cut input becomes a `selector_term` LITERAL seed, with the fuzz target's own eight argument bytes, so that every replay runs it.",
+        "`crates/wz-zenoh/src/api/session.rs`:",
+        "`Engine::Router` holds `Box<RouterEngine>`, with a doc saying why.",
+        "The one construction boxes it."
+      ],
+      "verification_bullets": [
+        "The fuzz crash was downloaded from the run's artifact and read. The panic text names the term and rule S1 at both levels; the input carries `zid_len` 0x14 in packet 355; libFuzzer reported `MS: 0`, so the crash came from an unmutated corpus entry.",
+        "Control. With the walker's bound taken out, the new wz-capture test reproduces the hosted finding exactly: the same term, S1 at the record level and at the document level. This was a fleet run, rc 101.",
+        "`wz-session-core --features dissect-serde dissect::` passes, 113 tests run and 0 failed. These include the new walker test, which holds the timestamp walk to the generated codec's verdict at 16, 17 and 20 bytes.",
+        "`wz-capture --features dissect selector_term` passes, 9 tests run. These include the soundness property over every seed capture and the noise population, and the new cut-input test.",
+        "`scripts/fuzz.sh regress selector_term` passes through the fuzz target itself, ran=195 inputs, the new LITERAL seed among them. `fuzz_seeds.py --selftest` passes.",
+        "`cargo clippy -p zenoh --all-features --all-targets -- -D warnings`, the command Layer C1cn runs, passes with the boxed router engine. rustfmt is clean on every changed file.",
+        "The C1cs readings quoted in the decision are the hosted job's own lines from run 42011089802."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The next hosted CI run is still to be read per job, as round 4290 asked. No CI run has executed since 4290, because run 42011089802 held the concurrency group in the queue for hours. The things to read:",
+        "`validate (Layers A + C0)` ends inside its 30 minutes.",
+        "`gate provenance (Layer C0)` passes armed, inside 1800 s.",
+        "C1cs is green on every case.",
+        "C1cn is green with the boxed router engine.",
+        "C1bz and the six C1bzr shards are green on pin d7de4b6858.",
+        "The next nightly Fuzz run should read `selector_term` green with its new seed. The ADR 0084 size-fix carry of round 4290 stands unchanged."
+      ],
+      "publishable_decision_summary": "Two hosted reds are repaid at their root. The nightly Fuzz run (42016507903, at b0caa2b649) failed its `selector_term` job on an input from the `pcap` corpus. The soundness oracle offered the term `Push.del.timestamp.zid == 617320737570726f63205d393420205b` and found it Unknown over the very record whose tree held the field (rule S1). The input was a `Frame` whose `Push` carried a `Del` with a timestamp of a twenty-byte zid. The generated timestamp codec refuses that zid (`sce:max-size=\"16\"`), and so do zenoh-pico and zenoh. The dissection walker read any VLE length, and every reader of a zid field reads at most sixteen bytes, so the zid printed as a value that did not name its own bytes. The walker now refuses a zid past sixteen bytes in `SpanCursor::zid`, the one constructor every zid site goes through. Two of those seven sites take a VLE count (the timestamp and the linkstate entry); the other five take a four-bit nibble and could not exceed it. The refusal is the codec's own `LengthOutOfRange`, and the dissection's serde name table now names it, so a persisted dissection records it by its name and not as \"Unrecognised\".\n\nCI run 42011089802 (at 0c7298a48d) failed Layer C1cn: clippy `large_enum_variant` on `wz-zenoh`'s `Engine`. Its `Router` variant was at least 352 bytes, against 104 for `Tokio`, once the router node took an ABI extension and an engine state of its own (8ef208ab60, ed4d766806). The variant is now `Box<RouterEngine>`. A node is opened once, so one allocation keeps every peer and client session at its own size. The session that owns the router mode of `wz-zenoh` was told before the fix.\n\nThe same run's other two reds were attributed rather than repaired here. The bare-`.output()` census red in `validate + verify + test` was already repaid by 3522f080a1. The C1cs red is the eight cases that round 4290 and 9e3e643439 moved. That run predates both, and its hosted readings all fall under the moved budgets: pico-client 1,892,417 against 1,906,600, pico-default 4,470,378 against 4,499,900, capic-default 9,606,825 against 9,642,000. The fleet measurement 4290 rested on therefore agrees with the hosted machine.",
+      "publishable_changes_bullets": [
+        "`crates/wz-session-core/src/dissect.rs`:",
+        "`SpanCursor::zid` refuses `LengthOutOfRange` past `CREDENTIAL_ZID_BYTES` (16).",
+        "The serde name table names `LengthOutOfRange` in both directions.",
+        "New test: `a_zid_longer_than_sixteen_bytes_is_refused_as_the_codec_refuses_it`. It walks the timestamp and the linkstate entry at 16, 17 and 20 bytes, and holds the timestamp walk to the generated codec's own verdict.",
+        "`crates/wz-capture/src/selector_term_tests.rs`: new test `a_timestamp_zid_past_sixteen_bytes_offers_no_sentence_it_cannot_hold`. The fuzz input is cut to the one datagram it needed and run through both levels of the soundness oracle.",
+        "`scripts/lib/fuzz_seeds.py`: the same cut input becomes a `selector_term` LITERAL seed, with the fuzz target's own eight argument bytes, so that every replay runs it.",
+        "`crates/wz-zenoh/src/api/session.rs`:",
+        "`Engine::Router` holds `Box<RouterEngine>`, with a doc saying why.",
+        "The one construction boxes it."
+      ],
+      "publishable_verification_bullets": [
+        "The fuzz crash was downloaded from the run's artifact and read. The panic text names the term and rule S1 at both levels; the input carries `zid_len` 0x14 in packet 355; libFuzzer reported `MS: 0`, so the crash came from an unmutated corpus entry.",
+        "Control. With the walker's bound taken out, the new wz-capture test reproduces the hosted finding exactly: the same term, S1 at the record level and at the document level. This was a fleet run, rc 101.",
+        "`wz-session-core --features dissect-serde dissect::` passes, 113 tests run and 0 failed. These include the new walker test, which holds the timestamp walk to the generated codec's verdict at 16, 17 and 20 bytes.",
+        "`wz-capture --features dissect selector_term` passes, 9 tests run. These include the soundness property over every seed capture and the noise population, and the new cut-input test.",
+        "`scripts/fuzz.sh regress selector_term` passes through the fuzz target itself, ran=195 inputs, the new LITERAL seed among them. `fuzz_seeds.py --selftest` passes.",
+        "`cargo clippy -p zenoh --all-features --all-targets -- -D warnings`, the command Layer C1cn runs, passes with the boxed router engine. rustfmt is clean on every changed file.",
+        "The C1cs readings quoted in the decision are the hosted job's own lines from run 42011089802."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The next hosted CI run is still to be read per job, as round 4290 asked. No CI run has executed since 4290, because run 42011089802 held the concurrency group in the queue for hours. The things to read:",
+        "`validate (Layers A + C0)` ends inside its 30 minutes.",
+        "`gate provenance (Layer C0)` passes armed, inside 1800 s.",
+        "C1cs is green on every case.",
+        "C1cn is green with the boxed router engine.",
+        "C1bz and the six C1bzr shards are green on pin d7de4b6858.",
+        "The next nightly Fuzz run should read `selector_term` green with its new seed. The ADR 0084 size-fix carry of round 4290 stands unchanged."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
