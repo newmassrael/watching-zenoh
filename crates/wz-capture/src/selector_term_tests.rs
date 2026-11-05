@@ -334,20 +334,67 @@ fn hold(name: &str, capture: &[u8]) -> Held {
     held
 }
 
+/// [`hold`] over every capture of `population`, on as many threads as the
+/// machine has, joined in the population's order.
+///
+/// The captures are independent and each is judged whole by one thread, so the
+/// verdict and every count are what one thread would reach. The join is in the
+/// population's order and not in the order the threads finish, so the examples
+/// a report keeps of each class are the same on every run. One thread took
+/// 282 s over this population on a build machine, and the hosted job that runs
+/// it in the `wz-capture` leg of Layer C1bnl ran out of its 1800 s budget twice
+/// (runs 41974391826 and 42011089802): the work is spread, not shortened.
+fn hold_each(population: &[(String, Vec<u8>)]) -> Held {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    let threads = std::thread::available_parallelism()
+        .map_or(1, core::num::NonZeroUsize::get)
+        .min(population.len().max(1));
+    let next = AtomicUsize::new(0);
+    let mut judged: Vec<(usize, Held)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((name, capture)) = population.get(i) else {
+                            return mine;
+                        };
+                        mine.push((i, hold(name, capture)));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("a worker judging captures"))
+            .collect()
+    });
+    assert_eq!(
+        judged.len(),
+        population.len(),
+        "every capture was judged once"
+    );
+    judged.sort_by_key(|(i, _)| *i);
+    let mut all = Held::default();
+    for (_, held) in judged {
+        all.absorb(held);
+    }
+    all
+}
+
 /// THE PROPERTY, over the fuzzers' capture seeds and the noise population,
 /// every node of every record and of every row.
 #[test]
 fn every_named_node_offers_a_sentence_its_record_answers_yes() {
-    let mut seeds = Held::default();
     let captures = seed_captures();
-    for (name, capture) in &captures {
-        seeds.absorb(hold(name, capture));
-    }
-    let mut noise = Held::default();
-    let noise_captures = noise_captures();
-    for (i, capture) in noise_captures.iter().enumerate() {
-        noise.absorb(hold(&alloc::format!("noise {i}"), capture));
-    }
+    let seeds = hold_each(&captures);
+    let noise_captures: Vec<(String, Vec<u8>)> = noise_captures()
+        .into_iter()
+        .enumerate()
+        .map(|(i, capture)| (alloc::format!("noise {i}"), capture))
+        .collect();
+    let noise = hold_each(&noise_captures);
     std::println!(
         "selector_term soundness, {} seed captures:\n{seeds}",
         captures.len()

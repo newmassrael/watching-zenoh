@@ -2487,19 +2487,27 @@ jobs:
   # storage profiles, its last finished leg `wz-session-core` (2943 tests); shard 0 read 25 min.
   # A third shard puts each near two thirds of that.
   #
+  # FOUR SHARDS (hosted runs 41974391826 and 42011089802). Shard 0 of three was cancelled at
+  # `elapsed 1812s` and `1813s` of 1800 in both, while shards 1 and 2 read 15 and 12.5 min. Its
+  # `wz-capture` leg alone read 11 and 14 min: the selector-term soundness property (round
+  # 4234) judged every seed capture on one thread, 282 s on a build machine. That test now
+  # spreads the captures over the runner's cores (86.6 s on four cores of the same machine),
+  # and a fourth shard gives back the margin the table's growth took. The partition is still
+  # position modulo the count, so the heavy leg shares its shard with a quarter of the rest.
+  #
   # DROP-PROOF INVARIANT (the census's, co-located on purpose): `shard` MUST list exactly
   # [0 .. WZ_LEGS_SHARDS-1]. A missing shard is legs no job runs while everything stays green;
   # `scripts/lib/shard_matrix_binding.py` holds the list to the count.
   nondefault-legs:
-    name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/3)
+    name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3]
     env:
-      WZ_LEGS_SHARDS: "3"
+      WZ_LEGS_SHARDS: "4"
       WZ_LEGS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Budget stamp — start this job's own clock
